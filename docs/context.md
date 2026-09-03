@@ -28,15 +28,16 @@ additional percentage buffer. `max_active_tokens` can impose a smaller working
 set. The advertised maximum output is still the request ceiling; it is reduced
 only when the current input leaves less space in the context window.
 
-The supplied source reference describes authenticated Codex budgeting at Pi's
-272K request window while retaining the provider-advertised maximum as discovery
-metadata; smaller provider windows remain authoritative. This limits repeated
-prompt encoding and moves long sessions to compaction before oversized requests
-dominate latency/cost.
+The authenticated Codex working-window policy caps most models, including Astra,
+at 272K request tokens while retaining larger provider-advertised maxima as
+discovery metadata. GPT-5.6 Luna is the model-specific exception and may use up
+to a 372K working window; smaller discovered provider windows remain
+authoritative. This limits repeated prompt encoding and moves long sessions to
+compaction before oversized requests dominate latency/cost.
 
 Zero or unset `compaction.max_active_tokens` removes only the additional absolute
-working-set ceiling, not the Codex route cap. An explicit smaller ceiling remains
-a separate setting.
+working-set ceiling, not the model-specific Codex route cap. An explicit
+smaller ceiling remains a separate setting.
 
 ## Settings
 

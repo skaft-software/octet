@@ -33,6 +33,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod auth;
+pub mod batch;
 pub mod catalog;
 pub mod client;
 pub mod error;
@@ -53,6 +54,11 @@ pub use auth::{
     Auth, AwsCredentials, AwsSigV4Signer, CredentialResolver, CredentialResolverRegistry,
     CredentialScheme, RequestSigner, ResolvedCredential, Secret, SignedRequestHeaders,
     SigningRequest,
+};
+pub use batch::{
+    BatchError, OpenRouterBatch, OpenRouterBatchList, OpenRouterBatchListOptions,
+    OpenRouterBatchRequest, OpenRouterBatchRequestCounts, OpenRouterBatchRequestItem,
+    OpenRouterBatchResponse, OpenRouterBatchResult, OpenRouterBatchUsage,
 };
 pub use catalog::{AuthConfig, CatalogConfig, EndpointConfig, Model, ModelCatalog, ModelConfig};
 pub use client::AiClient;

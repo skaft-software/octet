@@ -171,6 +171,27 @@ fn sanitize_optional_diagnostic(
     }
 }
 
+fn sanitize_batch_error(redactor: &CredentialRedactor, error: &mut crate::batch::BatchError) {
+    use crate::batch::BatchError;
+
+    match error {
+        BatchError::InvalidEndpoint(value)
+        | BatchError::InvalidCustomId(value)
+        | BatchError::DuplicateCustomId(value)
+        | BatchError::RequestBodyNotObject(value)
+        | BatchError::InvalidBatchId(value)
+        | BatchError::InvalidStatus(value)
+        | BatchError::UnsupportedProvider(value) => {
+            *value = sanitize_diagnostic(redactor, value, MAX_DIAGNOSTIC_METADATA_BYTES);
+        }
+        BatchError::ModelMismatch { custom_id, model } => {
+            *custom_id = sanitize_diagnostic(redactor, custom_id, MAX_DIAGNOSTIC_METADATA_BYTES);
+            *model = sanitize_diagnostic(redactor, model, MAX_DIAGNOSTIC_METADATA_BYTES);
+        }
+        BatchError::EmptyModel | BatchError::EmptyRequests | BatchError::InvalidLimit(_) => {}
+    }
+}
+
 fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiError) -> AiError {
     match &mut error {
         AiError::Http(error) => {
@@ -218,6 +239,7 @@ fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiError) -> AiErr
             let drained = std::mem::replace(&mut **inner, AiError::Canceled);
             **inner = sanitize_ai_error(redactor, drained);
         }
+        AiError::Batch(error) => sanitize_batch_error(redactor, error),
         AiError::Config(_)
         | AiError::Auth(_)
         | AiError::Validation(_)
@@ -436,6 +458,228 @@ where
         Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
         Ok(None) => Ok(None),
     }
+}
+
+const MAX_BATCH_BODY_BYTES: usize = 256 * 1024 * 1024;
+const MAX_BATCH_ERROR_SNIPPET_BYTES: usize = 4096;
+
+async fn read_batch_body(
+    response: reqwest::Response,
+    initial_timeout: Duration,
+    idle_timeout: Duration,
+    deadline: Duration,
+    operation: &'static str,
+) -> Result<Vec<u8>, AiError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_BATCH_BODY_BYTES as u64)
+    {
+        return Err(DecodeError::BodyTooLarge.into());
+    }
+
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_BATCH_BODY_BYTES as u64) as usize,
+    );
+    let mut stream = response.bytes_stream();
+    let started_at = Instant::now();
+    let mut first_chunk = true;
+
+    while let Some(chunk) = next_body_chunk(
+        &mut stream,
+        idle_timeout,
+        initial_timeout,
+        first_chunk,
+        started_at,
+        deadline,
+        operation,
+    )
+    .await?
+    {
+        first_chunk = false;
+        if body
+            .len()
+            .checked_add(chunk.len())
+            .is_none_or(|size| size > MAX_BATCH_BODY_BYTES)
+        {
+            return Err(DecodeError::BodyTooLarge.into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn openrouter_batch_url(endpoint: &crate::types::Endpoint) -> Result<url::Url, AiError> {
+    if endpoint.id.0 != "openrouter" {
+        return Err(crate::batch::BatchError::UnsupportedProvider(endpoint.id.0.clone()).into());
+    }
+    crate::catalog::validate_endpoint(endpoint)?;
+    endpoint
+        .base_url
+        .join("../beta/batches")
+        .map_err(|error| crate::error::ConfigError::Parse(error.to_string()).into())
+}
+
+fn openrouter_batch_item_url(
+    endpoint: &crate::types::Endpoint,
+    id: &str,
+) -> Result<url::Url, AiError> {
+    crate::batch::validate_batch_id(id)?;
+    let mut url = openrouter_batch_url(endpoint)?;
+    let path = format!("{}/{}", url.path().trim_end_matches('/'), id);
+    url.set_path(&path);
+    Ok(url)
+}
+
+async fn read_batch_error_snippet(
+    response: reqwest::Response,
+    initial_timeout: Duration,
+    idle_timeout: Duration,
+    deadline: Duration,
+) -> String {
+    let mut body = Vec::with_capacity(MAX_BATCH_ERROR_SNIPPET_BYTES);
+    let mut stream = response.bytes_stream();
+    let started_at = Instant::now();
+    while body.len() < MAX_BATCH_ERROR_SNIPPET_BYTES {
+        match next_body_chunk(
+            &mut stream,
+            idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
+            initial_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
+            false,
+            started_at,
+            deadline.min(MAX_ERROR_BODY_DEADLINE),
+            "batch HTTP error response body",
+        )
+        .await
+        {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_BATCH_ERROR_SNIPPET_BYTES - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+async fn batch_http_request(
+    client: &AiClient,
+    endpoint: &crate::types::Endpoint,
+    method: http::Method,
+    url: url::Url,
+    body: Option<bytes::Bytes>,
+    operation: &'static str,
+) -> Result<serde_json::Value, AiError> {
+    let mut headers = endpoint.default_headers.clone();
+    if body.is_some() {
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+    }
+
+    let resolved_headers = crate::auth::resolve_headers(&endpoint.auth)
+        .await
+        .map_err(AiError::Auth)?;
+    let mut diagnostic_redactor = resolved_headers.redactor;
+    diagnostic_redactor.include_header_values(&endpoint.default_headers);
+    let mut current_key = None;
+    for (key, value) in resolved_headers.headers {
+        if let Some(key) = key {
+            current_key = Some(key.clone());
+            headers.insert(key, value);
+        } else if let Some(key) = &current_key {
+            headers.append(key.clone(), value);
+        }
+    }
+
+    let builder = client.http.request(method, url).headers(headers);
+    let builder = if let Some(body) = body {
+        builder.body(body)
+    } else {
+        builder
+    };
+    let response = tokio::time::timeout(endpoint.timeout, builder.send())
+        .await
+        .map_err(|_| {
+            AiError::Transport(TransportError {
+                phase: TransportPhase::ResponseHeaders,
+                timeout: true,
+                message: format!("{operation} timed out waiting for response headers"),
+            })
+        })?
+        .map_err(|error| request_open_transport_error(error, operation))
+        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
+
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .or_else(|| response.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs);
+
+    if !status.is_success() {
+        let snippet = read_batch_error_snippet(
+            response,
+            client.stream_initial_timeout,
+            client.stream_idle_timeout,
+            client.stream_deadline,
+        )
+        .await;
+        let provider_code = serde_json::from_str::<serde_json::Value>(&snippet)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(json_scalar_string)
+            });
+        let retryable = matches!(
+            status,
+            http::StatusCode::REQUEST_TIMEOUT
+                | http::StatusCode::TOO_MANY_REQUESTS
+                | http::StatusCode::BAD_GATEWAY
+                | http::StatusCode::SERVICE_UNAVAILABLE
+                | http::StatusCode::GATEWAY_TIMEOUT
+        );
+        return Err(sanitize_ai_error(
+            &diagnostic_redactor,
+            HttpError {
+                status,
+                request_id,
+                retry_after,
+                provider_code,
+                body_snippet: (!snippet.is_empty()).then_some(snippet),
+                retryable,
+            }
+            .into(),
+        ));
+    }
+
+    let body = read_batch_body(
+        response,
+        client.stream_initial_timeout,
+        client.stream_idle_timeout,
+        client.stream_deadline,
+        "batch response body",
+    )
+    .await
+    .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
+    serde_json::from_slice(&body).map_err(|error| {
+        sanitize_ai_error(
+            &diagnostic_redactor,
+            AiError::Decode(DecodeError::Json(error.to_string())),
+        )
+    })
 }
 
 struct HttpStreamRequest {
@@ -2000,6 +2244,103 @@ impl AiClient {
                 &diagnostic_redactor,
                 AiError::Decode(DecodeError::Json(error.to_string())),
             )
+        })
+    }
+
+    /// Submits one asynchronous OpenRouter Batch API job.
+    ///
+    /// The batch is deliberately not part of [`Self::stream`]: OpenRouter
+    /// completes it asynchronously and returns results only after processing.
+    /// `endpoint` must be the catalog's `openrouter` endpoint, and all request
+    /// bodies must already use the selected batch endpoint's native JSON shape.
+    pub async fn submit_openrouter_batch(
+        &self,
+        endpoint: &crate::types::Endpoint,
+        request: crate::batch::OpenRouterBatchRequest,
+    ) -> Result<crate::batch::OpenRouterBatch, AiError> {
+        request.validate()?;
+        let body = serde_json::to_vec(&request)
+            .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+        if body.len() > MAX_BATCH_BODY_BYTES {
+            return Err(DecodeError::BodyTooLarge.into());
+        }
+        let value = batch_http_request(
+            self,
+            endpoint,
+            http::Method::POST,
+            openrouter_batch_url(endpoint)?,
+            Some(bytes::Bytes::from(body)),
+            "batch submission",
+        )
+        .await?;
+        serde_json::from_value(value).map_err(|error| {
+            AiError::Decode(DecodeError::Json(format!(
+                "invalid OpenRouter batch response: {error}"
+            )))
+        })
+    }
+
+    /// Retrieves one OpenRouter Batch API job and its inline results, if ready.
+    pub async fn get_openrouter_batch(
+        &self,
+        endpoint: &crate::types::Endpoint,
+        id: &str,
+    ) -> Result<crate::batch::OpenRouterBatch, AiError> {
+        let value = batch_http_request(
+            self,
+            endpoint,
+            http::Method::GET,
+            openrouter_batch_item_url(endpoint, id)?,
+            None,
+            "batch retrieval",
+        )
+        .await?;
+        serde_json::from_value(value).map_err(|error| {
+            AiError::Decode(DecodeError::Json(format!(
+                "invalid OpenRouter batch response: {error}"
+            )))
+        })
+    }
+
+    /// Lists OpenRouter Batch API jobs using cursor and status filters.
+    pub async fn list_openrouter_batches(
+        &self,
+        endpoint: &crate::types::Endpoint,
+        options: &crate::batch::OpenRouterBatchListOptions,
+    ) -> Result<crate::batch::OpenRouterBatchList, AiError> {
+        options.validate()?;
+        let mut url = openrouter_batch_url(endpoint)?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(limit) = options.limit {
+                query.append_pair("limit", &limit.to_string());
+            }
+            if let Some(after) = &options.after {
+                query.append_pair("after", after);
+            }
+            for status in &options.statuses {
+                query.append_pair("status", status);
+            }
+            if let Some(created_after) = &options.created_after {
+                query.append_pair("created_after", created_after);
+            }
+            if let Some(created_before) = &options.created_before {
+                query.append_pair("created_before", created_before);
+            }
+        }
+        let value = batch_http_request(
+            self,
+            endpoint,
+            http::Method::GET,
+            url,
+            None,
+            "batch listing",
+        )
+        .await?;
+        serde_json::from_value(value).map_err(|error| {
+            AiError::Decode(DecodeError::Json(format!(
+                "invalid OpenRouter batch list response: {error}"
+            )))
         })
     }
 

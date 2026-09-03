@@ -4,6 +4,7 @@
 
 mod app;
 mod auth;
+mod batch;
 mod cli;
 mod commands;
 mod compaction;
@@ -116,7 +117,8 @@ async fn run() -> anyhow::Result<()> {
     let is_serve = matches!(&top_level_command, Some(cli::TopLevelCommand::Serve { .. }));
     #[cfg(not(feature = "serve"))]
     let is_serve = false;
-    if !is_serve {
+    let is_batch = matches!(&top_level_command, Some(cli::TopLevelCommand::Batch { .. }));
+    if !is_serve && !is_batch {
         // Preserve the original startup/error boundary for every terminal and
         // non-Serve invocation.
         tui::terminal::install_panic_hook();
@@ -132,6 +134,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(cli::TopLevelCommand::Setup { options }) = top_level_command.clone() {
         return provider_setup::run_cli(&options, &config);
+    }
+    if let Some(cli::TopLevelCommand::Batch { command }) = top_level_command.clone() {
+        return batch::run(command, &config).await;
     }
     #[cfg(feature = "serve")]
     if let Some(cli::TopLevelCommand::Serve {

@@ -244,6 +244,7 @@ fn public_ai_error_diagnostic(error: &AiError, endpoint: &str, model: &str) -> S
         // credential-redacted at the request boundary, so a bounded
         // `detail` field is safe to show.
         AiError::Config(error) => detail_diagnostic(&context("request preparation"), error),
+        AiError::Batch(error) => detail_diagnostic(&context("request preparation"), error),
         AiError::Auth(error) => detail_diagnostic(&context("authentication"), error),
         AiError::Validation(error) => detail_diagnostic(&context("request preparation"), error),
         AiError::Unsupported(error) => detail_diagnostic(&context("request preparation"), error),
@@ -467,9 +468,10 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
 
 fn ai_error_phase(error: &AiError) -> &'static str {
     match error {
-        AiError::Config(_) | AiError::Validation(_) | AiError::Unsupported(_) => {
-            "request preparation"
-        }
+        AiError::Config(_)
+        | AiError::Batch(_)
+        | AiError::Validation(_)
+        | AiError::Unsupported(_) => "request preparation",
         AiError::Auth(_) => "authentication",
         AiError::Http(_) => "HTTP response",
         AiError::Transport(error) => match (error.phase, error.timeout) {
