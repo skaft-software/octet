@@ -16,6 +16,7 @@ const COLORS: [(u8, u8, u8); 8] = [
 ];
 
 /// Eight contiguous equal-width columns: zero is half height, one full height.
+/// Uniformly scale the 8×2 terminal grid to fit the box, centered in padding.
 /// All columns share a baseline. A finite colour sweep never changes geometry
 /// or delays input; blank cells preserve the terminal background.
 pub(crate) fn render_logo(
@@ -31,7 +32,9 @@ pub(crate) fn render_logo(
     if width < BYTE.len() || rows < 2 {
         return vec![" ".repeat(width); rows];
     }
-    let column_width = width / BYTE.len();
+    let column_width = (width / BYTE.len()).min(rows / 2);
+    let mark_rows = column_width * 2;
+    let top_pad = (rows - mark_rows) / 2;
     let left_pad = (width - column_width * BYTE.len()) / 2;
     let right_pad = width - left_pad - column_width * BYTE.len();
     let glyph = if theme.unicode() { "█" } else { "#" };
@@ -39,9 +42,12 @@ pub(crate) fn render_logo(
     let blank = " ".repeat(column_width);
     (0..rows)
         .map(|row| {
+            if row < top_pad || row >= top_pad + mark_rows {
+                return " ".repeat(width);
+            }
             let mut line = " ".repeat(left_pad);
             for (column, bit) in BYTE.iter().enumerate() {
-                if *bit == b'0' && row < rows / 2 {
+                if *bit == b'0' && row < top_pad + column_width {
                     line.push_str(&blank);
                     continue;
                 }
@@ -89,6 +95,73 @@ mod tests {
             assert_eq!(rows.len(), 6);
             assert!(rows.iter().all(|row| visible_width(row) == width));
         }
+    }
+
+    #[test]
+    fn uniform_grid_fits_both_box_limits_with_centered_padding() {
+        let theme = crate::tui::theme::test_theme();
+        for (width, height, scale) in [
+            (0, 0, 0),
+            (7, 6, 0),
+            (8, 1, 0),
+            (8, 2, 1),
+            (14, 6, 1),
+            (16, 6, 2),
+            (24, 3, 1),
+            (24, 5, 2),
+            (40, 21, 5),
+        ] {
+            let actual = render_logo(&theme, width, height, DURATION, None, None)
+                .iter()
+                .map(|line| strip_terminal_sequences(line))
+                .collect::<Vec<_>>();
+            let mut expected = vec![" ".repeat(width); height];
+            if scale > 0 {
+                let left = (width - 8 * scale) / 2;
+                let top = (height - 2 * scale) / 2;
+                for (y, row) in [" ██ ████", "████████"].iter().enumerate()
+                {
+                    let expanded = row
+                        .chars()
+                        .map(|ch| ch.to_string().repeat(scale))
+                        .collect::<String>();
+                    for dy in 0..scale {
+                        expected[top + y * scale + dy] = format!(
+                            "{}{}{}",
+                            " ".repeat(left),
+                            expanded,
+                            " ".repeat(width - left - 8 * scale)
+                        );
+                    }
+                }
+            }
+            assert_eq!(actual, expected, "box={width}x{height}, scale={scale}");
+        }
+    }
+
+    #[test]
+    fn uniformly_scaled_logo_preserves_model_blend_and_finite_color_sweep() {
+        let theme = crate::tui::theme::test_theme();
+        let render = |elapsed| render_logo(&theme, 16, 6, elapsed, Some((255, 0, 0)), None);
+        let steady = render(DURATION);
+        // First approved gradient column (75,141,255), blended 0.58 toward red.
+        assert!(steady[3].contains(&theme.rgb_fg((179, 59, 107), "██")));
+        let during = render(0.5);
+        assert_ne!(during, steady, "animation changes colors");
+        let plain = |rows: &[String]| {
+            rows.iter()
+                .map(|line| strip_terminal_sequences(line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plain(&during), plain(&steady), "not geometry");
+        assert_eq!(render(DURATION + 1.0), steady, "finite sweep settles");
+        let mut capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+        capabilities.animation = false;
+        let reduced = crate::tui::theme::test_theme_with(capabilities);
+        assert_eq!(
+            render_logo(&reduced, 16, 6, 0.5, Some((255, 0, 0)), None),
+            steady
+        );
     }
 
     #[test]

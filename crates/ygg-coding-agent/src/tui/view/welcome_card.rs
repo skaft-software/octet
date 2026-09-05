@@ -244,6 +244,84 @@ mod tests {
     use sexy_tui_rs::strip_terminal_sequences;
 
     #[test]
+    fn welcome_logo_occupied_geometry_narrow() {
+        assert_welcome_logo_geometry(&[(46, 1), (24, 1)]);
+    }
+
+    #[test]
+    fn welcome_logo_occupied_geometry_intermediate() {
+        assert_welcome_logo_geometry(&[(60, 2), (48, 2), (71, 2)]);
+    }
+
+    #[test]
+    fn welcome_logo_occupied_geometry_wide() {
+        assert_welcome_logo_geometry(&[(80, 3), (72, 3), (120, 3)]);
+    }
+
+    fn assert_welcome_logo_geometry(widths: &[(u16, usize)]) {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        use std::time::Duration;
+
+        for (unicode, color, animation) in [
+            (true, ColorDepth::TrueColor, true),
+            (false, ColorDepth::TrueColor, true),
+            (true, ColorDepth::None, true),
+            (true, ColorDepth::TrueColor, false),
+        ] {
+            let mut capabilities = TerminalCapabilities::test(true, unicode, color);
+            capabilities.animation = animation;
+            let shell = InteractiveShell::test_shell_with_theme(
+                crate::tui::theme::test_theme_with(capabilities),
+            );
+            let started = Instant::now();
+            shell.state.borrow_mut().startup_card_started_at = Some(started);
+            let glyph = if unicode { '█' } else { '#' };
+            for &(width, scale) in widths {
+                let mut initial_geometry = None;
+                for elapsed in [0.0, 0.5, crate::tui::splash::DURATION, 3.0] {
+                    let rendered = render_welcome_card(
+                        &shell.state.borrow(),
+                        width,
+                        10,
+                        started + Duration::from_secs_f32(elapsed),
+                    );
+                    assert_eq!(rendered.len(), 8, "fixed welcome layout at {width}");
+                    let occupied = rendered
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(y, line)| {
+                            strip_terminal_sequences(line)
+                                .chars()
+                                .enumerate()
+                                .filter_map(move |(x, ch)| (ch == glyph).then_some((x, y)))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<std::collections::HashSet<_>>();
+                    let left = occupied.iter().map(|(x, _)| *x).min().unwrap();
+                    let right = occupied.iter().map(|(x, _)| *x).max().unwrap();
+                    let top = occupied.iter().map(|(_, y)| *y).min().unwrap();
+                    let bottom = occupied.iter().map(|(_, y)| *y).max().unwrap();
+                    assert_eq!((right - left + 1, bottom - top + 1), (8 * scale, 2 * scale),
+                        "occupied byte, not padding: terminal width={width}, unicode={unicode}, elapsed={elapsed}");
+                    assert_eq!(occupied.len(), 14 * scale * scale);
+                    for y in 0..2 * scale {
+                        for x in 0..8 * scale {
+                            let expected = y >= scale || ![0, 3].contains(&(x / scale));
+                            assert_eq!(occupied.contains(&(left + x, top + y)), expected,
+                                "equal contiguous columns/half-height zeros: width={width}, x={x}, y={y}");
+                        }
+                    }
+                    if let Some(initial) = &initial_geometry {
+                        assert_eq!(&occupied, initial, "animation must not move geometry");
+                    } else {
+                        initial_geometry = Some(occupied);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn custom_welcome_theme_is_solid_accent_and_framed() {
         let shell =
             InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_from_source(
