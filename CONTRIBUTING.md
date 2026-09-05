@@ -1,9 +1,23 @@
-# Contributing to Ygg
+# Contributing to octet
 
-Ygg welcomes focused bug fixes, protocol improvements, terminal-correct UX
+octet welcomes focused bug fixes, protocol improvements, terminal-correct UX
 work, provider compatibility updates, tests, and documentation corrections.
 The project is pre-1.0, so small changes with strong evidence are easier to
 review and safer to ship than broad rewrites.
+
+## Identity and documentation
+
+Use lowercase **octet** for current product prose. The
+[repository documentation](docs/README.md) and checked-in examples are the
+product authority; include reproducible outcome evidence rather than relying
+on an external website or an illustrative screenshot.
+
+The intended 0.7.0 rename is not yet the source command contract. In this pre-rename checkout,
+keep working `ygg`/`ygg-host`, crate/SDK, `YGG_*`, and `.ygg` spellings in source
+instructions until the coherent rename pass. Do not invent octet download,
+npm, or Homebrew URLs, aliases, or automatic migration. Preserve historical
+changelog/release/benchmark identity and third-party notices. The actual source
+repository remains `skaft-software/ygg`; see the [0.7.0 draft](docs/releases/v0.7.0.md).
 
 ## AI-assisted contributions
 
@@ -63,7 +77,7 @@ verified duplicate, or an explicit product/non-goal decision.
 
 ## Development setup
 
-Ygg supports macOS and Linux and declares Rust 1.86 as its minimum supported
+The current source supports macOS and Linux and declares Rust 1.86 as its minimum supported
 Rust version. Install Rust through [rustup](https://rustup.rs/) and install
 `rg` (ripgrep).
 

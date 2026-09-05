@@ -1,8 +1,17 @@
-# Security policy
+# octet security policy
 
 ## Supported versions
 
-Ygg is pre-1.0 software. Security fixes are made on the latest `0.6.x` release; older snapshots are not supported.
+octet is pre-1.0 software. The inherited released product is Ygg: security
+fixes target its latest `0.6.x` release; older snapshots are not supported.
+The intended octet 0.7.0 release remains [a draft](docs/releases/v0.7.0.md), not
+a newly supported or qualified release.
+
+The boundaries below describe the current source, which still spells commands,
+environment variables, and roots `ygg`, `YGG_*`, and `.ygg`. Product identity
+does not create a security boundary or authorize importing an existing Ygg
+installation. The intended clean rename must preserve unrelated installed Ygg
+binaries and data; it promises no aliases or automatic old-brand migration.
 
 ## Boundary and defaults
 

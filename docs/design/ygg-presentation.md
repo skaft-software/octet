@@ -1,15 +1,17 @@
-# Ygg presentation contract
+# octet presentation contract
 
-Ygg's default presentation is one coherent terminal instrument, not a fixed
-provider hue. Its stable identity is the tree/dot-matrix mark, typography,
+octet's default presentation is one coherent terminal instrument, not a fixed
+provider hue. Its stable identity is the `01101111` byte mark, typography,
 spacing, interaction grammar, semantic colours, and trust treatment. Model
 identity is retained as provenance without turning every working surface into
-provider branding.
+provider branding. The [canonical native assets](../assets/octet/README.md)
+fix eight contiguous, baseline-aligned positions; positions 1 and 4 are
+half-height. Asset proofs are not evidence of product integration or captures.
 
 ## Stable versus adaptive visual tokens
 
 Stable product tokens include the terminal surface, text hierarchy, layout,
-spacing, tree silhouette, interaction grammar, and semantic
+spacing, byte silhouette, interaction grammar, and semantic
 success/warning/error colours. Adaptive model tokens identify both model
 provenance and the active shell atmosphere: the startup atmosphere, each
 persisted prompt card, the composer for the model that will receive the next
@@ -112,9 +114,10 @@ it exists.
 
 ## Interaction tone
 
-The default should be calm, dense under pressure, and precise about state. The
-startup tree glimmer is a signature interaction: subtle, non-blocking, finite,
-and safe to degrade on limited or reduced-motion terminals. Progressive
+The default should be calm, dense under pressure, and precise about state. Any
+startup byte shimmer is subtle, non-blocking, finite, and safe to disable on
+limited or reduced-motion terminals. The complete byte remains identifiable
+without animation, and input never waits for it. Progressive
 disclosure keeps raw detail one action away without imposing a dashboard.
 
 A useful internal rule is: **calm by default, detail on demand, raw truth one

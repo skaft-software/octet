@@ -2,6 +2,28 @@
 
 All notable changes to Ygg are documented here. This project follows Semantic Versioning while pre-1.0 APIs may evolve rapidly.
 
+## 0.7.0 — draft, unreleased
+
+### Identity and documentation
+
+- Introduce **octet** as the intended lowercase product identity: a
+  high-performance coding agent, extensible in any language, free and open source.
+- Add repository-owned documentation navigation and source-grounded workflows
+  for reviewable changes, bounded delegation, custom tools, and native-host
+  embedding; retain the former README's substantive source reference separately.
+- Add the canonical native byte/outlined-wordmark package with pinned provenance,
+  checksums and reproducible exports; adopt the byte, icon/favicon and octet
+  labels in the bundled web client. Asset proofs and browser fixtures are not
+  actual product captures or native-terminal qualification.
+- Separate historical Ygg installation and benchmark evidence from current
+  guidance. This pre-rename checkout still uses `ygg`/`ygg-host`, `ygg-*` crates and
+  SDKs, `YGG_*`, `.ygg`, and `0.7.0-dev`; the clean rename and exact-candidate
+  release qualification remain pending. No automatic old-brand migration,
+  renamed installation channel, comparative performance, or readiness is claimed.
+
+See [the 0.7.0 draft](docs/releases/v0.7.0.md) for intended identity and gates.
+Historical entries below are unchanged.
+
 ## 0.6.7 — 2026-09-02
 
 ### Fixed
