@@ -738,12 +738,25 @@ impl ToolOutputMediaKind {
 /// Text remains the compact fallback for every provider. Image and audio
 /// parts reuse Ygg's canonical media types so built-in and executable tools
 /// cross the same persistence and provider-lowering boundary.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ToolOutputContentPart {
     /// Plain model-visible text.
     Text(String),
     /// An image or audio payload already vetted by the host.
     Media(Media),
+}
+
+impl std::fmt::Debug for ToolOutputContentPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(text) => f.debug_tuple("Text").field(text).finish(),
+            // Canonical Media's Debug includes bytes and source URLs.
+            Self::Media(media) => f
+                .debug_tuple("Media")
+                .field(&ToolOutputMediaKind::from_media(media))
+                .finish(),
+        }
+    }
 }
 
 /// Maximum serialized bytes retained as structured tool output.
@@ -1019,7 +1032,7 @@ impl ToolOutputCommit {
 /// semantic error marker. Transport-level failures still use [`ToolError`]; a
 /// completed tool may return a rich error envelope without losing its media or
 /// durable details.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolOutput {
     /// Compact, line-oriented text optimized for LLM consumption.
     pub text: String,
@@ -1029,6 +1042,23 @@ pub struct ToolOutput {
     details: ToolOutputDetails,
     is_error: bool,
     delivery_commit: Option<ToolOutputCommit>,
+    presentation_images_omitted: bool,
+}
+
+impl std::fmt::Debug for ToolOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolOutput")
+            .field("text", &self.text)
+            .field("media_kinds", &self.media_kinds)
+            .field("content_parts", &self.content_parts)
+            .field("details", &self.details)
+            .field("is_error", &self.is_error)
+            .field(
+                "presentation_images_omitted",
+                &self.presentation_images_omitted,
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl ToolOutput {
@@ -1043,6 +1073,7 @@ impl ToolOutput {
             details: ToolOutputDetails::default(),
             is_error: false,
             delivery_commit: None,
+            presentation_images_omitted: false,
         }
     }
 
@@ -1079,6 +1110,7 @@ impl ToolOutput {
             details: ToolOutputDetails::default(),
             is_error: false,
             delivery_commit: None,
+            presentation_images_omitted: false,
         }
     }
 
@@ -1138,6 +1170,69 @@ impl ToolOutput {
     /// Returns the ordered text and media parts.
     pub fn content_parts(&self) -> &[ToolOutputContentPart] {
         &self.content_parts
+    }
+
+    /// Whether accepted images were omitted at the bounded owner-only
+    /// presentation boundary. This flag carries no payload or source location.
+    /// It is intentionally coarse: live presentation cannot recover the exact
+    /// per-image reason available when hydrating the complete durable result.
+    pub fn presentation_images_omitted(&self) -> bool {
+        self.presentation_images_omitted
+    }
+
+    /// Enrich only the owning frontend's stripped output, never observer copies.
+    /// Candidates must come from the authoritative lowered durable message.
+    pub(crate) fn with_owner_presentation_images<'a>(
+        mut self,
+        media: impl IntoIterator<Item = &'a Media>,
+    ) -> Self {
+        const MAX_IMAGES: usize = 4;
+        const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+        const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+        let mut count = 0;
+        let mut total_bytes = 0usize;
+        for media in media {
+            let Media::Image(image) = media else { continue };
+            if count >= MAX_IMAGES {
+                self.presentation_images_omitted = true;
+                break;
+            }
+            count += 1;
+            let ygg_ai::ImageSource::Inline(bytes) = &image.source else {
+                self.presentation_images_omitted = true;
+                continue;
+            };
+            if bytes.len() > MAX_IMAGE_BYTES
+                || total_bytes.saturating_add(bytes.len()) > MAX_TOTAL_BYTES
+            {
+                self.presentation_images_omitted = true;
+                continue;
+            }
+            total_bytes += bytes.len();
+            // Detach accepted slices: cloning Bytes could retain an arbitrarily
+            // larger transport allocation despite the visible-length budgets.
+            let owned = Media::Image(ygg_ai::ImageMedia {
+                source: ygg_ai::ImageSource::Inline(bytes::Bytes::copy_from_slice(bytes)),
+                media_type: image.media_type.clone(),
+                detail: image.detail,
+            });
+            // Both projections share only the newly bounded allocation. Keep
+            // the authoritative accepted-kind metadata unchanged.
+            self.media.push(owned.clone());
+            self.content_parts.push(ToolOutputContentPart::Media(owned));
+        }
+        self
+    }
+
+    pub(crate) fn attach_owner_presentation_images(&mut self, images: Self) {
+        self.presentation_images_omitted = images.presentation_images_omitted;
+        self.content_parts.extend(
+            images
+                .content_parts
+                .into_iter()
+                .filter(|part| matches!(part, ToolOutputContentPart::Media(_))),
+        );
+        self.media = images.media;
     }
 
     /// Returns the retained machine-readable structured result.
@@ -1241,6 +1336,7 @@ impl ToolOutput {
             details: self.details.clone(),
             is_error: self.is_error,
             delivery_commit: None,
+            presentation_images_omitted: false,
         }
     }
 }
@@ -1299,6 +1395,74 @@ pub fn content_hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_presentation_detaches_small_slices_from_large_backing_allocations() {
+        let backing = bytes::Bytes::from(vec![42; 8 * 1024 * 1024]);
+        let slice = backing.slice(1024..1032);
+        let source = Media::Image(ygg_ai::ImageMedia {
+            source: ygg_ai::ImageSource::Inline(slice.clone()),
+            media_type: Some("image/png".parse().unwrap()),
+            detail: Some(ygg_ai::ImageDetail::Low),
+        });
+        let output = ToolOutput::new("safe").with_owner_presentation_images([&source]);
+        let Media::Image(image) = &output.media()[0] else {
+            panic!("image")
+        };
+        let ygg_ai::ImageSource::Inline(owned) = &image.source else {
+            panic!("inline")
+        };
+        assert_eq!(owned, &slice);
+        assert_ne!(
+            owned.as_ptr(),
+            slice.as_ptr(),
+            "owner bytes must not retain the original 8 MiB allocation"
+        );
+        assert_eq!(image.media_type, Some("image/png".parse().unwrap()));
+        assert_eq!(image.detail, Some(ygg_ai::ImageDetail::Low));
+        assert!(!output.presentation_images_omitted());
+    }
+
+    #[test]
+    fn owner_presentation_has_independent_count_byte_and_source_bounds() {
+        let image = |size| {
+            Media::image_bytes(
+                bytes::Bytes::from(vec![42; size]),
+                "image/png".parse().unwrap(),
+            )
+        };
+        for (media, retained) in [
+            (vec![image(1); 5], 4),
+            (vec![image(2 * 1024 * 1024); 3], 2),
+            (vec![image(2 * 1024 * 1024 + 1), image(1)], 1),
+            (
+                vec![
+                    Media::image_url(
+                        "https://secret.invalid/private-payload".parse().unwrap(),
+                        None,
+                    ),
+                    image(1),
+                ],
+                1,
+            ),
+        ] {
+            let output = ToolOutput::new("safe").with_owner_presentation_images(&media);
+            assert_eq!(output.media().len(), retained);
+            assert!(output.presentation_images_omitted());
+            assert!(output.media().iter().all(|media| matches!(media, Media::Image(image) if matches!(image.source, ygg_ai::ImageSource::Inline(_)))));
+            let debug = format!("{output:?} {:?}", output.content_parts());
+            assert!(!debug.contains("private-payload"));
+            assert!(!debug.contains("42, 42"));
+            let stripped = output.without_media_payloads();
+            assert!(stripped.media().is_empty());
+            assert!(!stripped.presentation_images_omitted());
+        }
+        let raw = ToolOutput::new("safe").with_media(Media::image_url(
+            "https://secret.invalid/private-payload".parse().unwrap(),
+            None,
+        ));
+        assert!(!format!("{raw:?} {:?}", raw.content_parts()).contains("private-payload"));
+    }
 
     #[test]
     fn workspace_resolution_denials_keep_a_stable_policy_code() {

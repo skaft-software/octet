@@ -182,6 +182,9 @@ pub fn public_error_diagnostic(error: &AgentError, endpoint: &str, model: &str) 
     }
 }
 
+const AMBIGUOUS_ACCEPTANCE_HINT: &str =
+    "Provider acceptance is uncertain; octet did not replay the request. Inspect provider state before retrying explicitly.";
+
 /// Format an inference-layer error for a user-facing retry or terminal event.
 /// The same allow-list is used for both paths so retry messages cannot expose
 /// more provider data than the final failure message.
@@ -212,6 +215,9 @@ fn public_ai_error_diagnostic(error: &AiError, endpoint: &str, model: &str) -> S
                 (ygg_ai::TransportPhase::Body, true) => "response body timeout",
             };
             let mut diagnostic = context(phase);
+            if transport.phase != ygg_ai::TransportPhase::Connect {
+                append_provider_field(&mut diagnostic, "hint", Some(AMBIGUOUS_ACCEPTANCE_HINT));
+            }
             append_provider_field(&mut diagnostic, "detail", Some(&transport.message));
             truncate_public_diagnostic(&mut diagnostic);
             diagnostic
@@ -243,6 +249,16 @@ fn public_ai_error_diagnostic(error: &AiError, endpoint: &str, model: &str) -> S
         AiError::Unsupported(error) => detail_diagnostic(&context("request preparation"), error),
         AiError::Decode(error) => detail_diagnostic(&context("response decoding"), error),
         AiError::Pricing(error) => detail_diagnostic(&context("usage accounting"), error),
+        AiError::StreamProtocol(
+            error @ (ygg_ai::StreamProtocolError::MissingFinish
+            | ygg_ai::StreamProtocolError::PrematureEof),
+        ) => {
+            let mut diagnostic = context("stream protocol");
+            append_provider_field(&mut diagnostic, "hint", Some(AMBIGUOUS_ACCEPTANCE_HINT));
+            append_provider_field(&mut diagnostic, "detail", Some(&error.to_string()));
+            truncate_public_diagnostic(&mut diagnostic);
+            diagnostic
+        }
         AiError::StreamProtocol(error) => detail_diagnostic(&context("stream protocol"), error),
         AiError::Canceled => context("request cancellation"),
     }
@@ -615,6 +631,8 @@ pub struct Agent {
     max_session_tokens: Option<u64>,
     max_session_cost_microdollars: Option<u64>,
     provider_retries_enabled: bool,
+    /// Explicit owner-only image presentation; never inherited by child agents.
+    owner_tool_images_enabled: bool,
     /// Child sessions owned by the delegation manager are observed by their
     /// parent even when they do not carry a nested delegation binding.
     ultra_observation_managed: bool,
@@ -2158,6 +2176,25 @@ fn lower_tool_result(
     )
 }
 
+/// The lowerer emits exactly one paired result followed by protocol-adjacent
+/// media. Use that authoritative message, not the tool's unaccepted raw output.
+fn lowered_tool_result_media(message: &UserMessage) -> impl Iterator<Item = &Media> {
+    message.content.iter().flat_map(|part| {
+        let (nested, adjacent) = match part {
+            UserPart::ToolResult(result) => (result.content.as_slice(), None),
+            UserPart::Media(media) => (&[][..], Some(media)),
+            UserPart::Text(_) => (&[][..], None),
+        };
+        nested
+            .iter()
+            .filter_map(|part| match part {
+                ToolResultPart::Media(media) => Some(media),
+                ToolResultPart::Text(_) => None,
+            })
+            .chain(adjacent)
+    })
+}
+
 fn persist_pending_cancellations(session: &mut Session) -> Result<(), AgentError> {
     let Some((calls, persisted)) = pending_tool_state(session) else {
         return Ok(());
@@ -2218,9 +2255,7 @@ fn retryable_before_generation(error: &AiError) -> bool {
 }
 
 fn is_replayable_network_failure(error: &AiError) -> bool {
-    // A mid-stream wrapper keeps the replayability of the failure that ended
-    // the stream (e.g. a body disconnect that already streamed bytes is
-    // replayable exactly as the bare transport error was).
+    // Wrapping a failure never changes its acceptance ambiguity.
     if let AiError::StreamFailure { inner, .. } = error {
         return is_replayable_network_failure(inner);
     }
@@ -2228,10 +2263,7 @@ fn is_replayable_network_failure(error: &AiError) -> bool {
         error,
         AiError::Transport(transport)
             if !transport.timeout
-                && matches!(
-                    transport.phase,
-                    ygg_ai::TransportPhase::Connect | ygg_ai::TransportPhase::Body
-                )
+                && transport.phase == ygg_ai::TransportPhase::Connect
     )
 }
 
@@ -2337,27 +2369,13 @@ fn retryable_provider_error(error: &ygg_ai::ProviderError) -> bool {
 }
 
 fn retryable_stream_start(error: &AiError) -> bool {
+    if let AiError::StreamFailure { inner, .. } = error {
+        return retryable_stream_start(inner);
+    }
+    // No visible output is not proof of nonacceptance. Only a safe connection
+    // failure or an explicit provider rejection can authorize another request.
     retryable_before_generation(error)
-        || matches!(
-            error,
-            AiError::Transport(transport)
-                if !transport.timeout && transport.phase == ygg_ai::TransportPhase::Body
-        )
         || matches!(error, AiError::Provider(provider) if retryable_provider_error(provider))
-        || matches!(
-            error,
-            AiError::StreamProtocol(
-                ygg_ai::StreamProtocolError::MissingFinish
-                    | ygg_ai::StreamProtocolError::PrematureEof
-            )
-        )
-        // The clauses above are variant-specific; a mid-stream wrapper
-        // delegates so that e.g. a stream ending without a terminal event is
-        // retried exactly as the bare protocol error was.
-        || matches!(
-            error,
-            AiError::StreamFailure { inner, .. } if retryable_stream_start(inner)
-        )
 }
 
 fn provider_retry_limit(error: &AiError) -> usize {
@@ -2366,14 +2384,10 @@ fn provider_retry_limit(error: &AiError) -> usize {
     if let AiError::StreamFailure { inner, .. } = error {
         return provider_retry_limit(inner);
     }
-    if matches!(
-        error,
-        AiError::Transport(transport)
-            if transport.timeout || transport.phase == ygg_ai::TransportPhase::ResponseHeaders
-    ) {
-        // A timeout has already consumed its configured deadline. A request
-        // that failed while sending or awaiting headers may also have been
-        // accepted by the provider. Neither class is replayed automatically.
+    if !retryable_stream_start(error) {
+        // Timeouts have consumed their deadline; post-send transport failures
+        // and incomplete streams cannot establish nonacceptance. No budget is
+        // available unless classification independently admits a safe replay.
         0
     } else if is_replayable_network_failure(error) {
         MAX_NETWORK_RETRIES
@@ -4373,6 +4387,7 @@ impl Agent {
             max_session_tokens: None,
             max_session_cost_microdollars: None,
             provider_retries_enabled: true,
+            owner_tool_images_enabled: false,
             ultra_observation_managed: false,
             delegation: None,
             last_run_lifecycle: None,
@@ -4707,6 +4722,14 @@ impl Agent {
     pub fn set_max_session_cost_microdollars(&mut self, limit: Option<u64>) {
         self.max_session_cost_microdollars = limit;
         self.sync_delegation_runtime_settings();
+    }
+
+    /// Opt into bounded accepted inline tool images for the owning run consumer.
+    /// General observers remain payload-free. Disabled by default; interactive
+    /// hosts should enable this immediately before invoking their common prompt
+    /// path, including after an Agent rebuild. This is not a persisted setting.
+    pub fn set_owner_tool_images_enabled(&mut self, enabled: bool) {
+        self.owner_tool_images_enabled = enabled;
     }
 
     /// Enable or disable transient provider retries for subsequent runs.
@@ -5333,6 +5356,7 @@ impl Agent {
         let compaction_threshold_fraction = self.compaction_threshold_fraction;
         let compaction_keep_recent_tokens = self.compaction_keep_recent_tokens;
         let provider_retries_enabled = self.provider_retries_enabled;
+        let owner_tool_images_enabled = self.owner_tool_images_enabled;
         let stream_delegation = self.delegation.clone();
         let run_delegation = self.delegation.clone();
         let mut delegation_telemetry = self
@@ -6984,6 +7008,13 @@ impl Agent {
                         sandbox.max_output_bytes,
                         newly_added,
                     );
+                    let owner_images = if owner_tool_images_enabled {
+                        Some(ToolOutput::new("").with_owner_presentation_images(
+                            lowered_tool_result_media(&message),
+                        ))
+                    } else {
+                        None
+                    };
                     terminal_action_receipts.push(TerminalActionReceipt {
                         tool: call.name.clone(),
                         arguments: call.arguments_json.clone(),
@@ -7042,12 +7073,17 @@ impl Agent {
                             .with_is_error(is_error)),
                         Err(error) => Err(error),
                     };
-                    let ev = AgentEvent::ToolFinished {
+                    let mut ev = AgentEvent::ToolFinished {
                         id: call.id.clone(),
                         result,
                         duration,
                     };
                     notify_observers(&observers, &ev);
+                    if let (Some(images), AgentEvent::ToolFinished { result: Ok(output), .. }) =
+                        (owner_images, &mut ev)
+                    {
+                        output.attach_owner_presentation_images(images);
+                    }
                     yield ev;
 
                 }
@@ -7773,7 +7809,7 @@ mod tests {
                     timeout: true,
                     message: "stream idle beyond its timeout".into(),
                 })),
-                "phase=response body timeout detail=stream idle beyond its timeout",
+                "phase=response body timeout hint=Provider acceptance is uncertain; octet did not replay the request. Inspect provider state before retrying explicitly. detail=stream idle beyond its timeout",
             ),
             (
                 AgentError::IncompleteResponse {
@@ -7833,8 +7869,7 @@ mod tests {
             last_event_ms: Some(97_000),
         };
 
-        // A body-phase disconnect that already streamed bytes: replayable
-        // network failure, exactly as the bare transport error was.
+        // Body disconnects remain ambiguous, even before visible generation.
         let disconnect = AiError::StreamFailure {
             inner: Box::new(AiError::Transport(ygg_ai::TransportError {
                 phase: ygg_ai::TransportPhase::Body,
@@ -7845,10 +7880,10 @@ mod tests {
         };
         assert_eq!(ai_error_phase(&disconnect), "response body");
         assert!(!retryable_before_generation(&disconnect));
-        assert!(retryable_stream_start(&disconnect));
-        assert!(is_replayable_network_failure(&disconnect));
+        assert!(!retryable_stream_start(&disconnect));
+        assert!(!is_replayable_network_failure(&disconnect));
         assert!(!looks_like_context_error(&disconnect));
-        assert_eq!(provider_retry_limit(&disconnect), MAX_NETWORK_RETRIES);
+        assert_eq!(provider_retry_limit(&disconnect), 0);
 
         // A stream that ended on a provider 503 frame keeps that frame's
         // retry budget instead of being demoted to the wrapper's behavior.
@@ -8216,6 +8251,62 @@ mod tests {
         Model {
             spec: Arc::new(spec),
             endpoint: base.endpoint,
+        }
+    }
+
+    #[test]
+    fn owner_images_come_only_from_accepted_durable_protocol_parts() {
+        let raw = Ok(ToolOutput::new("image").with_media(Media::image_bytes(
+            bytes::Bytes::from_static(b"payload-sentinel"),
+            "image/png".parse().unwrap(),
+        )));
+        for protocol in [
+            Protocol::OpenAiChat,
+            Protocol::OpenAiResponses,
+            Protocol::AnthropicMessages,
+        ] {
+            for supported in [false, true] {
+                let modalities = if supported {
+                    ygg_ai::ModalitySet::none().with(ygg_ai::Modality::Image)
+                } else {
+                    ygg_ai::ModalitySet::none()
+                };
+                let (message, _, _, _, _) = lower_tool_result(
+                    ygg_ai::ToolCallId("call".into()),
+                    &raw,
+                    &tool_media_model(protocol, modalities),
+                    4096,
+                    Vec::new(),
+                );
+                let owner = ToolOutput::new("")
+                    .with_owner_presentation_images(lowered_tool_result_media(&message));
+                assert_eq!(owner.media().len(), usize::from(supported));
+                assert!(!owner.presentation_images_omitted());
+                assert!(!format!("{owner:?}").contains("payload-sentinel"));
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_stream_endings_have_no_retry_budget_and_actionable_hints() {
+        for error in [
+            AiError::StreamProtocol(ygg_ai::StreamProtocolError::MissingFinish),
+            AiError::StreamProtocol(ygg_ai::StreamProtocolError::PrematureEof),
+            AiError::Transport(ygg_ai::TransportError {
+                phase: ygg_ai::TransportPhase::Body,
+                timeout: false,
+                message: "connection reset".into(),
+            }),
+        ] {
+            assert!(!retryable_before_generation(&error));
+            assert!(!retryable_stream_start(&error));
+            assert!(!is_replayable_network_failure(&error));
+            assert_eq!(provider_retry_limit(&error), 0);
+            let diagnostic = public_ai_error_diagnostic(&error, "test", "test");
+            assert!(
+                diagnostic.contains("Inspect provider state before retrying explicitly"),
+                "{diagnostic}"
+            );
         }
     }
 

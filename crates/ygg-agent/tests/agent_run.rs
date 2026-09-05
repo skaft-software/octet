@@ -1747,45 +1747,87 @@ async fn body_disconnect_after_output_never_replays_ambiguous_generation() {
 }
 
 #[tokio::test]
-async fn body_disconnect_before_output_retries_as_network_loss() {
-    let (uri, calls) =
-        interrupted_body_server(msg_start(), text_turn("recovered after reconnect")).await;
+async fn body_disconnect_before_output_is_ambiguous_and_not_replayed() {
+    let (uri, calls) = interrupted_body_server(msg_start(), text_turn("must not replay")).await;
     let workspace_dir = tempfile::tempdir().unwrap();
     let session_dir = tempfile::tempdir().unwrap();
     let workspace = workspace_dir.path().canonicalize().unwrap();
     let session_path = session_dir.path().join("session.jsonl");
     let mut agent = build_agent(&uri, &workspace, &session_path, Some(4));
-
-    let mut run = agent.prompt("recover safely").await.unwrap();
+    let mut run = agent.prompt("inspect before retrying").await.unwrap();
     let events = collect(&mut run).await;
+    drop(run);
     assert!(matches!(
         assert_single_run_finished(&events),
-        FinishReason::Completed
+        FinishReason::Failed(_)
     ));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ProviderRetry {
-            attempt: 1,
-            max_attempts: 5,
-            error,
-            ..
-        } if error.contains("Are you connected to the internet?")
-    )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::OutputDelta {
-            channel: OutputChannel::Text,
-            text,
-        } if text.contains("recovered after reconnect")
-    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         events
             .iter()
             .filter(|event| matches!(event, AgentEvent::TurnStarted))
             .count(),
-        2
+        1
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    drop(agent);
+    assert!(Session::open_read_only(&session_path)
+        .unwrap()
+        .context()
+        .unwrap()
+        .iter()
+        .any(|message| matches!(
+            message, Message::User(user) if user.content.iter().any(|part| matches!(
+                part, UserPart::Text(text) if text == "inspect before retrying"
+            ))
+        )));
+}
+
+#[tokio::test]
+async fn missing_terminal_before_output_is_ambiguous_and_not_replayed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![msg_start(), text_turn("must not replay")],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut agent = build_agent(
+        &server.uri(),
+        workspace.path(),
+        &sessions.path().join("session.jsonl"),
+        Some(4),
+    );
+    let mut run = agent.prompt("keep this pending input").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Failed(_)
+    ));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    drop(agent);
+    assert!(
+        Session::open_read_only(sessions.path().join("session.jsonl"))
+            .unwrap()
+            .context()
+            .unwrap()
+            .iter()
+            .any(|message| matches!(
+                message, Message::User(user) if user.content.iter().any(|part| matches!(
+                    part, UserPart::Text(text) if text == "keep this pending input"
+                ))
+            ))
+    );
 }
 
 #[tokio::test]
@@ -6658,4 +6700,118 @@ async fn non_recon_bash_still_executes_serially() {
         assert_single_run_finished(&events),
         FinishReason::Completed
     ));
+}
+
+// Valid synthetic one-pixel PNG, not an attachment or a provider fixture.
+const OWNER_IMAGE_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0,
+    0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5, 1, 1,
+    39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+struct StrippedToolObserver(Arc<AtomicUsize>);
+impl ygg_agent::EventObserver for StrippedToolObserver {
+    fn on_event(&self, event: &AgentEvent) {
+        if let AgentEvent::ToolFinished {
+            result: Ok(output), ..
+        } = event
+        {
+            assert!(output.media().is_empty());
+            assert!(!output
+                .content_parts()
+                .iter()
+                .any(|part| matches!(part, ygg_agent::ToolOutputContentPart::Media(_))));
+            assert!(!output.presentation_images_omitted());
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[tokio::test]
+async fn real_read_tool_images_are_owner_opt_in_and_observers_stay_stripped() {
+    for enabled in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(Script {
+                bodies: vec![
+                    tool_turn(&[(
+                        "read-image",
+                        "read",
+                        serde_json::json!({"path":"pixel.png"}),
+                    )]),
+                    text_turn("image accepted"),
+                ],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("pixel.png"), OWNER_IMAGE_PNG).unwrap();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let mut extensions = ExtensionHost::new();
+        extensions.load(&CoreTools);
+        extensions.observe(StrippedToolObserver(observed.clone()));
+        let mut agent = Agent::new(AgentConfig {
+            client: AiClient::new(),
+            model: scripted_model(&server.uri()),
+            session: Session::create(sessions.path().join("session.jsonl")).unwrap(),
+            system: "Test the actual read tool".into(),
+            sandbox: SandboxConfig::new(workspace.path()),
+            effect_broker: EffectBroker::new(EffectPolicy::UnsafeHost),
+            extensions,
+            max_turns: Some(4),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: ygg_ai::ReasoningMode::Standard,
+            cache_retention: ygg_ai::CacheRetention::Short,
+            session_id: None,
+        })
+        .unwrap();
+        if enabled {
+            agent.set_owner_tool_images_enabled(true);
+        }
+        let mut run = agent.prompt("read pixel.png").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        assert!(matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Completed
+        ));
+        let output = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolFinished {
+                    result: Ok(output), ..
+                } => Some(output),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(output.media().len(), usize::from(enabled));
+        assert_eq!(
+            output
+                .content_parts()
+                .iter()
+                .filter(|part| matches!(part, ygg_agent::ToolOutputContentPart::Media(_)))
+                .count(),
+            usize::from(enabled)
+        );
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        let debug = format!("{events:?}");
+        assert!(!debug.contains("iVBOR"));
+        assert!(!debug.contains("\\x89PNG"));
+        assert!(!debug.contains("137, 80, 78, 71"));
+        assert!(agent
+            .session()
+            .context()
+            .unwrap()
+            .iter()
+            .any(|message| matches!(message,
+                Message::User(user) if user.content.iter().any(|part| matches!(part,
+                    UserPart::ToolResult(result) if result.content.iter().any(|part| matches!(part,
+                        ygg_ai::ToolResultPart::Media(Media::Image(_))
+                    ))
+                ))
+            )));
+    }
 }
