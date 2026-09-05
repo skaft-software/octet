@@ -54,12 +54,12 @@ fn render_pi_startup(state: &ShellState, width: u16) -> Vec<String> {
     let accent = |text: &str| state.theme.fg("accent", text);
     let muted = |text: &str| state.theme.dim(text);
     [
-        format!("{} {}", accent("ygg"), muted(&version)),
+        format!("{} {}", accent("octet"), muted(&version)),
         muted("escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more"),
         muted("Press ctrl+o to show full startup help and loaded resources."),
         String::new(),
         muted(
-            "Ygg can explain its own features and look up its docs. Ask it how to use or extend Ygg.",
+            "octet can explain its own features and look up its docs. Ask it how to use or extend octet.",
         ),
     ]
     .into_iter()
@@ -133,7 +133,7 @@ pub(super) fn render_welcome_card(
         [
             format!(
                 "{} {}",
-                splash_bold("ygg"),
+                splash_bold("octet"),
                 splash_text(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             ),
             String::new(),
@@ -158,7 +158,7 @@ pub(super) fn render_welcome_card(
         [
             format!(
                 "{} {}",
-                state.theme.bold(&state.theme.fg("model_accent", "ygg")),
+                state.theme.bold(&state.theme.fg("model_accent", "octet")),
                 state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             ),
             String::new(),
