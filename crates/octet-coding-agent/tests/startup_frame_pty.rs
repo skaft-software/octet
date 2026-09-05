@@ -201,14 +201,35 @@ impl PtyOctet {
     }
 
     fn spawn_configured(binary: &Path, mode: MouseMode, api: Option<&str>, color: bool) -> Self {
+        Self::spawn_at(
+            binary,
+            mode,
+            api,
+            color,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            "probe",
+        )
+    }
+
+    fn spawn_at(
+        binary: &Path,
+        mode: MouseMode,
+        api: Option<&str>,
+        color: bool,
+        dimensions: (u16, u16),
+        start: (u16, bool, bool),
+        model: &str,
+    ) -> Self {
         let root = tempfile::tempdir().expect("PTY test tempdir");
         let home = root.path().join("home");
         let workspace = root.path().join("workspace");
         let sessions = root.path().join("sessions");
         create_inert_environment(&home, &workspace, &sessions);
-        if let Some(base_url) = api {
+        if api.is_some() || model != "probe" {
+            let base_url = api.unwrap_or("http://127.0.0.1:9/v1/");
             let credential = serde_json::json!({
-                "base_url": base_url, "api_key": "", "api_name": "probe",
+                "base_url": base_url, "api_key": "", "api_name": model,
                 "headers": [], "models": [], "auto_discover": false,
             });
             fs::write(
@@ -218,10 +239,19 @@ impl PtyOctet {
             .expect("loopback provider fixture");
         }
 
-        let mut pty = Pty::open(INITIAL_COLUMNS, INITIAL_ROWS);
+        let mut pty = Pty::open(dimensions.0, dimensions.1);
         // Rows exist before the child is exec'd, exactly as stale shell output
         // does at an interactive startup boundary.
         pty.seed_startup_rows();
+        if start.1 {
+            // An inherited DECSTBM region survives ED2 and CUP.
+            write!(pty.slave, "\x1b[3;{}r", dimensions.1 - 1).unwrap();
+        }
+        if start.2 {
+            pty.slave.write_all(b"\x1b[?6h").unwrap();
+        }
+        write!(pty.slave, "\x1b[{};7H", start.0 + 1).expect("seed starting cursor");
+        pty.slave.flush().expect("flush starting cursor");
 
         let stdin = duplicate_stdio(pty.slave.as_raw_fd());
         let stdout = duplicate_stdio(pty.slave.as_raw_fd());
@@ -238,7 +268,7 @@ impl PtyOctet {
                 "--mouse",
                 mode.as_arg(),
                 "--model",
-                "custom/probe",
+                &format!("custom/{model}"),
                 "--workspace",
             ])
             .arg(&workspace)
@@ -1388,5 +1418,173 @@ fn visible_bytes(bytes: &[u8]) -> String {
         format!("{escaped}… ({} bytes total)", bytes.len())
     } else {
         escaped
+    }
+}
+
+/// Check composed cells, not occurrences in the ANSI transcript: legitimate
+/// differential frames repeat the current brand, but must never accumulate it.
+fn assert_single_welcome(parser: &vt100::Parser, columns: u16, label: &str) {
+    let text = screen_text(parser, columns);
+    let version = format!("octet v{}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        text.matches(&version).count(),
+        1,
+        "{label}: duplicate/missing version\n{text}"
+    );
+    let version_row = text
+        .lines()
+        .position(|line| line.contains(&version))
+        .unwrap();
+    let logo_box = (usize::from(columns) / 3).clamp(14, 24);
+    let scale = (logo_box / 8).min(3);
+    let top = version_row + (6 - 2 * scale) / 2;
+    let left = 2 + (logo_box - 8 * scale) / 2;
+    let (rows, _) = parser.screen().size();
+    for row in 0..usize::from(rows) {
+        for col in 0..usize::from(columns) {
+            let in_grid =
+                row >= top && row < top + 2 * scale && col >= left && col < left + 8 * scale;
+            let expected =
+                in_grid && (row >= top + scale || b"01101111"[(col - left) / scale] == b'1');
+            let actual = parser
+                .screen()
+                .cell(row as u16, col as u16)
+                .unwrap()
+                .contents()
+                == "█";
+            assert_eq!(
+                actual, expected,
+                "{label}: stale/missing logo cell at ({row},{col})\n{text}"
+            );
+        }
+    }
+}
+
+fn check_welcome_frames(
+    octet: &PtyOctet,
+    parser: &mut vt100::Parser,
+    consumed: &mut usize,
+    columns: u16,
+    label: &str,
+) {
+    if let Some(directory) = std::env::var_os("OCTET_STARTUP_REDRAW_TRACE_DIR") {
+        fs::write(
+            PathBuf::from(directory).join(format!("{label}.ansi")),
+            &octet.pty.output,
+        )
+        .unwrap();
+    }
+    let start = *consumed;
+    for frame in frame_ranges(&octet.pty.output[start..]) {
+        let end = start + frame.end;
+        parser.process(&octet.pty.output[*consumed..end]);
+        *consumed = end;
+        assert_single_welcome(parser, columns, label);
+    }
+    // Retain the entire tail, including cursor controls and any incomplete
+    // synchronized frame. A later read completes it; never assert a partial
+    // screen that synchronized output has not presented to the user.
+}
+
+#[test]
+fn real_octet_repeated_startup_redraw_composed_screen() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Optional, explicit immutable binary for reproducing a pre-fix artifact.
+    let binary = std::env::var_os("OCTET_STARTUP_REDRAW_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_octet")));
+    for (columns, rows, starting_row) in [
+        (80, 24, 0),
+        (190, 18, 7),
+        (190, 19, 17),
+        (190, 20, 5),
+        (46, 18, 4),
+    ] {
+        for mode in [MouseMode::Auto, MouseMode::App] {
+            for (margins, origin) in [(false, false), (true, false), (true, true)] {
+                let label = format!(
+                    "{columns}x{rows}-start{starting_row}-{mode:?}-margins{margins}-origin{origin}"
+                );
+                let mut octet = PtyOctet::spawn_at(
+                    &binary,
+                    mode,
+                    None,
+                    true,
+                    (columns, rows),
+                    (starting_row, margins, origin),
+                    "qwen-3.8-27b",
+                );
+                octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                    synchronized_frame_end_containing(bytes, b"Qwen 3.8 27B").is_some()
+                });
+                octet.pty.drain_for(Duration::from_millis(250));
+                let mut parser = vt100::Parser::new(rows, columns, 512);
+                let mut consumed = 0;
+                check_welcome_frames(
+                    &octet,
+                    &mut parser,
+                    &mut consumed,
+                    columns,
+                    &format!("{label}-startup"),
+                );
+                // Shift+Tab updates a local setting, appends a note and restarts
+                // model-colour animation. No provider/model request or resize.
+                for step in 0..2 {
+                    octet.pty.write_input(b"\x1b[Z");
+                    octet.pty.drain_for(Duration::from_millis(350));
+                    check_welcome_frames(
+                        &octet,
+                        &mut parser,
+                        &mut consumed,
+                        columns,
+                        &format!("{label}-setting{step}"),
+                    );
+                    assert!(
+                        parser
+                            .screen()
+                            .contents()
+                            .contains("thinking changed to off"),
+                        "{label}\n{}",
+                        parser.screen().contents()
+                    );
+                }
+                octet.pty.drain_for(Duration::from_millis(2300));
+                check_welcome_frames(
+                    &octet,
+                    &mut parser,
+                    &mut consumed,
+                    columns,
+                    &format!("{label}-settled"),
+                );
+                let resize_start = octet.pty.output.len();
+                octet.resize(80, 24);
+                parser.set_size(24, 80);
+                if (columns, rows) != (80, 24) {
+                    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                        synchronized_frame_end_containing(&bytes[resize_start..], b"\x1b[2J")
+                            .is_some()
+                    });
+                }
+                octet.pty.drain_for(Duration::from_millis(100));
+                check_welcome_frames(
+                    &octet,
+                    &mut parser,
+                    &mut consumed,
+                    80,
+                    &format!("{label}-resize"),
+                );
+                let capture = octet.shutdown();
+                assert!(capture.status.success());
+                assert!(capture.termios_restored);
+                assert!(!uses_alternate_screen(&capture.output));
+                assert_eq!(
+                    count_bytes(&capture.output, FRAME_BEGIN),
+                    count_bytes(&capture.output, FRAME_END)
+                );
+                eprintln!("composed redraw PASS {label}");
+            }
+        }
     }
 }

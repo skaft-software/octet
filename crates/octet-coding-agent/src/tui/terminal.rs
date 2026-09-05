@@ -687,6 +687,12 @@ impl OctetTerminal<Stdout> {
             event::EnableBracketedPaste,
             cursor::SetCursorStyle::SteadyBlock,
             cursor::Hide,
+            // The renderer owns the complete physical viewport. ED2/CUP do
+            // not reset inherited scrolling margins or origin mode: cursor-up
+            // can clamp at that margin while the logical cursor keeps moving,
+            // leaving a stale version/logo strip on each subsequent redraw.
+            // Establish physical coordinates without erasing saved lines.
+            crossterm::style::Print("\x1b[?6l\x1b[r"),
             // Pi's first primary-screen frame deliberately preserves saved
             // lines and therefore does not erase physical rows left by the
             // shell. Clear only the visible viewport before that frame; ED 3
