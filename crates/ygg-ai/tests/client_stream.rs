@@ -538,6 +538,7 @@ enum WebSocketBehavior {
     CloseBeforeEvents,
     ConnectionLimit,
     RejectHandshake,
+    StallHandshake,
     Stall,
     StallWithPongs,
 }
@@ -621,6 +622,14 @@ async fn handle_test_responses_connection(
         return Ok(());
     }
 
+    if matches!(behavior, WebSocketBehavior::StallHandshake) {
+        // Read the upgrade but never acknowledge it; finish when the client
+        // drops its timed-out handshake. No generation frame can be accepted.
+        let mut bytes = [0_u8; 1024];
+        while stream.read(&mut bytes).await? != 0 {}
+        return Ok(());
+    }
+
     if matches!(behavior, WebSocketBehavior::RejectHandshake) {
         stream
             .write_all(
@@ -678,7 +687,8 @@ async fn handle_test_responses_connection(
             }
             WebSocketBehavior::Complete
             | WebSocketBehavior::ConnectionLimit
-            | WebSocketBehavior::RejectHandshake => {}
+            | WebSocketBehavior::RejectHandshake
+            | WebSocketBehavior::StallHandshake => {}
         }
 
         let prewarm = body.get("generate") == Some(&serde_json::Value::Bool(false));
@@ -915,6 +925,72 @@ async fn responses_websocket_handshake_failure_falls_back_to_http_sse() {
         server.requests().await,
         vec![serde_json::json!({"transport": "http"})]
     );
+}
+
+#[tokio::test]
+async fn responses_websocket_handshake_timeout_falls_back_without_sending_generation() {
+    let server =
+        TestResponsesServer::start(WebSocketBehavior::StallHandshake, fallback_responses_body())
+            .await;
+    let mut model = websocket_test_model(&server.base_url);
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(100);
+    let response = AiClient::new()
+        .complete(
+            &model,
+            responses_request(vec![user_message("slow upgrade")], Some("slow-handshake")),
+        )
+        .await
+        .expect("a timed-out upgrade cannot accept generation; HTTP fallback is safe");
+    assert_eq!(response.response_id.as_deref(), Some("resp-http"));
+    assert_eq!(
+        server.requests().await,
+        vec![serde_json::json!({"transport": "http"})]
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_prewarm_body_timeout_is_not_a_connection_failure() {
+    let server =
+        TestResponsesServer::start(WebSocketBehavior::StallWithPongs, fallback_responses_body())
+            .await;
+    let mut model = websocket_test_model(&server.base_url);
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(100);
+    let error = AiClient::new()
+        .prewarm_responses(
+            &model,
+            responses_request(vec![user_message("prewarm")], Some("prewarm-timeout")),
+        )
+        .await
+        .expect_err("accepted prewarm without terminal output must time out");
+    assert!(matches!(error, AiError::Transport(ref transport)
+        if transport.phase == ygg_ai::TransportPhase::Body && transport.timeout));
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["generate"], false);
+}
+
+#[tokio::test]
+async fn responses_credential_resolution_failure_never_opens_a_transport() {
+    struct FailedResolver;
+    #[async_trait::async_trait]
+    impl ygg_ai::CredentialResolver for FailedResolver {
+        async fn resolve(&self) -> Result<ygg_ai::ResolvedCredential, ygg_ai::AuthError> {
+            Err(ygg_ai::AuthError::Resolve)
+        }
+    }
+    let server = MockServer::start().await;
+    let mut model = websocket_test_model(&format!("{}/", server.uri()));
+    Arc::make_mut(&mut model.endpoint).auth = Auth::Dynamic(Arc::new(FailedResolver));
+    let error = AiClient::new()
+        .complete(&model, text_request())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AiError::Auth(ygg_ai::AuthError::Resolve)));
+    assert_eq!(
+        error.to_string(),
+        "Auth error: Credential resolution failed"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

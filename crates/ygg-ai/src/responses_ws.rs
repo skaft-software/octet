@@ -387,8 +387,44 @@ impl ResponsesWsPool {
         headers: http::HeaderMap,
         body: Value,
         liveness: ResponsesWsLiveness,
+        startup_timeout: Duration,
     ) -> Result<mpsc::Receiver<Result<Value, AiError>>, AiError> {
-        let connection = self.connect(key, url, headers).await?;
+        let deadline = tokio::time::Instant::now() + startup_timeout;
+        // Only this future owns connection establishment; no generation command
+        // exists yet. A timeout here is proven safe for HTTP fallback.
+        let connection = tokio::time::timeout(
+            startup_timeout.min(crate::client::DEFAULT_CONNECT_TIMEOUT),
+            self.connect(key, url, headers),
+        )
+        .await
+        .map_err(|_| {
+            AiError::Transport(TransportError {
+                phase: TransportPhase::Connect,
+                timeout: true,
+                message: "Responses WebSocket handshake timed out before request send".to_owned(),
+            })
+        })??;
+        // Keep queueing and sending inside the original endpoint startup budget,
+        // without letting that outer timer misclassify a handshake timeout.
+        tokio::time::timeout_at(deadline, self.send_request(key, connection, body, liveness))
+            .await
+            .map_err(|_| {
+                AiError::Transport(TransportError {
+                    phase: TransportPhase::ResponseHeaders,
+                    timeout: true,
+                    message: "Responses WebSocket request start timed out; acceptance unknown"
+                        .to_owned(),
+                })
+            })?
+    }
+
+    async fn send_request(
+        &self,
+        key: Option<&str>,
+        connection: Connection,
+        body: Value,
+        liveness: ResponsesWsLiveness,
+    ) -> Result<mpsc::Receiver<Result<Value, AiError>>, AiError> {
         let (reply, events) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let (started, started_result) = oneshot::channel();
         let command = RequestCommand {
@@ -442,6 +478,7 @@ impl ResponsesWsPool {
         headers: http::HeaderMap,
         mut body: Value,
         liveness: ResponsesWsLiveness,
+        startup_timeout: Duration,
     ) -> Result<(), AiError> {
         let Some(object) = body.as_object_mut() else {
             return Err(crate::error::DecodeError::Json(
@@ -450,19 +487,30 @@ impl ResponsesWsPool {
             .into());
         };
         object.insert("generate".to_owned(), Value::Bool(false));
+        let deadline = tokio::time::Instant::now() + startup_timeout;
         let mut events = self
-            .request(Some(key), url, headers, body, liveness)
+            .request(Some(key), url, headers, body, liveness, startup_timeout)
             .await?;
-        while let Some(event) = events.recv().await {
-            let event = event?;
-            if terminal_kind(&event).is_some() {
-                return Ok(());
+        tokio::time::timeout_at(deadline, async {
+            while let Some(event) = events.recv().await {
+                let event = event?;
+                if terminal_kind(&event).is_some() {
+                    return Ok(());
+                }
             }
-        }
-        Err(transport_error(
-            TransportPhase::Body,
-            "Responses WebSocket prewarm ended before completion",
-        ))
+            Err(transport_error(
+                TransportPhase::Body,
+                "Responses WebSocket prewarm ended before completion",
+            ))
+        })
+        .await
+        .map_err(|_| {
+            AiError::Transport(TransportError {
+                phase: TransportPhase::Body,
+                timeout: true,
+                message: "Responses WebSocket prewarm response timed out".to_owned(),
+            })
+        })?
     }
 
     /// Header value required by the current Codex Responses WebSocket route.
@@ -1048,6 +1096,7 @@ mod tests {
                     http::HeaderMap::new(),
                     serde_json::json!({"model": "gpt", "input": []}),
                     ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                    Duration::from_secs(2),
                 )
                 .await
             }
@@ -1074,6 +1123,48 @@ mod tests {
         ));
         assert!(!connection.alive.load(Ordering::Acquire));
         assert!(!pool.state.lock().await.sessions.contains_key("stale"));
+    }
+
+    #[tokio::test]
+    async fn queued_request_deadline_closes_receiver_without_replaying() {
+        let pool = ResponsesWsPool::default();
+        let (sender, mut commands) = mpsc::channel(1);
+        pool.state.lock().await.sessions.insert(
+            "queued".to_owned(),
+            Connection {
+                sender,
+                alive: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        let error = pool
+            .request(
+                Some("queued"),
+                Url::parse("ws://127.0.0.1:1/").unwrap(),
+                http::HeaderMap::new(),
+                serde_json::json!({"model": "gpt", "input": []}),
+                ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                Duration::from_millis(20),
+            )
+            .await
+            .expect_err("unacknowledged request must reach its startup deadline");
+        assert!(matches!(
+            error,
+            AiError::Transport(TransportError {
+                phase: TransportPhase::ResponseHeaders,
+                timeout: true,
+                ..
+            })
+        ));
+        let command = commands.recv().await.unwrap();
+        assert!(
+            command.reply.is_closed(),
+            "actor must not send an orphaned queued generation"
+        );
+        assert!(command.started.is_closed());
+        assert!(
+            commands.try_recv().is_err(),
+            "deadline must not enqueue a replacement"
+        );
     }
 
     #[tokio::test]
@@ -1192,6 +1283,53 @@ mod tests {
         assert!(incremental);
         assert_eq!(wire["previous_response_id"], "resp_1");
         assert_eq!(wire["input"], serde_json::json!([item("next")]));
+    }
+
+    #[test]
+    fn continuation_keeps_encrypted_reasoning_and_invalidates_changed_controls() {
+        let first = serde_json::json!({
+            "model": "gpt", "input": [item("user")],
+            "tools": [], "reasoning": {"effort": "high"}, "store": false
+        });
+        let reasoning = serde_json::json!({
+            "type": "reasoning", "id": "rs_1", "encrypted_content": "opaque",
+            "summary": [], "future": {"keep": true}
+        });
+        let terminal = serde_json::json!({
+            "type": "response.completed",
+            "response": {"id": "resp_1", "output": [reasoning.clone(), item("assistant")]}
+        });
+        let mut continuation = None;
+        update_continuation(&first, &terminal, &mut continuation);
+        let mut next = first.clone();
+        next["input"] =
+            serde_json::json!([item("user"), reasoning, item("assistant"), item("next")]);
+        let original = next.clone();
+        let (wire, incremental) = incremental_body(&next, continuation.as_ref());
+        assert!(incremental);
+        assert_eq!(wire["previous_response_id"], "resp_1");
+        assert_eq!(wire["input"], serde_json::json!([item("next")]));
+        assert_eq!(
+            next, original,
+            "HTTP fallback must retain the complete opaque window"
+        );
+        for (key, value) in [
+            (
+                "tools",
+                serde_json::json!([{"type": "function", "name": "new_tool"}]),
+            ),
+            ("reasoning", serde_json::json!({"effort": "low"})),
+        ] {
+            let mut changed = next.clone();
+            changed[key] = value;
+            let (wire, incremental) = incremental_body(&changed, continuation.as_ref());
+            assert!(!incremental);
+            assert_eq!(wire, changed);
+            assert_eq!(wire["input"][1]["encrypted_content"], "opaque");
+        }
+        let (wire, incremental) = incremental_body(&next, None);
+        assert!(!incremental, "a fresh socket cannot use the old cursor");
+        assert_eq!(wire, original);
     }
 
     #[test]

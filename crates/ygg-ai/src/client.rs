@@ -31,7 +31,7 @@ const MAX_SUCCESS_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// Bound DNS/TCP/TLS establishment independently from a provider's header
 /// timeout. Without this, a dead route can consume the full endpoint timeout on
 /// every retry before the UI receives an error.
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum time to wait for the first response-body chunk after headers. A
 /// provider may have accepted the request and still be processing a very large
 /// prompt or loading a local model.
@@ -1577,24 +1577,17 @@ impl AiClient {
         let body = serde_json::from_slice::<serde_json::Value>(&parts.body)
             .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
         let key = format!("{}:{}:{session_id}", model.endpoint.id.0, model.spec.id.0);
-        let result = tokio::time::timeout(
-            model.endpoint.timeout.min(DEFAULT_CONNECT_TIMEOUT),
-            self.responses_ws.prewarm(
+        let result = self
+            .responses_ws
+            .prewarm(
                 &key,
                 parts.url,
                 headers,
                 body,
                 ResponsesWsLiveness::for_response_idle(self.stream_idle_timeout),
-            ),
-        )
-        .await
-        .map_err(|_| {
-            AiError::Transport(TransportError {
-                phase: TransportPhase::Connect,
-                timeout: true,
-                message: "Responses WebSocket prewarm timed out".to_owned(),
-            })
-        })?;
+                model.endpoint.timeout.min(DEFAULT_CONNECT_TIMEOUT),
+            )
+            .await;
         result.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))
     }
 
@@ -1756,20 +1749,19 @@ impl AiClient {
             if let Ok(body) =
                 serde_json::from_slice::<serde_json::Value>(&fallback_request.parts.body)
             {
-                let connect_timeout = model.endpoint.timeout.min(DEFAULT_CONNECT_TIMEOUT);
-                let result = tokio::time::timeout(
-                    connect_timeout,
-                    self.responses_ws.request(
+                let result = self
+                    .responses_ws
+                    .request(
                         websocket_key.as_deref(),
                         fallback_request.parts.url.clone(),
                         ws_headers,
                         body,
                         ResponsesWsLiveness::for_response_idle(self.stream_idle_timeout),
-                    ),
-                )
-                .await;
+                        model.endpoint.timeout,
+                    )
+                    .await;
                 match result {
-                    Ok(Ok(events)) => {
+                    Ok(events) => {
                         return Ok(responses_websocket_stream(
                             model.clone(),
                             events,
@@ -1782,17 +1774,9 @@ impl AiClient {
                             self.stream_deadline,
                         ));
                     }
-                    Ok(Err(error)) if websocket_open_failure_is_replay_safe(&error) => {}
-                    Ok(Err(error)) => {
+                    Err(error) if websocket_open_failure_is_replay_safe(&error) => {}
+                    Err(error) => {
                         return Err(sanitize_ai_error(&diagnostic_redactor, error));
-                    }
-                    Err(_) => {
-                        return Err(AiError::Transport(TransportError {
-                            phase: TransportPhase::ResponseHeaders,
-                            timeout: true,
-                            message: "Responses WebSocket request timed out before stream start"
-                                .to_owned(),
-                        }));
                     }
                 }
             }
