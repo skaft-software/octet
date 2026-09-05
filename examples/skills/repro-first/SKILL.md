@@ -5,7 +5,7 @@ version: 0.1.0
 required-tools:
   - read
   - search
-  - exec
+  - bash
 tags:
   - debugging
   - diagnostics

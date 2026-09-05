@@ -1,82 +1,127 @@
 # octet sessions
 
-octet stores each conversation as bounded, append-only JSONL under the configured
-session directory, namespaced by workspace. The JSONL file is the durable
-conversation and branch history. Readable names and tags live in small sidecars
-under the workspace store's `.metadata/` directory so older binaries can still
-open the conversation unchanged.
+[Documentation](README.md) · [Context](context.md) · [Commands](commands.md)
 
-## Discovery catalog
+Continue the latest conversation in the current workspace:
 
-Each workspace store may also contain `.catalog/sessions-v1.sqlite3`. This is a
-private, disposable SQLite projection used to make session listing and the
-resume picker independent of total transcript bytes. It contains bounded
-derived titles, active-branch message counts, and transcript size/mtime
-fingerprints; JSONL and `.metadata/` remain authoritative. The interactive
-picker can enumerate all workspace-key directories under the shared session
-root and uses each directory's `.workspace` marker for display. octet streams only
-missing or stale transcripts, refreshes the active row when an app closes
-normally, and removes rows for missing sessions. An unavailable, locked,
-corrupt, oversized, or newer-version catalog never blocks session access: octet
-falls back to bounded JSONL scans, and rebuilds catalogs whose SQLite contents
-are corrupt. Deleting the `.catalog/` directory is safe; octet recreates it on
-demand.
+```sh
+octet --continue
+```
+
+Sessions are bounded, append-only JSONL, namespaced by workspace under the
+configured session directory (`--session-dir PATH`). Complete semantic boundaries
+are durable; provisional streaming deltas are not. Parent links preserve branches
+without rewriting history. Names/tags live in `.metadata/` sidecars so the
+conversation remains readable without changing its format.
+
+## Resume and branch
+
+```sh
+octet --resume
+octet --resume SESSION_ID
+octet --fork SESSION_ID
+octet --fork
+```
+
+Resume restores model/reasoning, prompt identity, tool panels, branches, and
+historical prompt colors. Explicit `--model`/`--reasoning` override recovered
+values. `--fork <id|path>` creates a new session from the selected head before
+startup; bare `--fork` opens the picker.
+
+| Interactive action | Result |
+| --- | --- |
+| `/resume [id]` | Resume directly or open the picker. |
+| `/fork` | Pick an active-branch user message or the whole conversation for a new session. |
+| `/clone` | New session from the current head without a picker. |
+| `/tree` | Complete parent-linked history. `+` traces the selected branch; `*` marks its exact durable head. |
+| `/checkout <entry-id>` | Move the durable head and branch from there without deleting ancestry. |
+| `/name [name]` | Show or change the readable name. |
+| `/export [path]` | Redacted portable export. |
+
+The resume picker supports fuzzy, quoted-phrase, and `re:` regex filtering,
+named-only filtering, recent/title/message-count sorting, and optional paths.
+Tab toggles current/all-workspace scope; Ctrl+S cycles ordering, Ctrl+N filters
+named sessions, Ctrl+P toggles paths, Ctrl+R renames, and Delete moves to trash.
+All-workspace browsing is not a cross-workspace transcript index; a differently
+scoped session cannot be resumed into the same live App.
 
 ## Commands
 
-```console
+```sh
 octet sessions list
-octet sessions list --query review
-octet sessions inspect <id>
-octet sessions rename <id> "parser cleanup"
-octet sessions tag <id> rust local-model
-octet sessions export <id>
-octet sessions export <id> --output ./handoff.octet-session.json
-octet sessions delete <id>
-octet sessions repair <id>
+octet sessions list --query parser
+octet sessions inspect SESSION_ID
+octet sessions rename SESSION_ID "parser hardening"
+octet sessions tag SESSION_ID rust local-model
+octet sessions export SESSION_ID
+octet sessions export SESSION_ID --output ./handoff.octet-session.json
+octet sessions delete SESSION_ID
+octet sessions repair SESSION_ID
+octet doctor
 ```
 
-`list` searches IDs, names, derived titles, tags, internal JSONL paths, and
-dates encoded in IDs. Lists and searches are intentionally scoped to the
-selected workspace's store; octet does not maintain a cross-workspace index.
-Modified times are shown as readable relative ages. `inspect` validates the
-file read-only and reports its derived active-branch title, size, entry count,
-head, checkpoint and usage totals, plus branch roots and leaves. Both `inspect`
-and the TUI's `/tree` render the complete parent-linked history as a stable
-connector tree. `+` traces the selected branch and `*` marks its exact durable
-head, so abandoned forks remain visible without looking like active context.
-`/checkout <entry-id>` creates a new branch by moving the durable head without
-deleting ancestry.
+Listing/search is read-only and uses bounded metadata scans or the disposable
+catalog. `list` searches IDs, names, derived titles, tags, internal JSONL paths,
+and dates encoded in IDs, scoped to the selected workspace store. Modified times
+appear as relative ages. `inspect` validates read-only and reports derived
+active-branch title, size, entries, head, checkpoints, usage, and branch roots/leaves;
+its connector tree and `/tree` include abandoned forks without treating them as
+active context. `doctor` performs read-mostly prerequisite/provider/model checks
+without constructing an Agent or starting executable extensions.
 
-Interactive commands operate on the current session:
+## Recovery
 
-- `/name [name]` shows or changes its readable name.
-- `/export [path]` writes a redacted portable export.
-- `/resume [id]` opens the session picker; `Tab` toggles current/all workspace
-  scope, `Ctrl+S` cycles recent/title/message-count ordering, `Ctrl+N` shows
-  named sessions, `Ctrl+P` toggles paths, `Delete` trashes, and `Ctrl+R` renames.
-- `/fork` creates a new session from a selected active-branch user message;
-  `/clone` creates one from the current head. `--fork <id|path>` performs the
-  same head fork before startup, while bare `--fork` opens the picker.
+Delete moves JSONL and metadata to `.trash/`, not permanent unlinking. Repair
+first writes an owner-private backup, then removes only an interrupted final
+append. Corruption in a completed record is diagnosed, never automatically
+rewritten. A dropped run never silently replays an unresolved mutating call;
+its outcome is indeterminate. Cancellation cannot undo an already completed
+action. [Network and effect recovery](tools.md#recovery-and-security).
 
-`delete` is recoverable: it moves the JSONL and metadata into `.trash/` rather
-than unlinking them. `repair` is deliberately narrow. It first writes an
-owner-private backup, then removes only an interrupted final append. Corruption
-in any completed record is diagnosed and never rewritten automatically.
+## Portable export and redaction
+
+Export validates and writes an owner-private `octet-session-export` version 1
+JSON package with source identity, readable metadata, and records. Existing
+paths are not replaced without `--force`.
+
+Redaction is on by default: credential-like keys and string content in prompts,
+tool arguments, and results are scanned. The bounded deterministic scanner
+covers authorization/cookie headers, common API-token prefixes, credential
+assignments and URL queries, URL userinfo, private-key blocks, and JSON objects
+or arrays serialized inside strings. It preserves surrounding prose and UTF-8
+and reports replaced values/fragments. This is a safety filter, **not proof that
+arbitrary prose or media contains no secret**. `--include-secrets` requests raw
+values with an explicit warning; use only for a trusted destination.
+
+HTML export, hosted viewers, and cloud sharing are outside this local-first
+session boundary. [Media/privacy](media.md#privacy-and-remote-reads).
+
+## Discovery catalog
+
+Each workspace store may contain `.catalog/sessions-v1.sqlite3`, a private,
+disposable SQLite projection of bounded titles, active-branch message counts,
+and transcript size/mtime fingerprints. JSONL and `.metadata/` remain
+authoritative. Listing/resume need not scan all transcript bytes: only missing
+or stale entries are streamed, the active row refreshes on normal app close,
+and missing sessions lose their rows. The picker enumerates workspace-key
+directories under the shared root and displays their `.workspace` markers.
+
+Unavailable, locked, corrupt, oversized, or newer-version catalogs never block
+access: octet falls back to bounded JSONL scans and rebuilds corrupt SQLite
+contents. Removing `.catalog/` is safe; it is recreated on demand.
 
 ## JSONL schema
 
-Every physical line is one JSON object with a `type` discriminator. There are
-four top-level record types:
+Each physical line is one JSON object with a `type` discriminator:
 
-| Record | Purpose |
+| Record | Meaning |
 | --- | --- |
-| `entry` | An immutable parent-linked conversation or state entry. |
-| `head` | Selects the active branch head and records cumulative cost. |
-| `checkpoint` | Marks a completed prompt and exact restorable head. |
-| `usage` | Stores provider/model/token/cost accounting for one operation. |
+| `entry` | Immutable parent-linked conversation/state. |
+| `head` | Active branch selection and cumulative cost. |
+| `checkpoint` | Completed prompt and exact restorable head. |
+| `usage` | Provider/model/token/cost accounting for one operation. |
 
-An entry has this stable envelope:
+Stable entry envelope:
 
 ```json
 {
@@ -88,39 +133,32 @@ An entry has this stable envelope:
     "prompt_model_source": "local",
     "prompt_color": "#5a36d6"
   },
-  "value": {
-    "type": "message"
-  }
+  "value": { "type": "message" }
 }
 ```
 
-`parent` is `null` for a root. Entry value types are `message`, `compaction`,
-`config`, `prompt_template_selected`, `skill_activated`,
-`skill_resource_read`, and `skill_deactivated`. Prompt-template selection keeps
-the chosen name and content hash outside model-visible context. Skill entries
-make explicit activation and lazily loaded resources resumable; compaction
-records snapshot the active skill state and cumulative Pi-compatible
-`details.readFiles`/`details.modifiedFiles` lists. Those detail fields default
-to empty lists when older session records omit them.
+`parent: null` marks a root. Entry values are `message`, `compaction`, `config`,
+`prompt_template_selected`, `skill_activated`, `skill_resource_read`, and
+`skill_deactivated`. Template name/hash stay outside model-visible context.
+Skill activation/resource events are resumable; compaction snapshots active
+skills and cumulative Pi-compatible `details.readFiles` / `details.modifiedFiles`.
+Older records missing those fields receive empty lists.
 
-`metadata.prompt_color` is the normalized sRGB prompt-gutter colour assigned
-at the original user append. It is inert presentation data and is never sent
-to a provider. Once written it is authoritative: resume, checkout, branching,
-compaction, model switches, and theme reloads do not recalculate it. Legacy
-prompts without the field may derive a deterministic display fallback from
-their own historical `prompt_model`; the currently selected model is never
-used to recolour history.
+`metadata.prompt_color` is normalized sRGB, assigned at the original user append,
+inert, and never provider input. It remains authoritative through resume,
+checkout, branching, compaction, model switches, and theme reloads. Legacy prompts
+without it may derive a deterministic fallback from their historical
+`prompt_model`, never the currently selected model.
 
-`usage` operation kinds are assistant turns, rejected Responses turns,
-compaction, terminal gates, and `delegated_agent`. A delegated record names the
-host-created child, its completed turn/tool-call counts, the child's aggregated
-disjoint token buckets, route/model, exact category cost, and picodollar
-remainder. The child JSONL remains the detailed transcript; this root mirror is
-written once before the owning checkpoint so cumulative session cost, `/cost`,
-the footer, export, resume, and later cost-limit checks all include delegated
-spend without reopening private child paths.
+`usage` kinds include assistant turns, rejected Responses turns, compaction,
+terminal gates, and `delegated_agent`. A delegated record names its host-created
+child, completed turn/tool-call counts, aggregate disjoint token buckets,
+route/model, exact category cost, and picodollar remainder. Child JSONL remains
+the detailed transcript; a root mirror is written **once before the owning
+checkpoint**. Session cost, `/cost`, footer, export, resume, and subsequent
+cost-limit checks therefore include child spend without reopening private paths.
 
-A head record is the only branch-selection mutation:
+The head record is the only branch-selection mutation:
 
 ```json
 {
@@ -131,27 +169,8 @@ A head record is the only branch-selection mutation:
 }
 ```
 
-Entries are never rewritten when branching or compacting. Context is rebuilt
-by walking parents from the selected head and applying any compaction boundary.
-Completed JSONL records are strict UTF-8 and strict JSON. Only a final
-unterminated record is considered a recoverable torn append. Reads are bounded
-by both file bytes and record count.
-
-## Portable export and redaction
-
-Export writes an owner-private `octet-session-export` version 1 JSON package with
-source identity, readable metadata, and validated records. Existing paths are
-not replaced without `--force`.
-
-Redaction is on by default. It replaces values under credential-like keys and
-also scans string content in prompts, tool arguments, and tool results. The
-bounded deterministic scanner covers authorization and cookie headers, common
-API-token prefixes, credential assignments and URL query parameters, URL
-userinfo, private-key blocks, and JSON objects or arrays serialized inside
-strings. It preserves surrounding prose and UTF-8, and reports each replaced
-value or credential fragment. This is a safety filter, not a proof that
-arbitrary prose contains no secret. Use `--include-secrets` only for a trusted
-destination; octet prints an explicit warning when raw values are requested.
-
-HTML export, hosted viewers, and cloud sharing are intentionally outside this
-local-first session boundary.
+Branching/compaction never rewrites entries. Context walks parents from the
+selected head and applies compaction boundaries. Completed records are strict
+UTF-8 and strict JSON; only a final unterminated record is a recoverable torn
+append. Reads are bounded by bytes and record count.
+[Persistence invariants](design/octet-agent.md#sessions).

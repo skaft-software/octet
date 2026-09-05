@@ -1,29 +1,35 @@
 # local-model-workflow executable extension
 
-This Python example uses the dependency-free `octet-extension-sdk` package to
-show how a local-model workflow can remain explicit and inspectable instead of
-silently rewriting prompts. It contributes:
+**Legacy Python runtime example**, not an API `0.3` quickstart. Its
+`before_prompt` and `context/collect` interfaces are legacy contribution points,
+not current API `0.3` authoring surfaces. See [current authoring](../../../docs/extensions.md)
+and the [legacy runtime](../../../sdk/python/legacy-runtime.md); do not retag its
+manifest.
 
-- a `before_prompt` hook that returns compact, labeled system-suffix context;
-- the same deterministic text through `context/collect` for normal prompt
-  composition and context inspection;
-- a semantic status item derived from current model and active-skill metadata;
-  and
-- one process-originated notification when prompt shaping first becomes active.
+The dependency-free SDK keeps local-model prompt shaping explicit and inspectable:
 
-Install the SDK before copying the directory:
+- `before_prompt` returns compact, labeled system-suffix context.
+- `context/collect` returns the same deterministic text for prompt composition
+  and context inspection.
+- A semantic status item uses current model and active-skill metadata.
+- One process-originated notification reports when shaping first becomes active.
+
+For an existing legacy setup, install the source SDK from a checkout:
 
 ```console
 python3 -m pip install ./sdk/python
 ```
 
-Copy the directory to `.octet/extensions/local-model-workflow/`, explicitly
-enable and trust it before restarting octet or using `/extensions reload`.
-`--safe-mode` discovers the manifest but never starts its process. The existing frontend integration exposes its
-typed hook, context, status, and event contributions. The extension itself
-reads no files, launches no child subprocesses, accesses no network, and uses no
-terminal escape sequences.
+Copy to `.octet/extensions/local-model-workflow/`, explicitly enable and trust
+it, then restart or use `/extensions reload`. `--safe-mode` discovers the
+manifest but never starts it. Full-access requires a trusted, separately isolated
+environment; declarations are not an OS sandbox.
 
-The workflow context is intentionally short for small context windows. It is
-deterministic for the same host state and exposes its label and placement so a
-user can see exactly what will reach the model.
+Typed hooks, context, status, and events remain protocol contributions, but the
+coding TUI does not render generic persistent extension status. The extension
+reads no files, launches no child subprocesses, uses no network, and emits no
+terminal escapes.
+
+Context is intentionally short for small windows, deterministic for the same
+host state, and exposes its label and placement so users can inspect exactly
+what reaches the model.

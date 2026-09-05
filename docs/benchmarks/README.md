@@ -4,17 +4,20 @@ This directory contains reproducibility evidence. A result is publishable only
 when its losses, environment, binary identity, raw outputs, and any adjudication
 exclusions are retained.
 
-Historical Ygg artifacts (not octet 0.7.0 results) include the compact canonical Terminal-Bench 2.1
-[evidence package](tb21-v0.6.2/README.md), the frozen
-control fingerprint ([baseline-v0.6.2.md](baseline-v0.6.2.md)), the reconciled
-failure report
-([failure-report-v0.6.2-2026-08-28.md](failure-report-v0.6.2-2026-08-28.md)),
-the complete token-efficiency audit
-([token-efficiency-v0.6.2-2026-08-28.md](token-efficiency-v0.6.2-2026-08-28.md)),
-the scoped coding-agent
-[runtime-footprint comparison](runtime-footprint-2026-08-29.md), the
-credential-free [Pi runtime evidence harness](pi-runtime-evidence.md), and the
-opt-in beta protocol ([beta-protocol.md](beta-protocol.md)).
+The current methods below cover [optional telemetry](#optional-agent-telemetry),
+[systems measurements](#systems-measurements), and [usability checks](#usability-checks).
+The [Pi runtime fixture](#pi-runtime-fixture-evidence) is hold-only, not a published
+performance result. For planning, see the [project](https://github.com/orgs/skaft-software/projects/5).
+
+## Historical results
+
+These are historical Ygg artifacts, not octet 0.7.0 results:
+
+- [Terminal-Bench 2.1 evidence package](tb21-v0.6.2/README.md)
+- [Frozen v0.6.2 control fingerprint](baseline-v0.6.2.md)
+- [Reconciled failure report](failure-report-v0.6.2-2026-08-28.md)
+- [Complete token-efficiency audit](token-efficiency-v0.6.2-2026-08-28.md)
+- [Scoped runtime-footprint comparison](runtime-footprint-2026-08-29.md)
 
 The pinned [Harbor adapter](../../evaluation/harbor/README.md) reproduces historical
 Ygg 0.6.2 only. It is not an octet 0.7.0 evaluation adapter or campaign.
@@ -67,6 +70,11 @@ Telemetry is an observer, not a wire capture. It does not currently expose
 provider request IDs, exact response-header timing for compaction/gate calls,
 or raw context bodies. Those limitations must be stated in reports.
 
+Do not ask users to enable telemetry for a report. If they volunteer diagnostics,
+`octet --telemetry ./octet-telemetry.jsonl` produces a redacted operational trace;
+they should inspect it before sharing. See [voluntary diagnostics](#voluntary-diagnostics)
+for the sharing boundary.
+
 ## Systems measurements
 
 `scripts/bench-systems.py` uses only the Python standard library and real OS
@@ -109,6 +117,35 @@ Those cases require a harness-specific driver and should be supplied with
 same task, endpoint, model weights, context limit, timeout, hardware, and
 concurrency for every harness.
 
+## Usability checks
+
+Use these manual checks for installation, session resume, and cancellation:
+
+1. Build the unpublished checkout in isolation; use pinned release instructions
+   only after publication and platform acceptance are separately verified.
+2. Configure either a local OpenAI-compatible endpoint or a cloud provider.
+3. Run `octet --help`, start one session, and complete a small repository task.
+4. Exit, resume with `octet --continue`, and complete a second task.
+5. Cancel one intentionally long-running operation and regain the prompt.
+6. Inspect `/status` (or the equivalent status command) and report the active
+   model, endpoint class, and context information.
+
+### Usability reports
+
+Collect voluntary reports through an issue template, interview, or exported local
+form. Record:
+
+- OS, CPU/RAM/GPU, octet version, and install method;
+- provider class (`local`, `remote`, or `subscription`), not credentials;
+- installation and first-task completion: success/failure, minutes, and whether
+  author assistance was needed;
+- resume/cancel behavior: pass/fail; and
+- crashes, hangs, provider configuration failures, and abandoned tasks.
+
+Report the numerator, denominator, exclusions, and reason categories. Do not hide
+an unresolved crash or data-loss issue in an average, or turn a small usability
+sample into a superiority claim. Follow the [diagnostic sharing rules](#voluntary-diagnostics).
+
 ## Pi runtime fixture evidence
 
 [`scripts/bench-pi-runtime.py`](../../scripts/bench-pi-runtime.py) is the
@@ -131,6 +168,20 @@ than redacting them in place. Keep methodology-relevant hardware, versions,
 digests, argument flags, environment keys, and numeric samples. Record exactly
 what was sanitized, state whether any measurements changed, and recompute public
 artifact checksums after sanitation.
+
+### Voluntary diagnostics
+
+A voluntarily shared diagnostic bundle may contain version/build identity,
+platform, provider kind, configuration keys with values removed, sanitized
+startup diagnostics, and explicitly selected telemetry. Exclude credentials,
+authorization headers, raw prompts, tool arguments/results, and workspace paths
+where possible. Never request API keys, raw prompts, private repositories,
+unredacted session files, or mandatory background telemetry.
+
+Session content must be excluded unless the user deliberately redacts and
+approves it for private support. That exception does not relax the public
+evidence-package exclusions above. Diagnostic sharing and any export convenience
+are optional, not prerequisites for using octet.
 
 ## Failure taxonomy
 

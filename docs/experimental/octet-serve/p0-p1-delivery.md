@@ -1,14 +1,20 @@
-# octet Serve P0/P1 delivery checklist
+<a id="octet-serve-p0p1-delivery-checklist"></a>
 
-This checklist turns the July 27 Claude.app comparison audit into observable
-delivery requirements. Audit claims are requirements only after they have been
-confirmed against the current checkout. A checked item has production
-implementation evidence and automated or explicitly recorded validation;
-fixture-only behavior does not count.
+# Historical Serve acceptance checklist
 
-At the current hardening checkpoint, completed rows are checked below. Rows left
-unchecked are deliberate product gaps, not implied fixture capabilities. The
-full verification evidence is recorded in [Current state](current-state.md).
+**Historical evidence, not a current delivery plan or octet 0.7.0 pass.** The
+P0/P1 labels and checked rows below retain the inherited hardening checkpoint's
+scope. They record the July 27 comparison audit and its follow-up evidence;
+fixture-only behavior did not count as production implementation. Unchecked
+rows record gaps at that checkpoint, not promised features.
+
+No checks were rerun for this documentation proposal. Current-source
+reconciliation and live-provider/media/recovery/capture qualification remain
+deferred. Read the [Serve guide](README.md) for usage,
+[implementation reference](current-state.md) for source-attributed coverage, and
+[historical validation](current-state.md#validation-evidence) for the original
+command-level matrix. Current work tracking belongs on the
+[Project](https://github.com/orgs/skaft-software/projects/5).
 
 ## Constraints
 

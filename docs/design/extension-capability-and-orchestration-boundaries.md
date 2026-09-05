@@ -2,7 +2,7 @@
 
 This document defines how octet assigns capability ownership across host, extension, and delegated execution. It is the non-goals and ownership artifact for issue `#142`.
 
-> Normative scope: non-`octet-serve` backlog planning and extension-capability work. It does **not** revise protocol contracts.
+> Scope: non-`octet-serve` extension-capability ownership. This reference does **not** revise protocol contracts.
 
 ## Capability classes and ownership
 
@@ -85,10 +85,20 @@ These do **not** move into octet core unless a separate issue is opened with a d
 - File-tree/worktree isolation for delegated children by virtue of delegation alone.
 - Automatic trust transfer between hosted and in-harness execution.
 
-## Cross-links to backlog work
+<a id="cross-links-to-backlog-work"></a>
 
-- `#73` requires this ownership model when documenting continuation state transitions and anti-spin behavior.
-- `#109` and `#110` should emit bounded, capability-aware telemetry/diagnostics under this provenance model.
-- `#121` remains extension-owned (executable bundle + skill) and must not imply a core-browser capability.
-- `#142` is the originating issue for this boundary text.
-- `#133` should continue to rely on shared extension lifecycle contracts (`extensions/*/settle_turn`, terminal lifecycle outcomes) and this ownership boundary.
+## Integration requirements
+
+- Documentation of continuation state transitions and anti-spin behavior must use
+  this ownership model (`#73`).
+- Telemetry and diagnostics should emit bounded, capability-aware data under this
+  provenance model (`#109`, `#110`).
+- Browser capability remains extension-owned (executable bundle + skill), not a
+  core-browser capability (`#121`).
+- Extension lifecycle integration should rely on shared lifecycle contracts
+  (`extensions/*/settle_turn`, terminal lifecycle outcomes) and this ownership
+  boundary (`#133`).
+
+## Project
+
+[Roadmap and backlog](https://github.com/orgs/skaft-software/projects/5)

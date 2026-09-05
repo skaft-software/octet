@@ -1,101 +1,111 @@
 # `octet-pi-compat`
 
-This directory contains the Node compatibility host used by published `octet pi`
-aggregate plans. It runs Pi extension source through Pi's public loader while
-octet continues to own the model loop, JSON-RPC transport, trust gates,
-persistence, and process cleanup.
+Run a bounded subset of reviewed Pi extension source through Pi's public loader.
+octet still owns the model loop, JSON-RPC transport, trust gates, persistence,
+and process cleanup. See [Pi migration](../../docs/pi-migration.md) to inspect or
+import a setup first; a generated link is not proof of compatibility.
 
-The first-party bridge distribution version is `0.7.0`; Pi `0.84.4` and
-API `0.2`/the opt-in `0.3` mode are independent contracts.
+## Create a local link
+
+With source-built octet `0.7.0` and a separately reviewed local Pi installation:
+
+```console
+octet pi plan ./extension.ts --pi-package /reviewed/pi-coding-agent \
+  --output /private/review/pi-plan.json
+octet pi preflight --plan /private/review/pi-plan.json
+octet pi publish --plan /private/review/pi-plan.json
+octet pi list
+```
+
+`publish` creates a **local** aggregate link, not a public release. octet `0.7.0`
+is unpublished. `octet pi install SOURCE` is the local one-command shorthand;
+none of these commands installs npm dependencies or imports source. Plans are
+inert and preflight/publish revalidate their pins. Generated links remain inert
+until separately enabled and trusted. Package code then runs with your OS
+authority under octet's executable-extension trust model.
+
+Use `octet pi rollback NAME` to move only a validated generated package out of
+discovery into a local rollback directory. It does not delete reviewed sources or
+change enablement/trust policy. The [aggregate contract](COMPATIBILITY.md#aggregate-publication-and-api-03-evidence-seam)
+details source order, fingerprints, integrity, link identity, and rollback.
 
 ## Pinned compatibility profile
 
-The current profile targets exactly
-`@earendil-works/pi-coding-agent@0.84.4` on Node 22.19 or newer. The bridge
-validates both before importing extension code; it does not silently follow a
-newer Pi runtime found on `PATH`. Exact source revision, npm integrity values,
-public surface names, and the 78-example corpus live in the machine-readable
-[`profiles/0.84.4.json`](profiles/0.84.4.json). The canonical per-surface,
-example, and TUI evidence is in
-[`profiles/0.84.4.ledger.json`](profiles/0.84.4.ledger.json);
-[COMPATIBILITY.md](COMPATIBILITY.md) is its human view.
+The bridge distribution is `0.7.0`; Pi `0.84.4` and the live API version are
+independent contracts. It requires exactly
+`@earendil-works/pi-coding-agent@0.84.4` and Node 22.19 or newer, validated before
+importing extension code. It never silently adopts a newer Pi runtime from
+`PATH`. `octet pi plan --pi-package DIR` records a canonical nonstandard package
+location without relying on ambient extension-environment inheritance.
 
-Use `octet pi plan`, `octet pi preflight --plan FILE`, then `octet pi publish --plan
-FILE` to create an aggregate link; `octet pi install` is the equivalent local
-one-command shorthand. Plans are inert and pin source order, source fingerprints,
-nearby dependency-lock fingerprints, the canonical selected runtime path, and its
-package integrity. Preflight and publish revalidate every pin without importing
-source. Schema-v3 generated links and schema-v2 aggregate locks bind those values
-plus the manifest path and explicit-enable/explicit-trust requirement into a
-link identity. The bridge verifies the identity before the Pi loader runs and
-rechecks runtime integrity afterward. `octet pi list` marks legacy, changed, or
-otherwise stale links; it never claims that a link is trusted.
+Source fingerprints exclude dependency, build, and cache directories. Supported
+adjacent dependency locks and the reviewed runtime installation are pinned
+separately. Schema-v3 links and schema-v2 aggregate locks bind the manifest path
+and explicit-enable/explicit-trust requirement into link identity; the bridge
+verifies that identity before loading and rechecks runtime integrity afterward.
+`octet pi list` reports stale/legacy/changed metadata, never that a link is trusted.
 
-The live Pi process protocol defaults to API `0.2`. Every published aggregate
-also has a canonical API `0.3` `pi-runtime-evidence.json` sidecar containing
-static selection and integrity evidence for a future runtime manager. That
-sidecar alone does not enable API `0.3` lifecycle or dynamic-command support.
-
-Generated links remain inert until separately enabled and trusted. Dependency,
-build, and cache directories are excluded from source fingerprints; supported
-adjacent dependency locks and the separately reviewed runtime installation are
-bound independently.
+The [profile](profiles/0.84.4.json) pins the source revision, npm integrity,
+public names, and 78-example corpus. The [machine ledger](profiles/0.84.4.ledger.json)
+and its [human view](COMPATIBILITY.md) record exact support and safe divergences.
 
 ## Current supported surface
 
+The default API `0.2` bridge supports:
+
 - Pi tools with text/image output, cancellation, bounded progress, argument
   preparation, transformed result details/error/usage, and live tool catalogs;
-- initialization-time Pi command discovery as native octet slash commands when
-  the host negotiates `runtime_commands`, with the generated multiplexed route
-  retained only as a compatibility fallback;
-- notifications, confirmations, text input, and a plain-text compatibility
-  theme;
-- basic lifecycle events, prompt/context contributions, and local Pi event-bus
-  behavior; and
-- host session-name and reasoning snapshots where octet already supplies them.
+- initial Pi commands as native octet slash commands when `runtime_commands` is
+  negotiated, with the generated multiplexed route as a compatibility fallback;
+- notifications, confirmations, text input, and a plain-text compatibility theme;
+- basic lifecycle events, prompt/context contributions, and a local Pi event bus;
+- host session-name and reasoning snapshots where supplied by octet.
+
+Unknown Pi APIs fail closed. Session/tree mutation, compaction control, root-agent
+messaging, active-tool policy mutation, arbitrary components/editors/widgets, and
+terminal input are not silently emulated. The [per-surface ledger](COMPATIBILITY.md#public-extension-surface)
+is authoritative; an example that loads is not evidence of behavioral parity.
 
 ## API 0.3 provider mode
 
-Provider support is an explicit opt-in: run `octet pi install SOURCE --api-version
-0.3`. API `0.2` remains the default, and existing API `0.2` links are never
-upgraded in place. An API `0.3` link declares only host-owned `providers` and
-one fixed aggregate Pi-tool dispatcher; it omits the legacy command, UI,
-context, notification, confirmation, process, and network contributions.
+`octet pi install SOURCE --api-version 0.3` explicitly selects the constrained
+provider bridge. API `0.2` remains the default; existing links are never upgraded
+in place. The `0.3` link contributes only host-owned `providers` and one fixed
+aggregate Pi-tool dispatcher. It omits legacy commands, UI, context,
+notifications, confirmation, process, and network contributions.
 
-In this mode, bounded secret-free `registerProvider` and `unregisterProvider`
-declarations are synchronized to octet's API `0.3` catalog. After the bridge's
-bounded initial startup collection window closes and it has received every
-response for the serialized registration batch, it emits the additive
-`providers/complete` notification, including for an empty catalog. octet projects
-an owner's declarations only after that completion signal; an older API `0.3`
-extension that does not negotiate it reaches a bounded timeout with its
-incomplete declarations withheld rather than publishing a partial route.
-octet performs host authorization and retains credentials and authorization
-leases. The bridge passes only canonical semantic request JSON, secret-free
-catalog metadata, and a generic cancellation signal to the extension's
-`octetStream` adapter. It rejects endpoint/base-URL, headers, API keys,
-transport, callback, and OAuth payload authority rather than forwarding it.
-Safe semantic `before_provider_request` transforms and reduced
-`after_provider_response` status hooks are supported;
-`before_provider_headers` is explicitly rejected because headers remain
-host-owned.
+Bounded secret-free `registerProvider`/`unregisterProvider` declarations synchronize
+to octet's `0.3` catalog. After the bounded initial collection window closes and
+every serialized registration response arrives, the bridge emits
+`providers/complete`, even for an empty catalog. octet projects declarations only
+after completion. An older `0.3` extension without that negotiated signal reaches
+a bounded timeout with incomplete declarations withheld, not partially published.
 
-Outside that opt-in mode, provider registration and provider payload hooks fail
-explicitly. The bridge does not silently emulate session/tree mutation,
-compaction control, root-agent messaging, active-tool policy mutation,
-arbitrary Pi components/editors/widgets, or terminal input.
+octet retains credentials, authorization, and leases. The `octetStream` adapter
+receives canonical semantic request JSON, secret-free catalog metadata, and a
+generic cancellation signal—not endpoint/base-URL, header, API-key, transport,
+callback, or OAuth authority. Safe semantic `before_provider_request` transforms
+and reduced `after_provider_response` status hooks are supported;
+`before_provider_headers` is rejected. Provider registration and payload hooks
+fail explicitly outside this opt-in mode.
 
-The scanner is pinned to Pi 0.84.4's public event, registration, action, and UI
-names. Unknown APIs fail closed instead of being labeled bridge-compatible.
+Every local aggregate also carries the static `pi-runtime-evidence.json` sidecar.
+That API `0.3` evidence file does not upgrade a `0.2` live protocol or enable
+lifecycle, lazy activation, workspace/reload, or dynamic-command support.
+**Provider coverage is deterministic fake-Pi fixture evidence, not real-runtime
+provider parity.** See the [provider boundary](COMPATIBILITY.md#api-03-provider-bridge)
+and [release requirements](COMPATIBILITY.md#release-policy).
 
 ## Tests
+
+These maintainer commands check fixtures or diagnose a selected local runtime:
 
 ```sh
 # Hermetic bridge, public-surface, and ledger fixtures.
 python3 -m unittest discover -s extensions/octet-pi-compat/tests -p 'test_*.py'
 python3 extensions/octet-pi-compat/conformance.py --check --json
 
-# Developer diagnosis only; this does not verify npm tarball integrity.
+# Developer diagnosis only; neither command verifies npm tarball integrity.
 OCTET_PI_REAL_PACKAGE=/path/to/@earendil-works/pi-coding-agent \
   python3 -m unittest discover -s extensions/octet-pi-compat/tests \
   -p 'test_bridge_protocol.py'
@@ -103,34 +113,18 @@ OCTET_PI_REAL_PACKAGE=/path/to/@earendil-works/pi-coding-agent \
 OCTET_PI_REAL_PACKAGE=/path/to/@earendil-works/pi-coding-agent \
   cargo test -p octet-coding-agent \
   pi::tests::generated_link_runs_the_pinned_real_pi_hello_example_when_selected --lib
-
-# Full unchanged-source loader gate: local artifacts only, no download,
-# fresh HOME/allowlisted environment, and Linux unshare --net required.
-python3 extensions/octet-pi-compat/conformance.py --full --network-isolated \
-  --coding-agent-tarball /local/pi-coding-agent-0.84.4.tgz \
-  --tui-tarball /local/pi-tui-0.84.4.tgz \
-  --pi-package /local/unpacked/pi-coding-agent \
-  --source-root /local/pi-source-at-b79e4cc
 ```
 
-The full gate validates the pinned npm SRI values and matches the selected
-coding-agent and Node-resolved Pi TUI package roots against their tarballs before
-it loads all 78 unchanged sources through Pi's public loader. It reports failure
-rather than treating a fake fixture, a package directory alone, or a smoke test
-as real-runtime proof. The real-Pi suite covers the official hello example and
-an unchanged `plan-mode` load plus `/todos` smoke. It does not claim plan-mode
-behavioral parity: flags, shortcuts, active-tool overlays, session entries,
-root messages, editor/widget transport, and durable custom entries remain
-explicitly rejected release blockers. API `0.3` provider cases use the
-checked-in deterministic fake Pi loader for catalog, authorization, hooks,
-streaming, cancellation, mutation, and cleanup assertions; they are fixture
-evidence, not a real-runtime provider-parity claim.
+The real-Pi suite covers the official hello example and an unchanged `plan-mode`
+load plus `/todos` smoke, not plan-mode behavioral parity. Flags, shortcuts,
+active-tool overlays, session entries, root messages, editor/widget transport,
+and durable custom entries remain explicit blockers. Fake-Pi provider cases cover
+catalog, authorization, hooks, streaming, cancellation, mutation, and cleanup only.
 
-The bridge uses the selected Pi package's own loader and does not install npm
-dependencies. `octet pi plan --pi-package DIR` validates and records an exact
-nonstandard package location without relying on ambient extension environment
-inheritance. `octet pi rollback NAME` removes only a validated generated package
-from discovery by renaming it into a local rollback directory; it does not delete
-reviewed sources or modify trust policy. Package code still runs with the
-launching user's operating-system authority under octet's executable-extension
-trust model.
+The separate [unchanged-source full gate](COMPATIBILITY.md#integrity-verified-unchanged-source-full-gate)
+uses `conformance.py --full --network-isolated` with local coding-agent/TUI tarballs,
+`--pi-package`, and `--source-root`. It verifies npm SRI and both resolved package
+roots, uses fresh `HOME` and an allowlisted environment with Linux `unshare --net`,
+and loads all 78 unchanged sources through Pi's public loader. It performs no
+download and fails rather than accepting fake fixtures, a package directory
+alone, or a smoke test as real-runtime proof.

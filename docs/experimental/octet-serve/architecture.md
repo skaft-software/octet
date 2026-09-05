@@ -1,5 +1,11 @@
 # Architecture
 
+Maintainer reference for the experimental source snapshot, not octet 0.7.0
+qualification. Start with the [Serve guide](README.md) for local use.
+[LAN pairing](lan-pairing.md), native shells, and production live previews remain
+design-only. The graphical protocol described here is separate from extension
+API 0.3 and native-host protocol 1.
+
 ## Shape
 
 ```text
@@ -16,6 +22,10 @@ apps/web
 The frontend knows only the versioned protocol. It must not know whether its
 transport is same-host HTTP/WebSocket, a future native bridge, or an
 authenticated LAN connection.
+
+The shared React client lives in `apps/web/`; future native shells belong under
+`apps/`. The client uses the compiled default theme and canonical octet
+`01101111` byte mark. It does not host or synchronize a TUI.
 
 ## Extension packages
 
@@ -42,10 +52,10 @@ handles, or internal TUI state over the wire.
 truthfully create real octet sessions without an adapter at that ownership
 boundary.
 
-The allowed adapter:
+The adapter:
 
 - is feature-gated;
-- lives under the coding-agent extension integration area;
+- lives at `crates/octet-coding-agent/src/extensions/serve.rs`;
 - constructs a new `App` for a requested session;
 - translates agent/session lifecycle into renderer-neutral extension events;
 - accepts only validated typed commands;
@@ -56,8 +66,15 @@ The allowed adapter:
 
 The feature-enabled package runtime keeps the internal dispatch into this
 adapter tiny. The ordinary octet binary instead keeps a tiny external `octet serve`
-dispatch into the installed runtime. Broader changes to the AI, agent, TUI, or
-terminal packages are out of scope.
+dispatch into the installed runtime. Source-level extraction behind a stable
+Runtime API is deferred. The default TUI, agent, AI, and `sexy-tui-rs` must not
+depend on the web surface.
+
+The adapter and client are presentation-only boundaries. They must not add
+presentation instructions to the model, alter the system prompt or active tool
+schemas, insert frontend state into session content, or ask another model to
+summarize work for the interface. Existing broad local authority remains the
+default; client authentication and agent authority are separate controls.
 
 ## Session ownership
 
@@ -135,10 +152,11 @@ regress a newer hosted or inventory projection.
 
 ## Local transport
 
-The first web gate binds only to loopback and retains strict host/origin
-validation, request/frame limits, security headers, and sanitized errors. It
-must not gain LAN access by binding the same unauthenticated server to
-`0.0.0.0`.
+The described host binds only to IPv4 loopback and retains strict host/origin
+validation, request/frame limits, security headers, and sanitized errors. A
+one-use launch capability is exchanged for an ephemeral HttpOnly,
+SameSite=Strict cookie before API or event-stream access. It must not gain LAN
+access by binding the same server to `0.0.0.0`.
 
 ## Local terminal
 
@@ -148,9 +166,14 @@ same-origin loopback WebSocket. A browser owner key reattaches to a retained
 shell after disconnect, while the manager limits retained sessions to four and
 bounds input, replay, and dimensions. A terminal is rooted at the configured
 workspace; it is not a general path or remote-shell API. Server shutdown stops
-all retained shells.
+all retained shells. [Process cleanup](../../design/serve-lifecycle-safety.md#owned-subprocesses)
+is bounded and does not contain deliberately escaped processes.
 
 ## Preview isolation
+
+Production advertises `previews: false`; fixture UI is not a registered live
+preview. The following remains an isolation requirement, not implemented
+production preview support:
 
 Generated HTML and live previews use a separate, capability-limited surface.
 They cannot access the main application DOM, provider credentials, arbitrary

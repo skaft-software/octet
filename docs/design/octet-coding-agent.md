@@ -131,10 +131,9 @@ System instructions are composed through `compose_instructions(&Config)`.
   by that exact value (including `""`), bypassing AGENTS and skill instructions.
 - If `system_prompt` is `None`, the default flow composes the base prompt,
   trusted workspace/global `AGENTS.md` context, and active skill instructions.
-- Layer precedence for `system_prompt` follows the same startup precedence model
-  as `model` and `reasoning`: CLI `--system-prompt` overrides project config,
-  which overrides global config, with `OCTET_SYSTEM_PROMPT` as the lowest optional
-  layer.
+- Layer precedence for `system_prompt`, lowest to highest, is global config,
+  trusted project config, `OCTET_SYSTEM_PROMPT`, then CLI `--system-prompt`.
+  An explicit empty CLI value overrides every lower layer.
 - The override does not persist through session metadata; startup and rebuild
   compose instructions from the current live config across `interactive`,
   `plain`, `print`, and `rpc`.
@@ -158,11 +157,12 @@ instructions use labelled blocks with stable IDs and hashes.
 ## Compaction and handoff summaries
 
 Before installing the agent policy, bootstrap combines the generic fractional
-threshold with an optional absolute active-context ceiling. There is no route
-default: the full provider-advertised window (872K, 1M on Pro) is available for
-in-context learning. An explicit `compaction.max_active_tokens` constrains the
-working set (for example 272_000), and zero disables the absolute cap while
-leaving `threshold_fraction` authoritative. The lower effective threshold is
+threshold with an optional absolute active-context ceiling. Codex request
+budgeting caps the plan-selected provider window at 272,000 tokens; smaller
+provider windows remain authoritative. Larger advertised maxima remain discovery
+metadata. An explicit `compaction.max_active_tokens` further constrains the
+working set; zero or unset removes only that additional absolute ceiling, not the
+Codex route cap. `threshold_fraction` remains authoritative. The lower effective threshold is
 applied on initial construction, rebuild, interactive reconfiguration, and RPC
 toggles, and `/context` reports that same effective capacity.
 
@@ -342,7 +342,7 @@ closed.
 
 Authenticated Codex discovery sends compatibility client version `0.153.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 4 invalidates inventories
+`multi_agent_version: "v2"`. Cache schema version 5 invalidates inventories
 queried with older compatibility versions, preserves those fields and the 272K
 Codex request-window cap, and is scoped to the authenticated account context.
 Only fresh, complete, account-matched metadata is registered. Stale or

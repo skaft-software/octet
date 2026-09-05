@@ -1,6 +1,6 @@
-# Historical evidence download
+# Download benchmark results
 
-[Download compact evidence ZIP](historical-evidence.zip) ·
+[Download benchmark results](historical-evidence.zip) ·
 [ZIP SHA-256](historical-evidence.zip.sha256) · [manifest](manifest.json)
 
 This is supporting evidence, not a new octet 0.7.0 benchmark or an official

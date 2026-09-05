@@ -1,72 +1,69 @@
 # Migrating from Pi
 
-octet can inventory an installed Pi setup without running package code or invoking
-a model:
+Inspect your Pi setup before importing anything:
 
 ```console
 octet migrate pi --dry-run
 ```
 
-This is the first, deterministic stage of Pi migration. It is an inspection and
-planning command, not a source-compatibility promise and not yet an apply
-command.
+This scanner reads local files without running package code, starting a model,
+or changing either setup. It always runs dry, even without `--dry-run`; it is
+not an apply command or a compatibility promise. The commands here describe the
+unpublished octet `0.7.0` source build, not a public installation channel.
 
 ## Current command
 
-The scanner reads Pi's user settings at `~/.pi/agent/settings.json` and the
-selected project's `.pi/settings.json`. `PI_CODING_AGENT_DIR` or `--pi-home`
-can select another user directory, and `--project` can select another project:
+The scanner reads `~/.pi/agent/settings.json` and the selected project's
+`.pi/settings.json`. `PI_CODING_AGENT_DIR` or `--pi-home` selects another user
+directory; `--project` selects another project:
 
 ```console
 octet migrate pi --dry-run --project /path/to/project
 octet migrate pi --dry-run --json > pi-migration.json
 ```
 
-The scanner invocation is always a dry run; `--dry-run` makes that intent
-explicit. It exits before normal octet configuration, provider discovery, session
-startup, extension startup, or model bootstrap. It therefore consumes zero
-model tokens.
+It exits before normal octet configuration, provider discovery, session or
+extension startup, and model bootstrap, so it uses no model tokens. See the
+[report classifications](#classification) before treating anything as compatible.
 
 ## Import portable setup data
 
-A separate, opt-in command imports the portable subset of a Pi setup. It does
-not change the existing scanner behavior:
+Import is a separate, opt-in command. Preview it first:
 
 ```console
 octet migrate import pi --dry-run
 octet migrate import pi --source /path/to/pi/agent --dry-run --json
 octet migrate import pi --source /path/to/pi/agent
+# Explicitly accept destination conflicts:
 octet migrate import pi --source /path/to/pi/agent --yes
 ```
 
-Without `--source`, the importer checks `PI_CODING_AGENT_DIR`, then the standard
-Pi agent locations. It runs octet's built-in, read-only API 0.3 adapter rather
-than executing Pi packages or a user-selected adapter command. The host owns
-all destination decisions and writes.
+Without `--source`, import checks `PI_CODING_AGENT_DIR`, then the standard Pi
+agent locations. It uses octet's built-in read-only API `0.3` adapter, not Pi
+package code or a user-selected adapter command. The host owns destinations and
+writes.
 
-The importer can select a model already known to octet, copy portable skills into
-`~/.octet/skills/`, and add local stdio MCP declarations to `~/.octet/mcp.json`.
-A Pi provider/API-model pair is selected only when it has exactly one match in
-octet's built-in catalog; octet persists that catalog entry's canonical ID. Custom,
-unknown, and ambiguous provider/model values are skipped rather than guessed.
-Every imported skill is wrapped in host-authored frontmatter with
-`disable-model-invocation: true`; every imported MCP server has `enabled: false`
-and `required: false`. Review and explicitly enable either resource only after
-inspecting it.
+| Portable data | Import behavior |
+| --- | --- |
+| Model selection | Selects a Pi provider/API-model pair only if it has exactly one match in octet's built-in catalog, then persists the canonical catalog ID. Custom, unknown, and ambiguous pairs are skipped, not guessed. |
+| Skills | Copies to `~/.octet/skills/` with host-authored `disable-model-invocation: true` frontmatter. Review before explicitly enabling. |
+| Local stdio MCP declarations | Adds to `~/.octet/mcp.json` with `enabled: false` and `required: false`. Review before explicitly enabling. |
 
 Credentials, MCP environment values, headers, working directories, and Pi
-permission decisions are never copied. Unsupported models and transports are
-reported as skipped; model skips include bounded details in the text report and
-JSON `model_diagnostics`. The command never writes the Pi source setup, contacts
-a network service, starts an imported MCP server, starts an extension, or invokes
-a model.
+permission decisions are **never copied**. Unsupported models/transports are
+reported as skipped; model skips have bounded text details and JSON
+`model_diagnostics`. Import never writes the Pi setup, uses a network service,
+starts an imported MCP server or extension, or invokes a model.
 
-Imports track the hashes they own in `~/.octet/migrations/pi-state.json`. A
-changed destination is a conflict and requires an interactive confirmation or
-`--yes`; `--dry-run` performs the same validation without writing anything.
-Before an import changes a destination, it creates a private backup under
-`~/.octet/backups/migrate/` and prints its path. Restore it only when the current
-destination still matches the import:
+Owned hashes are tracked in `~/.octet/migrations/pi-state.json`. A changed
+destination is a conflict requiring interactive confirmation or `--yes`.
+`--dry-run` validates the same inputs without writing. Before changing a
+destination, import creates a private backup under `~/.octet/backups/migrate/`
+and prints its path.
+
+### Restore an import
+
+Restore normally requires the current destination to still match the import:
 
 ```console
 octet migrate restore ~/.octet/backups/migrate/IMPORT-DIRECTORY
@@ -74,11 +71,13 @@ octet migrate restore ~/.octet/backups/migrate/IMPORT-DIRECTORY
 octet migrate restore ~/.octet/backups/migrate/IMPORT-DIRECTORY --yes
 ```
 
+Review the backup and later local edits before using the overwrite option. This
+restore is separate from the generated-extension rollback below.
+
 ## Plan, preflight, and publish a compatible extension
 
-Once a local Pi extension or installed Pi package has been reviewed, compile an
-inert aggregate plan. `--with` is ordered: the first source loads first and all
-sources share one Pi process, event bus, `globalThis`, and registry set.
+After reviewing local Pi sources and a separately installed Pi runtime, create
+an inert aggregate plan:
 
 ```console
 octet pi plan ./first.ts --with ./second-package --with ./third.ts \
@@ -89,132 +88,84 @@ octet pi publish --plan /private/review/pi-aggregate-plan.json
 octet pi list
 ```
 
-`octet pi install ...` remains a shorthand for compile, preflight, and publish in
-one local command. It is useful for a reviewed one-off source; the explicit
-three-step form leaves an auditable handoff between review and publication.
-`--output` requires an existing non-symlink parent and a new file, so a plan is
-never silently replaced. Without `--output`, stdout is only canonical JSON (the
-inertness note is written to stderr), so it can be redirected into a plan file.
-Compilation requires exactly
-`@earendil-works/pi-coding-agent@0.84.4`, either selected with `--pi-package`
-or found by the bounded local discovery rules. It never downloads, installs, or
-executes a package. Prefer `--pi-package` in automation so the selected runtime
-is unambiguous.
+`publish` writes a **local** generated wrapper under `~/.octet/extensions/`, not
+a public release. `octet pi install ...` combines compile, preflight, and publish.
+Neither path downloads/installs dependencies, imports package code, runs lifecycle
+scripts, copies the Pi runtime, nor enables/trusts the link.
 
-The canonical plan pins, in order:
+- `--with` is ordered. All sources share one persistent Pi process, real
+  `ExtensionRunner`, event bus, `globalThis`, and registry set.
+- Compilation requires exactly `@earendil-works/pi-coding-agent@0.84.4`, selected
+  by `--pi-package` or bounded local discovery. Prefer an explicit path in
+  automation. The bridge distribution `0.7.0` targets Pi `0.84.4` and Node 22.19+.
+- `--output` requires an existing non-symlink parent and a new file; it never
+  replaces a plan. Without it, stdout is canonical JSON and the inertness note
+  goes to stderr, so stdout can be redirected.
+- Plans pin ordered canonical source paths and bounded SHA-256 fingerprints,
+  supported adjacent dependency locks (`package-lock.json`, npm shrinkwrap,
+  pnpm, Yarn, or Bun lock files), the canonical Pi runtime, and its exact
+  `package.json` bytes plus reviewed `dist/` tree. They also pin bridge/Pi/octet
+  versions, `pi_aggregate` lifecycle profile, and explicit-enable/explicit-trust.
+- Preflight rereads every pin without imports. Publish repeats it before writing
+  and rolls back a partial package on write failure. Changed source, lock,
+  package, plan digest, or runtime requires a replacement plan.
 
-- every canonical source path, bounded source SHA-256, and supported adjacent
-  dependency-lock SHA-256 (`package-lock.json`, npm shrinkwrap, pnpm, Yarn, or
-  Bun lock files);
-- the canonical Pi package root and a package-integrity SHA-256 over its exact
-  `package.json` bytes and reviewed `dist/` tree;
-- the bridge, Pi, and octet versions, the `pi_aggregate` lifecycle profile, and
-  the explicit-enable/explicit-trust requirement.
-
-`preflight` re-reads all of those inputs without importing a source. `publish`
-runs that same preflight immediately before creating a discoverable package and
-rolls back a partial package on write failure. A changed source, lock, package,
-plan digest, or selected runtime is rejected with a replacement-plan action.
-Generated schema-v3 link records and aggregate-lock schema-v2 records bind the
-source order, package integrity, manifest path, and explicit trust requirement
-through a link identity. The bridge checks those values before and after its Pi
-loader imports source, and rejects a startup whose source/runtime changed during
-that interval.
-
-The generated wrapper lives under `~/.octet/extensions/`, points at existing
-sources, and does not install npm dependencies, run lifecycle scripts, copy the
-Pi package, or enable/trust itself. It remains disabled and untrusted until the
-user makes both decisions:
+[Schema-v3 link identity and schema-v2 aggregate locks](../extensions/octet-pi-compat/COMPATIBILITY.md#aggregate-publication-and-api-03-evidence-seam)
+bind source order, integrity, manifest path, and trust requirements. The bridge
+checks source/runtime integrity before and after loading and fails closed on
+changes. Review the generated name, then separately enable and trust it:
 
 ```console
 octet --enable-extension pi-extension-name --trust-extension pi-extension-name
 ```
 
-`octet pi list` reports metadata freshness only; it deliberately does **not** claim
-that the user has enabled or trusted a link. To remove a generated link from
-discovery without deleting the reviewed package, use the reversible local
-rollback action:
+`octet pi list` reports freshness, not enablement or trust. To remove a link from
+discovery reversibly:
 
 ```console
 octet pi rollback pi-extension-name
 ```
 
-The command moves only a validated generated package into a private rollback
-directory beside the extension root and leaves octet's enable/trust policy intact.
-Review its records before manually restoring it.
+Rollback moves only a validated generated package to a private rollback directory
+beside the extension root. It leaves reviewed sources and enable/trust policy
+intact. Review its records before manually restoring it.
 
-The first-party bridge distribution `0.7.0` targets exactly Pi `0.84.4` and Node 22.19 or newer. Its
-live Pi protocol defaults to API `0.2`. Explicit `--api-version 0.3` installation
-selects the constrained provider bridge described in the compatibility ledger;
-its provider coverage is fixture evidence, not real-runtime parity. API `0.3`
-currently has no lifecycle-event or dynamic-command surface for this bridge. Publication also
-writes a canonical `pi-runtime-evidence.json` sidecar using the generated API
-`0.3` canonical JSON helper. That small, static selection/evidence seam is for
-the future runtime manager; it is **not** a claim that Pi lifecycle behavior has
-been upgraded to API `0.3`.
+The live bridge defaults to API `0.2`. Explicit `--api-version 0.3` selects the
+[constrained provider mode](../extensions/octet-pi-compat/README.md#api-03-provider-mode),
+not an in-place upgrade or lifecycle/dynamic-command support. Its provider
+coverage is fake-Pi fixture evidence, not real-runtime parity. The static
+`pi-runtime-evidence.json` sidecar uses the generated API `0.3` canonical JSON
+helper; it does not add runtime-manager behavior.
 
-The exhaustive per-event/API/UI ledger and completion gates are maintained in
-[`extensions/octet-pi-compat/COMPATIBILITY.md`](../extensions/octet-pi-compat/COMPATIBILITY.md).
-Its canonical machine-readable form is
-[`0.84.4.ledger.json`](../extensions/octet-pi-compat/profiles/0.84.4.ledger.json).
-`python3 extensions/octet-pi-compat/conformance.py --check --json` validates its
-118 public surfaces, 78 official examples, 33 TUI audit rows, six plan-mode
-journeys, fixture links, and profile digest without claiming that a real Pi
-package was run. The separate full gate accepts only local integrity-verified
-tarballs, a clean pinned Pi checkout, a fresh allowlisted environment, and Linux
-network isolation.
+## Scanner reference
 
-The default API `0.2` bridge supports Pi tools, transformed result
-details/error/usage, live tool catalogs,
-notifications, confirmations, text input, basic lifecycle/context events, and
-local Pi event-bus behavior. On a octet host negotiating `runtime_commands`, Pi's
-initial command catalog is exposed under its native slash names; the generated
-`/<name> COMMAND ...` route remains only as a fallback for older hosts.
-Unsupported TUI, provider, session, compaction, agent-control, and mutation
-surfaces remain explicit migration diagnostics rather than silent no-ops. Pi
-`registerFlag` is also diagnosed: its runtime registration cannot safely become
-a octet API `0.3` manifest flag without running the source before trust and CLI
-construction.
-
-The scanner:
-
-1. reads bounded user and project Pi settings;
-2. resolves configured local, managed npm, and managed git package locations
-   without installing missing packages;
-3. applies Pi package manifests, conventional resource directories, package
-   filters, and top-level resource overrides;
-4. records installed package names and versions;
-5. hashes bounded package source/configuration and lockfiles separately;
-6. parses JavaScript, TypeScript, and TSX with tree-sitter;
-7. follows bounded relative source imports inside each package;
-8. inventories Pi event subscriptions, registrations, UI calls, mutations, and
-   runtime imports; and
-9. derives conservative filesystem, process, network, secret, native-module,
-   and dynamic-import signals.
-
-Malformed, missing, oversized, linked, or unsupported inputs become report
-diagnostics. One bad package does not prevent the rest of the inventory.
+The scanner resolves configured local, managed npm, and managed git packages
+without installing missing ones. It applies Pi manifests, conventional resource
+directories, package filters, and top-level resource overrides; records installed
+names/versions; and hashes bounded source/configuration separately from locks.
+It parses JavaScript, TypeScript, and TSX with tree-sitter, follows bounded
+relative imports inside each package, and inventories Pi events, registrations,
+UI calls, mutations, and runtime imports. Filesystem, process, network, secret,
+native-module, and dynamic-import signals are conservative inventory, not proof
+of runtime effects. Malformed, missing, oversized, linked, or unsupported input
+becomes a diagnostic; one bad package does not stop the rest.
 
 ### Classification
 
-The human and JSON reports use migration-path classifications:
-
 | Path | Meaning |
 | --- | --- |
-| `direct` | Pi skill or Markdown prompt content has a deterministic octet resource path. The dry run does not copy it. |
-| `replace` | Reserved for an exact package/version/source-hash recipe that selects a octet-native replacement. No replacement recipes ship in this first scanner slice. |
-| `bridge` | The extension uses only surfaces implemented by the pinned compatibility process. A generated link still needs a successful runtime handshake before it is known compatible. |
-| `native_port` | The extension uses a known Pi 0.84.4 mutation or registration that needs an explicit octet-native port or a future bounded host primitive. |
-| `manual` | The extension depends on arbitrary Pi TUI/editor components, custom providers, or deep session/compaction internals; redesign is required. Pi JSON themes are also manual because octet themes use a different semantic schema. |
-| `blocked` | The package could not be resolved/read or parsed completely, or it uses names outside the pinned Pi 0.84.4 public compatibility profile. |
+| `direct` | Pi skills or Markdown prompts have a deterministic octet resource path; the scanner does not copy them. |
+| `replace` | Reserved for an exact package/version/source-hash native replacement recipe. No replacement recipes ship. |
+| `bridge` | Uses only surfaces implemented by the pinned process. Still needs a successful generated-link runtime handshake; this is a candidate, not runtime availability or exact fidelity. |
+| `native_port` | Uses a known Pi `0.84.4` mutation/registration requiring a native port or a future bounded host primitive. |
+| `manual` | Arbitrary Pi TUI/editor components, custom providers, or deep session/compaction internals need redesign. Pi JSON themes also need manual conversion to octet's different semantic schema. |
+| `blocked` | Could not resolve/read/parse completely, or uses names outside the pinned Pi `0.84.4` public profile. |
 
-`bridge` describes a migration candidate, not current runtime availability or
-exact behavioral fidelity. The report never silently treats an unsupported call
-as a no-op.
+Unsupported calls are never silently classified as no-ops.
 
 ### Machine-readable report
 
-`--json` emits schema version `1`. Its top-level safety fields are explicit:
+`--json` emits schema version `1`, with explicit safety fields:
 
 ```json
 {
@@ -226,136 +177,67 @@ as a no-op.
 }
 ```
 
-Package entries include the configured source and scope, resolved root, package
-name/version when available, source and lock hashes, discovered resources,
-extension analyses, analyzed file/byte/node counts, unresolved internal imports,
-and diagnostics. Resource paths include whether Pi's current
-filters enable them. The source hash covers the package manifest, discovered
-resources, reachable relative modules, and bounded source/configuration files;
-the lock hash covers supported npm/pnpm/Yarn lockfiles. A hash is omitted when
-its complete selected input cannot be read within the bounds. A future recipe
-must key on package identity, version, source hash, and lock hash rather than
-package name alone.
+Package entries include configured source/scope, resolved root, name/version,
+source and lock hashes, discovered resources and Pi-filter enablement, extension
+analyses, analyzed file/byte/node counts, unresolved internal imports, and
+diagnostics. Source hashes cover the manifest, discovered resources, reachable
+relative modules, and bounded source/configuration; lock hashes cover supported
+npm/pnpm/Yarn lockfiles. A hash is omitted if its complete selected input cannot
+be read within bounds. Any future recipe must match identity, version, source
+hash, and lock hash, never package name alone.
 
 ## Safety and bounds
 
-The scanner does not:
+The scanner does not execute/import extensions, run npm lifecycle scripts,
+install packages, trust/start executable extensions, send data to a model/network,
+copy/rewrite/delete either setup, or read Pi authentication/model credential
+stores. Settings, manifests, source, locks, resources, relative import closure,
+and aggregate hashing have fixed limits. Selected files use descriptor-bound,
+no-follow regular-file reads; linked package roots/resources are rejected.
+`--npm-root` only adds an explicit legacy `node_modules` search root. The scanner
+never executes a configured Pi `npmCommand`.
 
-- execute or import a Pi extension;
-- run an npm lifecycle script or install a missing package;
-- trust and start a octet executable extension;
-- send source, settings, or the report to a model or network service;
-- copy, rewrite, or delete Pi or octet files; or
-- read Pi authentication/model credential stores.
-
-Settings, package manifests, source files, lockfiles, resource counts, relative
-import closure, and aggregate hashing all have fixed limits. Selected files use
-octet's descriptor-bound, no-follow regular-file reader. Symlinked package roots
-and resources are rejected. `--npm-root` only adds an explicitly selected legacy
-`node_modules` search root; the scanner never executes a configured
-`npmCommand` from Pi settings.
-
-Static authority signals are conservative inventory, not proof that a package
-will or will not exercise an effect at runtime. The compatibility host runs
-third-party npm code with the launching user's operating-system authority under
-octet's executable-extension trust model. See [Executable
-extensions](extensions.md#kernel-boundary) and the [security
-policy](../SECURITY.md).
-
-## Migration architecture
-
-Universal Pi source compatibility is deliberately not the goal. Pi extensions
-can mutate in-process agent, provider, session, and TUI state that octet keeps
-behind a language-neutral subprocess boundary. Recreating that ABI in the octet
-kernel would compromise the boundary rather than improve migration.
-
-The intended staged system is:
-
-```text
-scanner/compiler
-  + exact package recipes
-  + one persistent Pi compatibility process
-  + explicitly selected agentic fallback
-```
-
-### Deterministic scanner/compiler
-
-The shipped dry run is the inventory front end for this stage. `octet pi plan`
-compiles an inert source/lock/runtime-integrity aggregate; `preflight` verifies
-it and `publish` creates the generated wrapper only after that verification.
-`octet pi install` is the one-command shorthand. None installs dependencies or
-executes package code. Future recipes can copy compatible skills/prompts,
-transform known configuration, and cache intermediate results by source and lock
-hash. Those operations should remain deterministic and model-free.
-
-### Compatibility process
-
-A generated Pi aggregate hosts a deliberately bounded subset of Pi's
-`ExtensionAPI` through one persistent `octet-pi-compat` process. Ordered `--with`
-sources are compiled into a source/lock/runtime-integrity plan, preflighted, and
-published as one aggregate lock. The one real `ExtensionRunner` preserves their
-local event bus, `globalThis`, and shared registries. Runtime-manager-owned lazy
-activation, workspace sharing, and hot reload remain future work; the published
-sidecar is only a narrow API `0.3` evidence seam for that manager.
-
-Unsupported Pi APIs must raise a clear compatibility error. The bridge must not
-silently discard a policy, mutation, lifecycle, or UI call. Static and runtime
-tools use API `0.2` live tool catalogs. Negotiated `runtime_commands` makes the
-command set discovered during Pi initialization authoritative without requiring
-those names in the generated manifest; command registration after initialization
-still needs a live command-catalog protocol.
-
-### Exact recipes
-
-A recipe may replace an implementation with the capability it provides—for
-example, importing MCP configuration into a future `octet-mcp` package instead of
-porting a Pi-specific MCP UI. Recipe lookup must require the package identity,
-exact installed version, source hash, and lock hash. Name-only recipes are not
-safe enough to apply automatically.
-
-### Agentic fallback
-
-Model-assisted porting remains opt-in and receives the scanner's structured
-residual, relevant source functions, target API contract, and tests—not an
-entire setup by default. The command must show where model use begins before any
-request is made. Arbitrary TUI frontends and custom provider transports should
-report manual redesign rather than trigger an unbounded automatic port.
+The compatibility host, once enabled and trusted, does run third-party npm code
+with your OS authority. Static scanning is not a sandbox. See
+[executable extensions](extensions.md#kernel-boundary) and [security](../SECURITY.md).
 
 ## Deliberate compatibility boundary
 
-Capability migration is often practical even when exact UX is not:
+Portable import, inventory, and pinned local links are separate capabilities,
+not universal Pi source or UX compatibility. The default bridge supports bounded
+tools, transformed details/error/usage, live tool catalogs, dialogs,
+notifications, basic lifecycle/context, and the local event bus. Initial commands
+become native slash names when `runtime_commands` is negotiated;
+`/<name> COMMAND ...` is the fallback. Later command registration still needs a live command
+catalog protocol. `registerFlag` is diagnosed, not converted to a pre-trust API
+`0.3` manifest flag by executing source during CLI construction.
 
-- basic tools, commands, notifications, and local event-bus behavior are strong
-  bridge candidates;
-- MCP, search, browser, LSP, memory, and subagent behavior belong in replaceable
-  octet extension processes, not the kernel;
-- Pi input transforms, safe tool-argument replacement with host revalidation,
-  pre-persistence tool-result transforms, extension-scoped durable state, and
-  per-turn tool-policy overlays are evidence for possible narrow future APIs;
-- custom provider/OAuth/stream handlers, mutable session-tree/compaction hooks,
-  and arbitrary editor/header/footer/widget components are not transparent
-  bridge targets; and
-- octet should evolve semantic, frontend-neutral UI contributions rather than an
-  arbitrary component ABI.
+Exact replacement recipes, automatic whole-setup selection, transparent custom
+provider/OAuth/stream handlers, session/tree/compaction or agent-control mutation,
+and arbitrary TUI/editor/header/footer/widget parity are not provided. Pi themes
+and those components may need redesign. MCP, search, browser, LSP, memory, and
+subagent capabilities belong in replaceable extension processes, not an arbitrary
+Pi component ABI in the kernel.
 
-None of those possible protocol additions is implied by the current dry-run
-command. They should be introduced only with a concrete migrated package,
-wire-level tests, bounded failure semantics, and no cost on the no-extension
-path.
+The [compatibility ledger](../extensions/octet-pi-compat/COMPATIBILITY.md) retains
+all 118 public surfaces, 78 examples, 33 TUI audit rows, and six plan-mode journeys;
+its [machine form](../extensions/octet-pi-compat/profiles/0.84.4.ledger.json) is
+canonical. `conformance.py --check --json` validates fixtures and profile integrity,
+not a real Pi run. The [full gate](../extensions/octet-pi-compat/COMPATIBILITY.md#integrity-verified-unchanged-source-full-gate)
+requires local integrity-verified tarballs, a clean pinned checkout, fresh
+allowlisted environment, and Linux network isolation. Neither prose nor load-only
+smoke proves Pi parity. The separate [provider ledger](pi-provider-compatibility.md)
+records native provider route assumptions and unsupported surfaces.
 
-## Product promise
+## Project and earlier section links
 
-The intended promise is:
+Future migration work is tracked in the [project](https://github.com/orgs/skaft-software/projects/5),
+not promised by these commands. Model-assisted porting is not an automatic
+fallback; no current scanner invocation silently starts model use.
 
-> octet can inspect a Pi setup, migrate portable resources without model tokens,
-> replace known infrastructure with exact octet-native recipes, run a bounded
-> compatible subset through an explicitly trusted bridge, and identify exactly
-> what still requires a port.
-
-Today the zero-token scanner, limited host-owned portable import, and explicitly
-trusted, pinned compatibility links are implemented. The bridge runs a tested
-subset of Pi 0.84.4 tools, commands, dialogs, context, and lifecycle behavior;
-explicit ordered source sets can share one locked runtime. Exact replacement
-recipes, automatic whole-setup selection, session/provider mutation, and
-arbitrary Pi component parity remain unfinished and are reported rather than
-silently emulated.
+- <a id="migration-architecture"></a>[Migration architecture](#deliberate-compatibility-boundary).
+- <a id="deterministic-scannercompiler"></a>[Deterministic scanner/compiler](#scanner-reference).
+- <a id="compatibility-process"></a>[Compatibility process](../extensions/octet-pi-compat/COMPATIBILITY.md#aggregate-publication-and-api-03-evidence-seam).
+- <a id="exact-recipes"></a>[Exact recipes](https://github.com/orgs/skaft-software/projects/5): none ship; see [classification](#classification).
+- <a id="agentic-fallback"></a>[Agentic fallback](https://github.com/orgs/skaft-software/projects/5): not an implemented automatic migration path.
+- <a id="product-promise"></a>[Current scope](#deliberate-compatibility-boundary) and [project](https://github.com/orgs/skaft-software/projects/5).

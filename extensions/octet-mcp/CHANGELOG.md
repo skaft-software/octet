@@ -1,6 +1,8 @@
 # octet-mcp changelog
 
-## Unreleased
+## [Unreleased]
+
+### Changed
 
 - Gate Streamable HTTP MCP behind the conspicuous, one-shot
   `octet --experimental-streamable-http-mcp` process-owner flag. Configuration,
@@ -10,6 +12,9 @@
 - Document the nine unresolved Streamable HTTP defects and retain the transport
   as blocked-by-default experimental code rather than presenting it as generally
   safe.
+
+### Added
+
 - Add deterministic configuration, runtime, and product-boundary coverage for
   the gate.
 - Add an explicit, bounded Streamable HTTP transport with negotiated session
@@ -19,7 +24,13 @@
   non-persistent bearer credential-adapter boundary; OAuth and static credential
   configuration remain intentionally unsupported.
 
-## 0.1.0 — Ygg 0.6.1
+<a id="010--ygg-061"></a>
+
+## [0.1.0]
+
+Ygg 0.6.1.
+
+### Added
 
 - Add the first API `0.2` dynamic-catalog MCP bridge.
 - Support explicit user and digest-pinned trusted-project configuration for

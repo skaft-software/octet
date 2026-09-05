@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
 
 ### Added
 
@@ -24,7 +24,7 @@
 - Terminal-gate rejections now carry cumulative session cost so per-worker cost
   tracks token usage between accepted turns.
 
-## 0.2.0
+## [0.2.0]
 
 ### Added
 
@@ -57,7 +57,9 @@
 - `agent/follow_up` on a settled child is a resume, not a rejection; the
   worker's persistent task and transcript survive between runs.
 
-## 0.1.0
+## [0.1.0]
+
+### Added
 
 - Add four bounded API `0.2` subagent tools over the host-owned `agent_sessions` service.
 - Enforce two-child, depth-one, read/search-only orchestration policy with owner-derived scoping, idempotent spawn, budgets, timeout observation, cancellation, restart reconciliation, and shutdown settlement.

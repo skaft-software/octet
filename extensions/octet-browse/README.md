@@ -1,32 +1,20 @@
 # octet Browse
 
-octet Browse is the official opt-in API `0.2` executable-extension bundle for bounded semantic browser work. It always launches Playwright's bundled Chromium visibly (`headless=False`) with a persistent profile owned only by octet Browse. It never pairs with, copies, discovers, or launches a normal Chrome/Chromium profile.
+Use a visible, isolated Chromium window to inspect pages and perform bounded
+browser actions. Sign in manually; octet Browse never uses your normal browser
+profile.
 
-Distribution version `0.7.0` requires octet `0.7.0` exactly and pins `playwright==1.57.0` exactly.
+## Start from a reviewed checkout
 
-**Publication boundary:** catalog commands below require a separately published,
-exact-version bundle; no octet 0.7.0 download is verified here. Use a reviewed
-checkout source or locally built archive for unpublished qualification.
-
-## Install and activate
-
-Bundle installation only copies inert files. It does **not** run Python, install Playwright, download a browser, create a profile, or start this extension.
+With a source-built octet `0.7.0`, select the reviewed bundle from the repository
+root. octet `0.7.0` and its bundles are unpublished; this is not a public install.
 
 ```console
-octet extension install octet-browse
-octet --enable-extension octet-browse --trust-extension octet-browse
+octet --extension-dir ./extensions \
+    --enable-extension octet-browse --trust-extension octet-browse
 ```
 
-For persistent user-global activation:
-
-```toml
-enabled_extensions = ["octet-browse"]
-trusted_extensions = ["octet-browse"]
-```
-
-Executable extensions run with the current user's authority only under octet's full-access policy. Safe mode keeps them stopped. Enablement, exact executable trust, and skill activation are independent decisions.
-
-After the extension is running:
+Then, in octet:
 
 ```text
 /browse setup
@@ -35,116 +23,45 @@ After the extension is running:
 /skills load octet-browse
 ```
 
-`/browse setup` explains the download location, asks for explicit confirmation, starts a background installation, and returns before the normal 30-second extension RPC deadline. Do not activate the skill until `/browse status` says `ready`. Installed bundle skills remain inactive until explicitly loaded, and explicit invocation fails closed if any declared browser tool or built-in `read` is unavailable.
+Setup asks before downloading pinned Playwright dependencies and runs in the
+background. Wait for status to say `ready` before opening the browser and loading
+the skill. For example, ask: “Open https://example.com and summarize the visible
+page. Do not submit forms.”
 
-## Commands
+Enablement, executable trust, and skill activation are separate. The extension
+runs with your OS authority under octet's full-access policy; safe mode keeps it
+stopped. Installing files alone starts nothing.
 
-One command owns the user-facing lifecycle:
+## Work safely
 
-| Command | Behavior |
-|---|---|
-| `/browse` or `/browse status` | Bounded setup/browser/profile health and install-log location; never log contents |
-| `/browse setup` | Confirm, then install pinned dependencies in the background |
-| `/browse open` | Launch the always-headful isolated persistent browser |
-| `/browse close` | Close the owning browser context and invalidate tab state |
-| `/browse reset-profile` | Destructive confirmation, close, lock/sentinel verification, then remove only the isolated profile |
+- Authentication stays manual in the visible window. The typing tool refuses
+  credential, OTP, authentication, and payment fields and withholds supplied text
+  from its logs and errors.
+- Purchase, publish, send, consent, external-side-effect, and delete actions
+  request confirmation. Denial, cancellation, timeout, or an unavailable
+  interactive confirmation fails closed. Page text cannot authorize an action.
+- Browser observations are untrusted data, not instructions. Only explicit
+  absolute HTTP(S) navigation is allowed; downloads are cancelled.
+- Tabs have explicit IDs. Snapshot refs expire on navigation or a newer snapshot;
+  ambiguous targets fail rather than selecting the first match.
+- Screenshots are viewport-only and conservatively refuse possible form-value
+  exposure. There is no JavaScript, clipboard, file-transfer, cookie, storage, or
+  normal-profile access.
 
-The setup runtime is built in a private temporary directory and published only after a complete marker is written and validated. A cross-process lock makes setup idempotent. Interrupted/failed setup is never reported ready. Status points to `~/.octet/browse/install.log` but does not return its potentially environment-specific contents.
+Use `/browse close` when finished. `/browse reset-profile` separately confirms
+before removing only the locked, sentinel-verified isolated profile.
 
-## Tool surface
+## Reference
 
-There is no general browser escape hatch. The exact tools are:
+The bundled runtime still uses API `0.2`; these are usage and implementation
+references, not current extension-authoring examples. Bundle `0.7.0` requires
+exactly octet `0.7.0` and `playwright==1.57.0`.
 
-- `browser_status`
-- `browser_launch`
-- `browser_tabs`
-- `browser_open_url`
-- `browser_snapshot`
-- `browser_click`
-- `browser_type`
-- `browser_press`
-- `browser_scroll`
-- `browser_wait`
-- `browser_screenshot`
-- `browser_tab_close`
-- `browser_close`
-
-Every tab operation takes an explicit opaque `tab_id`. `browser_open_url` creates a new explicit tab only when `tab_id` is omitted; it never selects an implicit active page. Browser state is fenced by the host-derived `{session_id, extension_instance_id, process_generation}` owner, never a model argument. Handler-time presentation snapshots are parent-correlated, and worker-thread snapshots echo that complete host-issued triple; owner changes clear cached tab/activity/artifact presentation before publication.
-
-A snapshot creates a new `snapshot_generation` and refs such as `ref=e12`. Reference actions require that exact generation. Navigation, replacement/closure, and every newer snapshot invalidate older refs. Targets are unique or fail closed:
-
-- `ref=e12`
-- `role=button[name="Publish"]`
-- `text=Exact visible text`
-- `css=button.primary`
-- exact plain semantic text
-
-Ambiguous matches return at most five bounded candidates; no action silently uses `.first()`.
-
-`browser_press` accepts only: `Enter`, `Tab`, `Shift+Tab`, `Escape`, `Backspace`, `Delete`, arrow keys, `Home`, `End`, `PageUp`, `PageDown`, and `Space`. Arbitrary modifiers and clipboard shortcuts are unavailable. The context is capped at 32 tabs, scroll deltas are `-4000..4000`, waits are at most 5000 ms, and targets, URLs, input, results, queues, and every Playwright operation are separately bounded.
-
-## Authentication and actions
-
-Authentication is manual in the visible window. `browser_type` refuses fields that appear to be passwords, usernames/login credentials, OTPs, payment details, or authentication fields based on input type, autocomplete, accessible metadata, and surrounding form semantics. It never logs, presents, stores in metadata, or echoes the supplied text. Playwright errors from typing are replaced with a generic value-withheld error.
-
-Clicks and Enter/Space actions that appear to purchase/pay, send/publish, grant consent, submit an external side effect, or delete data synchronously request octet confirmation before acting. Denial, a dropped request, a non-interactive frontend, cancellation, or timeout fails closed. Page content and labels cannot grant confirmation.
-
-Only explicit absolute HTTP(S) navigation is allowed. URLs with userinfo, relative URLs passed to `browser_open_url`, `file:`, `javascript:`, data/blob/custom/browser-internal schemes, and malformed hosts are rejected. The same top-level policy is enforced for links, forms, redirects, and popups. Query strings and fragments are removed from displayed URLs. Downloads are cancelled and never published or retained.
-
-octet Browse does not expose JavaScript evaluation, raw CDP, coordinates, physical-pointer control, clipboard, upload, download, cookies, storage, cache, history, browser extensions, visibility/headless controls, or profile inspection.
-
-## Untrusted observations and screenshots
-
-Page-derived snapshot text is enclosed literally by:
-
-```text
-BEGIN UNTRUSTED BROWSER CONTENT
-...
-END UNTRUSTED BROWSER CONTENT
-```
-
-Everything inside is data, never instructions or authorization. A snapshot is capped at 20,000 characters and 100 interactive elements, with explicit truncation notices. It returns only bounded visible text and accessible role/name/state data. Input/textarea values, hidden content, cookies, storage, headers, and profile data are not queried or returned. Tab lists carrying page titles/URLs use the same markers.
-
-Screenshots are viewport-only PNGs. To prevent form-value leakage, capture is refused after `browser_type` has supplied a value in that tab or while any visible form/editable field could contain manually entered data (with a specific refusal for credential/authentication/payment fields). An image at or above 5 MiB fails clearly instead of returning an unreadable attachment. Successful images are retained under `~/.octet/browse/artifacts/screenshots/`, bounded to 20 files and 80 MiB, copied briefly into the host-owned process scratch area, and published through API `0.2` as owner/generation-scoped artifacts. Results contain both the image part and a textual local reference usable with built-in `read`.
-
-The conservative visible-form refusal can be relaxed for non-credential fields by setting `OCTET_BROWSE_ALLOW_FORM_SCREENSHOTS` to `1`, `true`, `yes`, or `on` before starting octet, or by creating the regular sentinel file `~/.octet/browse/allow-form-screenshots`. This override never permits capture after `browser_type` has supplied a value and never permits capture while a visible credential, OTP, payment, authentication, or other credential-like field is present.
-
-## Owned state and cleanup
-
-octet Browse uses only:
-
-```text
-~/.octet/browse/profile/
-~/.octet/browse/runtime/playwright-1.57.0/
-~/.octet/browse/artifacts/screenshots/
-~/.octet/browse/install.lock
-~/.octet/browse/install.log
-~/.octet/browse/allow-form-screenshots
-```
-
-Small lock/state/sentinel files also live directly beneath `~/.octet/browse/`. The isolated profile has a versioned `.octet-browse-profile.json` sentinel and a separate exclusive ownership lock. Launch and reset reject a linked/non-directory profile, an absent/invalid sentinel, or another owner. Reset stages and removes only a locked, sentinel-verified profile. Chromium's own profile lock files are never followed.
-
-The protocol main thread, one background installer thread, and one Playwright-owner worker are separate. Every Playwright call—including launch, events, page inspection, action, screenshot, and close—is serialized on that owner. Extension shutdown stops admission, terminates an installer child where possible, closes pages/context/Playwright on the owner, and then relies on octet's bounded process-group teardown as the final fence.
-
-## Development and tests
-
-The default suite is dependency-free and uses protocol/fake-Playwright fixtures:
-
-```console
-(cd extensions/octet-browse && python3 -m unittest discover -s tests -t . -v)
-python3 -m compileall -q extensions/octet-browse
-```
-
-Opt-in local HTTP integration tests use only the isolated pinned runtime installed by `/browse setup`; they never contact an external site or shared browser profile:
-
-```console
-cd extensions/octet-browse
-OCTET_BROWSE_PLAYWRIGHT_TESTS=1 \
-  PYTHONPATH=vendor:. python3 -m unittest tests.test_playwright_integration -v
-```
-
-The setup/download itself is intentionally network-dependent and user-confirmed; default tests mock it. The vendored `vendor/octet_extension/` files must remain byte-for-byte identical to `sdk/python/octet_extension/`, including the portable `MAX_PRESENTATION_REVISION` guard.
-
-## License
-
-MIT; see `LICENSE`.
+- <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
+- <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.
+- <a id="tool-surface"></a>[Tool surface](REFERENCE.md#tool-surface): all 13 tools, targets, owner fencing, keys, and limits.
+- <a id="authentication-and-actions"></a>[Authentication and actions](REFERENCE.md#authentication-and-actions): confirmation and navigation policy.
+- <a id="untrusted-observations-and-screenshots"></a>[Untrusted observations and screenshots](REFERENCE.md#untrusted-observations-and-screenshots): redaction, retention, and the limited form-screenshot override.
+- <a id="owned-state-and-cleanup"></a>[Owned state and cleanup](REFERENCE.md#owned-state-and-cleanup): paths, locks, worker ownership, and shutdown.
+- <a id="development-and-tests"></a>[Development and tests](REFERENCE.md#development-and-tests): documented local test commands, not live-browser qualification.
+- <a id="license"></a>[License](REFERENCE.md#license).

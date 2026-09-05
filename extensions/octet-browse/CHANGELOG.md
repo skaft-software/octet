@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0
+## [0.1.0]
+
+### Added
 
 - Initial official API 0.2 Ygg Browse bundle.
 - Pinned confirmed background setup for Playwright 1.57.0 and isolated Chromium.

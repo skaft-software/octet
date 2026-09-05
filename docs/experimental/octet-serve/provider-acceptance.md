@@ -1,24 +1,37 @@
 # Configured-provider acceptance
 
-> The retained v0.4.0 waiver below is historical Ygg evidence, not acceptance or
-> a waiver of [octet 0.7.0 release gates](../../releases/v0.7.0.md). Current source
-> paths use octet; no renamed live-provider pass is asserted here.
+Maintainer reference for provider routes and acceptance procedures in the
+supplied source snapshot. For usage, see the [Serve guide](README.md).
+**octet 0.7.0 is unpublished and not qualified.** Live-provider, media, recovery,
+and capture work remains deferred. Provider/reasoning work outside this snapshot
+must be reconciled with the final source before integration.
 
-octet Serve uses the coding agent's provider stack rather than a web-specific
-client. Release acceptance therefore has two separate layers:
+The retained [v0.4.0 record](#release-record) is historical Ygg evidence, not a
+pass or waiver of [octet 0.7.0 release gates](../../releases/v0.7.0.md).
 
-1. a required deterministic, credential-free conformance test on every pull
-   request; and
-2. an optional manually approved credentialed check against representative live
-   providers.
+## Acceptance boundaries
 
-The two layers must remain separate. Pull-request CI must not inherit developer
-or repository provider credentials, and credentialed results must not upload raw
-provider traffic, prompts, or logs as artifacts. Credentialed checks do not
-block packaging by default; that workflow default is not acceptance of the
-[octet 0.7.0 release gates](../../releases/v0.7.0.md).
+Serve uses the coding agent's provider stack rather than a web-specific client.
+The documented workflow separates:
+
+1. required deterministic, credential-free conformance testing on pull requests;
+2. separately approved credentialed checks against representative live providers.
+
+Pull-request CI must not inherit developer or repository provider credentials.
+Credentialed results must not upload raw provider traffic, prompts, or logs.
+Credentialed checks do not block packaging by default; that default does not
+establish release acceptance. Nothing on this page authorizes a live run.
+
+The live procedure below builds `octet-host` and tests **native-host protocol 1**,
+not extension API 0.3 or the graphical Serve transport. In particular, native
+audio acceptance does not establish web attachment support: production Serve
+supports images and bounded prompt documents, not audio. The bundled extension
+runtime examples are not qualified API 0.3 authoring examples.
 
 ## Supported provider matrix
+
+This is the route inventory recorded by the snapshot, not a final provider or
+model-capability qualification.
 
 | Route | Providers | Credential source | Deterministic coverage | Optional live representative |
 | --- | --- | --- | --- | --- |
@@ -47,20 +60,20 @@ The built-in OpenAI Chat credential variables are:
 
 A custom provider's environment-variable name is user-selected in its
 `bearer_env` auth entry or `api_key_env` shorthand. API keys must not be placed
-directly in Git-tracked configuration. A provider being listed here means octet
-supports its wire route; individual model capabilities still depend on the provider's model
-metadata.
+directly in Git-tracked configuration. A provider being listed here means the
+snapshot documents its wire route; individual model capabilities still depend
+on the provider's model metadata.
 
 ## Deterministic CI gate
 
-`apps/web/tests/live-host.spec.ts` launches the real Serve-capable `octet` binary
-with a temporary owner-only `HOME`, workspace, credential registry, and session
-directory. Its provider is an in-process loopback OpenAI-compatible server. The
-child environment is an allowlist containing a fake fixture token, so ambient
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and other live credentials cannot enter
-the test process.
+`apps/web/tests/live-host.spec.ts` is documented to launch the real Serve-capable
+`octet` binary with a temporary owner-only `HOME`, workspace, credential registry,
+and session directory. Its provider is an in-process loopback OpenAI-compatible
+server. The child environment is an allowlist containing a fake fixture token,
+so ambient `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and other live credentials cannot
+enter the test process.
 
-The test proves:
+The test's acceptance coverage is:
 
 - bearer authentication and provider-qualified model selection;
 - streamed text;
@@ -69,12 +82,12 @@ The test proves:
   a `429` sequence that exhausts automatic retries;
 - explicit `/compact`, durable checkpointing, process restart, and resume;
 - cancellation of an in-flight stream; and
-- bounded provider/phase failure diagnostics that are visible after retry
-  exhaustion, omit the provider body, fixture token, prompt canaries, request
-  IDs, and provider error codes, and never project model-only failed-turn
-  context as an assistant response.
+- bounded provider/phase failure diagnostics visible after retry exhaustion,
+  omitting the provider body, fixture token, prompt canaries, request IDs, and
+  provider error codes, and never projecting model-only failed-turn context as
+  an assistant response.
 
-Run it after building the feature-enabled binary:
+The documented local command sequence is:
 
 ```sh
 cargo build -p octet-coding-agent --bin octet --features serve --locked
@@ -84,33 +97,32 @@ npm run test:e2e:live
 ```
 
 This is the only configured-provider test allowed in ordinary CI. It must stay
-loopback-only and credential-free.
+loopback-only and credential-free. No current run is reported here.
 
 ## Optional credentialed acceptance
 
-The protected `Stable provider acceptance` workflow remains available for
-maintainers who want live-provider evidence. Both stable release workflows
-expose a `require_provider_acceptance` input, which defaults to `false`. That
-packaging default does not waive octet 0.7.0 release qualification. With the default, release packaging
-does not read provider secrets or require an acceptance run. Setting the input
-to `true` restores fail-closed exact-SHA and protected-approval enforcement for
-that workflow run.
+The snapshot describes a protected `Stable provider acceptance` workflow. Both
+stable release workflows expose `require_provider_acceptance`, defaulting to
+`false`. Packaging then does not read provider secrets or require an acceptance
+run. Setting it to `true` enables fail-closed exact-SHA and protected-approval
+enforcement for that workflow run; the default does not waive octet 0.7.0
+qualification.
 
-When opting in, configure the `stable-release-provider-acceptance` environment
-with required reviewers and these spend-limited secrets:
+For a separately authorized run, the `stable-release-provider-acceptance`
+environment requires reviewers and these spend-limited secrets:
 
 - `LIVE_OPENAI_API_KEY`
 - `LIVE_ANTHROPIC_API_KEY`
 - `LIVE_OPENAI_CHAT_BASE_URL` and `LIVE_OPENAI_CHAT_API_KEY`
 - `LIVE_AUDIO_BASE_URL` and `LIVE_AUDIO_API_KEY`
 
-Dispatch `.github/workflows/provider-acceptance.yml` with the workflow ref and
-`source_sha` both set to the exact 40-character candidate commit. Supply the
-reviewed model and provider IDs as workflow inputs. Do not dispatch it for pull
-requests or forks.
+The `.github/workflows/provider-acceptance.yml` dispatch contract requires both
+workflow ref and `source_sha` to be the exact 40-character candidate commit, with
+reviewed model and provider IDs as inputs. Pull requests and forks are excluded.
 
 The workflow builds `octet-host` from that checkout and invokes
-`scripts/provider-acceptance.py` in isolated owner-only workspaces. It checks:
+`scripts/provider-acceptance.py` in isolated owner-only workspaces. Its criteria
+are:
 
 1. OpenAI Responses, Anthropic Messages, and OpenAI-compatible Chat each stream
    text, call the read-only `read` tool, and return a disposable file canary.
@@ -139,11 +151,30 @@ has a successful `workflow_dispatch` run with a recorded approval for
 unapproved successful run is not release evidence. When the input is `false`,
 the workflow records the waiver in its job summary and continues packaging.
 
+## Manual Serve acceptance
+
+The inherited real-provider Serve checklist remains unqualified and deferred.
+A separately approved assessment must record evidence for:
+
+- fresh and restored sessions, including concurrent independent sessions;
+- real prompts, streaming, tool activity, and context/compaction accounting;
+- image and supported document attachments;
+- steer, follow-up, edit, retry, fork, stop, and reconnect;
+- terminal reopen and host shutdown;
+- archive, trash, restore, and guarded permanent deletion;
+- branch checkout and source, diff, and output reopening after host restart;
+- review and search.
+
+Fixtures and native-host checks cannot substitute for this graphical journey.
+See [web criteria](web-acceptance.md) and the
+[Project](https://github.com/orgs/skaft-software/projects/5) for work tracking.
+
 ## Release record
 
-Live-provider checks are waived for `v0.4.0`; deterministic configured-provider
-coverage remains required and passed. The optional protected workflow can be run
-later without changing the published binaries.
+Live-provider checks were waived for `v0.4.0`; deterministic configured-provider
+coverage remained required and passed. The original record stated that the
+optional protected workflow could run later without changing published binaries.
+This historical statement does not authorize a run or waive current gates.
 
 | Candidate | Gate | Provider/model | UTC date | Result | Reviewer |
 | --- | --- | --- | --- | --- | --- |

@@ -1,6 +1,16 @@
-# octet Serve LAN pairing
+<a id="octet-serve-lan-pairing"></a>
 
-**Status:** implementation specification for the experimental LAN v1.
+# LAN pairing specification
+
+**Unimplemented design reference.** The supplied source snapshot supports only
+the [local loopback client](README.md). All LAN flags, routes, DTO additions,
+dependencies, native projects, and acceptance commands below are proposed
+contracts, not available setup instructions or observed passes. Connected
+Devices and LAN-client capabilities remain false. This graphical transport
+specification is not extension API 0.3 or native-host protocol 1.
+
+Work tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).
+No LAN or signed native delivery is qualified for unpublished octet 0.7.0.
 
 ## Product invariant
 
@@ -47,7 +57,7 @@ protocol without changing session semantics.
 
 ## Architecture
 
-octet Serve runs two isolated transports:
+The design separates two transports:
 
 ```text
 Local browser                     Native macOS/iOS/Android client
@@ -121,9 +131,9 @@ This is mutual authentication but deliberately not mutual TLS:
 Noise would duplicate TLS and require a custom encrypted framing protocol.
 Mutual TLS would add CSR issuance, client-certificate provisioning, WebView
 certificate behavior, and TLS-layer revocation across three native platforms.
-Neither is justified for LAN v1.
+Neither is part of the LAN-v1 design.
 
-The minimal new Rust dependency set belongs only to `extensions/octet-serve`:
+The proposed new Rust dependency set belongs only to `extensions/octet-serve`:
 
 ```toml
 axum-server = { version = "0.8", features = ["tls-rustls"] }
@@ -136,7 +146,7 @@ base64 = "0.22"
 zeroize = "1"
 ```
 
-No networking or cryptographic dependency enters a octet core crate.
+No networking or cryptographic dependency enters an octet core crate.
 
 ## Host identity and persistent state
 
@@ -541,10 +551,12 @@ projection, encoded-command cache, cursor tracking, replay, and event buffering.
 Native clients therefore cannot drift into a second octet protocol
 implementation.
 
-Apple uses `URLSession`, `URLSessionWebSocketTask`, a narrowly scoped
-`WKScriptMessageHandler`, and an app-owned `WKURLSchemeHandler`. Android uses
+The platform sketches use `URLSession`, `URLSessionWebSocketTask`, a narrowly
+scoped `WKScriptMessageHandler`, and an app-owned `WKURLSchemeHandler` on Apple;
 OkHttp, `WebViewAssetLoader`, and `WebViewCompat.addWebMessageListener` with the
-single asset origin. Android must not bypass `onReceivedSslError`.
+single asset origin on Android. Android must not bypass `onReceivedSslError`.
+These sketches do not select or validate the shell framework; see
+[native delivery](native-delivery.md).
 
 ## Reconnect and failure behavior
 
@@ -596,9 +608,12 @@ request guards unregister themselves on drop. Revocation waits for the registry
 commit before closing connections so reconnect cannot race ahead of durable
 state.
 
-## Module and ownership boundaries
+<a id="module-and-ownership-boundaries"></a>
 
-All substantive implementation remains under the optional extension:
+## Proposed modules
+
+All substantive implementation remains under the optional extension. These are
+proposed paths, not a statement that the files exist:
 
 ```text
 extensions/octet-serve/src/
@@ -616,7 +631,7 @@ extensions/octet-serve/src/
     routes.rs
 ```
 
-Existing extension files change only as follows:
+Existing extension seams are limited to:
 
 - `model.rs`: authenticated-client and public device DTOs;
 - `bounds.rs`: pairing, header, registry, and catalog bounds;
@@ -626,7 +641,7 @@ Existing extension files change only as follows:
 - `tests/lan_transport.rs`, `tests/pairing.rs`, and `tests/security.rs`: black-box
   contracts.
 
-Web ownership:
+Web modules:
 
 ```text
 apps/web/src/native/
@@ -639,7 +654,7 @@ apps/web/src/native/
 `components/Devices.tsx` gain the client/device/pairing projections and failure
 states.
 
-Native ownership:
+Native module sketch:
 
 ```text
 apps/apple/
@@ -700,8 +715,9 @@ pairing, TLS, or devices.
 
 ## Acceptance matrix
 
-All `R`, `N`, `W`, `A`, and `D` tests are release-blocking. Physical `E` tests
-are required before distributing a signed LAN build.
+The following are unrun design criteria, not existing LAN test results. All `R`,
+`N`, `W`, `A`, and `D` tests are release-blocking. Physical `E` tests are required
+before distributing a signed LAN build.
 
 | ID | Runner | Acceptance |
 | --- | --- | --- |
@@ -748,7 +764,8 @@ are required before distributing a signed LAN build.
 | E05 | Physical | A client on a different subnet cannot discover or use the host |
 | E06 | Physical | Host restart reconnects paired clients without re-pairing |
 
-Required automated commands:
+Proposed automated commands follow. The referenced native projects do not exist
+in this snapshot; this block is not a runnable current acceptance recipe.
 
 ```console
 cargo test --manifest-path extensions/octet-serve/Cargo.toml
@@ -758,22 +775,14 @@ xcodebuild test -project apps/apple/octet.xcodeproj -scheme octet -destination '
 (cd apps/android && ./gradlew testDebugUnitTest connectedDebugAndroidTest)
 ```
 
-## Build order
-
-1. Add host identity, authenticated principals, device registry, bounds, and
-   golden contracts.
-2. Split common, loopback, and LAN routers; add TLS and subnet admission.
-3. Add the pairing state machine and loopback-owner administration.
-4. Add mDNS advertisement and discovery-state reporting.
-5. Bind bootstrap and every command envelope to the authenticated principal.
-6. Implement the real Connected devices and pairing UI.
-7. Factor shared TypeScript replay logic and implement `NativeBridgeTransport`.
-8. Build the shared Apple shell, then the macOS and iOS targets.
-9. Build the Android shell.
-10. Pass automated, adversarial, multi-client, physical-device, and signed-build
-    gates.
-
 The LAN listener must not ship before the existing optional Serve feature,
-embedded web payload, and installed-binary path are independently
-release-valid. LAN functionality remains default-off until the full acceptance
-matrix is green.
+embedded web payload, and installed-binary path are independently release-valid.
+LAN functionality remains default-off until the automated, adversarial,
+multi-client, physical-device, and signed-build gates are green.
+
+<a id="build-order"></a>
+
+## Project
+
+[Project](https://github.com/orgs/skaft-software/projects/5) — implementation work
+tracking. This document retains the technical contract, not an execution plan.

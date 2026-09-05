@@ -10,7 +10,7 @@ disabled in v0.7.0; the terminal uses its compiled default.
 | Kind | Global | Trusted project | Explicit option |
 | --- | --- | --- | --- |
 | Prompt | `~/.octet/prompts/*.{md,toml}` | `.octet/prompts/*.{md,toml}` | `--prompt-template <file-or-dir>` |
-| Skill | `~/.octet/skills/*/SKILL.md` plus managed `~/.octet/extensions/*/skills/*/SKILL.md` | `.octet/skills/*/SKILL.md` | `--skill-dir` |
+| Skill | [Ordered user roots](#skill-roots) | [Ordered project roots](#skill-roots) | `--skill-dir` |
 | Extension | `~/.octet/extensions/*/extension.toml` | `.octet/extensions/*/extension.toml` | `--extension-dir` |
 
 Roots are visited global, project, then explicit in option order. An explicit
@@ -39,11 +39,32 @@ If octet cannot resolve an absolute user home directory, global configuration an
 global resources are disabled with a diagnostic. It never falls back to the
 invocation directory and reclassifies project files as user-owned resources.
 
+### Skill roots
+
+Skill discovery uses this **low-to-high precedence** order:
+
+1. **User:** `~/.agents/skills`, then `~/.pi/agent/skills`, then managed extension
+   skills, then `~/.octet/skills`.
+2. **Trusted project:** `.agents/skills` roots from the workspace through the
+   invocation directory, then the invocation directory's `.pi/skills`, then the
+   workspace's `.octet/skills`. These project roots require `--workspace-trusted`.
+3. **Explicit:** `--skill-dir` sources in command-line option order.
+
+Later definitions replace earlier definitions of the same skill name; collisions
+are recorded in discovery diagnostics. Discovery does not activate a skill.
+The octet-native entrypoints remain `~/.octet/skills/*/SKILL.md`,
+`.octet/skills/*/SKILL.md`, and managed
+`~/.octet/extensions/*/skills/*/SKILL.md`.
+
+These lookup locations do not promise full Agent Skills/Pi parser compatibility
+or additional symlink support. Parser-specific shapes and symlink behavior for
+those additional roots require their exact source contract.
+
 ## Reads and diagnostics
 
-Resource roots, selected files, and directory entrypoints must be regular,
-non-symlink filesystem objects. Parser reads use descriptor-bound no-follow
-opens and fixed byte limits:
+For octet-native resource roots, selected files, and directory entrypoints, the
+existing resolver contract requires regular, non-symlink filesystem objects.
+Parser reads use descriptor-bound no-follow opens and fixed byte limits:
 
 | Kind | Maximum parser input |
 | --- | ---: |

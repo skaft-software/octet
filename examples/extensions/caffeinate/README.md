@@ -1,29 +1,31 @@
 # caffeinate executable extension
 
-This API `0.2` Python extension keeps a Mac awake while octet owns one or more
-active turns. Sleep inhibition is domain behavior, so it lives here rather
-than in the agent kernel. The extension observes `turn/started`,
-`turn/settled`, and `session/settled`, reference-counts overlapping turns, and
-runs one bounded `/usr/bin/caffeinate -i -t 1800` subprocess until the last
+**Legacy API `0.2` example**, version `0.2.0`; not an API `0.3` quickstart. See
+[current authoring](../../../docs/extensions.md) and the
+[legacy Python runtime](../../../sdk/python/legacy-runtime.md). Keep its manifest
+version unchanged when studying it.
+
+This Python extension keeps a Mac awake while octet owns one or more active
+root turns. Sleep inhibition lives in the extension, not the kernel. It observes
+`turn/started`, `turn/settled`, and `session/settled`, reference-counts overlapping
+turns, and runs one `/usr/bin/caffeinate -i -t 1800` subprocess until the last
 observed turn settles.
 
-The `-i` assertion prevents idle system sleep without forcing the display to
-stay on or overriding explicit sleep choices. The `-t 1800` argument bounds the
-assertion to 30 minutes if octet cannot deliver a cleanup boundary. This example
-does not pass `-w`, so it does not bind `caffeinate` to the extension PID.
-`/caffeinate` reports whether the inhibitor is active, and the interactive TUI
-shows an `awake` status contribution while it is running. Unsupported systems
-remain usable and receive a diagnostic when a turn starts.
+`-i` prevents idle system sleep without forcing the display on or overriding
+explicit sleep choices. `-t 1800` bounds the assertion to 30 minutes if cleanup
+cannot be delivered. The example does not use `-w` and does not bind the helper
+to the extension PID. `/caffeinate` reports whether inhibition is active. It also
+supplies an `awake` semantic status contribution; the coding TUI does not render
+generic persistent extension status. Unsupported systems remain usable and
+receive a diagnostic when a turn starts.
 
-Install the SDK before copying the directory:
+For an existing legacy setup, install the source SDK from a checkout:
 
 ```console
 python3 -m pip install ./sdk/python
 ```
 
-Copy the directory to `.octet/extensions/caffeinate/`, then explicitly enable and
-trust it. Executable-extension startup requires the default full-access policy.
-For a project extension, one invocation is:
+Copy the directory to `.octet/extensions/caffeinate/`, then enable and trust it:
 
 ```console
 octet --workspace-trusted \
@@ -31,23 +33,18 @@ octet --workspace-trusted \
     --trust-extension caffeinate
 ```
 
-Full-access mode uses the octet process's ambient operating-system authority; run
-this example only from an appropriately isolated, trusted environment.
+Startup requires default full-access policy; `--safe-mode` keeps it stopped.
+Full-access uses the octet process's ambient OS authority: run only in a trusted,
+appropriately isolated environment. The extension requires macOS and
+`/usr/bin/caffeinate`, reads no files, and uses no network. Its `process = true`
+declaration is consent metadata for the helper, not an OS sandbox.
 
-The extension requires macOS and `/usr/bin/caffeinate`. It reads no files and
-uses no network. Its declared `process = true` capability is visible consent
-metadata for launching the sleep inhibitor; it is not an operating-system
-sandbox.
+API `0.2` settles completed, failed, interrupted, and cancelled root turns, so
+each terminal releases its reference. Session settlement clears remaining
+references for that session. Extension shutdown and top-level protocol cleanup
+explicitly terminate the helper; the 30-minute timeout is a final fail-safe.
 
-API `0.2` emits `turn/settled` for completed, failed, interrupted, and cancelled
-root turns, so each terminal path releases its reference. `session/settled`
-cleans up any remaining references for that session. Extension shutdown and
-the top-level protocol cleanup explicitly terminate the child, while the
-30-minute subprocess timeout is a final fail-safe. The `-i` assertion prevents
-idle system sleep only; it does not prevent display sleep or override an
-explicit user sleep request.
-
-Run the example's dependency-free tests from the repository root with:
+The example's dependency-free test command, from the repository root:
 
 ```console
 python3 examples/extensions/caffeinate/test_extension.py

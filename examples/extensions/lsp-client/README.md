@@ -1,22 +1,30 @@
 # lsp-client
 
-Read-only LSP code intelligence as an executable extension (issue #23, Stage-1
-spike scope). One model-callable `code_intelligence` tool with an operation
-enum: `definition`, `references`, `hover`, and `diagnostics` (pull). The
-`before_prompt` hook injects new language-server diagnostics once per change.
+**Legacy implementation reference**, not an API `0.3` quickstart. Its
+`before_prompt` hook is a legacy request-path interface, not a current API
+`0.3` cleanup hook. See [current authoring](../../../docs/extensions.md) and
+the [legacy Python runtime](../../../sdk/python/legacy-runtime.md). Do not retag
+its manifest.
+
+One read-only `code_intelligence` model tool supports `definition`, `references`,
+`hover`, and pull `diagnostics`. The `before_prompt` hook injects new
+language-server diagnostics once per change.
 
 ## Scope and boundaries
 
-- Text-first: `read`, search, and build/test commands remain the fallback.
-  Every unavailable state is a typed, bounded result, never a product failure.
-- No hidden mutation: the extension only sends `didOpen`/`didChange` to keep
-  the server's document view current. It never applies server-proposed edits.
-- Servers are never downloaded or installed; a missing binary is a typed
-  unavailable result.
+- Text-first: `read`, search, and build/test commands remain fallbacks.
+  Unavailable states are typed, bounded results, never product failures.
+- No hidden mutation: `didOpen`/`didChange` keep server document state current;
+  server-proposed edits are never applied.
+- Servers are never downloaded or installed; missing binaries give typed
+  unavailable results.
+- Executable startup still needs independent enablement, trust, and full-access
+  admission; `--safe-mode` keeps it stopped. Use separate OS isolation for trusted
+  processes; capability declarations are not a sandbox.
 
 ## Supported servers
 
-Configured by file suffix in `extension.py` (`DEFAULT_SERVERS`):
+File suffix configuration lives in `extension.py` (`DEFAULT_SERVERS`):
 
 | Suffix | Server |
 | --- | --- |
@@ -28,18 +36,17 @@ The server binary must already be on `PATH`.
 
 ## Behavior
 
-- Lazy start: a server spawns on the first query for a matching suffix.
-- Bounded: every request has a deadline; restart attempts are capped
-  (3 consecutive failures or 10 lifetime starts per server); results are
-  capped (10 definitions, 100 references, 20 diagnostics per file, 2 KB hover).
-- Document sync: files are re-read before each query; edits made by `edit`,
-  `write`, or shell tools are pushed with `didChange` so diagnostics reflect
-  the current content, not a stale snapshot.
-- Diagnostics injection: `before_prompt` contributes only diagnostics not
-  previously injected; a file that becomes clean is forgotten so a regression
-  re-reports. Total injection volume is capped per turn.
-- Crash handling: a dead server is killed by process group and restarted under
-  the bounds above; in-flight requests fail with a typed unavailable result.
+- Lazy start: first query for a matching suffix starts its server.
+- Bounded: each request has a deadline. Restarts cap at three consecutive failures
+  or ten lifetime starts/server. Results cap at ten definitions, 100 references,
+  20 diagnostics/file, and 2 KB hover text.
+- Document sync: re-read files before every query; changes made by `edit`, `write`,
+  or shell tools are sent with `didChange`, avoiding stale diagnostics.
+- Diagnostics injection: only previously uninjected diagnostics are contributed.
+  Clean files are forgotten so regressions re-report; total injection is capped
+  per turn.
+- Crash handling: kill a dead server's process group and restart within the same
+  bounds. In-flight requests fail with typed unavailable results.
 
 ## Tests
 
@@ -47,6 +54,8 @@ The server binary must already be on `PATH`.
 python3 examples/extensions/lsp-client/test_extension.py
 ```
 
-The suite runs against a fake LSP server over real stdio framing and covers
-navigation, document resync, diagnostics delivery/dedup, and failure paths
-(dead server, silent server, unconfigured suffix, missing files).
+The documented suite uses a fake LSP server over real stdio, covering navigation,
+document resync, diagnostics delivery/deduplication, and dead/silent server,
+unconfigured suffix, and missing-file failures.
+
+Development tracking: [project board](https://github.com/orgs/skaft-software/projects/5).

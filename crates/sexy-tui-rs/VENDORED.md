@@ -15,8 +15,7 @@ branches or a release tag. The octet workspace is therefore the source of truth 
 package `0.3.1`; synchronize the standalone history deliberately before
 advertising an external release.
 
-The behavioral source of truth is a pinned Pi TUI release, not `main` and not
-this crate's earlier independently evolved behavior:
+Historical Pi reference retained from the earlier port documentation:
 
 - Pi source: <https://github.com/earendil-works/pi/tree/20be4b18d4c57487f8993d2762bace129f0cf7c6/packages/tui>
 - Pi tag/package: `v0.81.1` / `@earendil-works/pi-tui@0.81.1`
@@ -24,6 +23,13 @@ this crate's earlier independently evolved behavior:
 - Pi copyright: Copyright (c) 2025 Mario Zechner
 - Pi license: MIT; the upstream notice is preserved in this crate's `LICENSE`
   and in the workspace `THIRD_PARTY_NOTICES.md`.
+
+The current Pi parity target is `0.84.4`. Its exact revision, 33-test-file
+inventory, and incomplete audit status (`release_status: in_progress`) are
+recorded in [`UPSTREAM-PARITY.md`](UPSTREAM-PARITY.md) and the
+[`0.84.4 ledger`](upstream/pi-tui-0.84.4.json). The historical `0.81.1` reference
+above does not mean the older ports were imported from `0.84.4`, nor does the
+current target imply complete parity.
 
 Core ports must cite and reproduce the pinned Pi tests. Rust-only rich rendering
 and octet native-scrollback behavior are additive layers and must not redefine

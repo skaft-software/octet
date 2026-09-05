@@ -1,8 +1,11 @@
 # Serve lifecycle and safety design
 
-This document records the safety contracts implemented by the experimental
-`octet serve` host. They protect octet's own trust, persistence, and protocol
-boundaries. They do **not** turn octet into an operating-system sandbox.
+Maintainer reference for safety contracts described by the experimental
+`octet serve` source snapshot. For local use, see the
+[Serve guide](../experimental/octet-serve/README.md). The contracts protect
+octet's trust, persistence, and protocol boundaries; they do **not** turn octet
+into an operating-system sandbox. Current-version recovery qualification is
+deferred; the verification references below are not a new octet 0.7.0 pass.
 
 ## Security model
 
@@ -184,7 +187,9 @@ operational state, not persisted conversation history.
 
 ## Verification anchors
 
-Adversarial coverage lives with the owning package:
+The source snapshot identifies the following adversarial coverage. These are
+locations for maintainer review, not evidence that checks were run on the final
+release source:
 
 - process descendants and UTF-8: `extensions/octet-serve/src/pty.rs` and
   `tests/repository_context.rs`;

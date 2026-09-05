@@ -1,123 +1,13 @@
 # octet-subagents
 
-`octet-subagents` is a small API `0.2` executable extension for bounded background workers. It launches named, single-purpose child conversations through octet's **host-owned `agent_sessions` service**. It is not an agent team, graph/recipe runtime, swarm, hosted-agent scheduler, or second Agent loop.
+Delegate a bounded task to a background worker while the parent continues other
+work. octet owns the child conversations, permissions, persistence, limits, and
+shutdown. This is not an agent team, swarm, or second model loop.
 
-Distribution version `0.7.0` targets exactly octet `0.7.0`; the API remains `0.2`.
+## Try a read-only investigation
 
-## Safety model
-
-V1 is deliberately bounded, with the parent's full standard tool scope as the default grant:
-
-- at most **eight active children** and thirty-two retained workers per parent owner;
-- depth one; a recursively admitted descendant is immediately interrupted when its host path/depth is observed;
-- four predefined profiles (`explore`, `review`, `test-analysis`, `research`);
-- inherited model only (`model: "inherit"`), because the API `0.2` service does not accept a model override;
-- requested tool scope is a non-empty duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`; the default grant is the full five-tool scope, and `tools: [read, search]` narrows a worker to hard read-only for pure investigations;
-- wall-time, turn, and cost ceilings are optional per spawn: when omitted they inherit the parent session's ceilings (an unlimited parent remains unlimited); explicit values are bounded to 5 s–24 h, 1–256 turns, and 1–50,000,000 microdollars; returned output is 512–16,384 bytes;
-- fresh child contexts inherit the parent's model, context/output limits, and optional session token ceiling exactly; an unlimited parent remains unlimited and the model-facing spawn schema has no separate token-budget field;
-- strict owner derivation from `tool/call.context.resource_owner`; no tool schema accepts an owner;
-- retry-safe spawn keys, bounded output/error retention, cooperative cancellation, explicit stop, and continue (steer active / resume settled).
-
-`edit`, `write`, and `bash` are part of the default grant; the `tools`
-argument narrows or restores any subset within the five-tool whitelist:
-network, browser, computer control, mailbox/team
-primitives, another agent primitive, and any other tool are rejected. The
-canonical child policy keeps repository content and task text as data, not
-policy, and never grants recursion or manager-generated commands.
-
-API `0.2` creates the child with inherited model, cwd/workspace, environment,
-sandbox, approval policy, and extension policy, but `agent/spawn.policy` is the
-hard per-child boundary: octet installs a detached tool snapshot containing only
-the granted tools (never collaboration or agent primitives), applies the
-requested per-child turn/cost ceilings or inherits the parent's ceilings when
-they are omitted, inherits the parent's context/output and optional
-session-token settings without inventing a child ceiling, accounts cumulative
-tokens/cost, caps UTF-8 summary bytes, and owns the absolute wall deadline.
-Each child starts a fresh context; its usage is mirrored into the root ledger
-for accounting only, never inserted into the parent's model context, and never
-charged to the parent's own-context token ceiling. The
-eight-active/depth-one/thirty-two-retained limits are also checked by the
-real host service. Extension restart or absence of polling cannot relax those
-limits. A shared cwd/filesystem is **not isolation**.
-
-The host returns an opaque `agent-session:*` reference rather than the private
-delegation JSONL path. Serve resolves that reference only by inventorying its
-owner-private delegation directories, opens the transcript through a
-no-follow descriptor, and exposes a locked read-only session projection. The
-reference carries no filesystem path and cannot be used to submit another
-prompt or bypass the worker policy.
-
-There is no dedicated writer profile in V1: mutation capability is granted per
-spawn through the requested tool list and is enforced by the host's scoped
-tool snapshot, not by cooperative prompts alone. A worker granted `edit`,
-`write`, or `bash` operates inside the same shared filesystem the parent sees,
-so grant mutation only for tightly scoped, verifiable work.
-
-## Kernel boundary
-
-The package contains decomposition/completion policy, tool and command definitions, semantic projection, fixtures, and tests. It does **not** contain a model loop or session store.
-
-octet owns:
-
-- the child model conversations and durable session files;
-- ancestry, concurrency/depth/team limits, inherited permissions, and cost limits;
-- owner/principal checks for every `agent/*` request;
-- persistence, cancellation, restart service continuity, and descendant shutdown;
-- completion mailbox claim/ack and delivery as a legal new parent event/turn.
-
-The extension calls only these SDK helpers, which map directly to API `0.2`:
-
-- `spawn_agent` → `agent/spawn`;
-- `list_agents` → `agent/list`;
-- `wait_agents` → `agent/wait`;
-- `interrupt_agent` → `agent/interrupt`;
-- `send_agent_message` → `agent/message`;
-- `follow_up_agent` → `agent/follow_up`.
-
-`agent/message` steers an active worker and `agent/follow_up` resumes a
-settled one; both are exposed only through `subagent_continue`. It does not
-use the graph/recipe spike, built-in team mailboxes, or another scheduler.
-
-## Install, enable, and trust
-
-The release archive has one root directory named `octet-subagents`. Install a local archive with:
-
-```console
-octet extension install --path ./octet-subagents-0.7.0.tar.gz
-```
-
-Installation/discovery is inert: it does not enable, trust, or start the process. Explicitly enable and trust the selected manifest in full-access mode, preferably inside separate OS isolation:
-
-The current workspace bundle can be rebuilt and installed deterministically with:
-
-```console
-./scripts/reinstall-octet-subagents.sh
-```
-
-This updates `~/.octet/extensions/octet-subagents`; rebuilding `octet` with
-`cargo run` alone does not replace an already installed extension bundle.
-
-Enable and trust it explicitly:
-
-```console
-octet --enable-extension octet-subagents --trust-extension octet-subagents
-```
-
-`--safe-mode` never starts executable extensions. Use `/extensions` to enable or
-disable installed executable bundles, and `/extensions status` to inspect source,
-trust, API, generation, and negotiated features. Enabling never grants trust. The
-tools return an explicit unavailable result when the trusted extension is not
-running or the host has not offered its owner-bound `agent_sessions` service.
-
-The bundle is self-contained and has no install hook or third-party dependency. `vendor/octet_extension/` is a synchronized copy of octet's dependency-free Python SDK. Python 3.9+ is required at runtime.
-
-The optional packaged skill at `skills/octet-subagents/SKILL.md` is discovered after installation but remains inactive until the user explicitly loads it.
-
-## Tools
-
-### `subagent_spawn`
-
-Launch a worker in the background by default:
+After [enabling the local bundle](#enable-the-local-bundle), a `subagent_spawn`
+call can narrow a worker to reading and search:
 
 ```json
 {
@@ -135,179 +25,72 @@ Launch a worker in the background by default:
 }
 ```
 
-There is intentionally no `max_tokens` argument. The child gets a fresh model
-context with the parent's model context/output limits and inherits the parent's
-optional cumulative session-token ceiling exactly (`null` remains unlimited).
+The acknowledgement is **not completion**. Keep doing independent work;
+octet delivers the final output through its durable parent mailbox. Reusing an
+identical spawn key is retry-safe; using it with different input fails.
 
-If no key is supplied, the extension derives one from the complete canonical request. Keys are scoped by octet to the extension principal and durable session owner. Identical retries return the same host-present child. If a new owning run clears that live host record, the extension retains the last bounded summary/error and sibling roster as terminal diagnostic evidence; an explicit identical retry then replaces that orphaned cache entry and asks the host to create a new authoritative worker. Reuse with different input fails. The orchestration fingerprint is also placed in the canonical child message so a restart cannot accidentally make host-visible input equality narrower than extension input equality.
+| Tool | Use |
+| --- | --- |
+| `subagent_spawn` | Start a named worker; `background: false` requests a bounded foreground wait. |
+| `subagent_status` | Resync one `target` or list all owned workers. |
+| `subagent_wait` | Wait 1–60 seconds; cancelling or expiring the wait does not stop workers. |
+| `subagent_stop` | Supply exactly one of `{"target":"explore-auth"}` or `{"all":true}`. Acknowledgement is not terminal completion. |
+| `subagent_continue` | Supply `target` and `message` to steer an active worker or resume a settled one with its conversation retained. Stopping and orphaned workers are rejected. |
 
-The immediate result is an acknowledgement, not completion. Continue independent parent work and let octet deliver the worker's concise final output through its durable parent mailbox. Set `background: false` only when a bounded foreground wait is actually useful.
+## Enable the local bundle
 
-### `subagent_status`
-
-Refresh the authoritative host-present tree plus any bounded terminal evidence retained after owning-run cleanup. `target` may be a displayed name, stable agent ID, or host path. Without a target it returns a compact list. Missing active records become explicitly `orphaned`; captured summaries/errors and sibling rows do not disappear. It never accepts a caller-supplied owner and never infers state from output prose.
-
-### `subagent_wait`
-
-Wait 1–60 seconds for one target or all owned workers. The host reverse request is cancellable and sliced to keep cancellation responsive. Expiring or cancelling the wait leaves workers in the background; reaching a worker's wall deadline requests host interruption and produces the distinct `timed_out` state.
-
-### `subagent_stop`
-
-Provide exactly one of:
-
-```json
-{"target": "agent-1"}
-```
-
-or:
-
-```json
-{"all": true}
-```
-
-The host validates the target against the extension principal and current resource owner and interrupts the selected descendant tree. An accepted request remains `stopping` until a subsequent authoritative `agent/list` or `agent/wait` record reports the terminal interruption; acknowledgement alone is never presented as completion. Repeated stop on a terminal worker is a bounded no-op.
-
-### `subagent_continue`
-
-Provide a `target` (displayed name, stable agent ID, or host path) and a `message`:
-
-```json
-{"target": "explore-auth", "message": "Also check the revocation path."}
-```
-
-An active worker receives the message through `agent/message` as a queued
-turn on its running session; a settled worker (`done`, `failed`,
-`cancelled`, `stopped`, or `timed_out`) is resumed through `agent/follow_up`
-as a new run of the worker's durable session, so the earlier conversation
-context is retained. Workers still draining a stop (`stopping`) and orphaned
-workers (host shutdown) are rejected with stable errors rather than raced.
-The host clears a settled record's completion timestamp on resume, so elapsed
-time always measures the current run.
-
-## Lifecycle and restart behavior
-
-Worker states are authoritative projections of `agent/list`/`agent/wait`:
-
-- `pending` → `queued`;
-- `running` → `running` (temporarily `waiting` during a wait call);
-- `completed` → `done`, with bounded exact host output in detail/results;
-- `failed` → `failed`, with a bounded error;
-- `interrupted` → `cancelled`, or `stopped`/`timed_out` when the extension issued that reason;
-- `shutdown`/missing active record → `orphaned`.
-
-When an owning run removes records before another status/wait observation, the extension keeps its last bounded terminal summaries, errors, usage, and complete sibling roster instead of deleting the local tree. Previously active missing records become explicit `orphaned` rows. An identical explicit spawn retry may replace its matching orphaned cache entry; the host remains authoritative for new execution.
-
-A supervised extension restart receives a new process generation but the host service retains trees by stable extension principal plus durable session owner. The next owner-scoped call resyncs with `agent/list`, marks recovered records as restarted, and restores the public task name, profile, idempotency fingerprint, host-created/started/completed/deadline timestamps, policy, usage, and stable session reference. Retrying the same spawn key returns the same child without creating another session. A complete process-host rebuild creates a new service boundary for mutation; retained transcript inspection remains separately read-only and provenance-authorized.
-
-Outstanding API requests are cooperatively cancelled. Cancelling a wait does not stop the worker. If spawn cancellation races a durable host create, the required idempotency key makes the next identical call safe; unsafe ambiguous work is not replayed with new input.
-
-On extension shutdown the local projection settles, while octet's API `0.2` process shutdown stops every child tree owned by the extension service. The shutdown callback never reuses a stale parent request ID.
-
-## TUI and Serve presentation
-
-The manifest declares:
-
-```toml
-[contributes]
-presentation = true
-```
-
-The extension emits complete monotonic `presentation/update` snapshots using the generic host contract:
-
-- compact status counts;
-- content-free activity rows;
-- stable list/tree nodes and parentage;
-- queued/running/waiting/done/failed/stopped/cancelled/timed-out/orphaned/restarted distinctions;
-- elapsed time, inherited model/profile, current structured phase/tool, turns, token/cost budgets, session/artifact references;
-- selected detail with `parent > worker` breadcrumb, policy provenance, inherited cwd/sandbox/approval/environment facts, the host-observed terminal summary (unsafe controls visibly escaped), artifacts, bounded error, and restart state;
-- declared inspect, stop, and stop-all actions routed only to the manifest command.
-
-Prompts, tool arguments/results, and running model prose never appear in the
-worker list or composer-adjacent activity block. The host returns per-worker
-structured phase/current tool, host-observed tool calls, disjoint provider token
-buckets, turn count, and priced cost. The extension places those values in
-generic activity `metrics`; it never supplies terminal rows or footer text. In
-the TUI, octet renders the complete latest owner-fenced worker roster as a
-persistent transcript event immediately above the composer from native
-`AgentEvent::DelegationUpdated` events; ordinary tool disclosure never truncates
-it. It does
-not poll `/subagents status` for the composer block. A worker row has the
-compact form `N Tool Calls • ↑input ↓output • $cost`; input includes the three
-disjoint uncached/cache-read/cache-write buckets, while reasoning remains a
-subset of output.
-
-Before the root run settles, octet stops and briefly joins its children, sums each
-child session's durable usage/cost records including picodollar remainders, and
-writes one `delegated_agent` usage record per worker into the root session. The
-live child total is included in the footer only until that durable handoff, so
-delegated spend contributes exactly once to cumulative session cost and later
-cost-limit checks.
-
-The opaque worker resource reference is stable and owner-scoped.
-Serve opens it only after host-written provenance binds the exact parent session,
-path-free extension principal, and resource owner; the web view is locked and
-read-only. The TUI's live block is host-rendered from semantic activity metrics;
-no extension status or footer contribution is rendered. The no-argument
-`/subagents` command opens a host-owned list: Up/Down moves between workers,
-Enter opens the selected scrollable read-only transcript, and Escape or Left
-returns to the list. The same owner-bound status command used by the live tick
-and open panel reconciles authoritative `agent_sessions` state and publishes the
-next complete presentation revision; the frontend keeps focus by stable node ID
-and revalidates the latest owner-scoped reference before opening it.
-`/extensions inspect agent-session:<digest>` remains the explicit reference
-fallback. Both paths open only a child in the current parent's delegation team.
-Neither frontend can submit prompts or mutate a worker; all mutation remains on
-owner-bound `agent_sessions`. The package supplies no Rust TUI plugin, web code,
-or frontend scheduler. Generic rendering, selection/navigation, reconnect and
-instance/generation fencing, authenticated action routing, and Serve transport
-are host-owned.
-
-### `/subagents` headless/narrow fallback
-
-```text
-Subagents · 1 running · 1 done
-├─ explore-auth         running    00:42  agent-1
-└─ inspect-tests        done       01:08  agent-2
-```
-
-Use `/subagents inspect <name-or-id>` for cached read-only detail. The octet coding
-host binds API `0.2` command requests to their host-derived owner, so an explicit
-`/subagents stop ...` and the generic TUI/Serve stop action use the same
-owner-checked `agent_sessions` path. A host or headless integration that omits
-`context.resource_owner` fails closed without issuing a stop. The extension
-never smuggles a stale request ID into a command. A cached list may lag; run
-`subagent_status` from an active model turn to resync.
-
-## Release smoke recipe
-
-Compare measurements from the same task run once directly and once with up to two read-only workers:
+With source-built octet `0.7.0`, install a reviewed locally built archive, then
+separately enable and trust it:
 
 ```console
-./release-smoke.py \
-  --direct /tmp/direct.json \
-  --subagents /tmp/subagents.json \
-  --require-gain
+octet extension install --path ./octet-subagents-0.7.0.tar.gz
+octet --enable-extension octet-subagents --trust-extension octet-subagents
 ```
 
-Each input records accepted finding IDs, input/output tokens, wall time, CPU time, peak RSS, duplicate findings, and failure classes. The script reports quality gain and resource deltas. It consumes caller-captured measurements and never starts a provider or makes a network call during packaging.
+This does not imply a public download: octet `0.7.0` bundles are unpublished.
+Python 3.9+ is required. Installation has no hook or third-party dependency and
+starts nothing. Executable extensions require full-access policy; `--safe-mode`
+keeps them stopped. `/extensions status` shows the selected source, trust, API,
+generation, and negotiated features. Enabling never grants trust. The packaged
+skill is separately opt-in with `/skills load octet-subagents`.
 
-A deterministic fixture smoke is:
+## Bound the work
 
-```console
-./release-smoke.py \
-  --direct fixtures/smoke/direct.json \
-  --subagents fixtures/smoke/subagents.json \
-  --require-gain
-```
+- At most **8 active children and 32 retained workers per parent owner**, depth one.
+- Profiles are `explore`, `review`, `test-analysis`, and `research`. The model is
+  inherited; there is no override or separate `max_tokens` argument.
+- The default tool grant is **read, search, edit, write, and bash**, not read-only.
+  A requested list must be a non-empty, duplicate-free subset. No browser,
+  network-specific, collaboration, or recursive agent tools are admitted.
+- Workers inherit cwd, environment, sandbox, approval policy, and extension
+  policy. A shared filesystem is **not isolation**. Scope mutations to owned
+  paths; task prose cannot relax host policy.
+- Omitted wall-time, turn, and cost ceilings inherit the parent's limits,
+  including unlimited settings. Explicit limits and output bounds are in the
+  [safety reference](REFERENCE.md#safety-model).
 
-For a real evaluation, keep the prompt, model, reasoning, workspace revision, and acceptance rubric fixed. Count only reviewed/accepted unique findings; record timeouts, provider failures, cancellation, duplicate findings, and policy violations rather than discarding failed trials.
+## Inspect the work
 
-## Tests
+`/subagents` opens the host-owned worker list. Use Up/Down to select, Enter for a
+scrollable read-only transcript, and Escape or Left to return. The TUI's live
+roster shows tool calls, token usage, and cost without exposing prompts, tool
+arguments/results, or running model prose.
+Serve inspection is also owner-bound and read-only; inspection cannot send a
+prompt. `/subagents inspect <name-or-id>` provides cached detail and
+`/extensions inspect agent-session:<digest>` is the explicit-reference fallback.
 
-From the package root:
+## Reference
 
-```console
-python3 -m unittest discover -s tests -v
-```
+Bundle `0.7.0` requires exactly octet `0.7.0` and retains API `0.2`. The detailed
+contract is a bundled-runtime reference, not a current extension SDK tutorial.
 
-The package-owned fake host service covers owner/principal isolation, concurrency, duplicate keys, cancellation races, timeout interruption, supervised restart/resync, completion claim/ack and legal parent-turn delivery, session/export inspection, and descendant shutdown. Protocol tests run the vendored SDK over JSON-RPC streams and verify negotiation, owner correlation, presentation updates, `/subagents`, cancellation, and graceful shutdown. Release tests verify manifest/archive bounds, SDK synchronization, fixtures, executable bits, and the smoke report.
+- <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.
+- <a id="kernel-boundary"></a>[Kernel boundary](REFERENCE.md#kernel-boundary): host service ownership.
+- <a id="install-enable-and-trust"></a>[Install, enable, and trust](REFERENCE.md#install-enable-and-trust): local rebuild and inactive skill discovery.
+- <a id="tools"></a>[Tools](REFERENCE.md#tools): [spawn](REFERENCE.md#subagent_spawn), [status](REFERENCE.md#subagent_status), [wait](REFERENCE.md#subagent_wait), [stop](REFERENCE.md#subagent_stop), and [continue](REFERENCE.md#subagent_continue).
+  <a id="subagent_spawn"></a><a id="subagent_status"></a><a id="subagent_wait"></a><a id="subagent_stop"></a><a id="subagent_continue"></a>
+- <a id="lifecycle-and-restart-behavior"></a>[Lifecycle and restart behavior](REFERENCE.md#lifecycle-and-restart-behavior): authoritative states, retries, resync, and shutdown.
+- <a id="tui-and-serve-presentation"></a>[TUI and Serve presentation](REFERENCE.md#tui-and-serve-presentation): privacy, usage, and owner-fenced inspection.
+  - <a id="subagents-headlessnarrow-fallback"></a>[/subagents headless/narrow fallback](REFERENCE.md#subagents-headlessnarrow-fallback).
+- <a id="release-smoke-recipe"></a>[Release smoke recipe](REFERENCE.md#release-smoke-recipe): measured inputs versus deterministic fixtures; no claimed live gain.
+- <a id="tests"></a>[Tests](REFERENCE.md#tests).

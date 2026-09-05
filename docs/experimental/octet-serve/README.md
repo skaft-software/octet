@@ -1,151 +1,131 @@
 # Experimental `octet serve`
 
-`octet serve` is an optional first-party extension and application surface for
-using octet through a shared graphical client. It is not a new interaction mode,
-and it does not replace or mirror the terminal UI.
-
-The first release target is a polished local web client backed by real,
-headless octet sessions. A later gate adds accountless, mutually authenticated
-LAN clients. Thin macOS, iOS, and Android shells follow only after the web and
-LAN contracts are stable.
-
-## Product contract
-
-- Opening the graphical app at its root creates and selects a fresh provisional
-  task in the focused work surface.
-- Opening an explicit task route restores that task. Opening `/overview` loads
-  the command center from session inventory without creating or opening a task;
-  an already selected task remains selected in client state.
-- Existing, pinned, and concurrently running tasks remain available in the
-  sidebar.
-- Each active task has one authoritative session owner and runs independently.
-- The command center is a deterministic aggregate of host-owned task state. It
-  surfaces exception counts, prioritizes tasks that need intervention or review,
-  and supports task/project search without inventing summaries or runtime state.
-- The transcript remains the primary surface for a focused task. Progress,
-  sources, outputs, diffs, approvals, and previews appear only when real
-  structured events create them.
-- The interface has no Chat, Code, Work, or Cowork mode selector. The command
-  center and focused task are two views of the same task lifecycle, not separate
-  agent modes.
-- `octet serve` is headless. It neither hosts nor synchronizes a TUI.
-
-The graphical interaction grammar deliberately feels familiar to users of
-ChatGPT and Claude/Cowork while remaining a clean-room octet implementation with
-octet branding, terminology, themes, and security boundaries.
-
-## Package boundary
-
-Substantial implementation belongs outside octet's four core packages:
-
-- `extensions/octet-serve/` owns the protocol, session service, transports,
-  security, and embedded-asset host.
-- `apps/web/` owns the shared React client.
-- Later thin native applications live under `apps/`.
-
-For this release, the package is binary-modular: the feature-enabled
-runtime contains the smallest adapter needed to construct and control octet's
-private `App`, while the ordinary octet binary owns only package management and a
-small external `octet serve` dispatcher. Source-level extraction behind a stable
-Runtime API is deferred. The default TUI, agent, AI, and `sexy-tui-rs` behavior
-must not depend on the web surface.
-
-The adapter and client are presentation-only boundaries. They must not add
-presentation instructions to the model, alter the system prompt or active tool
-schemas, insert frontend state into session content, or ask another model to
-summarize work for the interface. octet's existing broad local authority remains
-the default; client authentication and agent authority are separate controls.
-
-See:
-
-- [Current state and fresh-context handoff](current-state.md)
-- [Architecture](architecture.md)
-- [LAN pairing](lan-pairing.md)
-- [Native delivery](native-delivery.md)
-- [Web acceptance](web-acceptance.md)
-- [Configured-provider acceptance](provider-acceptance.md)
-
-## First web cut
-
-The first complete vertical slice must use real sessions, not production
-fixtures. It includes:
-
-- a fresh-task launch flow and durable task sidebar;
-- an exception-prioritized command center with aggregate status, task/project
-  search, and direct return to focused work;
-- two independently running sessions;
-- streaming assistant, reasoning, tool, approval, and run-outcome items;
-- stop, steer, and queued follow-up;
-- model, reasoning, authority, and supported attachment controls;
-- deterministic sources, outputs, changes, and previews;
-- replay, idempotency, reconnect, and replay-gap recovery;
-- responsive desktop, tablet, and phone layouts;
-- the compiled default theme and canonical octet `01101111` byte mark.
-
-Fixtures remain a development and test input only.
-
-## Build, install, and release gates
-
-With a locally qualified octet `0.7.0` build, use a matching local Serve archive
-as shown below. Catalog installation requires separately verified publication;
-the following commands document that conditional contract, not availability:
+Run the graphical client from a source checkout:
 
 ```console
-octet extension install octet-serve
+cargo run --features serve -- serve --port 0
+```
+
+This starts a headless host for the launch workspace and opens its local web
+client. `--port 0` requests an available port. Add `--no-open` to skip opening the
+browser; `--web-root <directory>` selects a development asset directory.
+
+**octet 0.7.0 is unpublished and not release-qualified.** These instructions
+describe the experimental source snapshot, not an available signed download.
+Live-provider, media, recovery, and capture qualification remain deferred.
+
+<a id="product-contract"></a>
+
+## Use tasks
+
+- Open the app root for a fresh provisional task, an explicit task route to
+  restore that task, or `/overview` to browse task inventory without creating or
+  opening a task. The overview does not clear an already selected task.
+- Previous, pinned, and running tasks stay in the sidebar. Tasks are independent
+  sessions and can run concurrently; observers of one task share one host owner.
+- Send a prompt, stop a run, steer it, or queue a follow-up. Model and reasoning
+  choices come from the host. Edit, retry, fork, and branch checkout require an
+  idle, committed boundary.
+- Use `@` to select trusted project files as explicit context. Use `/` for
+  host-admitted commands, prompt templates, skills, and enabled extensions.
+  Commands requiring interactive extension confirmation are unavailable.
+- Attach PNG, JPEG, GIF, or WebP images, or bounded text, Markdown, and ordinary
+  PDFs. Model support still governs image input. The production Serve host does
+  not accept audio.
+
+The transcript is the main task view. The command center sorts and searches
+host-owned task state; sources, changes, outputs, approvals, and progress appear
+only when structured evidence supports them. There is no extra agent mode or
+synchronized TUI.
+
+## Access and authority
+
+The host binds **IPv4 loopback only**. A one-use launch capability is exchanged
+for an ephemeral **HttpOnly, SameSite=Strict** browser cookie before API or
+event-stream access. Host, Origin, and Fetch Metadata checks restrict requests
+to the local application. Keep the launch capability private.
+
+Browser authentication is not project trust or an agent sandbox. The production
+adapter advertises `FullAccess` only. Enabled commands run with the local user's
+OS authority; use a restricted user, container, VM, or OS sandbox for hostile
+work. Pairing would not grant project trust, Remote Read, or more tool authority.
+
+**LAN pairing is not implemented.** There is no working `--lan`, `--demo`, or
+`--local-only` switch. Do not expose this listener through `0.0.0.0`, a proxy, or
+port forwarding. The [LAN specification](lan-pairing.md) describes a separate,
+opt-in pinned-TLS transport with explicit pairing and revocable device
+credentials; it is not setup guidance. [Native apps](native-delivery.md) are
+also unimplemented.
+
+## Terminal and recovery
+
+The terminal appears only when the host allows process execution. It starts a
+local shell in the configured workspace and retains at most four terminals.
+Browser disconnect or detach retains the shell; host shutdown stops retained
+shells. Closing an inspector or preview is only a presentation action, not a
+stop command. Descendant cleanup is bounded, not OS-level process containment.
+
+Reconnect replays missing events or replaces state with an authoritative
+snapshot on a replay gap. Repeated command IDs do not execute twice. Browser
+text and attachment drafts are session-scoped and clear after acknowledged
+submission, but accepted queued follow-ups do **not** survive a host restart.
+Conversation checkout and forks do not undo filesystem or other external effects.
+
+Archive and trash retain tasks for later access or restore. Permanent deletion
+requires the exact confirmation phrase and uses a crash-recovery journal;
+missing required stores fail before commit. Shared payloads and
+conversation-content-free inference accounting are retained. See the complete
+[deletion and recovery contract](../../design/serve-lifecycle-safety.md#permanent-session-deletion).
+These are source-described contracts, not a completed current-version recovery
+qualification.
+
+<a id="build-install-and-release-gates"></a>
+
+## Install or update a package
+
+With a locally qualified matching octet `0.7.0` build and Serve archive:
+
+```console
+octet extension install --path octet-serve-0.7.0-TARGET.tar.gz
 octet extension list
 octet serve
 ```
 
-`octet extension update octet-serve` reinstalls the package matching the running
-octet version. `octet extension remove octet-serve` removes only package files and
-preserves Serve sessions and other user data. A downloaded release archive can
-be installed without network access to GitHub:
+Local archive installation does not need GitHub network access. The package
+requires exactly `=0.7.0`; declared targets are GNU/Linux x86_64 and macOS
+x86_64/arm64, not Linux musl. Target declarations are not platform acceptance.
+
+Only after separate publication verification:
 
 ```console
-octet extension install --path octet-serve-0.7.0-TARGET.tar.gz
+octet extension install octet-serve
+octet extension update octet-serve
 ```
 
-The package requires exactly `=0.7.0` and supports GNU/Linux x86_64
-(`x86_64-unknown-linux-gnu`) plus macOS x86_64/arm64. Linux musl targets are not
-supported in this release. For development, run the embedded feature build
-directly:
+Update reinstalls the package matching the running octet version; it is not an
+independent upgrade to a different runtime version.
+`octet extension remove octet-serve` removes package files, not Serve sessions or
+other user data. See [package and release details](../../../extensions/octet-serve/README.md#package-and-release-reference).
 
-```console
-cargo run --features serve -- serve
-```
+<a id="explicit-exclusions"></a>
 
-Because `extensions/octet-serve` is deliberately workspace-excluded, its focused
-gate is mandatory in addition to the ordinary workspace gates:
+## Availability limits
 
-```console
-cargo test --manifest-path extensions/octet-serve/Cargo.toml
-cargo test -p octet-coding-agent --features serve
-```
+Production live previews and child-agent trees are disabled. Durable source,
+diff, and output evidence covers successful built-in `read`,
+`read_skill_resource`, `edit`, and `write`, not all Bash or extension mutations.
+There is no arbitrary-folder import from the browser, MCP or LSP management,
+extension catalog/lifecycle UI, scheduling, WAN access, multi-host replication,
+or hosted account service. Missing capabilities should stay hidden, not appear
+as empty dashboard sections.
 
-`octet serve` binds IPv4 loopback only in this cut. A one-use launch capability
-is exchanged for an ephemeral, HttpOnly, same-site browser cookie before any
-API or event-stream access. This transport authentication is distinct from
-octet's agent authority and from the future LAN device identity described in the
-pairing plan.
+<a id="package-boundary"></a>
+<a id="first-web-cut"></a>
 
-The release workflow at `.github/workflows/release-serve.yml` accepts only a
-finalized canonical stable `vMAJOR.MINOR.PATCH` release whose Cargo version
-matches the tag. It builds optimized runtimes for the three supported targets,
-verifies direct and package-dispatched launch, emits
-`octet-serve-VERSION-TARGET.tar.gz`, writes SHA-256 checksums, signs the archives
-and checksum manifest with keyless Sigstore bundles, and attaches them to that
-existing canonical octet release. Repair/source tags use
-`octet-serve-vMAJOR.MINOR.PATCH`; they do not replace the canonical octet tag.
-`scripts/package-octet-serve-release.sh` remains the local reproducibility and
-package-layout gate before any separately authorized publication. Declared
-target support is not evidence that all platform acceptance gates have passed.
+## Reference
 
-## Explicit exclusions
-
-The first web release does not include MCP management, a plugin or extension
-catalog and lifecycle UI, child-agent runtime trees, LSP, scheduling, TUI
-synchronization, WAN access, multi-host replication, or a hosted account
-service. Host-admitted skills, prompt templates, and enabled extension commands
-are available through the composer; a bounded local PTY is available when host
-authority permits process execution. Missing capabilities do not appear as
-empty navigation or dashboard sections.
+- [Implementation coverage and limitations](current-state.md) — maintainer reference.
+- [Architecture](architecture.md) and [lifecycle safety](../../design/serve-lifecycle-safety.md) — technical contracts.
+- [Web acceptance](web-acceptance.md) and [provider acceptance](provider-acceptance.md) — criteria, not a current pass.
+- [Historical checklist](p0-p1-delivery.md) and [validation record](current-state.md#validation-evidence) — evidence with its original scope.
+- [Project](https://github.com/orgs/skaft-software/projects/5) — work tracking.

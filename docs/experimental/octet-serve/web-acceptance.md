@@ -1,7 +1,15 @@
 # Web acceptance
 
-The web-first gate is complete only when every item below has observed test or
-inspection evidence.
+Maintainer acceptance criteria, **not a current test result**. The web-first gate
+requires observed evidence for every applicable item below. The source snapshot
+and historical fixture/local-provider passes do not qualify unpublished octet
+0.7.0. Live-provider, media, recovery, and captures remain deferred.
+
+For local usage, see the [Serve guide](README.md). Consult
+[implementation limits](current-state.md#what-remains-fixture-only-specified-or-absent)
+before treating a renderer as an enabled feature: production previews and
+child-agent trees are off; LAN and native clients are unimplemented. Work
+tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).
 
 ## Real execution
 
@@ -28,6 +36,8 @@ inspection evidence.
 - Rename, pin, archive, delete, and stop behave consistently across clients.
 - Streaming assistant, reasoning, tool, approval, input, compaction, source,
   output, diff/change, preview, and run-outcome items have typed renderers.
+  Preview rendering remains fixture-only until a production capability is
+  implemented and qualified.
 - Fenced unified diffs in committed assistant Markdown render with semantic
   headers, change counts, old/new line gutters, and visible change markers.
 - Multi-item work stays behind a concise semantic disclosure while streaming and
@@ -49,8 +59,8 @@ inspection evidence.
 - Completion supports arrows, Home/End, Page Up/Down, Enter, Escape, and unique
   slash-prefix Tab completion while the textarea retains focus.
 - Sources, outputs, and changed files come from deterministic evidence.
-- Preview opens in a resizable split on wide screens and a full-screen surface
-  on phones.
+- The preview layout contract is a resizable split on wide screens and a
+  full-screen surface on phones; fixture coverage is not production support.
 - Closing a presentation surface never stops underlying work.
 
 ## Recovery and security
@@ -71,7 +81,8 @@ inspection evidence.
 - PDF ingestion rejects deeply nested direct structures in an iterative bounded
   preflight before invoking the parser; hostile-input regression coverage uses a
   fixture far beyond the accepted nesting limit.
-- Generated HTML cannot access the main app or host bridge.
+- Generated HTML cannot access the main app or host bridge; this remains a
+  required isolation boundary before production previews can be enabled.
 - Production performs no analytics, remote-font, CDN, or hosted-control-plane
   request.
 - The local web server is loopback-only.
@@ -80,6 +91,8 @@ inspection evidence.
 
 - The interface is inspected at 1440×900, 1024×768, 768×1024, 390×844, and
   360×800.
+- The application uses the compiled default theme and canonical octet
+  `01101111` byte mark.
 - The application uses exactly two measured semantic size tokens: 14px
   interface text and 12px metadata; a style check rejects arbitrary component
   sizes.
@@ -111,7 +124,6 @@ inspection evidence.
 
 ## Repository
 
-- The rejected frontend has no visual or ontology inheritance.
 - No excluded feature appears as an empty placeholder.
 - No presentation context, model-authored UI schema, or dashboard-summary model
   call is introduced.
@@ -130,4 +142,3 @@ inspection evidence.
   separate approval. The packaging workflow defaults and historical v0.4.0
   waiver in [configured-provider acceptance](provider-acceptance.md) do not
   waive the [octet 0.7.0 release gates](../../releases/v0.7.0.md).
-- The main checkout remains untouched.
