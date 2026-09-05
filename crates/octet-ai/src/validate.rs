@@ -27,35 +27,20 @@ pub(crate) fn provider_ref_is_usable(
             .is_none_or(|expires_at| expires_at > SystemTime::now())
 }
 
-/// Returns a request-local reasoning selection with portable effort clamped to
-/// the model's advertised range. Ultra is an orchestration tier and is capped
-/// at Max unless the same metadata advertises V2 delegation; the coding product
-/// additionally gates selection on its observing subagents extension.
+/// Preserve explicit core intent; supported choices and V2 authority are checked
+/// by request validation rather than silently clamping this selection.
 pub(crate) fn normalize_reasoning_config<'a>(
     reasoning: &'a ReasoningConfig,
     caps: &Capabilities,
 ) -> Cow<'a, ReasoningConfig> {
-    let (ReasoningConfig::Effort(effort), Some(capability)) = (reasoning, &caps.reasoning) else {
-        return Cow::Borrowed(reasoning);
-    };
-    let ceiling = if capability.max_effort == crate::types::ReasoningEffort::Ultra
-        && caps.agent_delegation != Some(crate::types::AgentDelegation::V2)
-    {
-        crate::types::ReasoningEffort::Max
-    } else {
-        capability.max_effort
-    };
-    let effective = (*effort).max(capability.min_effort).min(ceiling);
-    if effective == *effort {
-        Cow::Borrowed(reasoning)
-    } else {
-        Cow::Owned(ReasoningConfig::Effort(effective))
-    }
+    // Explicit core requests are never silently clamped. Only the product
+    // boundary may normalize persisted choices, with a visible diagnostic.
+    let _ = caps;
+    Cow::Borrowed(reasoning)
 }
 
-/// Returns a request-local copy with portable effort clamped to the model's
-/// advertised range. Keeping this normalization beside validation ensures all
-/// codecs, including direct codec tests, apply identical model gating.
+/// Preserve request intent before shared validation. Product-level normalization
+/// of persisted selections is separate from the strict core request boundary.
 pub(crate) fn normalize_request_reasoning<'a>(
     req: &'a Request,
     caps: &Capabilities,
@@ -67,6 +52,34 @@ pub(crate) fn normalize_request_reasoning<'a>(
     let mut request = req.clone();
     request.reasoning = normalized.into_owned();
     Cow::Owned(request)
+}
+
+/// Shared exact-choice gate for generation and native compact construction.
+pub(crate) fn validate_reasoning_selection(
+    reasoning: &ReasoningConfig,
+    caps: &Capabilities,
+    protocol: Protocol,
+) -> Result<(), AiError> {
+    let supported = match &caps.reasoning {
+        None => *reasoning == ReasoningConfig::Off,
+        Some(cap) => {
+            cap.supports(reasoning)
+                && (*reasoning != ReasoningConfig::Effort(crate::types::ReasoningEffort::Ultra)
+                    || caps.agent_delegation == Some(crate::types::AgentDelegation::V2))
+        }
+    };
+    // Explicit controls must fail even in Lossy mode: omission can enable
+    // provider-default thinking while the caller believes reasoning is Off.
+    let google_level_off = protocol == Protocol::GoogleGenerativeAi
+        && *reasoning == ReasoningConfig::Off
+        && caps
+            .reasoning
+            .as_ref()
+            .is_some_and(|c| c.control == crate::types::ReasoningControl::Effort);
+    if !supported || google_level_off {
+        return Err(AiError::Unsupported(UnsupportedError::Reasoning));
+    }
+    Ok(())
 }
 
 /// Validates a request against the model's capabilities and protocol constraints.
@@ -528,11 +541,17 @@ pub(crate) fn validate_request(
                                         Protocol::AnthropicMessages,
                                         crate::types::ReasoningStateKind::AnthropicSignature { .. }
                                     ) | (
-                                        Protocol::AnthropicMessages,
+                                        Protocol::AnthropicMessages | Protocol::BedrockConverse,
                                         crate::types::ReasoningStateKind::AnthropicRedacted { .. }
+                                    ) | (
+                                        Protocol::BedrockConverse,
+                                        crate::types::ReasoningStateKind::AnthropicSignature { .. }
                                     )
                                 );
-                                if state.protocol != protocol
+                                let empty_bedrock_signature = protocol == Protocol::BedrockConverse
+                                    && matches!(&state.kind, crate::types::ReasoningStateKind::AnthropicSignature { signature } if signature.is_empty());
+                                if empty_bedrock_signature
+                                    || state.protocol != protocol
                                     || &state.model != target_model
                                     || !kind_matches
                                 {
@@ -635,39 +654,31 @@ pub(crate) fn validate_request(
         });
     }
 
-    if req.reasoning != ReasoningConfig::Off {
-        if let ReasoningConfig::Budget(budget) = &req.reasoning {
-            let effective_output_limit = req.max_output_tokens.unwrap_or(limits.max_output_tokens);
-            if *budget < 1024 || *budget > effective_output_limit {
-                return Err(AiError::Validation(
-                    ValidationError::ReasoningBudgetOutOfRange,
-                ));
+    validate_reasoning_selection(&req.reasoning, caps, protocol)?;
+    let budget = match (&req.reasoning, &caps.reasoning) {
+        (ReasoningConfig::Budget(budget), _) => Some(*budget),
+        (ReasoningConfig::Effort(effort), Some(cap)) => cap.budget(*effort),
+        _ => None,
+    };
+    if let Some(budget) = budget {
+        if matches!(
+            protocol,
+            Protocol::AnthropicMessages | Protocol::BedrockConverse
+        ) {
+            if req.temperature.is_some_and(|value| value != 1.0) {
+                return Err(AiError::Validation(ValidationError::InvalidTemperature));
+            }
+            if matches!(req.tool_choice, ToolChoice::Required | ToolChoice::Named(_)) {
+                return Err(AiError::Unsupported(UnsupportedError::ToolChoice));
             }
         }
-        let supported = match (&req.reasoning, &caps.reasoning) {
-            (_, None) => false,
-            (ReasoningConfig::On, Some(capability)) => matches!(
-                capability.control,
-                crate::types::ReasoningControl::AlwaysOn | crate::types::ReasoningControl::Toggle
-            ),
-            (ReasoningConfig::Effort(_), Some(capability)) => {
-                capability.control != crate::types::ReasoningControl::Toggle
-                    && capability.control != crate::types::ReasoningControl::AlwaysOn
-            }
-            (ReasoningConfig::Budget(budget), Some(capability)) => {
-                capability.control == crate::types::ReasoningControl::TokenBudget
-                    && *budget <= limits.max_output_tokens
-            }
-            (ReasoningConfig::Off, _) => true,
-        };
-        if !supported {
-            if mode == CompatibilityMode::Strict {
-                return Err(AiError::Unsupported(UnsupportedError::Reasoning));
-            }
-            diagnostics.push(Diagnostic {
-                code: "ignored_reasoning".to_string(),
-                message: "Reasoning request cannot be represented by this model".to_string(),
-            });
+        let output = req.max_output_tokens.unwrap_or(limits.max_output_tokens);
+        // At least one answer token remains; never consume the entire output
+        // allowance with hidden thinking.
+        if budget < 1024 || budget >= output {
+            return Err(AiError::Validation(
+                ValidationError::ReasoningBudgetOutOfRange,
+            ));
         }
     }
 
@@ -781,6 +792,7 @@ mod tests {
             parallel_tool_calls: tools,
             reasoning: if reasoning {
                 Some(crate::types::ReasoningCapability {
+                    options: None,
                     control: crate::types::ReasoningControl::Effort,
                     exposes_text: true,
                     preserves_state: true,
@@ -1063,6 +1075,7 @@ mod matrix_tests {
             parallel_tool_calls: tools,
             reasoning: if reasoning {
                 Some(crate::types::ReasoningCapability {
+                    options: None,
                     control: crate::types::ReasoningControl::Effort,
                     exposes_text: true,
                     preserves_state: true,
@@ -1362,39 +1375,29 @@ mod matrix_tests {
     }
 
     #[test]
-    fn reasoning_effort_is_clamped_to_the_advertised_range() {
+    fn explicit_reasoning_choices_fail_instead_of_clamping() {
         let mut req = base();
-        req.reasoning = ReasoningConfig::Effort(ReasoningEffort::Max);
         let mut capabilities = caps(false, false, false, false, true, false);
-        let reasoning = capabilities.reasoning.as_mut().unwrap();
-        reasoning.min_effort = ReasoningEffort::Low;
-        reasoning.max_effort = ReasoningEffort::High;
-
-        let high = normalize_request_reasoning(&req, &capabilities);
-        assert_eq!(
-            high.reasoning,
-            ReasoningConfig::Effort(ReasoningEffort::High)
-        );
-
-        req.reasoning = ReasoningConfig::Effort(ReasoningEffort::Minimal);
-        let low = normalize_request_reasoning(&req, &capabilities);
-        assert_eq!(low.reasoning, ReasoningConfig::Effort(ReasoningEffort::Low));
-
-        req.reasoning = ReasoningConfig::Effort(ReasoningEffort::Ultra);
-        let reasoning = capabilities.reasoning.as_mut().unwrap();
-        reasoning.min_effort = ReasoningEffort::Ultra;
-        reasoning.max_effort = ReasoningEffort::Ultra;
-        let without_v2 = normalize_request_reasoning(&req, &capabilities);
-        assert_eq!(
-            without_v2.reasoning,
-            ReasoningConfig::Effort(ReasoningEffort::Max)
-        );
-        capabilities.agent_delegation = Some(crate::types::AgentDelegation::V2);
-        let with_v2 = normalize_request_reasoning(&req, &capabilities);
-        assert_eq!(
-            with_v2.reasoning,
-            ReasoningConfig::Effort(ReasoningEffort::Ultra)
-        );
+        let cap = capabilities.reasoning.as_mut().unwrap();
+        cap.min_effort = ReasoningEffort::Low;
+        cap.options = Some(crate::types::ReasoningOptions {
+            values: vec!["low".into(), "high".into()],
+            default: Some("high".into()),
+        });
+        for choice in [
+            ReasoningConfig::Off,
+            ReasoningConfig::Effort(ReasoningEffort::Medium),
+            ReasoningConfig::Effort(ReasoningEffort::Max),
+        ] {
+            req.reasoning = choice.clone();
+            assert_eq!(
+                normalize_request_reasoning(&req, &capabilities).reasoning,
+                choice
+            );
+            assert!(run(&req, &capabilities, Protocol::OpenAiChat).is_err());
+        }
+        req.reasoning = ReasoningConfig::Effort(ReasoningEffort::High);
+        assert!(run(&req, &capabilities, Protocol::OpenAiChat).is_ok());
     }
 
     #[test]
@@ -1439,15 +1442,12 @@ mod matrix_tests {
             Err(AiError::Unsupported(UnsupportedError::Reasoning))
         ));
         req.compatibility = Lossy;
-        assert!(has_code(
-            &run(
-                &req,
-                &caps(false, false, false, false, false, false),
-                Protocol::OpenAiChat
-            )
-            .unwrap(),
-            "ignored_reasoning"
-        ));
+        assert!(run(
+            &req,
+            &caps(false, false, false, false, false, false),
+            Protocol::OpenAiChat
+        )
+        .is_err());
     }
 
     // --- reasoning-state protocol/model mismatch ---

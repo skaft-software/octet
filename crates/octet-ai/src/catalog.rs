@@ -342,7 +342,7 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
                     && budgets.medium <= budgets.high
                     && budgets.high <= budgets.xhigh
                     && budgets.xhigh <= budgets.max
-                    && budgets.max <= spec.limits.max_output_tokens
+                    && budgets.max < spec.limits.max_output_tokens
             }
             (
                 ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle,
@@ -358,11 +358,12 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
                 reasoning.control,
                 ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle
             ),
-            Protocol::OpenAiResponses | Protocol::GoogleGenerativeAi => {
-                reasoning.control == ReasoningControl::Effort
-            }
-            // Converse has no portable reasoning control in this codec.
-            Protocol::BedrockConverse => false,
+            Protocol::OpenAiResponses => reasoning.control == ReasoningControl::Effort,
+            Protocol::GoogleGenerativeAi => matches!(
+                reasoning.control,
+                ReasoningControl::Effort | ReasoningControl::TokenBudget
+            ),
+            Protocol::BedrockConverse => reasoning.control == ReasoningControl::TokenBudget,
         };
         let chat_mode_matches = reasoning.openai_chat_mode == OpenAiChatReasoningMode::Standard
             || (spec.protocol == Protocol::OpenAiChat
@@ -374,7 +375,82 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
                 )
                 && reasoning.exposes_text);
         let effort_range_valid = reasoning.min_effort <= reasoning.max_effort;
-        if !valid || !protocol_matches || !chat_mode_matches || !effort_range_valid {
+        let options_valid = reasoning.options.as_ref().is_none_or(|o| o.is_valid())
+            && match &reasoning.openai_chat_mode {
+                OpenAiChatReasoningMode::ProviderValues {
+                    values, default, ..
+                } => {
+                    let legacy = crate::types::ReasoningOptions {
+                        values: values.clone(),
+                        default: default.clone(),
+                    };
+                    legacy.is_valid() && reasoning.options.as_ref().is_none_or(|o| o == &legacy)
+                }
+                _ => true,
+            };
+        let declared_choices = reasoning
+            .options
+            .as_ref()
+            .map(|o| o.choices())
+            .unwrap_or_else(|| match &reasoning.openai_chat_mode {
+                // AlwaysOn's synthesized On choice must not hide a conflicting
+                // legacy exact declaration during catalog validation.
+                OpenAiChatReasoningMode::ProviderValues { values, .. } => values
+                    .iter()
+                    .filter_map(|v| crate::types::ReasoningConfig::from_provider_value(v))
+                    .collect(),
+                _ => reasoning.choices(),
+            });
+        let choices_valid = declared_choices.iter().all(|choice| match choice {
+            crate::types::ReasoningConfig::Off => reasoning.control != ReasoningControl::AlwaysOn,
+            crate::types::ReasoningConfig::On => matches!(
+                reasoning.control,
+                ReasoningControl::Toggle | ReasoningControl::AlwaysOn
+            ),
+            crate::types::ReasoningConfig::Effort(e) => {
+                matches!(
+                    reasoning.control,
+                    ReasoningControl::Effort | ReasoningControl::TokenBudget
+                ) && *e >= reasoning.min_effort
+                    && *e <= reasoning.max_effort
+            }
+            crate::types::ReasoningConfig::Budget(_) => false,
+        });
+        let google_values_valid = spec.protocol != Protocol::GoogleGenerativeAi
+            || reasoning.control == ReasoningControl::TokenBudget
+            || reasoning.options.as_ref().is_none_or(|o| {
+                o.values.iter().all(|v| {
+                    matches!(
+                        v.as_str(),
+                        "MINIMAL"
+                            | "LOW"
+                            | "MEDIUM"
+                            | "HIGH"
+                            | "minimal"
+                            | "low"
+                            | "medium"
+                            | "high"
+                    )
+                })
+            });
+        let profile_valid = match &reasoning.openai_chat_mode {
+            OpenAiChatReasoningMode::DeepSeekToggle
+            | OpenAiChatReasoningMode::QwenEnableThinking
+            | OpenAiChatReasoningMode::QwenChatTemplate { .. }
+            | OpenAiChatReasoningMode::Together { effort: false } => {
+                reasoning.control == ReasoningControl::Toggle
+            }
+            _ => true,
+        };
+        if !valid
+            || !protocol_matches
+            || !chat_mode_matches
+            || !effort_range_valid
+            || !options_valid
+            || !choices_valid
+            || !profile_valid
+            || !google_values_valid
+        {
             return Err(ConfigError::InvalidReasoningConfig(spec.id.clone()));
         }
     }
@@ -886,5 +962,36 @@ mod tests {
         let mut resolvers = CredentialResolverRegistry::new();
         resolvers.insert("dyn_id".to_string(), Arc::new(DummyResolver));
         assert!(ModelCatalog::from_config_with_resolvers(cfg, &resolvers).is_ok());
+    }
+    #[test]
+    fn review_regression_always_on_checks_legacy_exact_values() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let model = catalog
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut spec = (*model.spec).clone();
+        spec.protocol = Protocol::OpenAiChat;
+        let reasoning = spec.capabilities.reasoning.as_mut().unwrap();
+        reasoning.control = ReasoningControl::AlwaysOn;
+        reasoning.options = None;
+        reasoning.openai_chat_mode = OpenAiChatReasoningMode::ProviderValues {
+            values: vec!["none".into()],
+            default: Some("none".into()),
+            system_message: true,
+        };
+        assert!(matches!(
+            validate_model_spec(&spec),
+            Err(ConfigError::InvalidReasoningConfig(_))
+        ));
+        spec.capabilities
+            .reasoning
+            .as_mut()
+            .unwrap()
+            .openai_chat_mode = OpenAiChatReasoningMode::ProviderValues {
+            values: vec!["default".into()],
+            default: Some("default".into()),
+            system_message: true,
+        };
+        validate_model_spec(&spec).unwrap();
     }
 }

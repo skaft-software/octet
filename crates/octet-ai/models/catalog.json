@@ -94,7 +94,17 @@
           "preserves_state": true,
           "effort_budgets": null,
           "min_effort": "low",
-          "max_effort": "max"
+          "max_effort": "max",
+          "options": {
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default": "low"
+          }
         },
         "structured_output": true
       },
@@ -140,7 +150,17 @@
           "control": "effort",
           "exposes_text": true,
           "preserves_state": true,
-          "effort_budgets": null
+          "effort_budgets": null,
+          "min_effort": "low",
+          "options": {
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ],
+            "default": "medium"
+          }
         },
         "structured_output": true
       },
@@ -172,7 +192,31 @@
         "output_modalities": {"bits": 0},
         "tools": true,
         "parallel_tool_calls": true,
-        "reasoning": null,
+        "reasoning": {
+          "control": "token_budget",
+          "exposes_text": true,
+          "preserves_state": true,
+          "effort_budgets": {
+            "minimal": 1024,
+            "low": 2048,
+            "medium": 4096,
+            "high": 6144,
+            "xhigh": 7168,
+            "max": 7168
+          },
+          "min_effort": "minimal",
+          "max_effort": "high",
+          "options": {
+            "values": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "default": "medium"
+          }
+        },
         "structured_output": true
       },
       "limits": {
@@ -204,7 +248,18 @@
           "exposes_text": true,
           "preserves_state": true,
           "effort_budgets": null,
-          "max_effort": "max"
+          "max_effort": "max",
+          "min_effort": "low",
+          "options": {
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default": "high"
+          }
         },
         "structured_output": true
       },
@@ -237,7 +292,19 @@
           "exposes_text": true,
           "preserves_state": true,
           "effort_budgets": null,
-          "max_effort": "max"
+          "max_effort": "max",
+          "min_effort": "low",
+          "options": {
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default": "high"
+          }
         },
         "structured_output": true
       },
@@ -270,7 +337,18 @@
           "exposes_text": true,
           "preserves_state": true,
           "effort_budgets": null,
-          "max_effort": "max"
+          "max_effort": "max",
+          "min_effort": "low",
+          "options": {
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "max"
+            ],
+            "default": "high"
+          }
         },
         "structured_output": true
       },

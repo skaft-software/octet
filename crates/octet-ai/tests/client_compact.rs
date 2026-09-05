@@ -56,6 +56,16 @@ fn model(base_url: &str, protocol: Protocol) -> Model {
 fn codex_model(base_url: &str) -> Model {
     let mut model = model(base_url, Protocol::OpenAiResponses);
     let spec = Arc::make_mut(&mut model.spec);
+    spec.capabilities.reasoning = Some(ReasoningCapability {
+        options: None,
+        control: ReasoningControl::Effort,
+        exposes_text: true,
+        preserves_state: true,
+        effort_budgets: None,
+        openai_chat_mode: OpenAiChatReasoningMode::Standard,
+        min_effort: ReasoningEffort::Minimal,
+        max_effort: ReasoningEffort::High,
+    });
     spec.cache.session_affinity_format = Some(octet_ai::SessionAffinityFormat::Codex);
     Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
         octet_ai::ResponsesRuntimeProfile::Codex;
@@ -70,6 +80,7 @@ fn responses_lite_model(base_url: &str) -> Model {
     spec.capabilities.responses_lite = true;
     spec.capabilities.agent_delegation = Some(AgentDelegation::V2);
     spec.capabilities.reasoning = Some(ReasoningCapability {
+        options: None,
         control: ReasoningControl::Effort,
         exposes_text: true,
         preserves_state: true,
@@ -269,7 +280,7 @@ async fn compact_codex_posts_rich_exact_body_and_preserves_complete_output() {
 }
 
 #[test]
-fn compact_for_model_clamps_reasoning_to_the_advertised_range() {
+fn compact_for_model_rejects_unsupported_reasoning_without_clamping() {
     let mut model = responses_lite_model("https://example.com/");
     Arc::make_mut(&mut model.spec)
         .capabilities
@@ -290,7 +301,10 @@ fn compact_for_model_clamps_reasoning_to_the_advertised_range() {
         None,
     );
 
-    assert_eq!(request.reasoning.unwrap()["effort"], "high");
+    assert!(matches!(
+        request,
+        Err(AiError::Unsupported(octet_ai::UnsupportedError::Reasoning))
+    ));
 }
 
 #[tokio::test]
@@ -331,7 +345,8 @@ async fn compact_responses_lite_uses_advertised_transport_contract() {
         &OutputFormat::Text,
         CacheRetention::Short,
         None,
-    );
+    )
+    .unwrap();
 
     AiClient::new()
         .compact_responses(&model, request)
@@ -392,7 +407,8 @@ async fn compact_responses_lite_explicitly_disables_parallel_calls_without_tools
         &OutputFormat::Text,
         CacheRetention::Short,
         None,
-    );
+    )
+    .unwrap();
 
     AiClient::new()
         .compact_responses(&model, request)
@@ -440,11 +456,15 @@ async fn compact_public_route_uses_the_narrow_public_body() {
     request.text = Some(serde_json::json!({"verbosity": "low"}));
     request.prompt_cache_key = Some("public-session".into());
 
+    let mut public_model = model(&format!("{}/", server.uri()), Protocol::OpenAiResponses);
+    Arc::make_mut(&mut public_model.spec).capabilities.reasoning =
+        codex_model(&format!("{}/", server.uri()))
+            .spec
+            .capabilities
+            .reasoning
+            .clone();
     AiClient::new()
-        .compact_responses(
-            &model(&format!("{}/", server.uri()), Protocol::OpenAiResponses),
-            request,
-        )
+        .compact_responses(&public_model, request)
         .await
         .unwrap();
 }
@@ -588,5 +608,127 @@ async fn compact_http_errors_preserve_retry_metadata_and_taxonomy() {
         assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
         assert_eq!(error.provider_code.as_deref(), Some("compact_error"));
         assert_eq!(error.retryable, retryable);
+    }
+}
+
+#[test]
+fn compact_exact_choices_and_legacy_mode_fail_before_construction() {
+    let mut model = codex_model("http://127.0.0.1:9/");
+    Arc::make_mut(&mut model.spec)
+        .capabilities
+        .reasoning
+        .as_mut()
+        .unwrap()
+        .options = Some(octet_ai::types::ReasoningOptions {
+        values: vec!["low".into(), "high".into()],
+        default: Some("high".into()),
+    });
+    for selection in [
+        ReasoningConfig::Off,
+        ReasoningConfig::On,
+        ReasoningConfig::Effort(ReasoningEffort::Medium),
+        ReasoningConfig::Effort(ReasoningEffort::Ultra),
+    ] {
+        assert!(matches!(
+            ResponsesCompactRequest::for_model(
+                &model,
+                ResponsesInput::default(),
+                None,
+                &[],
+                &selection,
+                ReasoningMode::Standard,
+                &OutputFormat::Text,
+                CacheRetention::None,
+                None
+            ),
+            Err(AiError::Unsupported(octet_ai::UnsupportedError::Reasoning))
+        ));
+    }
+    assert!(matches!(
+        ResponsesCompactRequest::for_model(
+            &model,
+            ResponsesInput::default(),
+            None,
+            &[],
+            &ReasoningConfig::Effort(ReasoningEffort::High),
+            ReasoningMode::Pro,
+            &OutputFormat::Text,
+            CacheRetention::None,
+            None
+        ),
+        Err(AiError::Unsupported(
+            octet_ai::UnsupportedError::ReasoningMode
+        ))
+    ));
+    let valid = ResponsesCompactRequest::for_model(
+        &model,
+        ResponsesInput::default(),
+        None,
+        &[],
+        &ReasoningConfig::Effort(ReasoningEffort::High),
+        ReasoningMode::Standard,
+        &OutputFormat::Text,
+        CacheRetention::None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(valid.reasoning.unwrap()["effort"], "high");
+}
+
+#[tokio::test]
+async fn raw_compact_reasoning_rejects_before_auth_and_network_on_both_routes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Probe(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl octet_ai::CredentialResolver for Probe {
+        async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(octet_ai::AuthError::Resolve)
+        }
+    }
+    let server = MockServer::start().await;
+    for rich in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut model = codex_model(&format!("{}/", server.uri()));
+        if !rich {
+            Arc::make_mut(&mut model.spec).cache.session_affinity_format = None;
+            Arc::make_mut(&mut model.endpoint).runtime.responses_profile = Default::default();
+        }
+        Arc::make_mut(&mut model.endpoint).auth = Auth::Dynamic(Arc::new(Probe(calls.clone())));
+        Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap()
+            .options = Some(octet_ai::types::ReasoningOptions {
+            values: vec!["low".into(), "high".into()],
+            default: Some("high".into()),
+        });
+        for control in [
+            serde_json::json!({"effort":"none"}),
+            serde_json::json!({"effort":"medium"}),
+            serde_json::json!({"effort":"ultra"}),
+            serde_json::json!({"effort":"max"}),
+            serde_json::json!({"effort":42}),
+            serde_json::json!({"mode":"pro"}),
+            serde_json::json!({"budget_tokens":2048}),
+            serde_json::json!([]),
+        ] {
+            let mut request = compact_request(ResponsesInput::default(), None);
+            request.reasoning = Some(control);
+            assert!(matches!(
+                AiClient::new().compact_responses(&model, request).await,
+                Err(AiError::Unsupported(_))
+            ));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let mut request = compact_request(ResponsesInput::default(), None);
+        request.reasoning = Some(serde_json::json!({"effort":"high"}));
+        assert!(matches!(
+            AiClient::new().compact_responses(&model, request).await,
+            Err(AiError::Auth(octet_ai::AuthError::Resolve))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

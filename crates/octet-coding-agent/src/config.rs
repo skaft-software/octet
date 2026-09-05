@@ -10,10 +10,7 @@ use octet_agent::{
 };
 
 pub use crate::tui::terminal::ColorMode;
-use octet_ai::{
-    CacheRetention, ModelId, ReasoningConfig, ReasoningEffort, ReasoningEffortBudgets,
-    ReasoningMode,
-};
+use octet_ai::{CacheRetention, ModelId, ReasoningConfig, ReasoningEffort, ReasoningMode};
 
 /// Resolve the workspace root: an explicit path, the nearest `.git` ancestor,
 /// or the current directory. The returned path is canonicalized.
@@ -312,18 +309,6 @@ impl ThinkingLevel {
             Self::Off | Self::On => {
                 unreachable!("binary thinking is not represented by ReasoningEffort")
             }
-        }
-    }
-
-    pub fn pick_budget(self, budgets: &ReasoningEffortBudgets) -> u64 {
-        match self {
-            Self::Minimal => budgets.minimal,
-            Self::Low => budgets.low,
-            Self::Medium => budgets.medium,
-            Self::High => budgets.high,
-            Self::Xhigh => budgets.xhigh,
-            Self::Max | Self::Ultra => budgets.max,
-            Self::Off | Self::On => 0,
         }
     }
 

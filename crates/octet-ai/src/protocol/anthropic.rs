@@ -568,7 +568,18 @@ pub(crate) fn build_request(
     let mut effort_opt: Option<String> = None;
     if let Some(cap) = model.spec.capabilities.reasoning.as_ref() {
         match req.reasoning {
-            ReasoningConfig::Off => {}
+            ReasoningConfig::Off => {
+                thinking_opt = Some(AnthropicThinkingConfig {
+                    r#type: "disabled".to_owned(),
+                    budget_tokens: None,
+                });
+            }
+            ReasoningConfig::On if cap.control == crate::types::ReasoningControl::Toggle => {
+                thinking_opt = Some(AnthropicThinkingConfig {
+                    r#type: "enabled".to_owned(),
+                    budget_tokens: None,
+                });
+            }
             ReasoningConfig::On => {}
             ReasoningConfig::Effort(effort) => match cap.control {
                 crate::types::ReasoningControl::Effort => {
@@ -576,7 +587,12 @@ pub(crate) fn build_request(
                         r#type: "adaptive".to_string(),
                         budget_tokens: None,
                     });
-                    effort_opt = Some(anthropic_effort(effort));
+                    effort_opt = Some(if cap.options.is_some() {
+                        cap.wire_value(&req.reasoning)
+                            .expect("validated effort choice")
+                    } else {
+                        anthropic_effort(effort)
+                    });
                 }
                 crate::types::ReasoningControl::TokenBudget => {
                     if let Some(b) = cap.effort_budgets.as_ref() {
@@ -802,7 +818,7 @@ pub(crate) fn decode_stream_event(
                             protocol: Protocol::AnthropicMessages,
                             kind: ReasoningStateKind::AnthropicRedacted { data },
                         },
-                    );
+                    )?;
                 }
                 AnthropicResponseContentBlock::ToolUse { id, name } => {
                     emit_event(
@@ -888,7 +904,7 @@ pub(crate) fn decode_stream_event(
 
                 // Check signature
                 let sig_key = format!("sig_{}", index);
-                if let Some(sig) = builder.take_temp_buffer_as_content(&sig_key)? {
+                if let Some(sig) = builder.take_temp_buffer(&sig_key) {
                     builder.set_reasoning_state(
                         canonical_idx,
                         ReasoningState {
@@ -896,7 +912,7 @@ pub(crate) fn decode_stream_event(
                             protocol: Protocol::AnthropicMessages,
                             kind: ReasoningStateKind::AnthropicSignature { signature: sig },
                         },
-                    );
+                    )?;
                 }
             } else if builder.tool_call_builders.contains_key(&canonical_idx)
                 && !builder.ended_indices.contains(&canonical_idx)
@@ -1069,6 +1085,7 @@ mod tests {
                 parallel_tool_calls: true,
                 reasoning: if reasoning {
                     Some(crate::types::ReasoningCapability {
+                        options: None,
                         control: crate::types::ReasoningControl::TokenBudget,
                         exposes_text: true,
                         preserves_state: true,

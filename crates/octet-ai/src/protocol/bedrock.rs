@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use base64::Engine as _;
 use serde_json::{json, Map, Value};
 
 use crate::error::{AiError, DecodeError, ProviderError};
@@ -160,7 +161,7 @@ pub(crate) fn build_request(
                                 continue;
                             }
                             pending_tool_uses.remove(&tool_use_id);
-                            let mut content = result
+                            let result_text = result
                                 .content
                                 .iter()
                                 .filter_map(|part| match part {
@@ -168,10 +169,10 @@ pub(crate) fn build_request(
                                     ToolResultPart::Media(_) => None,
                                 })
                                 .collect::<Vec<_>>();
-                            let result_content = if content.is_empty() {
+                            let result_content = if result_text.is_empty() {
                                 vec![json!({"text": ""})]
                             } else {
-                                std::mem::take(&mut content)
+                                result_text
                             };
                             content.push(json!({
                                 "toolResult": {
@@ -212,9 +213,37 @@ pub(crate) fn build_request(
                                 }
                             }));
                         }
-                        AssistantPart::Reasoning(_)
-                        | AssistantPart::Media(_)
-                        | AssistantPart::ProviderMetadata(_) => {}
+                        AssistantPart::Reasoning(reasoning) => {
+                            if let Some(state) = reasoning.state.as_ref().filter(|state| {
+                                state.protocol == Protocol::BedrockConverse
+                                    && state.model == model.spec.id
+                            }) {
+                                let value = match &state.kind {
+                                    crate::types::ReasoningStateKind::AnthropicSignature {
+                                        signature,
+                                    } if !signature.is_empty() => Some(
+                                        json!({"reasoningText": {"text": reasoning.text.as_deref().unwrap_or(""), "signature": signature}}),
+                                    ),
+                                    crate::types::ReasoningStateKind::AnthropicRedacted {
+                                        data,
+                                    } => {
+                                        base64::engine::general_purpose::STANDARD
+                                            .decode(data)
+                                            .map_err(|_| {
+                                                invalid_provider_field(
+                                                    "invalid redacted reasoning state",
+                                                )
+                                            })?;
+                                        Some(json!({"redactedContent": data}))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(value) = value {
+                                    content.push(json!({"reasoningContent": value}));
+                                }
+                            }
+                        }
+                        AssistantPart::Media(_) | AssistantPart::ProviderMetadata(_) => {}
                     }
                 }
                 push_message(&mut messages, "assistant", content);
@@ -252,6 +281,22 @@ pub(crate) fn build_request(
         inference.insert("stopSequences".to_owned(), json!(request.stop));
     }
     body.insert("inferenceConfig".to_owned(), Value::Object(inference));
+    if let Some(cap) = &model.spec.capabilities.reasoning {
+        use crate::types::ReasoningConfig;
+        let budget = match &request.reasoning {
+            ReasoningConfig::Budget(budget) => Some(*budget),
+            ReasoningConfig::Effort(effort) => cap.budget(*effort),
+            _ => None,
+        };
+        let thinking = budget.map_or_else(
+            || json!({"type": "disabled"}),
+            |budget| json!({"type": "enabled", "budget_tokens": budget}),
+        );
+        body.insert(
+            "additionalModelRequestFields".to_owned(),
+            json!({"thinking": thinking}),
+        );
+    }
 
     if !request.tools.is_empty() && request.tool_choice != ToolChoice::None {
         let tools = request
@@ -358,7 +403,75 @@ pub(crate) fn decode_stream_event(
             let delta = payload
                 .get("delta")
                 .ok_or_else(|| invalid_provider_field("contentBlockDelta.delta"))?;
-            if let Some(text) = delta.get("text").and_then(Value::as_str) {
+            if let Some(reasoning) = delta.get("reasoningContent") {
+                let object = reasoning
+                    .as_object()
+                    .ok_or_else(|| invalid_provider_field("reasoningContent union"))?;
+                if object.len() != 1
+                    || !object
+                        .keys()
+                        .all(|k| matches!(k.as_str(), "text" | "signature" | "redactedContent"))
+                    || delta.as_object().is_none_or(|d| d.len() != 1)
+                {
+                    return Err(invalid_provider_field("reasoningContent union"));
+                }
+                if builder.text_buffers.contains_key(&canonical)
+                    || builder.tool_call_builders.contains_key(&canonical)
+                    || builder.ended_indices.contains(&canonical)
+                {
+                    return Err(invalid_provider_field("reasoningContent block kind"));
+                }
+                let redacted_key = format!("bedrock_redacted_{index}");
+                let signature_key = format!("bedrock_signature_{index}");
+                let already_reasoning = builder.reasoning_text_buffers.contains_key(&canonical);
+                if !already_reasoning {
+                    emit_event(
+                        &mut events,
+                        builder,
+                        StreamEvent::ReasoningStart { index: canonical },
+                    )?;
+                }
+                if let Some(chunk) = object.get("redactedContent") {
+                    if (already_reasoning && !builder.temp_buffers.contains_key(&redacted_key))
+                        || builder.temp_buffers.contains_key(&signature_key)
+                    {
+                        return Err(invalid_provider_field("mixed redacted/signed reasoning"));
+                    }
+                    let chunk = chunk
+                        .as_str()
+                        .ok_or_else(|| invalid_provider_field("redactedContent bytes"))?;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(chunk)
+                        .map_err(|_| invalid_provider_field("redactedContent base64"))?;
+                    // Each AWS blob delta is separately base64 encoded. Keep
+                    // boundaries until a single bounded decode/concatenate at stop.
+                    builder.append_temp_buffer(redacted_key.clone(), chunk)?;
+                    builder.append_temp_buffer(redacted_key, "\n")?;
+                } else {
+                    if builder.temp_buffers.contains_key(&redacted_key) {
+                        return Err(invalid_provider_field("mixed redacted/signed reasoning"));
+                    }
+                    if let Some(text) = object.get("text") {
+                        let text = text
+                            .as_str()
+                            .ok_or_else(|| invalid_provider_field("reasoningContent text"))?;
+                        emit_event(
+                            &mut events,
+                            builder,
+                            StreamEvent::ReasoningDelta {
+                                index: canonical,
+                                delta: text.to_owned(),
+                            },
+                        )?;
+                    } else {
+                        let signature = object
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| invalid_provider_field("reasoningContent signature"))?;
+                        builder.append_temp_buffer(signature_key, signature)?;
+                    }
+                }
+            } else if let Some(text) = delta.get("text").and_then(Value::as_str) {
                 if !builder.text_buffers.contains_key(&canonical) {
                     emit_event(
                         &mut events,
@@ -408,6 +521,44 @@ pub(crate) fn decode_stream_event(
                     &mut events,
                     builder,
                     StreamEvent::TextEnd { index: canonical },
+                )?;
+            } else if builder.reasoning_text_buffers.contains_key(&canonical)
+                && !builder.ended_indices.contains(&canonical)
+            {
+                let redacted_key = format!("bedrock_redacted_{index}");
+                let kind = if let Some(chunks) = builder.take_temp_buffer(&redacted_key) {
+                    let mut bytes = Vec::new();
+                    for chunk in chunks.lines() {
+                        base64::engine::general_purpose::STANDARD
+                            .decode_vec(chunk, &mut bytes)
+                            .map_err(|_| invalid_provider_field("redactedContent base64"))?;
+                    }
+                    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    builder.replace_temp_buffer(redacted_key.clone(), data)?;
+                    crate::types::ReasoningStateKind::AnthropicRedacted {
+                        data: builder
+                            .take_temp_buffer(&redacted_key)
+                            .expect("inserted redacted buffer"),
+                    }
+                } else {
+                    let signature = builder
+                        .take_temp_buffer(&format!("bedrock_signature_{index}"))
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| invalid_provider_field("missing reasoning signature"))?;
+                    crate::types::ReasoningStateKind::AnthropicSignature { signature }
+                };
+                builder.set_reasoning_state(
+                    canonical,
+                    crate::types::ReasoningState {
+                        protocol: Protocol::BedrockConverse,
+                        model: builder.model.clone(),
+                        kind,
+                    },
+                )?;
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::ReasoningEnd { index: canonical },
                 )?;
             } else if builder.tool_call_builders.contains_key(&canonical)
                 && !builder.ended_indices.contains(&canonical)
@@ -824,5 +975,300 @@ mod tests {
             .url
             .path()
             .ends_with("/model/fixture-api-name/converse-stream"));
+    }
+
+    fn thinking_model() -> crate::catalog::Model {
+        let mut model = harness::model(Protocol::BedrockConverse, None);
+        let spec = std::sync::Arc::make_mut(&mut model.spec);
+        spec.capabilities.structured_output = false;
+        spec.capabilities.reasoning = Some(crate::types::ReasoningCapability {
+            options: Some(crate::types::ReasoningOptions {
+                values: vec!["none".into(), "low".into(), "high".into()],
+                default: Some("low".into()),
+            }),
+            control: crate::types::ReasoningControl::TokenBudget,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: Some(crate::types::ReasoningEffortBudgets {
+                minimal: 1024,
+                low: 1536,
+                medium: 2048,
+                high: 3072,
+                xhigh: 4096,
+                max: 6144,
+            }),
+            openai_chat_mode: crate::types::OpenAiChatReasoningMode::Standard,
+            min_effort: crate::types::ReasoningEffort::Low,
+            max_effort: crate::types::ReasoningEffort::High,
+        });
+        model
+    }
+
+    fn thinking_request() -> Request {
+        Request {
+            system: None,
+            messages: vec![Message::User(crate::types::UserMessage {
+                content: vec![UserPart::Text("hello".into())],
+            })],
+            tools: vec![crate::types::ToolDef {
+                name: "echo".into(),
+                description: "fixture".into(),
+                parameters: json!({"type": "object"}),
+            }],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(4096),
+            temperature: None,
+            stop: Vec::new(),
+            reasoning: crate::types::ReasoningConfig::Effort(crate::types::ReasoningEffort::Low),
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: crate::types::OutputFormat::Text,
+            output_modalities: crate::types::OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::None,
+            session_id: None,
+        }
+    }
+
+    fn reasoning_tool_stream(deltas: Vec<Value>) -> Vec<(&'static str, Value)> {
+        let mut events = vec![("messageStart", json!({"role": "assistant"}))];
+        events.extend(deltas.into_iter().map(|delta| {
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": delta}}),
+            )
+        }));
+        events.extend([
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+            ("contentBlockStart", json!({"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "call-1", "name": "echo"}}})),
+            ("contentBlockDelta", json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": "{}"}}})),
+            ("contentBlockStop", json!({"contentBlockIndex": 1})),
+            ("messageStop", json!({"stopReason": "tool_use"})),
+            ("metadata", json!({"usage": {"inputTokens": 3, "outputTokens": 2, "totalTokens": 5}})),
+        ]);
+        events
+    }
+
+    fn drive_thinking(
+        events: &[(&str, Value)],
+        chunk: usize,
+    ) -> Result<crate::types::Response, AiError> {
+        let model = thinking_model();
+        let bytes = events
+            .iter()
+            .flat_map(|(kind, payload)| {
+                frame(
+                    &[(":message-type", "event"), (":event-type", kind)],
+                    payload,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut decoder = BedrockEventStreamDecoder::new();
+        let mut builder =
+            ResponseBuilder::new(model.spec.id.clone(), Protocol::BedrockConverse, None);
+        let mut state = BedrockStreamState::default();
+        let mut output = Vec::new();
+        for bytes in bytes.chunks(chunk) {
+            for message in decoder.push(bytes).map_err(AiError::Decode)? {
+                output.extend(decode_stream_event(
+                    &model,
+                    &message,
+                    &mut builder,
+                    &mut state,
+                )?);
+            }
+        }
+        decoder.finish().map_err(AiError::Decode)?;
+        finish_stream(&mut builder, &mut state, &mut output)?;
+        output
+            .into_iter()
+            .find_map(|event| match event {
+                StreamEvent::Finished(response) => Some(response),
+                _ => None,
+            })
+            .ok_or_else(|| invalid_provider_field("fixture missing terminal event"))
+    }
+
+    fn continuation(response: crate::types::Response) -> Request {
+        let mut request = thinking_request();
+        request.messages.push(Message::Assistant(response.message));
+        request
+            .messages
+            .push(Message::User(crate::types::UserMessage {
+                content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                    tool_call_id: ToolCallId("call-1".into()),
+                    content: vec![ToolResultPart::Text("actual supplied result".into())],
+                    is_error: true,
+                    added_tool_names: None,
+                })],
+            }));
+        request
+    }
+
+    #[test]
+    fn thinking_budgets_off_holes_and_answer_room_match_the_converse_wire() {
+        let model = thinking_model();
+        let mut request = thinking_request();
+        let body: Value =
+            serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"]["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1536})
+        );
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("anthropic_version").is_none());
+        request.reasoning = crate::types::ReasoningConfig::Off;
+        let body: Value =
+            serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"]["thinking"],
+            json!({"type": "disabled"})
+        );
+        for budget in [0, 1023, 4096, 4097] {
+            request.reasoning = crate::types::ReasoningConfig::Budget(budget);
+            assert!(build_request(&model, &request).is_err());
+        }
+        request.reasoning = crate::types::ReasoningConfig::Budget(1024);
+        assert!(build_request(&model, &request).is_ok());
+        request.reasoning =
+            crate::types::ReasoningConfig::Effort(crate::types::ReasoningEffort::Medium);
+        assert!(build_request(&model, &request).is_err());
+        let mut nonthinking = model.clone();
+        std::sync::Arc::make_mut(&mut nonthinking.spec)
+            .capabilities
+            .reasoning = None;
+        assert!(build_request(&nonthinking, &thinking_request()).is_err());
+    }
+
+    #[test]
+    fn thinking_rejects_sampling_and_forced_tool_combinations() {
+        let model = thinking_model();
+        let mut request = thinking_request();
+        request.temperature = Some(0.7);
+        assert!(build_request(&model, &request).is_err());
+        request.temperature = Some(1.0);
+        assert!(build_request(&model, &request).is_ok());
+        for choice in [ToolChoice::Required, ToolChoice::Named("echo".into())] {
+            request.tool_choice = choice;
+            assert!(build_request(&model, &request).is_err());
+        }
+    }
+
+    #[test]
+    fn signed_thinking_fragments_and_supplied_tool_result_replay_without_changes() {
+        let events = reasoning_tool_stream(vec![
+            json!({"text": "think"}),
+            json!({"text": "ing"}),
+            json!({"signature": "SIGN-A"}),
+            json!({"signature": "-B"}),
+        ]);
+        for chunk in [1, 2, 7, 31, usize::MAX] {
+            let response = drive_thinking(&events, chunk).unwrap();
+            assert_eq!(response.stop_reason, StopReason::ToolUse);
+            assert!(!format!("{response:?}").contains("SIGN-A"));
+            let request = continuation(response);
+            let body: Value =
+                serde_json::from_slice(&build_request(&thinking_model(), &request).unwrap().body)
+                    .unwrap();
+            assert_eq!(
+                body["messages"][1]["content"][0],
+                json!({"reasoningContent": {"reasoningText": {"text": "thinking", "signature": "SIGN-A-B"}}})
+            );
+            assert_eq!(
+                body["messages"][1]["content"][1]["toolUse"]["toolUseId"],
+                "call-1"
+            );
+            assert_eq!(
+                body["messages"][2]["content"][0],
+                json!({"toolResult": {"toolUseId": "call-1", "content": [{"text": "actual supplied result"}], "status": "error"}})
+            );
+        }
+    }
+
+    #[test]
+    fn redacted_chunks_are_decoded_separately_then_reencoded_as_one_blob() {
+        let events = reasoning_tool_stream(vec![
+            json!({"redactedContent": "AQ=="}),
+            json!({"redactedContent": "AgM="}),
+        ]);
+        for chunk in [1, 7, 31] {
+            let request = continuation(drive_thinking(&events, chunk).unwrap());
+            let body: Value =
+                serde_json::from_slice(&build_request(&thinking_model(), &request).unwrap().body)
+                    .unwrap();
+            assert_eq!(
+                body["messages"][1]["content"][0],
+                json!({"reasoningContent": {"redactedContent": "AQID"}})
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_unsigned_reasoning_blocks_fail_before_a_finished_response() {
+        for deltas in [
+            vec![json!({"text": "missing signature"})],
+            vec![json!({"redactedContent": "not base64!"})],
+            vec![json!({"text": "mixed union", "signature": "signature"})],
+            vec![
+                json!({"text": "mixed blocks"}),
+                json!({"redactedContent": "AQ=="}),
+            ],
+            vec![
+                json!({"redactedContent": "AQ=="}),
+                json!({"signature": "mixed"}),
+            ],
+            vec![json!({"signature": 7})],
+        ] {
+            assert!(drive_thinking(&reasoning_tool_stream(deltas), 7).is_err());
+        }
+    }
+
+    #[test]
+    fn incompatible_reasoning_is_rejected_or_dropped_without_plaintext_downgrade() {
+        let events = reasoning_tool_stream(vec![
+            json!({"text": "private reasoning"}),
+            json!({"signature": "signature"}),
+        ]);
+        let mut request = continuation(drive_thinking(&events, 7).unwrap());
+        let Message::Assistant(assistant) = &mut request.messages[1] else {
+            panic!()
+        };
+        let AssistantPart::Reasoning(reasoning) = &mut assistant.content[0] else {
+            panic!()
+        };
+        reasoning.state.as_mut().unwrap().model = crate::types::ModelId("different-model".into());
+        assert!(build_request(&thinking_model(), &request).is_err());
+        request.compatibility = CompatibilityMode::Lossy;
+        let parts = build_request(&thinking_model(), &request).unwrap();
+        let body: Value = serde_json::from_slice(&parts.body).unwrap();
+        assert!(!body.to_string().contains("private reasoning"));
+        assert!(!body.to_string().contains("reasoningContent"));
+        assert!(parts
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "dropped_reasoning_state"));
+    }
+
+    #[test]
+    fn signature_buffer_uses_the_existing_aggregate_response_limit() {
+        let model = thinking_model();
+        let mut builder =
+            ResponseBuilder::new(model.spec.id.clone(), Protocol::BedrockConverse, None);
+        builder
+            .reserve_buffered_content(crate::stream::MAX_RESPONSE_CONTENT_BYTES)
+            .unwrap();
+        let message = BedrockEventStreamMessage {
+            headers: [(":message-type".into(), "event".into()), (":event-type".into(), "contentBlockDelta".into())].into(),
+            payload: serde_json::to_vec(&json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"signature": "one more byte"}}})).unwrap().into(),
+        };
+        assert!(matches!(
+            decode_stream_event(
+                &model,
+                &message,
+                &mut builder,
+                &mut BedrockStreamState::default()
+            ),
+            Err(AiError::Decode(DecodeError::ResponseTooLarge))
+        ));
     }
 }

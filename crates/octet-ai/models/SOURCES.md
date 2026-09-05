@@ -25,7 +25,7 @@ or runtime.
 - `gpt-4o-mini` text pricing uses $0.15/M input, $0.60/M output, and $0.075/M cached input, represented as 150,000 / 600,000 / 75,000 microdollars per million tokens.
 - `gpt-5.4-mini` pricing uses $0.75/M input, $4.50/M output, and $0.075/M cached input. OpenAI does not separately bill cache writes for this route.
 - `gpt-6-astra` is an explicit Responses contract observation rather than a generated models.dev entry: 1,050,000 context, 128,000 output, text/image input, text output, and `low` through `max` reasoning. Base input/cache-read/cache-write/output rates are $10/$1/$12.50/$50 per million; above 272K input they are $20/$2/$25/$75.
-- The Codex inventory observed with compatibility client `0.153.2` publishes Astra's `low` through `ultra` reasoning levels as objects, defaults to `low`, and separately reports `use_responses_lite`, `multi_agent_version`, visibility, and API support. octet retains its 872K advertised input maximum, budgets 272K actively, treats a successful account inventory—not the model name or plan—as authoritative for dynamic Lite/V2 features, and uses `xhigh` model effort for V2 delegation.
+- The Codex inventory observed with compatibility client `0.153.2` publishes Astra's `low` through `ultra` reasoning levels as objects, defaults to `low`, and separately reports `use_responses_lite`, `multi_agent_version`, visibility, and API support. octet retains its 872K advertised input maximum, budgets 272K actively, treats a successful account inventory—not the model name or plan—as authoritative for dynamic Lite/V2 features, and maps explicitly selected Ultra to `max` model effort only with V2 delegation.
 - Anthropic text pricing records the published input/output/cache-read/5-minute-write rates and the explicit one-hour write rate of 2× input: Sonnet 4.5 and 4.6 use $3/$15/$0.30/$3.75/$6; Opus 4.8 uses $5/$25/$0.50/$6.25/$10; Fable 5 uses $10/$50/$1/$12.50/$20, all per million tokens.
 - The audio seed entry intentionally has `pricing: null` because this repository has no authoritative price snapshot for its separate text/audio token classes.
 
@@ -33,3 +33,16 @@ Endpoint auth, protocol compatibility, and explicit catalog pricing remain octet
 configuration. The models.dev snapshot fills missing pricing for discovered
 built-in routes without changing transport behavior; configured catalogs remain
 the escape hatch for private or custom endpoints.
+
+## Reasoning contract supplement (2026-09-05)
+
+The Cerebras route fallback for an inventory-returned **`qwen-3.8-27b`** uses
+`none`, `low`, `medium`, `high` (default `high`) and replays separated reasoning
+as `assistant.reasoning`. Source: [Cerebras reasoning documentation](https://inference-docs.cerebras.ai/capabilities/reasoning),
+reviewed separately from the older catalog/pricing snapshot. This does not add
+an invented model inventory, limits, prices, or a live-instance acceptance claim.
+The unhyphenated `qwen3.8-27b` is not this documented route identifier.
+
+Synthetic custom-server Qwen profiles are independent endpoint assertions, not
+Cerebras contracts. Their fixture provenance is recorded in
+`crates/octet-coding-agent/fixtures/providers/thinking-hotfix.json`.

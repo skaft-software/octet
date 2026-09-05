@@ -208,6 +208,12 @@ pub struct CustomModel {
     /// Whether the model supports reasoning/thinking.
     #[serde(default)]
     pub reasoning: bool,
+    /// Optional typed endpoint wire profile; never inferred from model names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_profile: Option<octet_ai::OpenAiChatReasoningMode>,
+    /// Provenance recorded by future setup/discovery. Missing on old/manual entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_source: Option<octet_ai::types::ReasoningMetadataSource>,
     /// Whether octet can configure reasoning. A model may still reason by
     /// default when this is false.
     #[serde(default = "default_true")]
@@ -281,6 +287,8 @@ impl Default for CustomModel {
             vision: false,
             structured_output: false,
             reasoning: false,
+            reasoning_profile: None,
+            reasoning_source: None,
             reasoning_configurable: true,
             reasoning_values: Vec::new(),
             reasoning_default: String::new(),

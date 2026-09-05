@@ -178,7 +178,11 @@ fn register_static_model(
         id: ModelId(catalog_id),
         endpoint: EndpointId(route.endpoint_id.into()),
         api_name: model.id.into(),
-        display_name: Some(model.name.into()),
+        display_name: Some(
+            octet_ai::model_metadata::model_display_name(model.id)
+                .unwrap_or(model.name)
+                .into(),
+        ),
         protocol: route.protocol,
         capabilities: static_model_capabilities(model),
         limits: ModelLimits {
@@ -287,15 +291,7 @@ fn static_model_capabilities(model: &StaticModelPreset) -> Capabilities {
         output_modalities: ModalitySet::none(),
         tools: true,
         parallel_tool_calls: model.protocol != Protocol::OpenAiChat,
-        reasoning: model.reasoning.then_some(ReasoningCapability {
-            control: ReasoningControl::Effort,
-            exposes_text: true,
-            preserves_state: model.protocol != Protocol::OpenAiChat,
-            effort_budgets: None,
-            openai_chat_mode: model.openai_chat_reasoning_profile.openai_chat_mode(),
-            min_effort: model.min_reasoning_effort,
-            max_effort: model.max_reasoning_effort,
-        }),
+        reasoning: static_reasoning_capability(model),
         responses_lite: false,
         agent_delegation: None,
         structured_output: !matches!(
@@ -304,6 +300,79 @@ fn static_model_capabilities(model: &StaticModelPreset) -> Capabilities {
         ),
         deferred_tool_loading: false,
     }
+}
+
+fn static_reasoning_capability(model: &StaticModelPreset) -> Option<ReasoningCapability> {
+    use super::models::StaticReasoningMode as Mode;
+    use octet_ai::{ReasoningEffort as E, ReasoningEffortBudgets};
+    if !model.reasoning {
+        return None;
+    }
+    let mut cap = ReasoningCapability {
+        options: None,
+        control: ReasoningControl::Effort,
+        exposes_text: true,
+        preserves_state: model.protocol != Protocol::OpenAiChat,
+        effort_budgets: None,
+        openai_chat_mode: model.openai_chat_reasoning_profile.openai_chat_mode(),
+        min_effort: model.min_reasoning_effort,
+        max_effort: model.max_reasoning_effort,
+    };
+    let (values, default): (Vec<&str>, Option<&str>) = match model.reasoning_mode {
+        Mode::Effort => return Some(cap),
+        Mode::Budget | Mode::GoogleBudget { .. } => {
+            cap.control = ReasoningControl::TokenBudget;
+            let maximum = model.max_output_tokens.saturating_sub(1024);
+            let maximum = if matches!(model.reasoning_mode, Mode::GoogleBudget { off: true }) {
+                maximum.min(24576)
+            } else {
+                maximum.min(32768)
+            };
+            cap.effort_budgets = Some(ReasoningEffortBudgets {
+                minimal: 1024,
+                low: 2048.min(maximum),
+                medium: 8192.min(maximum),
+                high: 16384.min(maximum),
+                xhigh: 24576.min(maximum),
+                max: maximum,
+            });
+            let mut values = vec!["minimal", "low", "medium", "high"];
+            if !matches!(model.reasoning_mode, Mode::GoogleBudget { off: false }) {
+                values.insert(0, "none");
+            }
+            (values, Some("medium"))
+        }
+        Mode::Adaptive { off, xhigh } => {
+            cap.min_effort = E::Low;
+            cap.max_effort = E::Max;
+            let mut values = vec!["low", "medium", "high"];
+            if off {
+                values.insert(0, "none");
+            }
+            if xhigh {
+                values.push("xhigh");
+            }
+            values.push("max");
+            (values, Some("high"))
+        }
+        Mode::GoogleLevels { pro } => {
+            cap.min_effort = if pro { E::Low } else { E::Minimal };
+            cap.max_effort = E::High;
+            (
+                if pro {
+                    vec!["LOW", "HIGH"]
+                } else {
+                    vec!["MINIMAL", "LOW", "MEDIUM", "HIGH"]
+                },
+                Some("HIGH"),
+            )
+        }
+    };
+    cap.options = Some(octet_ai::types::ReasoningOptions {
+        values: values.into_iter().map(str::to_owned).collect(),
+        default: default.map(str::to_owned),
+    });
+    Some(cap)
 }
 
 fn has_model_id(catalog: &ModelCatalog, id: &str) -> bool {

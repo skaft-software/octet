@@ -12,8 +12,14 @@ protocol the model advertises; it does not imply that `octet-ai` owns or can run
 an agent team. `ReasoningEffort::Ultra` is ordered above `Max`. OpenAI Responses
 requests backed by V2 delegation map Ultra to the model effort `"max"`; the
 coding product supplies the delegation half only through its observing
-`octet-subagents` extension. Defensive non-V2 routes that advertise Ultra retain
-the provider effort value `"ultra"`.
+`octet-subagents` extension. Explicit Ultra requests without V2 are rejected;
+product selection may normalize persisted choices to a supported ordinary tier.
+
+Optional `ReasoningCapability.options` preserves exact endpoint values and an
+advertised default, including gaps and whether Off exists. Discovery distinguishes
+absent, unknown and explicit metadata; explicit false suppresses route fallbacks.
+Malformed values/defaults are not interpreted as a broader range. Typed wire
+profiles remain endpoint-specific. See [provider thinking](../provider-thinking.md).
 
 `ReasoningMode::Pro` remains deserializable only for older callers and persisted
 sessions. Protocol validation rejects it in strict mode (or reports
@@ -125,7 +131,7 @@ Observed indices use a hash set and are sorted only during final assembly, keepi
 
 ## Validation and compatibility
 
-Strict mode rejects unsupported modalities, reasoning state, tools, malformed schemas, missing/orphan tool results, invalid sampling parameters, and model-limit violations before network I/O. Lossy conversion emits bounded diagnostics and visible placeholders rather than silently changing semantic data. Defensive token-budget and non-native protocol transforms map Ultra to the existing maximum budget; that fallback does not advertise complete Ultra orchestration semantics.
+Strict mode rejects unsupported modalities, reasoning state, tools, malformed schemas, missing/orphan tool results, invalid sampling parameters, and model-limit violations before network I/O. Lossy conversion emits bounded diagnostics and visible placeholders rather than silently changing semantic data. Explicit generation reasoning selections are validated without clamping, even in Lossy mode: silently omitting a rejected Off could enable provider-default thinking. Token budgets must leave answer room within the effective output allowance. Anthropic/Bedrock thinking also rejects incompatible sampling and forced tool choices. Product-level normalization is separate from core wire validation.
 
 ## Authentication and secrets
 

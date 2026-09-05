@@ -328,5 +328,5 @@ if "$script_directory/package-octet-npm.sh" "$version" "$native_directory" "$wor
     exit 1
 fi
 
-"$script_directory/test-octet-npm-install.sh" "$output_directory" "$version"
+"$script_directory/test-octet-npm-install.sh" --fixture "$output_directory" "$version"
 printf 'npm package and launcher tests passed for %s\n' "$version"

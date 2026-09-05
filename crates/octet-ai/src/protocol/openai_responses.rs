@@ -14,7 +14,9 @@ use crate::types::{
     ReasoningConfig, ReasoningMode, ReasoningState, ReasoningStateKind, Request, StopReason,
     ToolCallId, ToolChoice, ToolDef, ToolResultPart, Usage, UserPart,
 };
-use crate::validate::{normalize_reasoning_config, normalize_request_reasoning, validate_request};
+use crate::validate::{
+    normalize_request_reasoning, validate_reasoning_selection, validate_request,
+};
 
 // --- Private OpenAI Responses Request DTOs ---
 
@@ -270,10 +272,15 @@ fn map_responses_reasoning(
     reasoning: &ReasoningConfig,
     _reasoning_mode: ReasoningMode,
 ) -> Option<ResponsesReasoningConfig> {
-    model.spec.capabilities.reasoning.as_ref()?;
-    let effort = match reasoning {
-        ReasoningConfig::Effort(effort) => Some(responses_reasoning_effort(*effort).to_owned()),
-        ReasoningConfig::Off | ReasoningConfig::On | ReasoningConfig::Budget(_) => None,
+    let cap = model.spec.capabilities.reasoning.as_ref()?;
+    let effort = if *reasoning == ReasoningConfig::Effort(crate::types::ReasoningEffort::Ultra)
+        && model.spec.capabilities.agent_delegation == Some(crate::types::AgentDelegation::V2)
+    {
+        // Ultra's exact advertised choice still requires the existing V2 gate;
+        // the model half of that orchestration contract remains max.
+        Some(responses_reasoning_effort(crate::types::ReasoningEffort::Ultra).to_owned())
+    } else {
+        cap.wire_value(reasoning).filter(|value| value != "default")
     };
     let context = model
         .spec
@@ -325,12 +332,19 @@ pub(crate) fn build_compact_request(
     output_format: &OutputFormat,
     cache_retention: CacheRetention,
     session_id: Option<&str>,
-) -> crate::responses::ResponsesCompactRequest {
+) -> Result<crate::responses::ResponsesCompactRequest, AiError> {
+    crate::catalog::validate_model_spec(&model.spec)?;
+    if model.spec.protocol != Protocol::OpenAiResponses {
+        return Err(crate::error::UnsupportedError::ResponsesOptions.into());
+    }
+    if reasoning_mode == ReasoningMode::Pro {
+        return Err(crate::error::UnsupportedError::ReasoningMode.into());
+    }
+    validate_reasoning_selection(reasoning, &model.spec.capabilities, model.spec.protocol)?;
     // The private ChatGPT Codex compact route accepts the same active tool and
     // generation controls as normal Responses calls. Public OpenAI compact
     // currently exposes a narrower schema and may reject these extra fields.
     let responses_lite = model.spec.capabilities.responses_lite;
-    let reasoning = normalize_reasoning_config(reasoning, &model.spec.capabilities);
     let rich_codex_schema = model
         .endpoint
         .runtime
@@ -370,14 +384,14 @@ pub(crate) fn build_compact_request(
         (input, instructions)
     };
     let reasoning = rich_codex_schema
-        .then(|| map_responses_reasoning(model, reasoning.as_ref(), reasoning_mode))
+        .then(|| map_responses_reasoning(model, reasoning, reasoning_mode))
         .flatten()
         .map(|config| serde_json::to_value(config).expect("Responses reasoning serializes"));
     let text = rich_codex_schema
         .then(|| map_responses_text(model, output_format))
         .flatten()
         .map(|config| serde_json::to_value(config).expect("Responses text serializes"));
-    crate::responses::ResponsesCompactRequest {
+    Ok(crate::responses::ResponsesCompactRequest {
         model: model.spec.api_name.clone(),
         input,
         instructions,
@@ -387,7 +401,63 @@ pub(crate) fn build_compact_request(
         text,
         prompt_cache_key: prompt_cache_key_for(cache_retention, session_id),
         session_id: cache_session_id_for(cache_retention, session_id).map(str::to_owned),
+    })
+}
+
+/// Validate the public raw compact DTO before credentials or transport. An
+/// omitted control is provider-default intent, not an explicit Off request.
+pub(crate) fn validate_compact_reasoning(
+    model: &crate::catalog::Model,
+    reasoning: Option<&serde_json::Value>,
+) -> Result<(), AiError> {
+    let Some(reasoning) = reasoning else {
+        return Ok(());
+    };
+    let unsupported = || AiError::Unsupported(crate::error::UnsupportedError::Reasoning);
+    let object = reasoning.as_object().ok_or_else(unsupported)?;
+    if object.contains_key("mode") {
+        return Err(crate::error::UnsupportedError::ReasoningMode.into());
     }
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "effort" | "summary" | "context"))
+    {
+        return Err(unsupported());
+    }
+    let cap = model
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .ok_or_else(unsupported)?;
+    if let Some(effort) = object.get("effort") {
+        let effort = effort.as_str().ok_or_else(unsupported)?;
+        // Compare actual wire spellings, including the V2-only Ultra -> max
+        // mapping. Raw `ultra` is never a substitute for that typed gate.
+        let supported = cap.choices().iter().any(|choice| {
+            validate_reasoning_selection(choice, &model.spec.capabilities, model.spec.protocol)
+                .is_ok()
+                && map_responses_reasoning(model, choice, ReasoningMode::Standard)
+                    .and_then(|r| r.effort)
+                    .as_deref()
+                    == Some(effort)
+        });
+        if !supported {
+            return Err(unsupported());
+        }
+    }
+    if object
+        .get("summary")
+        .is_some_and(|value| !matches!(value.as_str(), Some("auto" | "concise" | "detailed")))
+    {
+        return Err(unsupported());
+    }
+    if object.get("context").is_some_and(|value| {
+        !model.spec.capabilities.responses_lite || value.as_str() != Some("all_turns")
+    }) {
+        return Err(unsupported());
+    }
+    Ok(())
 }
 
 pub(crate) fn responses_affinity_headers(
@@ -1506,7 +1576,7 @@ pub(crate) fn decode_stream_event(
                                 encrypted_content: item.encrypted_content,
                             },
                         },
-                    );
+                    )?;
                 }
             } else if item.r#type == "function_call" {
                 // Some Codex-compatible streams omit both argument deltas and
@@ -1715,6 +1785,7 @@ mod tests {
                 parallel_tool_calls: true,
                 reasoning: if reasoning {
                     Some(crate::types::ReasoningCapability {
+                        options: None,
                         control: crate::types::ReasoningControl::Effort,
                         exposes_text: true,
                         preserves_state: true,
@@ -1815,10 +1886,12 @@ mod tests {
         );
 
         req.temperature = Some(0.7);
+        assert!(build_request(&model, &req).is_err()); // Astra cannot honor Off.
+        req.reasoning = ReasoningConfig::Effort(crate::types::ReasoningEffort::Low);
         let body: serde_json::Value =
             serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
         assert_eq!(body["model"], "gpt-6-astra");
-        assert!(body.get("reasoning").is_none());
+        assert_eq!(body["reasoning"]["effort"], "low");
         for unsupported in ["temperature", "top_p", "logprobs"] {
             assert!(
                 body.get(unsupported).is_none(),
@@ -1827,7 +1900,6 @@ mod tests {
         }
 
         for (effort, expected) in [
-            (crate::types::ReasoningEffort::Minimal, "low"),
             (crate::types::ReasoningEffort::Low, "low"),
             (crate::types::ReasoningEffort::Xhigh, "xhigh"),
             (crate::types::ReasoningEffort::Max, "max"),
@@ -2160,6 +2232,7 @@ mod tests {
             let mut spec = (*model.spec).clone();
             spec.capabilities.reasoning.as_mut().unwrap().max_effort =
                 crate::types::ReasoningEffort::Ultra;
+            spec.capabilities.agent_delegation = Some(crate::types::AgentDelegation::V2);
             model.spec = std::sync::Arc::new(spec);
             let mut req = user_req(
                 vec![UserPart::Text("hi".to_string())],

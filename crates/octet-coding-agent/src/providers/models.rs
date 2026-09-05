@@ -23,6 +23,17 @@ impl StaticOpenAiChatReasoningProfile {
     }
 }
 
+/// Explicit reasoning primitives for the existing static inventory. Based on
+/// Pi 853a80d API encoders; no generated catalog or new availability is imported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StaticReasoningMode {
+    Effort,
+    Budget,
+    Adaptive { off: bool, xhigh: bool },
+    GoogleBudget { off: bool },
+    GoogleLevels { pro: bool },
+}
+
 /// Static model metadata used by multi-protocol providers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StaticModelPreset {
@@ -33,6 +44,7 @@ pub struct StaticModelPreset {
     pub max_output_tokens: u64,
     pub vision: bool,
     pub reasoning: bool,
+    pub(crate) reasoning_mode: StaticReasoningMode,
     /// Lowest portable reasoning effort that the provider accepts.
     pub min_reasoning_effort: ReasoningEffort,
     pub max_reasoning_effort: ReasoningEffort,
@@ -60,10 +72,16 @@ impl StaticModelPreset {
             max_output_tokens,
             vision,
             reasoning,
+            reasoning_mode: StaticReasoningMode::Effort,
             min_reasoning_effort: ReasoningEffort::Minimal,
             max_reasoning_effort,
             openai_chat_reasoning_profile: StaticOpenAiChatReasoningProfile::Standard,
         }
+    }
+
+    const fn with_reasoning_mode(mut self, mode: StaticReasoningMode) -> Self {
+        self.reasoning_mode = mode;
+        self
     }
 
     const fn with_min_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
@@ -87,7 +105,8 @@ pub const MINIMAX_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "MiniMax-M2.7-highspeed",
         "MiniMax-M2.7-highspeed",
@@ -97,7 +116,8 @@ pub const MINIMAX_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "MiniMax-M3",
         "MiniMax-M3",
@@ -107,7 +127,8 @@ pub const MINIMAX_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
 ];
 
 /// Kimi Coding routes carried by the Pi compatibility inventory.
@@ -121,7 +142,8 @@ pub const KIMI_CODING_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "kimi-k2-thinking",
         "Kimi K2 Thinking",
@@ -131,7 +153,8 @@ pub const KIMI_CODING_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
 ];
 
 /// MiniMax China's published Anthropic-compatible routes.
@@ -145,7 +168,8 @@ pub const MINIMAX_CHINA_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "MiniMax-M2.7-highspeed",
         "MiniMax-M2.7 Highspeed",
@@ -155,7 +179,8 @@ pub const MINIMAX_CHINA_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
 ];
 
 /// Vercel AI Gateway starter routes which Pi exposes through Anthropic Messages.
@@ -173,7 +198,11 @@ pub const VERCEL_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Max,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Adaptive {
+        off: true,
+        xhigh: false,
+    }),
     StaticModelPreset::new(
         "openai/gpt-5.4",
         "GPT 5.4",
@@ -183,7 +212,8 @@ pub const VERCEL_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Xhigh,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
 ];
 
 /// OpenCode Zen Go models that use the existing standard or DeepSeek Chat
@@ -309,7 +339,8 @@ pub const XIAOMI_TOKEN_PLAN_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "mimo-v2-omni",
         "MiMo V2 Omni",
@@ -319,7 +350,8 @@ pub const XIAOMI_TOKEN_PLAN_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "mimo-v2-pro",
         "MiMo V2 Pro",
@@ -329,7 +361,8 @@ pub const XIAOMI_TOKEN_PLAN_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "mimo-v2.5",
         "MiMo V2.5",
@@ -339,7 +372,8 @@ pub const XIAOMI_TOKEN_PLAN_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "mimo-v2.5-pro",
         "MiMo V2.5 Pro",
@@ -349,7 +383,8 @@ pub const XIAOMI_TOKEN_PLAN_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
 ];
 
 // Google models available from both Gemini Developer API and Vertex AI. Their
@@ -364,7 +399,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleBudget { off: true }),
     StaticModelPreset::new(
         "gemini-2.5-flash-lite",
         "Gemini 2.5 Flash-Lite",
@@ -374,7 +410,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleBudget { off: true }),
     StaticModelPreset::new(
         "gemini-2.5-pro",
         "Gemini 2.5 Pro",
@@ -384,7 +421,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleBudget { off: false }),
     StaticModelPreset::new(
         "gemini-3-flash-preview",
         "Gemini 3 Flash Preview",
@@ -394,7 +432,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
     StaticModelPreset::new(
         "gemini-3.1-flash-lite",
         "Gemini 3.1 Flash Lite",
@@ -404,7 +443,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
     StaticModelPreset::new(
         "gemini-3.1-pro-preview",
         "Gemini 3.1 Pro Preview",
@@ -414,7 +454,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: true }),
     StaticModelPreset::new(
         "gemini-3.1-pro-preview-customtools",
         "Gemini 3.1 Pro Preview Custom Tools",
@@ -424,7 +465,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: true }),
     StaticModelPreset::new(
         "gemini-3.5-flash",
         "Gemini 3.5 Flash",
@@ -434,7 +476,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
     StaticModelPreset::new(
         "gemini-flash-latest",
         "Gemini Flash Latest",
@@ -444,7 +487,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
     StaticModelPreset::new(
         "gemini-flash-lite-latest",
         "Gemini Flash-Lite Latest",
@@ -454,7 +498,8 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
 ];
 
 // Ported from @earendil-works/pi-ai 0.80.10.
@@ -478,7 +523,11 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Max,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Adaptive {
+        off: false,
+        xhigh: true,
+    }),
     StaticModelPreset::new(
         "claude-haiku-4-5",
         "Claude Haiku 4.5",
@@ -488,7 +537,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "claude-opus-4-1",
         "Claude Opus 4.1",
@@ -498,7 +548,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "claude-opus-4-5",
         "Claude Opus 4.5",
@@ -508,7 +559,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "claude-opus-4-6",
         "Claude Opus 4.6",
@@ -518,7 +570,11 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Max,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Adaptive {
+        off: true,
+        xhigh: false,
+    }),
     StaticModelPreset::new(
         "claude-opus-4-7",
         "Claude Opus 4.7",
@@ -528,7 +584,11 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Max,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Adaptive {
+        off: true,
+        xhigh: true,
+    }),
     StaticModelPreset::new(
         "claude-opus-4-8",
         "Claude Opus 4.8",
@@ -538,7 +598,11 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Max,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Adaptive {
+        off: true,
+        xhigh: true,
+    }),
     StaticModelPreset::new(
         "claude-sonnet-4",
         "Claude Sonnet 4",
@@ -548,7 +612,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "claude-sonnet-4-5",
         "Claude Sonnet 4.5",
@@ -558,7 +623,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "claude-sonnet-4-6",
         "Claude Sonnet 4.6",
@@ -568,7 +634,11 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Max,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Adaptive {
+        off: true,
+        xhigh: false,
+    }),
     StaticModelPreset::new(
         "claude-sonnet-5",
         "Claude Sonnet 5",
@@ -578,7 +648,11 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::Max,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Adaptive {
+        off: true,
+        xhigh: true,
+    }),
     StaticModelPreset::new(
         "deepseek-v4-flash",
         "DeepSeek V4 Flash",
@@ -621,7 +695,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
     StaticModelPreset::new(
         "gemini-3.1-pro",
         "Gemini 3.1 Pro Preview",
@@ -631,7 +706,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: true }),
     StaticModelPreset::new(
         "gemini-3.5-flash",
         "Gemini 3.5 Flash",
@@ -641,7 +717,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
     StaticModelPreset::new(
         "glm-5",
         "GLM-5",
@@ -991,7 +1068,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "qwen3.6-plus",
         "Qwen3.6 Plus",
@@ -1001,7 +1079,8 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
 ];
 
 pub const BEDROCK_MODELS: &[StaticModelPreset] = &[
@@ -1022,9 +1101,10 @@ pub const BEDROCK_MODELS: &[StaticModelPreset] = &[
         200_000,
         8_192,
         true,
-        false,
+        true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "anthropic.claude-sonnet-4-20250514-v1:0",
         "Claude Sonnet 4 (Bedrock)",
@@ -1032,9 +1112,10 @@ pub const BEDROCK_MODELS: &[StaticModelPreset] = &[
         200_000,
         64_000,
         true,
-        false,
+        true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "amazon.nova-pro-v1:0",
         "Amazon Nova Pro (Bedrock)",
@@ -1181,7 +1262,8 @@ pub const CLOUDFLARE_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "claude-sonnet-4-5",
         "Claude Sonnet 4.5",
@@ -1191,7 +1273,8 @@ pub const CLOUDFLARE_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "claude-opus-4-5",
         "Claude Opus 4.5",
@@ -1201,7 +1284,8 @@ pub const CLOUDFLARE_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    )
+    .with_reasoning_mode(StaticReasoningMode::Budget),
     StaticModelPreset::new(
         "gpt-4o",
         "GPT-4o",

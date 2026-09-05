@@ -368,6 +368,7 @@ pub(crate) mod harness {
                 tools: true,
                 parallel_tool_calls: true,
                 reasoning: Some(ReasoningCapability {
+                    options: None,
                     control: ReasoningControl::Effort,
                     exposes_text: true,
                     preserves_state: true,

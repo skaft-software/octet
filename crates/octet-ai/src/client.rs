@@ -1817,6 +1817,10 @@ impl AiClient {
             ))
             .into());
         }
+        crate::protocol::openai_responses::validate_compact_reasoning(
+            model,
+            request.reasoning.as_ref(),
+        )?;
         let rich_codex_schema = model
             .endpoint
             .runtime

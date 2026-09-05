@@ -3981,7 +3981,7 @@ impl CompactionContext<'_> {
                 &OutputFormat::Text,
                 self.cache_retention,
                 Some(self.session_id),
-            );
+            )?;
             let input_tokens = estimate_compact_request_tokens(&request, &replay);
             reserve_request_tokens(
                 self.session,
@@ -5004,7 +5004,7 @@ impl Agent {
             &OutputFormat::Text,
             self.cache_retention,
             Some(&self.session_id),
-        );
+        )?;
         let input_tokens = estimate_compact_request_tokens(&request, &replay);
         reserve_request_tokens(
             &self.session,

@@ -352,6 +352,10 @@ pub enum AgentDelegation {
 /// Model reasoning capabilities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningCapability {
+    /// Exact endpoint-supported selectors. Absence retains the legacy range
+    /// contract; a present list is authoritative, including whether Off exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<ReasoningOptions>,
     /// How the request selects reasoning effort.
     pub control: ReasoningControl,
     /// Whether the model streams reasoning/summary text.
@@ -364,17 +368,203 @@ pub struct ReasoningCapability {
     #[serde(default)]
     pub openai_chat_mode: OpenAiChatReasoningMode,
     /// Lowest reasoning effort this model meaningfully distinguishes.
-    /// Pickers omit lower tiers and request normalization raises lower values
-    /// to this floor.
+    /// Product selection omits lower tiers or normalizes persisted choices to
+    /// this floor. Explicit core requests outside the supported set fail.
     /// Defaults to `Minimal` so models that support the full portable range
     /// work without catalog changes.
     #[serde(default = "default_min_effort")]
     pub min_effort: ReasoningEffort,
-    /// Highest reasoning effort this model accepts. A request above this tier is
-    /// clamped down rather than emitting a value the backend would reject.
+    /// Highest reasoning effort this model accepts. Explicit core requests
+    /// outside the supported set fail before transport. Product pickers normalize.
     /// Defaults to `High` so models predating `xhigh`/`max` never advertise them.
     #[serde(default = "default_max_effort")]
     pub max_effort: ReasoningEffort,
+}
+
+/// Provenance of newly discovered reasoning metadata. Historical manual
+/// entries omit this field; absence never authorizes rewriting their intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMetadataSource {
+    /// Inventory contained no reasoning facts.
+    Absent,
+    /// Capability was mentioned but no usable control contract was supplied.
+    Unknown,
+    /// Inventory explicitly supplied a positive or negative assertion.
+    Explicit,
+}
+
+/// Exact selectors from a model/endpoint contract, not a universal effort enum.
+/// Wire spelling and provider default survive discovery, caches, and selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningOptions {
+    /// Bounded, unique portable selectors in provider order. `default` means
+    /// parameter-free On for the existing custom none/default contract only.
+    pub values: Vec<String>,
+    /// Exact advertised default, if any; it must occur in `values`.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+impl ReasoningConfig {
+    /// Decode a supported selector without conflating Off with Minimal.
+    pub fn from_provider_value(value: &str) -> Option<Self> {
+        Some(match value.to_ascii_lowercase().as_str() {
+            "none" | "off" | "disabled" | "false" => Self::Off,
+            "default" | "on" | "enabled" | "true" => Self::On,
+            "minimal" | "min" => Self::Effort(ReasoningEffort::Minimal),
+            "low" => Self::Effort(ReasoningEffort::Low),
+            "medium" | "med" => Self::Effort(ReasoningEffort::Medium),
+            "high" => Self::Effort(ReasoningEffort::High),
+            "xhigh" | "x-high" | "extra_high" => Self::Effort(ReasoningEffort::Xhigh),
+            "max" => Self::Effort(ReasoningEffort::Max),
+            "ultra" => Self::Effort(ReasoningEffort::Ultra),
+            _ => return None,
+        })
+    }
+
+    /// Canonical spelling for legacy effort contracts.
+    pub fn provider_value(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Off => "none",
+            Self::On => "default",
+            Self::Effort(ReasoningEffort::Minimal) => "minimal",
+            Self::Effort(ReasoningEffort::Low) => "low",
+            Self::Effort(ReasoningEffort::Medium) => "medium",
+            Self::Effort(ReasoningEffort::High) => "high",
+            Self::Effort(ReasoningEffort::Xhigh) => "xhigh",
+            Self::Effort(ReasoningEffort::Max) => "max",
+            Self::Effort(ReasoningEffort::Ultra) => "ultra",
+            Self::Budget(_) => return None,
+        })
+    }
+}
+
+impl ReasoningOptions {
+    /// Validate bounded exact choices. Unknown, duplicate semantic values and
+    /// dangling defaults are malformed, not permission to use a guessed range.
+    pub fn is_valid(&self) -> bool {
+        let choices = self.choices();
+        !self.values.is_empty()
+            && self.values.len() <= 9
+            && choices.len() == self.values.len()
+            && choices
+                .iter()
+                .enumerate()
+                .all(|(i, c)| !choices[..i].contains(c))
+            && self
+                .default
+                .as_ref()
+                .is_none_or(|v| self.values.contains(v))
+    }
+
+    /// Portable selections in the advertised order.
+    pub fn choices(&self) -> Vec<ReasoningConfig> {
+        self.values
+            .iter()
+            .filter_map(|v| ReasoningConfig::from_provider_value(v))
+            .collect()
+    }
+
+    /// Exact wire spelling of a supported selection.
+    pub fn value(&self, selection: &ReasoningConfig) -> Option<&str> {
+        self.values
+            .iter()
+            .find(|v| ReasoningConfig::from_provider_value(v).as_ref() == Some(selection))
+            .map(String::as_str)
+    }
+}
+
+impl ReasoningCapability {
+    fn exact_values(&self) -> Option<(&[String], Option<&str>)> {
+        if let Some(options) = &self.options {
+            return Some((&options.values, options.default.as_deref()));
+        }
+        match &self.openai_chat_mode {
+            OpenAiChatReasoningMode::ProviderValues {
+                values, default, ..
+            } => Some((values, default.as_deref())),
+            _ => None,
+        }
+    }
+
+    /// One shared choice set for product selection and strict core validation.
+    pub fn choices(&self) -> Vec<ReasoningConfig> {
+        if self.control == ReasoningControl::AlwaysOn {
+            return vec![ReasoningConfig::On];
+        }
+        if let Some((values, _)) = self.exact_values() {
+            return values
+                .iter()
+                .filter_map(|v| ReasoningConfig::from_provider_value(v))
+                .collect();
+        }
+        if self.control == ReasoningControl::Toggle {
+            return vec![ReasoningConfig::Off, ReasoningConfig::On];
+        }
+        let mut choices = vec![ReasoningConfig::Off];
+        choices.extend(
+            [
+                ReasoningEffort::Minimal,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh,
+                ReasoningEffort::Max,
+                ReasoningEffort::Ultra,
+            ]
+            .into_iter()
+            .filter(|e| *e >= self.min_effort && *e <= self.max_effort)
+            .map(ReasoningConfig::Effort),
+        );
+        choices
+    }
+
+    /// Whether this exact selection can be represented. Budget limits are
+    /// checked separately against the request's output allowance.
+    pub fn supports(&self, selection: &ReasoningConfig) -> bool {
+        if matches!(selection, ReasoningConfig::Budget(_)) {
+            return self.control == ReasoningControl::TokenBudget;
+        }
+        self.choices().contains(selection)
+    }
+
+    /// Endpoint default, otherwise the lowest supported enabled selection.
+    pub fn default_selection(&self) -> Option<ReasoningConfig> {
+        self.exact_values()
+            .and_then(|(_, default)| default.and_then(ReasoningConfig::from_provider_value))
+            .or_else(|| {
+                self.choices()
+                    .into_iter()
+                    .find(|c| *c != ReasoningConfig::Off)
+            })
+            .or_else(|| self.choices().into_iter().next())
+    }
+
+    /// Exact wire value. `default` deliberately remains visible to the encoder,
+    /// which decides whether its typed profile represents On by omission.
+    pub fn wire_value(&self, selection: &ReasoningConfig) -> Option<String> {
+        if let Some((values, _)) = self.exact_values() {
+            return values
+                .iter()
+                .find(|v| ReasoningConfig::from_provider_value(v).as_ref() == Some(selection))
+                .cloned();
+        }
+        selection.provider_value().map(str::to_owned)
+    }
+
+    /// Resolve a portable effort to this model's explicitly configured budget.
+    pub fn budget(&self, effort: ReasoningEffort) -> Option<u64> {
+        let b = self.effort_budgets?;
+        Some(match effort {
+            ReasoningEffort::Minimal => b.minimal,
+            ReasoningEffort::Low => b.low,
+            ReasoningEffort::Medium => b.medium,
+            ReasoningEffort::High => b.high,
+            ReasoningEffort::Xhigh => b.xhigh,
+            ReasoningEffort::Max | ReasoningEffort::Ultra => b.max,
+        })
+    }
 }
 
 /// Default floor for [`ReasoningCapability::min_effort`] when unspecified.
@@ -396,6 +586,22 @@ pub enum OpenAiChatReasoningMode {
     Standard,
     /// DeepSeek's explicit `thinking` toggle and `reasoning_content` replay.
     DeepSeekThinking,
+    /// DeepSeek thinking toggle without an independently advertised effort field.
+    DeepSeekToggle,
+    /// Cerebras effort/system-role contract and assistant `reasoning` replay.
+    Cerebras,
+    /// Qwen's top-level boolean control (not a chat-template option).
+    QwenEnableThinking,
+    /// Explicit local-server chat-template control, never inferred from a name.
+    QwenChatTemplate {
+        /// Retain reasoning on subsequent turns in servers supporting this option.
+        preserve_thinking: bool,
+    },
+    /// Together's nested boolean control with separately advertised effort.
+    Together {
+        /// Whether the endpoint also supports `reasoning_effort`.
+        effort: bool,
+    },
     /// OpenRouter's provider-neutral reasoning object (`reasoning.effort`).
     OpenRouter,
     /// Reasoning effort is supported, but the system instruction must remain a
@@ -786,13 +992,24 @@ pub enum AssistantPart {
 /// a property of text or tool calls: providers can attach continuation data to
 /// several unrelated wire part kinds, and preserving its position is required
 /// for replay.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum ProviderPartMetadata {
     /// Google Gemini/Vertex opaque thought signature for the following part.
     GoogleThoughtSignature {
         /// Base64-encoded provider continuation value.
         signature: String,
     },
+}
+
+impl std::fmt::Debug for ProviderPartMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GoogleThoughtSignature { .. } => formatter
+                .debug_struct("GoogleThoughtSignature")
+                .field("signature", &"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 /// Execution outcome of a tool call.
@@ -900,14 +1117,14 @@ pub struct ReasoningState {
 }
 
 /// Protocol-specific reasoning metadata shapes.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum ReasoningStateKind {
-    /// Anthropic `thinking` signature.
+    /// Anthropic `thinking` signature, including Bedrock reasoningText.
     AnthropicSignature {
         /// Opaque signature value.
         signature: String,
     },
-    /// Anthropic `redacted_thinking` block.
+    /// Anthropic `redacted_thinking` or base64 Bedrock redactedContent block.
     AnthropicRedacted {
         /// Opaque redacted data.
         data: String,
@@ -919,6 +1136,28 @@ pub enum ReasoningStateKind {
         /// Opaque encrypted reasoning block.
         encrypted_content: Option<String>,
     },
+}
+
+// Opaque replay state must survive serialization unchanged, but it is not
+// diagnostic content. This also protects Debug on enclosing Response/messages.
+impl std::fmt::Debug for ReasoningStateKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AnthropicSignature { .. } => formatter
+                .debug_struct("AnthropicSignature")
+                .field("signature", &"[REDACTED]")
+                .finish(),
+            Self::AnthropicRedacted { .. } => formatter
+                .debug_struct("AnthropicRedacted")
+                .field("data", &"[REDACTED]")
+                .finish(),
+            Self::OpenAiReasoning { .. } => formatter
+                .debug_struct("OpenAiReasoning")
+                .field("item_id", &"[REDACTED]")
+                .field("encrypted_content", &"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 /// Inline media bytes serialize as base64 strings. serde_json renders raw
@@ -1403,6 +1642,7 @@ mod tests {
                 tools: true,
                 parallel_tool_calls: true,
                 reasoning: Some(ReasoningCapability {
+                    options: None,
                     control: ReasoningControl::Effort,
                     exposes_text: true,
                     preserves_state: false,
@@ -1633,5 +1873,51 @@ mod tests {
             let serialized = serde_json::to_string(&stop).unwrap();
             assert_eq!(serialized, format!("\"{}\"", stop.as_canonical()));
         }
+    }
+    #[test]
+    fn opaque_reasoning_debug_redacts_without_changing_serialized_replay() {
+        for kind in [
+            ReasoningStateKind::AnthropicSignature {
+                signature: "OPAQUE_SIGNATURE".into(),
+            },
+            ReasoningStateKind::AnthropicRedacted {
+                data: "OPAQUE_REDACTED".into(),
+            },
+            ReasoningStateKind::OpenAiReasoning {
+                item_id: Some("OPAQUE_ID".into()),
+                encrypted_content: Some("OPAQUE_ENCRYPTED".into()),
+            },
+        ] {
+            let state = ReasoningState {
+                protocol: Protocol::BedrockConverse,
+                model: ModelId("fixture".into()),
+                kind,
+            };
+            assert!(!format!("{state:?}").contains("OPAQUE_"));
+            let encoded = serde_json::to_string(&state).unwrap();
+            assert!(encoded.contains("OPAQUE_"));
+            let decoded: ReasoningState = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+        }
+    }
+    #[test]
+    fn review_regression_google_metadata_debug_is_opaque_but_replay_is_exact() {
+        let metadata = ProviderPartMetadata::GoogleThoughtSignature {
+            signature: "SYNTHETIC_OPAQUE_MARKER".into(),
+        };
+        assert!(!format!("{metadata:?}").contains("SYNTHETIC_OPAQUE_MARKER"));
+        let message = AssistantMessage {
+            model: ModelId("fixture".into()),
+            protocol: Protocol::GoogleGenerativeAi,
+            content: vec![
+                AssistantPart::ProviderMetadata(metadata),
+                AssistantPart::Text("answer".into()),
+            ],
+        };
+        assert!(!format!("{message:?}").contains("SYNTHETIC_OPAQUE_MARKER"));
+        let encoded = serde_json::to_string(&message).unwrap();
+        assert!(encoded.contains("SYNTHETIC_OPAQUE_MARKER"));
+        let replay: AssistantMessage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(serde_json::to_string(&replay).unwrap(), encoded);
     }
 }

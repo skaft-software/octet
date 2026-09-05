@@ -802,13 +802,264 @@ fn model_id_implies_vision(id: &str) -> bool {
         || id.contains("pixtral")
 }
 
+/// Shared bounded metadata ingress for hosted discovery, custom bootstrap and
+/// guided setup. A malformed assertion fails, absent and unknown stay distinct,
+/// and explicit false wins before any route-scoped fallback is consulted.
+#[derive(Clone, Debug)]
+struct DiscoveredReasoning {
+    source: octet_ai::types::ReasoningMetadataSource,
+    supported: Option<bool>,
+    control: Option<ReasoningControl>,
+    options: Option<octet_ai::types::ReasoningOptions>,
+    profile: Option<OpenAiChatReasoningMode>,
+}
+
+fn decode_reasoning_metadata(entry: &serde_json::Value) -> anyhow::Result<DiscoveredReasoning> {
+    use octet_ai::types::{ReasoningMetadataSource as Source, ReasoningOptions};
+    let mut fields = Vec::new();
+    for metadata in [
+        Some(entry),
+        entry.get("top_provider"),
+        entry.get("provider"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for name in ["reasoning", "supports_reasoning", "reasoning_effort"] {
+            if let Some(value) = metadata.get(name) {
+                fields.push(value);
+            }
+            if let Some(value) = metadata.get("capabilities").and_then(|c| c.get(name)) {
+                fields.push(value);
+            }
+        }
+    }
+    let mut result = DiscoveredReasoning {
+        source: Source::Absent,
+        supported: None,
+        control: None,
+        options: None,
+        profile: None,
+    };
+    if fields
+        .iter()
+        .any(|v| metadata_capability_flag(v) == Some(false))
+    {
+        result.source = Source::Explicit;
+        result.supported = Some(false);
+        return Ok(result);
+    }
+    for field in fields {
+        result.source = Source::Unknown;
+        if field.is_null() {
+            continue;
+        }
+        anyhow::ensure!(
+            field.is_boolean() || field.is_object(),
+            "malformed reasoning metadata"
+        );
+        if let Some(supported) = metadata_capability_flag(field) {
+            result.supported = Some(supported);
+            result.source = Source::Explicit;
+        }
+        if let Some(control) = field.get("control") {
+            let control = match control.as_str() {
+                Some("effort" | "levels") => ReasoningControl::Effort,
+                Some("toggle" | "binary") => ReasoningControl::Toggle,
+                Some("always_on") => ReasoningControl::AlwaysOn,
+                Some("token_budget") => ReasoningControl::TokenBudget,
+                Some(_) => {
+                    result.source = Source::Unknown;
+                    result.supported = None;
+                    return Ok(result);
+                }
+                None => anyhow::bail!("malformed reasoning control"),
+            };
+            result.control = Some(control);
+        }
+        if let Some(values) = field.get("values") {
+            result.options = Some(decode_reasoning_options(values, field.get("default"))?);
+        } else if field.get("default").is_some() {
+            anyhow::bail!("reasoning default requires exact values");
+        }
+        if let Some(profile) = field.get("profile") {
+            result.profile =
+                Some(serde_json::from_value(profile.clone()).context("invalid reasoning profile")?);
+        }
+    }
+    if let Some(values) = entry
+        .get("supported_reasoning_levels")
+        .or_else(|| entry.get("supported_reasoning_efforts"))
+    {
+        result.options = Some(decode_reasoning_options(
+            values,
+            entry
+                .get("default_reasoning_level")
+                .or_else(|| entry.get("default_reasoning_effort")),
+        )?);
+        result.source = Source::Explicit;
+        result.supported = Some(true);
+        result.control = Some(ReasoningControl::Effort);
+    }
+    if let Some(options) = entry.get("reasoning_options") {
+        let options = options
+            .as_array()
+            .filter(|o| o.len() <= 3)
+            .ok_or_else(|| anyhow::anyhow!("malformed reasoning options"))?;
+        for option in options {
+            match option.get("type").and_then(serde_json::Value::as_str) {
+                Some("effort") => {
+                    anyhow::ensure!(
+                        result.options.is_none(),
+                        "conflicting reasoning option sources"
+                    );
+                    result.options = Some(decode_reasoning_options(
+                        option
+                            .get("values")
+                            .ok_or_else(|| anyhow::anyhow!("missing effort values"))?,
+                        option.get("default"),
+                    )?);
+                    result.control = Some(ReasoningControl::Effort);
+                }
+                Some("toggle" | "budget_tokens") => {
+                    if result.options.is_none() {
+                        result.source = Source::Unknown;
+                    }
+                }
+                _ => anyhow::bail!("malformed reasoning options"),
+            }
+        }
+    }
+    if result.options.is_none() {
+        if let Some(parameters) = entry
+            .get("supported_parameters")
+            .and_then(serde_json::Value::as_array)
+        {
+            if parameters.iter().any(|p| {
+                matches!(
+                    p.as_str(),
+                    Some("reasoning_effort" | "reasoning.effort" | "reasoning")
+                )
+            }) {
+                result.supported = Some(true);
+                result.source = Source::Explicit;
+                if parameters
+                    .iter()
+                    .any(|p| matches!(p.as_str(), Some("reasoning_effort" | "reasoning.effort")))
+                {
+                    result.control = Some(ReasoningControl::Effort);
+                }
+            }
+        }
+    }
+    if let Some(options) = &result.options {
+        let choices = options.choices();
+        let has_effort = choices
+            .iter()
+            .any(|v| matches!(v, ReasoningConfig::Effort(_)));
+        let inferred = if has_effort {
+            ReasoningControl::Effort
+        } else {
+            ReasoningControl::Toggle
+        };
+        anyhow::ensure!(
+            result.control.is_none_or(|c| c == inferred),
+            "reasoning control disagrees with exact values"
+        );
+        result.control = Some(inferred);
+        result.supported = Some(choices.iter().any(|v| *v != ReasoningConfig::Off));
+        result.source = Source::Explicit;
+    }
+    // Binary controls are semantic, not an effort range.
+    if result.control == Some(ReasoningControl::Toggle) && result.options.is_none() {
+        result.options = Some(ReasoningOptions {
+            values: vec!["false".into(), "true".into()],
+            default: None,
+        });
+    }
+    Ok(result)
+}
+
+fn decode_reasoning_options(
+    values: &serde_json::Value,
+    default: Option<&serde_json::Value>,
+) -> anyhow::Result<octet_ai::types::ReasoningOptions> {
+    let values = values
+        .as_array()
+        .filter(|a| !a.is_empty() && a.len() <= 9)
+        .ok_or_else(|| anyhow::anyhow!("invalid reasoning values"))?;
+    let values = values
+        .iter()
+        .map(|v| {
+            v.as_str().or_else(|| {
+                v.get("effort")
+                    .or_else(|| v.get("value"))
+                    .and_then(serde_json::Value::as_str)
+            })
+        })
+        .map(|v| {
+            v.map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("invalid reasoning value"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let default = default
+        .filter(|d| !d.is_null())
+        .map(|d| {
+            d.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("invalid reasoning default"))
+        })
+        .transpose()?;
+    let options = octet_ai::types::ReasoningOptions { values, default };
+    anyhow::ensure!(
+        options.is_valid(),
+        "unknown, duplicate or inconsistent reasoning values/default"
+    );
+    Ok(options)
+}
+
+/// Only genuine inventory labels cross the display-name boundary. A synthetic
+/// id fallback would obscure builtin spelling and cannot later be distinguished
+/// from a user's intentional raw-looking label.
+pub(crate) fn discovered_display_name(entry: &serde_json::Value, id: &str) -> Option<String> {
+    ["display_name", "name"]
+        .into_iter()
+        .filter_map(|key| entry.get(key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .find(|name| !name.is_empty() && *name != id)
+        .map(str::to_owned)
+}
+
+pub(crate) fn apply_discovered_reasoning(
+    entry: &serde_json::Value,
+    model: &mut crate::auth::custom::CustomModel,
+) -> anyhow::Result<()> {
+    let metadata = decode_reasoning_metadata(entry)?;
+    model.reasoning_source = Some(metadata.source);
+    model.reasoning = metadata.source != octet_ai::types::ReasoningMetadataSource::Unknown
+        && metadata.supported.unwrap_or(false);
+    model.reasoning_configurable = metadata.control != Some(ReasoningControl::AlwaysOn);
+    model.reasoning_profile = metadata.profile;
+    model.reasoning_uses_system_message = true;
+    if let Some(options) = metadata.options {
+        model.reasoning_values = options.values;
+        model.reasoning_default = options.default.unwrap_or_default();
+    }
+    // Generic custom reasoning=true is an explicit endpoint assertion and keeps
+    // the legacy effort contract. Hosted boolean metadata is handled separately.
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct DiscoveredApiModel {
     id: String,
     context_window: Option<u64>,
     max_output_tokens: Option<u64>,
     tools: bool,
+    #[cfg(test)]
     reasoning: bool,
+    reasoning_metadata: DiscoveredReasoning,
+    display_name: Option<String>,
     vision: bool,
     audio: bool,
 }
@@ -898,40 +1149,12 @@ fn model_metadata_supports_tools(entry: &serde_json::Value) -> bool {
 
 /// Hosted inventories must explicitly advertise reasoning controls. This keeps
 /// unverified OpenAI-compatible model names from enabling unsupported requests.
+#[cfg(test)]
 fn model_metadata_supports_reasoning(entry: &serde_json::Value) -> bool {
-    for metadata in [
-        Some(entry),
-        entry.get("top_provider"),
-        entry.get("provider"),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        for name in ["supports_reasoning", "reasoning", "reasoning_effort"] {
-            if let Some(supported) = metadata.get(name).and_then(metadata_capability_flag) {
-                return supported;
-            }
-        }
-        if let Some(capabilities) = metadata.get("capabilities") {
-            for name in ["reasoning", "reasoning_effort"] {
-                if let Some(supported) = capabilities.get(name).and_then(metadata_capability_flag) {
-                    return supported;
-                }
-            }
-        }
-        if let Some(parameters) = metadata
-            .get("supported_parameters")
-            .and_then(serde_json::Value::as_array)
-        {
-            return parameters.iter().any(|parameter| {
-                matches!(
-                    parameter.as_str(),
-                    Some("reasoning" | "reasoning_effort" | "reasoning.effort")
-                )
-            });
-        }
-    }
-    false
+    decode_reasoning_metadata(entry)
+        .ok()
+        .and_then(|m| m.supported)
+        .unwrap_or(false)
 }
 
 /// A custom endpoint is an explicit user-selected OpenAI-compatible runtime.
@@ -1013,7 +1236,10 @@ fn api_models_from_response(body: &serde_json::Value) -> anyhow::Result<Vec<Disc
                         .and_then(|provider| positive_u64(provider, &["max_completion_tokens"]))
                 }),
             tools: custom_model_metadata_supports_tools(entry),
+            #[cfg(test)]
             reasoning: model_metadata_supports_reasoning(entry),
+            reasoning_metadata: decode_reasoning_metadata(entry)?,
+            display_name: discovered_display_name(entry, id),
             vision,
             audio,
         });
@@ -1092,37 +1318,207 @@ fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> boo
     declaration.id == "openai" && gpt_6_family_model(id)
 }
 
+fn effort_capability(
+    mode: OpenAiChatReasoningMode,
+    values: &[&str],
+    default: Option<&str>,
+) -> ReasoningCapability {
+    let efforts = values
+        .iter()
+        .filter_map(|v| match ReasoningConfig::from_provider_value(v) {
+            Some(ReasoningConfig::Effort(e)) => Some(e),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ReasoningCapability {
+        options: Some(octet_ai::types::ReasoningOptions {
+            values: values.iter().map(|v| (*v).to_owned()).collect(),
+            default: default.map(str::to_owned),
+        }),
+        control: if efforts.is_empty() {
+            ReasoningControl::Toggle
+        } else {
+            ReasoningControl::Effort
+        },
+        exposes_text: true,
+        preserves_state: true,
+        effort_budgets: None,
+        openai_chat_mode: mode,
+        min_effort: efforts
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(octet_ai::ReasoningEffort::Minimal),
+        max_effort: efforts
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(octet_ai::ReasoningEffort::High),
+    }
+}
+
+/// Source facts are provider-scoped and only applied to an actual inventory
+/// entry. This does not inject availability, infer a Qwen server, or set prices.
+fn sparse_route_reasoning(
+    declaration: &ProviderDeclaration,
+    protocol: Protocol,
+    id: &str,
+) -> Option<ReasoningCapability> {
+    use OpenAiChatReasoningMode as Mode;
+    if declaration.id == "cerebras" && protocol == Protocol::OpenAiChat {
+        // https://inference-docs.cerebras.ai/capabilities/reasoning
+        // Official public documentation, not a live /models capture.
+        return Some(match id {
+            "qwen-3.8-27b" => effort_capability(
+                Mode::Cerebras,
+                &["none", "low", "medium", "high"],
+                Some("high"),
+            ),
+            "gpt-oss-120b" => {
+                effort_capability(Mode::Cerebras, &["low", "medium", "high"], Some("medium"))
+            }
+            // Dedicated/trial only: never inserted unless actually discovered.
+            "gemma-4-31b" => effort_capability(
+                Mode::Cerebras,
+                &["none", "low", "medium", "high"],
+                Some("none"),
+            ),
+            "kimi-k2.7-code" => {
+                let mut c = effort_capability(Mode::Cerebras, &["default"], Some("default"));
+                c.control = ReasoningControl::AlwaysOn;
+                c
+            }
+            _ => return None,
+        });
+    }
+    if declaration.id == "deepseek" && protocol == Protocol::OpenAiChat {
+        return Some(match id {
+            "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4" => effort_capability(
+                Mode::DeepSeekThinking,
+                &["none", "high", "xhigh"],
+                Some("high"),
+            ),
+            "deepseek-reasoner" => {
+                let mut c =
+                    effort_capability(Mode::DeepSeekThinking, &["default"], Some("default"));
+                c.control = ReasoningControl::AlwaysOn;
+                c
+            }
+            _ => return None,
+        });
+    }
+    // Preserve the documented public Responses sparse fallback without leaking
+    // a name-based control assertion to Azure deployments or other providers.
+    if declaration.id == "openai" && protocol == Protocol::OpenAiResponses {
+        if id == "gpt-6-astra" {
+            return Some(effort_capability(
+                Mode::Standard,
+                &["low", "medium", "high", "xhigh", "max"],
+                Some("low"),
+            ));
+        }
+        if id.starts_with("gpt-5")
+            || public_openai_gpt_6_model(declaration, id)
+            || matches!(id, "o1" | "o3" | "o3-mini" | "o4-mini")
+        {
+            return Some(effort_capability(
+                Mode::Standard,
+                &["low", "medium", "high"],
+                Some("medium"),
+            ));
+        }
+    }
+    None
+}
+
+fn discovered_reasoning_capability(
+    declaration: &ProviderDeclaration,
+    protocol: Protocol,
+    id: &str,
+    metadata: &DiscoveredReasoning,
+) -> Option<ReasoningCapability> {
+    if metadata.supported == Some(false) {
+        return None;
+    }
+    let known = sparse_route_reasoning(declaration, protocol, id);
+    if metadata.source == octet_ai::types::ReasoningMetadataSource::Unknown {
+        return None;
+    }
+    if metadata.options.is_none() && metadata.control.is_none() {
+        if known.is_some() {
+            return known;
+        }
+        // OpenRouter explicitly advertises its own nested reasoning primitive.
+        if declaration.id != "openrouter" || metadata.supported != Some(true) {
+            return None;
+        }
+    }
+    if metadata.supported != Some(true) {
+        return known;
+    }
+    let mode = match protocol {
+        Protocol::OpenAiChat => match declaration.id {
+            "cerebras" => OpenAiChatReasoningMode::Cerebras,
+            "deepseek" => {
+                if metadata.control == Some(ReasoningControl::Toggle) {
+                    OpenAiChatReasoningMode::DeepSeekToggle
+                } else {
+                    OpenAiChatReasoningMode::DeepSeekThinking
+                }
+            }
+            "openrouter" => OpenAiChatReasoningMode::OpenRouter,
+            "together" => OpenAiChatReasoningMode::Together {
+                effort: metadata.control == Some(ReasoningControl::Effort),
+            },
+            // An explicit exact effort schema is an endpoint assertion. Boolean
+            // metadata alone above is not enough to select an arbitrary profile.
+            _ => OpenAiChatReasoningMode::SystemMessage,
+        },
+        Protocol::OpenAiResponses => OpenAiChatReasoningMode::Standard,
+        // A Messages boolean/effort inventory does not prove adaptive thinking.
+        Protocol::AnthropicMessages | Protocol::GoogleGenerativeAi | Protocol::BedrockConverse => {
+            return known
+        }
+    };
+    let mut capability = known.unwrap_or_else(|| {
+        effort_capability(
+            mode.clone(),
+            &["none", "minimal", "low", "medium", "high"],
+            None,
+        )
+    });
+    capability.openai_chat_mode = mode;
+    if let Some(options) = &metadata.options {
+        let values = options
+            .values
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        capability = effort_capability(
+            capability.openai_chat_mode,
+            &values,
+            options.default.as_deref(),
+        );
+    }
+    if let Some(control) = metadata.control {
+        capability.control = control;
+    }
+    if capability.control == ReasoningControl::AlwaysOn {
+        capability.options = Some(octet_ai::types::ReasoningOptions {
+            values: vec!["default".into()],
+            default: Some("default".into()),
+        });
+    }
+    Some(capability)
+}
+
+#[cfg(test)]
 fn discovered_model_supports_reasoning(
     declaration: &ProviderDeclaration,
     protocol: Protocol,
     id: &str,
 ) -> bool {
-    let id = id.to_ascii_lowercase();
-    let id = id.rsplit('/').next().unwrap_or(&id);
-    match protocol {
-        Protocol::OpenAiResponses => {
-            id.starts_with("gpt-5")
-                || public_openai_gpt_6_model(declaration, id)
-                || id.starts_with("codex-")
-                || id
-                    .strip_prefix('o')
-                    .and_then(|rest| rest.as_bytes().first())
-                    .is_some_and(u8::is_ascii_digit)
-        }
-        // OpenAI-compatible providers also expose reasoning models through
-        // Chat Completions.  This must not be gated on the Responses codec:
-        // Cerebras Gemma 4, for example, accepts reasoning_effort on Chat.
-        Protocol::OpenAiChat => {
-            id.contains("gemma-4")
-                || id.contains("qwen3")
-                || id.contains("deepseek")
-                || id.contains("reason")
-                || id.contains("r1")
-        }
-        Protocol::AnthropicMessages | Protocol::BedrockConverse | Protocol::GoogleGenerativeAi => {
-            false
-        }
-    }
+    sparse_route_reasoning(declaration, protocol, id).is_some()
 }
 
 fn discovered_preset_binding<'a>(
@@ -1172,8 +1568,12 @@ fn register_openai_compatible_models(
             continue;
         }
         let protocol = route.protocol;
-        let reasoning =
-            model.reasoning || discovered_model_supports_reasoning(declaration, protocol, api_name);
+        let reasoning = discovered_reasoning_capability(
+            declaration,
+            protocol,
+            api_name,
+            &model.reasoning_metadata,
+        );
         let context_window = model.context_window.unwrap_or(128_000);
         let max_output_tokens = model
             .max_output_tokens
@@ -1200,21 +1600,13 @@ fn register_openai_compatible_models(
             catalog,
             declaration,
             api_name,
-            None,
+            model.display_name.clone(),
             Capabilities {
                 input_modalities,
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
                 parallel_tool_calls: model.tools && protocol != Protocol::OpenAiChat,
-                reasoning: reasoning.then_some(ReasoningCapability {
-                    control: ReasoningControl::Effort,
-                    exposes_text: true,
-                    preserves_state: true,
-                    effort_budgets: None,
-                    openai_chat_mode: OpenAiChatReasoningMode::Standard,
-                    min_effort: octet_ai::ReasoningEffort::Minimal,
-                    max_effort: octet_ai::ReasoningEffort::High,
-                }),
+                reasoning,
                 responses_lite: false,
                 agent_delegation: None,
                 structured_output: protocol != Protocol::OpenAiChat,
@@ -1380,6 +1772,7 @@ fn register_deepseek_v4_pro(
             tools: true,
             parallel_tool_calls: false,
             reasoning: Some(ReasoningCapability {
+                options: None,
                 control: ReasoningControl::Effort,
                 exposes_text: true,
                 preserves_state: false,
@@ -1426,14 +1819,18 @@ fn register_discovered_deepseek_models(
         if has_api_model(catalog, route.endpoint_id, api_name) {
             continue;
         }
-        let supports_reasoning =
-            api_name.contains("reason") || api_name.contains("r1") || api_name.contains("v4");
+        let reasoning = discovered_reasoning_capability(
+            declaration,
+            route.protocol,
+            api_name,
+            &model.reasoning_metadata,
+        );
         let (context_window, max_output_tokens) = deepseek_discovered_limits(&model);
         crate::providers::register_discovered_model(
             catalog,
             declaration,
             api_name,
-            None,
+            model.display_name.clone(),
             Capabilities {
                 input_modalities: if model.vision {
                     ModalitySet::none().with(octet_ai::Modality::Image)
@@ -1443,15 +1840,7 @@ fn register_discovered_deepseek_models(
                 output_modalities: ModalitySet::none(),
                 tools: true,
                 parallel_tool_calls: false,
-                reasoning: supports_reasoning.then_some(ReasoningCapability {
-                    control: ReasoningControl::Effort,
-                    exposes_text: true,
-                    preserves_state: false,
-                    effort_budgets: None,
-                    openai_chat_mode: OpenAiChatReasoningMode::DeepSeekThinking,
-                    min_effort: octet_ai::ReasoningEffort::Minimal,
-                    max_effort: octet_ai::ReasoningEffort::High,
-                }),
+                reasoning,
                 responses_lite: false,
                 agent_delegation: None,
                 structured_output: false,
@@ -1647,15 +2036,7 @@ fn openrouter_models_from_response(
         }
         let supports_tools = model_metadata_supports_tools(entry);
 
-        let supports_reasoning = entry
-            .get("supported_parameters")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|parameters| {
-                parameters.iter().any(|parameter| {
-                    matches!(parameter.as_str(), Some("reasoning" | "reasoning.effort"))
-                })
-            });
-
+        let reasoning_metadata = decode_reasoning_metadata(entry)?;
         let Some(route) = declaration.route_for_model(api_name) else {
             continue;
         };
@@ -1663,22 +2044,19 @@ fn openrouter_models_from_response(
             id: ModelId(format!("{}/{api_name}", declaration.id)),
             endpoint: EndpointId(route.endpoint_id.into()),
             api_name: api_name.into(),
-            display_name: None,
+            display_name: discovered_display_name(entry, api_name),
             protocol: route.protocol,
             capabilities: Capabilities {
                 input_modalities,
                 output_modalities: ModalitySet::none(),
                 tools: supports_tools,
                 parallel_tool_calls: false,
-                reasoning: supports_reasoning.then_some(ReasoningCapability {
-                    control: ReasoningControl::Effort,
-                    exposes_text: true,
-                    preserves_state: false,
-                    effort_budgets: None,
-                    openai_chat_mode: OpenAiChatReasoningMode::OpenRouter,
-                    min_effort: octet_ai::ReasoningEffort::Minimal,
-                    max_effort: octet_ai::ReasoningEffort::High,
-                }),
+                reasoning: discovered_reasoning_capability(
+                    declaration,
+                    route.protocol,
+                    api_name,
+                    &reasoning_metadata,
+                ),
                 responses_lite: false,
                 agent_delegation: None,
                 structured_output: false,
@@ -1815,20 +2193,7 @@ fn register_azure_openai(
             output_modalities: ModalitySet::none(),
             tools: true,
             parallel_tool_calls: true,
-            reasoning: discovered_model_supports_reasoning(
-                declaration,
-                route.protocol,
-                &deployment,
-            )
-            .then_some(ReasoningCapability {
-                control: ReasoningControl::Effort,
-                exposes_text: true,
-                preserves_state: true,
-                effort_budgets: None,
-                openai_chat_mode: OpenAiChatReasoningMode::Standard,
-                min_effort: octet_ai::ReasoningEffort::Minimal,
-                max_effort: octet_ai::ReasoningEffort::High,
-            }),
+            reasoning: sparse_route_reasoning(declaration, route.protocol, &deployment),
             responses_lite: false,
             agent_delegation: None,
             structured_output: true,
@@ -2364,13 +2729,6 @@ fn custom_reasoning_effort(value: &str) -> Option<octet_ai::ReasoningEffort> {
     }
 }
 
-fn custom_reasoning_is_off(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "none" | "off" | "disabled" | "false"
-    )
-}
-
 fn custom_reasoning_is_on(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -2378,41 +2736,18 @@ fn custom_reasoning_is_on(value: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn discovered_custom_reasoning(entry: &serde_json::Value) -> (bool, Vec<String>, String) {
-    let reported = entry
-        .get("capabilities")
-        .and_then(|capabilities| capabilities.get("reasoning"));
-    let values = reported
-        .and_then(|reasoning| reasoning.get("values"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let default = reported
-        .and_then(|reasoning| reasoning.get("default"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let enabled = match reported {
-        Some(metadata) => {
-            metadata
-                .get("supported")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-                && (values.is_empty() || values.iter().any(|value| !custom_reasoning_is_off(value)))
-        }
-        None => entry
-            .get("supported_parameters")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|parameters| {
-                parameters.iter().any(|parameter| {
-                    matches!(parameter.as_str(), Some("reasoning" | "reasoning_effort"))
-                })
-            }),
-    };
-    (enabled, values, default)
+    let metadata = decode_reasoning_metadata(entry).unwrap();
+    let options = metadata.options;
+    (
+        metadata.supported.unwrap_or(false),
+        options
+            .as_ref()
+            .map(|o| o.values.clone())
+            .unwrap_or_default(),
+        options.and_then(|o| o.default).unwrap_or_default(),
+    )
 }
 
 fn custom_reasoning_capability(
@@ -2421,16 +2756,19 @@ fn custom_reasoning_capability(
     if !model.reasoning {
         return None;
     }
-    let fixed_mode = if model.reasoning_uses_system_message {
-        OpenAiChatReasoningMode::SystemMessage
-    } else {
-        OpenAiChatReasoningMode::Standard
-    };
+    let fixed_mode = model.reasoning_profile.clone().unwrap_or({
+        if model.reasoning_uses_system_message {
+            OpenAiChatReasoningMode::SystemMessage
+        } else {
+            OpenAiChatReasoningMode::Standard
+        }
+    });
     if !model.reasoning_configurable {
         // Some providers think by default but reject every reasoning control
         // parameter. Keep that fact visible to octet as a single `on` option while
         // retaining a parameter-free request path.
         return Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::AlwaysOn,
             exposes_text: true,
             preserves_state: false,
@@ -2451,6 +2789,15 @@ fn custom_reasoning_capability(
         .reasoning_values
         .iter()
         .any(|value| custom_reasoning_is_on(value))
+        || matches!(
+            model.reasoning_profile,
+            Some(
+                OpenAiChatReasoningMode::DeepSeekToggle
+                    | OpenAiChatReasoningMode::QwenEnableThinking
+                    | OpenAiChatReasoningMode::QwenChatTemplate { .. }
+                    | OpenAiChatReasoningMode::Together { effort: false }
+            )
+        )
     {
         ReasoningControl::Toggle
     } else if model.reasoning_values.is_empty() {
@@ -2470,7 +2817,8 @@ fn custom_reasoning_capability(
         .copied()
         .max()
         .unwrap_or(octet_ai::ReasoningEffort::High);
-    let openai_chat_mode = if model.reasoning_values.is_empty() {
+    let openai_chat_mode = if model.reasoning_values.is_empty() || model.reasoning_profile.is_some()
+    {
         fixed_mode
     } else {
         OpenAiChatReasoningMode::ProviderValues {
@@ -2480,6 +2828,10 @@ fn custom_reasoning_capability(
         }
     };
     Some(ReasoningCapability {
+        options: (!model.reasoning_values.is_empty()).then(|| octet_ai::types::ReasoningOptions {
+            values: model.reasoning_values.clone(),
+            default: (!model.reasoning_default.is_empty()).then(|| model.reasoning_default.clone()),
+        }),
         control,
         exposes_text: true,
         preserves_state: false,
@@ -2609,6 +2961,8 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
         vision: false,
         structured_output: false,
         reasoning: true,
+        reasoning_profile: None,
+        reasoning_source: Some(octet_ai::types::ReasoningMetadataSource::Explicit),
         reasoning_configurable,
         reasoning_values,
         reasoning_default,
@@ -2626,7 +2980,13 @@ fn apply_known_custom_model_defaults(
     }
     models
         .into_iter()
-        .map(|model| apple_foundation_model_defaults(&model.api_name).unwrap_or(model))
+        .map(|model| {
+            if model.reasoning_source == Some(octet_ai::types::ReasoningMetadataSource::Absent) {
+                apple_foundation_model_defaults(&model.api_name).unwrap_or(model)
+            } else {
+                model
+            }
+        })
         .collect()
 }
 
@@ -2948,6 +3308,22 @@ fn register_custom_openai_provider(
 
     let cache = provider.cache.clone().unwrap_or_default();
     for model in &models {
+        if !model.reasoning_values.is_empty() {
+            anyhow::ensure!(
+                octet_ai::types::ReasoningOptions {
+                    values: model.reasoning_values.clone(),
+                    default: (!model.reasoning_default.is_empty())
+                        .then(|| model.reasoning_default.clone())
+                }
+                .is_valid(),
+                "invalid custom reasoning values/default"
+            );
+        } else {
+            anyhow::ensure!(
+                model.reasoning_default.is_empty(),
+                "custom reasoning default requires exact values"
+            );
+        }
         let configured_display =
             (!model.display_name.trim().is_empty()).then(|| model.display_name.trim().to_owned());
         let input_mods = if model.vision {
@@ -3132,27 +3508,36 @@ fn discover_models_blocking(
             positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
                 .unwrap_or(16_384)
                 .min(ctx);
-        let (reasoning, reasoning_values, reasoning_default) = discovered_custom_reasoning(entry);
-
-        models.push(CustomModel {
+        let mut model = CustomModel {
             api_name: id.to_string(),
-            display_name: id.to_string(),
+            display_name: discovered_display_name(entry, id).unwrap_or_default(),
             context_window: ctx,
             max_output_tokens,
             tools: custom_model_metadata_supports_tools(entry),
             parallel_tool_calls: supports("parallel_tool_calls"),
             vision,
             structured_output: supports("response_format"),
-            reasoning,
-            reasoning_configurable: reasoning,
-            reasoning_values,
-            reasoning_default,
+            reasoning: false,
+            reasoning_configurable: true,
+            reasoning_values: Vec::new(),
+            reasoning_default: String::new(),
+            reasoning_profile: None,
+            reasoning_source: None,
             // Auto-discovered local models are not guaranteed to implement
             // OpenAI's newer `developer` role. vLLM Qwen chat templates, in
             // particular, reject it while still accepting `system`.
             reasoning_uses_system_message: true,
             pricing: None,
-        });
+        };
+        if apply_discovered_reasoning(entry, &mut model).is_err() {
+            if report_errors {
+                crate::output::stderr!(
+                    "warning: model discovery contains invalid reasoning metadata"
+                );
+            }
+            continue;
+        }
+        models.push(model);
     }
     apply_known_custom_model_defaults(cred, models)
 }
@@ -3230,7 +3615,7 @@ const CODEX_MAX_OUTPUT_TOKENS: u64 = 128_000;
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet deliberately budgets requests against Pi's 272K working window. Smaller
 /// advertised windows remain authoritative.
-const CODEX_MODEL_CACHE_VERSION: u8 = 4;
+const CODEX_MODEL_CACHE_VERSION: u8 = 5;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
@@ -3254,6 +3639,9 @@ pub(crate) fn effective_compaction_threshold_fraction(config: &Config, model: &M
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DiscoveredCodexModel {
     id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    reasoning_options: octet_ai::types::ReasoningOptions,
     context_window: u64,
     max_context_window: u64,
     max_output_tokens: u64,
@@ -3297,59 +3685,57 @@ fn positive_u64(entry: &serde_json::Value, names: &[&str]) -> Option<u64> {
     })
 }
 
-fn reasoning_effort(value: &str) -> Option<octet_ai::ReasoningEffort> {
-    match value.to_ascii_lowercase().as_str() {
-        "minimal" | "none" => Some(octet_ai::ReasoningEffort::Minimal),
-        "low" => Some(octet_ai::ReasoningEffort::Low),
-        "medium" => Some(octet_ai::ReasoningEffort::Medium),
-        "high" => Some(octet_ai::ReasoningEffort::High),
-        "xhigh" | "extra_high" => Some(octet_ai::ReasoningEffort::Xhigh),
-        "max" => Some(octet_ai::ReasoningEffort::Max),
-        "ultra" => Some(octet_ai::ReasoningEffort::Ultra),
-        _ => None,
+fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::ReasoningOptions {
+    // Sparse Codex metadata cannot establish Off or Ultra. Keep the existing
+    // ordinary fallback range, without inventing a disabling wire value.
+    let floor = codex_min_effort(model_id);
+    let ceiling = codex_max_effort(model_id);
+    let values = ["minimal", "low", "medium", "high", "xhigh", "max"].into_iter()
+        .filter(|v| matches!(ReasoningConfig::from_provider_value(v), Some(ReasoningConfig::Effort(e)) if e >= floor && e <= ceiling))
+        .map(str::to_owned).collect();
+    octet_ai::types::ReasoningOptions {
+        values,
+        default: None,
+    }
+}
+
+fn strip_codex_ultra(options: &mut octet_ai::types::ReasoningOptions) {
+    options.values.retain(|v| {
+        ReasoningConfig::from_provider_value(v)
+            != Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra))
+    });
+    if options
+        .default
+        .as_ref()
+        .is_some_and(|d| !options.values.contains(d))
+    {
+        options.default = options.values.first().cloned();
     }
 }
 
 fn codex_reasoning_range(
-    entry: &serde_json::Value,
-    model_id: &str,
+    options: &octet_ai::types::ReasoningOptions,
+    id: &str,
 ) -> (octet_ai::ReasoningEffort, octet_ai::ReasoningEffort) {
-    let fallback = (codex_min_effort(model_id), codex_max_effort(model_id));
-    let Some(levels) = entry
-        .get("supported_reasoning_levels")
-        .or_else(|| entry.get("supported_reasoning_efforts"))
-    else {
-        return fallback;
-    };
-    let Some(levels) = levels.as_array().filter(|levels| !levels.is_empty()) else {
-        return fallback;
-    };
-    let mut efforts = Vec::with_capacity(levels.len());
-    for level in levels {
-        let Some(value) = level.as_str().or_else(|| {
-            level
-                .get("effort")
-                .or_else(|| level.get("value"))
-                .and_then(serde_json::Value::as_str)
-        }) else {
-            return fallback;
-        };
-        let Some(effort) = reasoning_effort(value) else {
-            return fallback;
-        };
-        efforts.push(effort);
-    }
+    let efforts = options
+        .choices()
+        .into_iter()
+        .filter_map(|c| match c {
+            ReasoningConfig::Effort(e) => Some(e),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     (
         efforts
             .iter()
             .copied()
             .min()
-            .expect("non-empty validated reasoning levels"),
+            .unwrap_or(codex_min_effort(id)),
         efforts
             .iter()
             .copied()
             .max()
-            .expect("non-empty validated reasoning levels"),
+            .unwrap_or(codex_max_effort(id)),
     )
 }
 
@@ -3418,19 +3804,33 @@ fn codex_models_from_response(
             .and_then(serde_json::Value::as_str)
             .is_some_and(|version| version.eq_ignore_ascii_case("v2"))
             .then_some(AgentDelegation::V2);
-        let (mut min_effort, mut max_effort) = codex_reasoning_range(entry, id);
+        let metadata = decode_reasoning_metadata(entry)?;
+        let mut reasoning_options = if metadata.supported == Some(false) {
+            octet_ai::types::ReasoningOptions {
+                values: vec!["none".into()],
+                default: Some("none".into()),
+            }
+        } else {
+            metadata
+                .options
+                .unwrap_or_else(|| codex_fallback_reasoning_options(id))
+        };
         if agent_delegation != Some(AgentDelegation::V2) {
-            // Ultra is valid only when the live inventory explicitly advertises
-            // it alongside V2 delegation. Never promote an advertised `max`.
-            max_effort = max_effort.min(octet_ai::ReasoningEffort::Max);
-            min_effort = min_effort.min(max_effort);
+            strip_codex_ultra(&mut reasoning_options);
         }
+        anyhow::ensure!(
+            reasoning_options.is_valid(),
+            "Codex inventory has no usable reasoning choices"
+        );
+        let (min_effort, max_effort) = codex_reasoning_range(&reasoning_options, id);
         let responses_lite = entry
             .get("use_responses_lite")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         models.push(DiscoveredCodexModel {
             id: id.to_owned(),
+            display_name: discovered_display_name(entry, id),
+            reasoning_options,
             context_window,
             max_context_window,
             max_output_tokens,
@@ -3573,6 +3973,9 @@ fn load_codex_model_cache(
             || model.max_context_window < model.context_window
             || model.max_output_tokens == 0
             || model.max_output_tokens > model.context_window
+            || !model.reasoning_options.is_valid()
+            || codex_reasoning_range(&model.reasoning_options, &model.id)
+                != (model.min_effort, model.max_effort)
             || model.min_effort > model.max_effort
             || (model.max_effort == octet_ai::ReasoningEffort::Ultra
                 && model.agent_delegation != Some(AgentDelegation::V2))
@@ -3589,9 +3992,11 @@ fn conservative_offline_codex_models(
     for model in &mut models {
         model.responses_lite = false;
         model.agent_delegation = None;
-        model.max_effort = model.max_effort.min(octet_ai::ReasoningEffort::Max);
-        model.min_effort = model.min_effort.min(model.max_effort);
+        strip_codex_ultra(&mut model.reasoning_options);
+        (model.min_effort, model.max_effort) =
+            codex_reasoning_range(&model.reasoning_options, &model.id);
     }
+    models.retain(|m| m.reasoning_options.is_valid());
     models
 }
 
@@ -3604,6 +4009,8 @@ fn fallback_codex_models(
             let (limits, max_context_window) = codex_model_limits(model_id, plan);
             DiscoveredCodexModel {
                 id: (*model_id).to_owned(),
+                display_name: None,
+                reasoning_options: codex_fallback_reasoning_options(model_id),
                 context_window: limits.context_window,
                 max_context_window,
                 max_output_tokens: limits.max_output_tokens,
@@ -3791,7 +4198,7 @@ fn register_openai_codex(
             id: catalog_id,
             endpoint: EndpointId(route.endpoint_id.into()),
             api_name: model.id,
-            display_name: None,
+            display_name: model.display_name,
             protocol: route.protocol,
             capabilities: Capabilities {
                 input_modalities: if supports_image_input {
@@ -3803,6 +4210,7 @@ fn register_openai_codex(
                 tools: true,
                 parallel_tool_calls: true,
                 reasoning: Some(ReasoningCapability {
+                    options: Some(model.reasoning_options),
                     control: ReasoningControl::Effort,
                     exposes_text: true,
                     preserves_state: true,

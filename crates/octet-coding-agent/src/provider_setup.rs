@@ -988,7 +988,8 @@ fn models_from_json(value: &serde_json::Value) -> Result<Vec<CustomModel>, Probe
         };
         let mut model = CustomModel {
             api_name: id.to_owned(),
-            display_name: id.to_owned(),
+            display_name: crate::app::bootstrap::discovered_display_name(entry, id)
+                .unwrap_or_default(),
             ..CustomModel::default()
         };
         if let Some(context_window) = positive_u64(
@@ -1007,6 +1008,8 @@ fn models_from_json(value: &serde_json::Value) -> Result<Vec<CustomModel>, Probe
         {
             model.max_output_tokens = max_output_tokens.min(model.context_window);
         }
+        crate::app::bootstrap::apply_discovered_reasoning(entry, &mut model)
+            .map_err(|_| ProbeFailure::InvalidDiscovery)?;
         models.push(model);
     }
     models.sort_by(|left, right| left.api_name.cmp(&right.api_name));

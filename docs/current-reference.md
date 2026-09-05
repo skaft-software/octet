@@ -387,6 +387,15 @@ If an endpoint cannot provide a useful `GET /v1/models`, set
 Protect the credential file with `chmod 600`. Use `--offline` to skip optional
 model discovery during startup; inference still reaches the selected endpoint.
 
+### Thinking controls
+
+Thinking choices follow the selected endpoint's metadata, not just the model
+family. Exact choices retain gaps and defaults; `off` is not `minimal`, and an
+always-on model exposes only `on`. CLI/config selections may normalize to a
+supported choice; explicit core generation requests reject unsupported controls,
+including in Lossy mode. See [provider thinking](provider-thinking.md) for native
+wire profiles, continuation behavior, and current qualification limits.
+
 ### Cold-start lifecycle feedback
 
 Set `lifecycle_feedback` to `true` only for an OpenAI-compatible endpoint that

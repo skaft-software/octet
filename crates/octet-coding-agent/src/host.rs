@@ -1434,6 +1434,7 @@ fn register_inline_model(
             tools: true,
             parallel_tool_calls: true,
             reasoning: request.supports_reasoning.then_some(ReasoningCapability {
+                options: None,
                 control: ReasoningControl::Effort,
                 exposes_text: true,
                 preserves_state: protocol == Protocol::OpenAiResponses,

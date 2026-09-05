@@ -172,7 +172,12 @@ pub fn resolve_model_display_name(
     {
         return provider_name.to_owned();
     }
-    derive_model_display_name(canonical_id)
+    let derived = derive_model_display_name(provider_name);
+    if !provider_name.is_empty() && derived != provider_name {
+        derived
+    } else {
+        derive_model_display_name(canonical_id)
+    }
 }
 
 /// Conservative fallback for canonical IDs. Only recognized model families

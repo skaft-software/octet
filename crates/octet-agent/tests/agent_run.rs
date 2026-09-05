@@ -954,7 +954,10 @@ fn build_agent_from_session(
 fn scripted_model_with_reasoning(uri: &str) -> Model {
     let base = scripted_model(uri);
     let mut spec = (*base.spec).clone();
+    // The highest advertised thinking budget must leave room for an answer.
+    spec.limits.max_output_tokens = 16_384;
     spec.capabilities.reasoning = Some(ReasoningCapability {
+        options: None,
         control: ReasoningControl::TokenBudget,
         exposes_text: true,
         preserves_state: true,
@@ -5230,16 +5233,10 @@ async fn torn_session_and_crash_recovery_still_green() {
 // `octet_ai::Request` instead of hardcoding `ReasoningConfig::Off`. These tests
 // pin that behavior end-to-end against the real request-build + SSE path.
 
-/// `thinking` in the outgoing Anthropic body proves the request carried a
-/// non-off reasoning budget; its absence proves the opposite.
-fn request_has_thinking(request: &serde_json::Value) -> bool {
-    request.get("thinking").is_some()
-}
-
 #[tokio::test]
-async fn reasoning_off_omits_thinking_from_the_request() {
-    // A reasoning-capable model with reasoning explicitly OFF must not send a
-    // `thinking` block: the config, not the capability, gates it.
+async fn reasoning_off_sends_explicit_disabled_thinking() {
+    // Off must override a thinking-capable provider's default explicitly,
+    // without an enabled budget or inferred Minimal selection.
     let (mut agent, server, _path, _dirs) =
         reasoning_harness(vec![text_turn("hi")], ReasoningConfig::Off, true).await;
 
@@ -5248,10 +5245,9 @@ async fn reasoning_off_omits_thinking_from_the_request() {
 
     let requests = wire_requests(&server).await;
     assert_eq!(requests.len(), 1);
-    assert!(
-        !request_has_thinking(&requests[0]),
-        "reasoning off must omit `thinking`: {}",
-        requests[0]
+    assert_eq!(
+        requests[0]["thinking"],
+        serde_json::json!({"type": "disabled"})
     );
 }
 

@@ -443,20 +443,6 @@ impl ResponseBuilder {
         Some(value)
     }
 
-    /// Removes a temporary field while transferring its reservation to the
-    /// retained canonical response content budget.
-    pub(crate) fn take_temp_buffer_as_content(
-        &mut self,
-        key: &str,
-    ) -> Result<Option<String>, AiError> {
-        let Some(value) = self.temp_buffers.remove(key) else {
-            return Ok(None);
-        };
-        self.release_buffered_content(value.len());
-        self.add_content_bytes(value.len())?;
-        Ok(Some(value))
-    }
-
     /// Selects whether the OpenAI Chat codec may buffer ambiguous bare JSON.
     pub(crate) fn set_buffer_ambiguous_compatibility_content(&mut self, enabled: bool) {
         self.buffer_ambiguous_compatibility_content = enabled;
@@ -573,9 +559,45 @@ impl ResponseBuilder {
         self.stop_reason = Some(reason);
     }
 
-    /// Feeds reasoning continuation state.
-    pub(crate) fn set_reasoning_state(&mut self, index: usize, state: ReasoningState) {
+    /// Replaces retained reasoning continuation state within the response budget.
+    /// A rejected replacement leaves both the prior state and accounting intact.
+    pub(crate) fn set_reasoning_state(
+        &mut self,
+        index: usize,
+        state: ReasoningState,
+    ) -> Result<(), AiError> {
+        fn retained_bytes(state: &ReasoningState) -> Option<usize> {
+            match &state.kind {
+                crate::types::ReasoningStateKind::AnthropicSignature { signature } => {
+                    Some(signature.len())
+                }
+                crate::types::ReasoningStateKind::AnthropicRedacted { data } => Some(data.len()),
+                crate::types::ReasoningStateKind::OpenAiReasoning {
+                    item_id,
+                    encrypted_content,
+                } => item_id
+                    .as_ref()
+                    .map_or(0, String::len)
+                    .checked_add(encrypted_content.as_ref().map_or(0, String::len)),
+            }
+        }
+
+        let old = self
+            .reasoning_states
+            .get(&index)
+            .map_or(Some(0), retained_bytes)
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        let new = retained_bytes(&state).ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        let aggregate = (self.aggregate_content_bytes - old)
+            .checked_add(new)
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        aggregate
+            .checked_add(self.buffered_content_bytes)
+            .filter(|total| *total <= MAX_RESPONSE_CONTENT_BYTES)
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        self.aggregate_content_bytes = aggregate;
         self.reasoning_states.insert(index, state);
+        Ok(())
     }
 
     fn apply_normalized_tool_arguments(
@@ -1215,6 +1237,180 @@ mod tests {
             }),
             Err(AiError::Decode(DecodeError::ResponseTooLarge))
         ));
+    }
+
+    fn opaque_reasoning_fixtures(payload: &str) -> Vec<(ReasoningState, usize)> {
+        use crate::types::ReasoningStateKind;
+        [
+            (
+                Protocol::AnthropicMessages,
+                ReasoningStateKind::AnthropicSignature {
+                    signature: payload.into(),
+                },
+                payload.len(),
+            ),
+            (
+                Protocol::AnthropicMessages,
+                ReasoningStateKind::AnthropicRedacted {
+                    data: payload.into(),
+                },
+                payload.len(),
+            ),
+            (
+                Protocol::BedrockConverse,
+                ReasoningStateKind::AnthropicSignature {
+                    signature: payload.into(),
+                },
+                payload.len(),
+            ),
+            (
+                Protocol::BedrockConverse,
+                ReasoningStateKind::AnthropicRedacted {
+                    data: payload.into(),
+                },
+                payload.len(),
+            ),
+            (
+                Protocol::OpenAiResponses,
+                ReasoningStateKind::OpenAiReasoning {
+                    item_id: Some(payload.into()),
+                    encrypted_content: None,
+                },
+                payload.len(),
+            ),
+            (
+                Protocol::OpenAiResponses,
+                ReasoningStateKind::OpenAiReasoning {
+                    item_id: None,
+                    encrypted_content: Some(payload.into()),
+                },
+                payload.len(),
+            ),
+            (
+                Protocol::OpenAiResponses,
+                ReasoningStateKind::OpenAiReasoning {
+                    item_id: Some(payload.into()),
+                    encrypted_content: Some(payload.into()),
+                },
+                payload.len() * 2,
+            ),
+        ]
+        .into_iter()
+        .map(|(protocol, kind, bytes)| {
+            (
+                ReasoningState {
+                    protocol,
+                    model: ModelId("m".into()),
+                    kind,
+                },
+                bytes,
+            )
+        })
+        .collect()
+    }
+
+    #[test]
+    fn opaque_reasoning_bounds_replacement_and_error_preservation() {
+        for (((state, bytes), (larger, _)), (empty, _)) in opaque_reasoning_fixtures("é")
+            .into_iter()
+            .zip(opaque_reasoning_fixtures("éx"))
+            .zip(opaque_reasoning_fixtures(""))
+        {
+            let mut builder = ResponseBuilder::new(state.model.clone(), state.protocol, None);
+            // Synthetic existing content keeps boundary tests small.
+            builder
+                .add_content_bytes(MAX_RESPONSE_CONTENT_BYTES - bytes - 3)
+                .unwrap();
+            builder.reserve_buffered_content(3).unwrap();
+            builder.set_reasoning_state(0, state.clone()).unwrap();
+            assert_eq!(
+                builder.aggregate_content_bytes,
+                MAX_RESPONSE_CONTENT_BYTES - 3
+            );
+            let retained = serde_json::to_value(&builder.reasoning_states[&0]).unwrap();
+
+            // Repeating the same state must not accumulate its retained bytes.
+            builder.set_reasoning_state(0, state.clone()).unwrap();
+            assert_eq!(
+                builder.aggregate_content_bytes,
+                MAX_RESPONSE_CONTENT_BYTES - 3
+            );
+            for (index, replacement) in [(0, larger), (1, state.clone())] {
+                assert!(matches!(
+                    builder.set_reasoning_state(index, replacement),
+                    Err(AiError::Decode(DecodeError::ResponseTooLarge))
+                ));
+                assert_eq!(
+                    builder.aggregate_content_bytes,
+                    MAX_RESPONSE_CONTENT_BYTES - 3
+                );
+                assert_eq!(builder.buffered_content_bytes, 3);
+                assert_eq!(builder.reasoning_states.len(), 1);
+                assert_eq!(
+                    serde_json::to_value(&builder.reasoning_states[&0]).unwrap(),
+                    retained
+                );
+            }
+            builder.set_reasoning_state(0, empty).unwrap();
+            assert_eq!(
+                builder.aggregate_content_bytes,
+                MAX_RESPONSE_CONTENT_BYTES - bytes - 3
+            );
+            builder.set_reasoning_state(0, state).unwrap();
+            assert_eq!(
+                builder.aggregate_content_bytes,
+                MAX_RESPONSE_CONTENT_BYTES - 3
+            );
+            assert!(matches!(
+                builder.add_content_bytes(1),
+                Err(AiError::Decode(DecodeError::ResponseTooLarge))
+            ));
+        }
+    }
+
+    #[test]
+    fn opaque_reasoning_cross_variant_replacement_releases_old_bytes() {
+        let mut builder =
+            ResponseBuilder::new(ModelId("m".into()), Protocol::OpenAiResponses, None);
+        builder.add_content_bytes(7).unwrap();
+        for (state, bytes) in opaque_reasoning_fixtures("opaque") {
+            builder.set_reasoning_state(0, state).unwrap();
+            assert_eq!(builder.aggregate_content_bytes, 7 + bytes);
+        }
+        builder
+            .set_reasoning_state(
+                0,
+                ReasoningState {
+                    model: ModelId("m".into()),
+                    protocol: Protocol::OpenAiResponses,
+                    kind: crate::types::ReasoningStateKind::OpenAiReasoning {
+                        item_id: None,
+                        encrypted_content: None,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(builder.aggregate_content_bytes, 7);
+    }
+
+    #[test]
+    fn opaque_reasoning_temp_buffer_transfer_is_counted_once() {
+        for (state, bytes) in opaque_reasoning_fixtures("opaque") {
+            let mut builder = ResponseBuilder::new(state.model.clone(), state.protocol, None);
+            builder
+                .add_content_bytes(MAX_RESPONSE_CONTENT_BYTES - bytes)
+                .unwrap();
+            builder
+                .replace_temp_buffer("opaque".into(), "x".repeat(bytes))
+                .unwrap();
+            assert_eq!(builder.buffered_content_bytes, bytes);
+            assert_eq!(builder.take_temp_buffer("opaque").unwrap().len(), bytes);
+            assert_eq!(builder.buffered_content_bytes, 0);
+            builder.set_reasoning_state(0, state.clone()).unwrap();
+            builder.set_reasoning_state(0, state).unwrap();
+            assert_eq!(builder.aggregate_content_bytes, MAX_RESPONSE_CONTENT_BYTES);
+            assert!(builder.temp_buffers.is_empty());
+        }
     }
 
     #[tokio::test]

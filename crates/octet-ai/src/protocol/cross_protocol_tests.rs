@@ -43,6 +43,7 @@ fn make_model(
             parallel_tool_calls: true,
             reasoning: if reasoning {
                 Some(ReasoningCapability {
+                    options: None,
                     control: if protocol == Protocol::AnthropicMessages {
                         ReasoningControl::TokenBudget
                     } else {

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use octet_agent::{Agent, DurableGoalStore, GoalDriver};
 use octet_ai::{
-    AgentDelegation, AiClient, Model, ModelCatalog, ModelId, OpenAiChatReasoningMode,
-    ReasoningConfig, ReasoningControl, ReasoningEffort, ReasoningMode,
+    AgentDelegation, AiClient, Model, ModelCatalog, ModelId, ReasoningConfig, ReasoningControl,
+    ReasoningEffort, ReasoningMode,
 };
 
 use crate::config::Config;
@@ -44,7 +44,7 @@ pub fn model_supports_ultra(model: &Model) -> bool {
         .as_ref()
         .is_some_and(|capability| {
             capability.control == ReasoningControl::Effort
-                && capability.max_effort >= ReasoningEffort::Ultra
+                && capability.supports(&ReasoningConfig::Effort(ReasoningEffort::Ultra))
         })
         && model
             .spec
@@ -55,92 +55,72 @@ pub fn model_supports_ultra(model: &Model) -> bool {
             })
 }
 
-fn reasoning_effort_ceiling(model: &Model, advertised: ReasoningEffort) -> ReasoningEffort {
-    if advertised == ReasoningEffort::Ultra && !model_supports_ultra(model) {
-        ReasoningEffort::Max
-    } else {
-        advertised
-    }
-}
-
 /// Translate a portable thinking selection to the target model's advertised
 /// reasoning control mechanism.
 pub fn thinking_to_reasoning(
     level: ThinkingLevel,
     model: &Model,
 ) -> anyhow::Result<ReasoningConfig> {
-    let capability = match &model.spec.capabilities.reasoning {
-        Some(capability) => capability,
-        None => {
-            // Model doesn't support thinking — fall back to Off rather than
-            // crashing, so a stale persisted thinking config doesn't lock
-            // the user out after switching to a simpler model.
-            return Ok(ReasoningConfig::Off);
-        }
-    };
-    if capability.control == ReasoningControl::AlwaysOn {
-        return Ok(ReasoningConfig::On);
-    }
-    if level == ThinkingLevel::Off {
+    let Some(capability) = &model.spec.capabilities.reasoning else {
         return Ok(ReasoningConfig::Off);
-    }
-    if capability.control == ReasoningControl::Toggle {
-        return Ok(ReasoningConfig::On);
-    }
-    // Clamp the requested tier down to the model's advertised ceiling so we
-    // never emit an effort the backend would reject (mirrors pi's
-    // `clampThinkingLevel`).  Also raise it to the model's floor: a request
-    // below what the model distinguishes is silently upgraded rather than
-    // rejected.
-    let requested = if level == ThinkingLevel::On {
-        capability.min_effort
+    };
+    let requested = match level {
+        ThinkingLevel::Off => ReasoningConfig::Off,
+        ThinkingLevel::On => ReasoningConfig::On,
+        _ => ReasoningConfig::Effort(level.to_effort()),
+    };
+    let choices = capability
+        .choices()
+        .into_iter()
+        .filter(|c| {
+            *c != ReasoningConfig::Effort(ReasoningEffort::Ultra) || model_supports_ultra(model)
+        })
+        .collect::<Vec<_>>();
+    let selected = if choices.contains(&requested) {
+        requested
+    } else if let ReasoningConfig::Effort(effort) = requested {
+        choices
+            .iter()
+            .filter_map(|c| match c {
+                ReasoningConfig::Effort(e) if *e <= effort => Some(*e),
+                _ => None,
+            })
+            .max()
+            .map(ReasoningConfig::Effort)
+            .or_else(|| {
+                choices
+                    .iter()
+                    .find(|c| **c != ReasoningConfig::Off)
+                    .cloned()
+            })
+            .or_else(|| choices.first().cloned())
+            .ok_or_else(|| anyhow::anyhow!("{} has no usable reasoning choice", model.spec.id.0))?
     } else {
-        level.to_effort()
+        capability
+            .default_selection()
+            .filter(|c| {
+                choices.contains(c)
+                    && (requested != ReasoningConfig::On || *c != ReasoningConfig::Off)
+            })
+            .or_else(|| {
+                choices
+                    .iter()
+                    .find(|c| **c != ReasoningConfig::Off)
+                    .cloned()
+            })
+            .or_else(|| choices.first().cloned())
+            .ok_or_else(|| anyhow::anyhow!("{} has no usable reasoning choice", model.spec.id.0))?
     };
-    let ceiling = reasoning_effort_ceiling(model, capability.max_effort);
-    let effort = clamp_effort(raise_effort(requested, capability.min_effort), ceiling);
-    let effort = match &capability.openai_chat_mode {
-        OpenAiChatReasoningMode::ProviderValues { values, .. }
-            if capability.control == ReasoningControl::Effort =>
-        {
-            let supported = values
-                .iter()
-                .filter_map(|value| match value.trim().to_ascii_lowercase().as_str() {
-                    "minimal" | "min" => Some(ReasoningEffort::Minimal),
-                    "low" => Some(ReasoningEffort::Low),
-                    "medium" | "med" => Some(ReasoningEffort::Medium),
-                    "high" => Some(ReasoningEffort::High),
-                    "xhigh" | "x-high" | "extra_high" => Some(ReasoningEffort::Xhigh),
-                    "max" => Some(ReasoningEffort::Max),
-                    "ultra" => Some(ReasoningEffort::Ultra),
-                    _ => None,
-                })
-                .filter(|supported| *supported <= ceiling)
-                .collect::<Vec<_>>();
-            supported
-                .iter()
-                .copied()
-                .filter(|supported| *supported <= effort)
-                .max()
-                .or_else(|| supported.iter().copied().min())
-                .unwrap_or(effort)
-        }
-        _ => effort,
-    };
-    match capability.control {
-        ReasoningControl::AlwaysOn => Ok(ReasoningConfig::On),
-        ReasoningControl::Effort => Ok(ReasoningConfig::Effort(effort)),
-        ReasoningControl::Toggle => unreachable!("toggle handled above"),
-        ReasoningControl::TokenBudget => {
-            let budgets = capability
-                .effort_budgets
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("{} has no reasoning budgets", model.spec.id.0))?;
-            Ok(ReasoningConfig::Budget(
-                effort_level(effort).pick_budget(budgets),
-            ))
+    if let ReasoningConfig::Effort(effort) = selected {
+        if capability.control == ReasoningControl::TokenBudget {
+            return Ok(ReasoningConfig::Budget(
+                capability.budget(effort).ok_or_else(|| {
+                    anyhow::anyhow!("{} has no reasoning budgets", model.spec.id.0)
+                })?,
+            ));
         }
     }
+    Ok(selected)
 }
 
 /// Translate a thinking selection while enforcing the product's subagent
@@ -157,21 +137,14 @@ pub fn thinking_to_reasoning_with_subagents(
             if fallback != ReasoningConfig::Effort(ReasoningEffort::Ultra) {
                 fallback
             } else {
-                ReasoningConfig::Off
+                anyhow::bail!(
+                    "{} has no ordinary reasoning choice without subagents",
+                    model.spec.id.0
+                )
             },
         );
     }
     Ok(reasoning)
-}
-
-/// Clamp a requested effort down to the model's highest supported tier.
-fn clamp_effort(effort: ReasoningEffort, ceiling: ReasoningEffort) -> ReasoningEffort {
-    effort.min(ceiling)
-}
-
-/// Raise a requested effort up to the model's lowest meaningfully distinct tier.
-fn raise_effort(effort: ReasoningEffort, floor: ReasoningEffort) -> ReasoningEffort {
-    effort.max(floor)
 }
 
 fn effort_level(effort: ReasoningEffort) -> ThinkingLevel {
@@ -201,15 +174,15 @@ pub fn normalize_reasoning_for_model(
         return Ok(ReasoningConfig::On);
     }
     match reasoning {
-        ReasoningConfig::Off => Ok(ReasoningConfig::Off),
+        ReasoningConfig::Off => thinking_to_reasoning(ThinkingLevel::Off, model),
         ReasoningConfig::On => thinking_to_reasoning(ThinkingLevel::On, model),
         ReasoningConfig::Effort(effort) => thinking_to_reasoning(effort_level(*effort), model),
         ReasoningConfig::Budget(budget) => match &model.spec.capabilities.reasoning {
             Some(capability) if capability.control == ReasoningControl::TokenBudget => {
-                if *budget < 1024 || *budget > model.spec.limits.max_output_tokens {
+                if *budget < 1024 || *budget >= model.spec.limits.max_output_tokens {
                     anyhow::bail!(
                         "reasoning budget {budget} must be between 1024 and {} for {}",
-                        model.spec.limits.max_output_tokens,
+                        model.spec.limits.max_output_tokens.saturating_sub(1),
                         model.spec.id.0
                     );
                 }
@@ -261,7 +234,10 @@ pub fn normalize_reasoning_selection_for_model_with_subagents(
         let fallback = if fallback != ReasoningConfig::Effort(ReasoningEffort::Ultra) {
             fallback
         } else {
-            ReasoningConfig::Off
+            anyhow::bail!(
+                "{} has no ordinary reasoning choice without subagents",
+                model.spec.id.0
+            )
         };
         return Ok((
             fallback,
@@ -273,7 +249,23 @@ pub fn normalize_reasoning_selection_for_model_with_subagents(
         ));
     }
     if mode == ReasoningMode::Standard {
-        return Ok((normalized, ReasoningMode::Standard, None));
+        let warning = (normalized != *reasoning).then(|| {
+            if *reasoning == ReasoningConfig::Off {
+                format!(
+                    "{} cannot honor reasoning=off; using advertised reasoning={}",
+                    model.spec.id.0,
+                    reasoning_label(&normalized)
+                )
+            } else {
+                format!(
+                    "{} does not support reasoning={}; using reasoning={}",
+                    model.spec.id.0,
+                    reasoning_label(reasoning),
+                    reasoning_label(&normalized)
+                )
+            }
+        });
+        return Ok((normalized, ReasoningMode::Standard, warning));
     }
 
     if model_supports_ultra(model) {
@@ -345,61 +337,17 @@ fn supported_levels_for_model(model: &Model) -> Vec<ThinkingLevel> {
     let Some(capability) = &model.spec.capabilities.reasoning else {
         return vec![ThinkingLevel::Off];
     };
-    if capability.control == ReasoningControl::AlwaysOn {
-        return vec![ThinkingLevel::On];
-    }
-    if let OpenAiChatReasoningMode::ProviderValues { values, .. } = &capability.openai_chat_mode {
-        let mut levels = Vec::new();
-        for value in values {
-            let level = match value.trim().to_ascii_lowercase().as_str() {
-                "none" | "off" | "disabled" => Some(ThinkingLevel::Off),
-                "default" | "on" | "enabled" => Some(ThinkingLevel::On),
-                "minimal" | "min" => Some(ThinkingLevel::Minimal),
-                "low" => Some(ThinkingLevel::Low),
-                "medium" | "med" => Some(ThinkingLevel::Medium),
-                "high" => Some(ThinkingLevel::High),
-                "xhigh" | "x-high" | "extra_high" => Some(ThinkingLevel::Xhigh),
-                "max" => Some(ThinkingLevel::Max),
-                "ultra" if model_supports_ultra(model) => Some(ThinkingLevel::Ultra),
-                _ => None,
-            };
-            let level = match (capability.control, level) {
-                (ReasoningControl::Toggle, Some(ThinkingLevel::Off | ThinkingLevel::On)) => level,
-                (ReasoningControl::Effort, Some(level)) if !matches!(level, ThinkingLevel::On) => {
-                    Some(level)
-                }
-                _ => None,
-            };
-            if let Some(level) = level.filter(|level| !levels.contains(level)) {
-                levels.push(level);
-            }
-        }
-        if !levels.is_empty() {
-            return levels;
-        }
-    }
-    if capability.control == ReasoningControl::Toggle {
-        return vec![ThinkingLevel::Off, ThinkingLevel::On];
-    }
-    let mut levels = vec![ThinkingLevel::Off];
-    levels.extend(
-        [
-            ThinkingLevel::Minimal,
-            ThinkingLevel::Low,
-            ThinkingLevel::Medium,
-            ThinkingLevel::High,
-            ThinkingLevel::Xhigh,
-            ThinkingLevel::Max,
-            ThinkingLevel::Ultra,
-        ]
+    capability
+        .choices()
         .into_iter()
-        .filter(|level| {
-            let effort = level.to_effort();
-            effort >= capability.min_effort
-                && effort <= reasoning_effort_ceiling(model, capability.max_effort)
-        }),
-    );
-    levels
+        .filter_map(|choice| match choice {
+            ReasoningConfig::Off => Some(ThinkingLevel::Off),
+            ReasoningConfig::On => Some(ThinkingLevel::On),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra) if !model_supports_ultra(model) => None,
+            ReasoningConfig::Effort(effort) => Some(effort_level(effort)),
+            ReasoningConfig::Budget(_) => None,
+        })
+        .collect()
 }
 
 /// Returns the model's portable thinking levels after applying the product's
@@ -562,6 +510,7 @@ impl Drop for App {
 
 #[cfg(test)]
 mod tests {
+    use octet_ai::OpenAiChatReasoningMode;
     use std::sync::Arc;
 
     use super::*;
@@ -603,6 +552,7 @@ mod tests {
     #[test]
     fn legacy_pro_migrates_only_when_ultra_and_v2_are_advertised() {
         let unsupported = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: true,
@@ -643,6 +593,7 @@ mod tests {
     #[test]
     fn ultra_requires_the_observing_subagents_extension() {
         let base = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: true,
@@ -683,6 +634,7 @@ mod tests {
     #[test]
     fn ultra_floor_cannot_override_the_effective_runtime_ceiling() {
         let model = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: true,
@@ -694,10 +646,11 @@ mod tests {
 
         assert_eq!(
             thinking_to_reasoning(ThinkingLevel::Ultra, &model).unwrap(),
-            ReasoningConfig::Effort(ReasoningEffort::Max)
+            ReasoningConfig::Off
         );
 
         let provider_values = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: true,
@@ -710,15 +663,13 @@ mod tests {
             min_effort: ReasoningEffort::Ultra,
             max_effort: ReasoningEffort::Ultra,
         }));
-        assert_eq!(
-            thinking_to_reasoning(ThinkingLevel::Ultra, &provider_values).unwrap(),
-            ReasoningConfig::Effort(ReasoningEffort::Max)
-        );
+        assert!(thinking_to_reasoning(ThinkingLevel::Ultra, &provider_values).is_err());
     }
 
     #[test]
     fn maps_effort_and_token_budget_thinking() {
         let effort = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: false,
@@ -733,6 +684,7 @@ mod tests {
         );
 
         let budget = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::TokenBudget,
             exposes_text: true,
             preserves_state: false,
@@ -762,6 +714,7 @@ mod tests {
 
     fn effort_model(max_effort: ReasoningEffort) -> Model {
         model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: false,
@@ -830,6 +783,7 @@ mod tests {
     #[test]
     fn token_budget_maps_xhigh_and_max() {
         let budget = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::TokenBudget,
             exposes_text: true,
             preserves_state: false,
@@ -858,6 +812,7 @@ mod tests {
     #[test]
     fn provider_reported_toggle_and_effort_values_are_exact() {
         let toggle = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Toggle,
             exposes_text: true,
             preserves_state: false,
@@ -885,6 +840,7 @@ mod tests {
         );
 
         let levels = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: false,
@@ -910,6 +866,7 @@ mod tests {
     #[test]
     fn always_on_reasoning_exposes_only_on_and_normalizes_stale_off() {
         let model = model_with(Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::AlwaysOn,
             exposes_text: true,
             preserves_state: false,

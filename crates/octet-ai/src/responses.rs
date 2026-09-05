@@ -318,6 +318,8 @@ pub struct ResponsesCompactRequest {
 impl ResponsesCompactRequest {
     /// Builds a native compact request with the same tool, reasoning, text,
     /// cache-key, and session-affinity controls as an ordinary Responses call.
+    /// Unsupported reasoning selections and legacy Pro fail without clamping,
+    /// before callers reserve request resources or open a transport.
     #[allow(clippy::too_many_arguments)]
     pub fn for_model(
         model: &Model,
@@ -329,7 +331,7 @@ impl ResponsesCompactRequest {
         output_format: &OutputFormat,
         cache_retention: CacheRetention,
         session_id: Option<&str>,
-    ) -> Self {
+    ) -> Result<Self, crate::AiError> {
         crate::protocol::openai_responses::build_compact_request(
             model,
             input,

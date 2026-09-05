@@ -16,9 +16,9 @@ use crate::stream::{
 use crate::types::{
     AssistantMessage, AssistantPart, AudioFormat, AudioMedia, AudioPayload, AudioVoice,
     ImageSource, Media, Message, OpenAiChatReasoningMode, OutputFormat, OutputModalities, Protocol,
-    ProviderMediaRef, ReasoningConfig, ReasoningEffort, ReasoningPart, Request, Response,
-    StopReason, ToolArgumentValidation, ToolCall, ToolCallArgumentError, ToolCallId, ToolChoice,
-    ToolDef, ToolResultPart, Usage, UserPart,
+    ProviderMediaRef, ReasoningConfig, ReasoningPart, Request, Response, StopReason,
+    ToolArgumentValidation, ToolCall, ToolCallArgumentError, ToolCallId, ToolChoice, ToolDef,
+    ToolResultPart, Usage, UserPart,
 };
 use crate::validate::{normalize_request_reasoning, validate_request};
 
@@ -47,6 +47,10 @@ struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ChatThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ChatResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     modalities: Option<Vec<String>>,
@@ -71,7 +75,16 @@ struct ChatStreamOptions {
 /// See <https://api-docs.deepseek.com/guides/thinking_mode>.
 #[derive(Serialize)]
 struct ChatReasoningConfig {
-    effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ChatTemplateThinking {
+    enable_thinking: bool,
+    preserve_thinking: bool,
 }
 
 #[derive(Serialize)]
@@ -94,6 +107,8 @@ enum ChatCompletionsMessage {
         content: Option<ChatInstructionContent>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ChatToolCall>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -423,64 +438,6 @@ fn deferred_tool_names(messages: &[crate::types::Message]) -> std::collections::
     names
 }
 
-fn provider_effort(value: &str) -> Option<ReasoningEffort> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "minimal" | "min" => Some(ReasoningEffort::Minimal),
-        "low" => Some(ReasoningEffort::Low),
-        "medium" | "med" => Some(ReasoningEffort::Medium),
-        "high" => Some(ReasoningEffort::High),
-        "xhigh" | "x-high" | "extra_high" => Some(ReasoningEffort::Xhigh),
-        "max" => Some(ReasoningEffort::Max),
-        "ultra" => Some(ReasoningEffort::Ultra),
-        _ => None,
-    }
-}
-
-fn provider_reasoning_value(
-    values: &[String],
-    default: Option<&str>,
-    reasoning: &ReasoningConfig,
-) -> Option<String> {
-    let find = |predicate: fn(&str) -> bool| {
-        values
-            .iter()
-            .find(|value| predicate(value))
-            .map(ToOwned::to_owned)
-    };
-    let selected = match reasoning {
-        ReasoningConfig::Off => find(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "none" | "off" | "disabled" | "false"
-            )
-        }),
-        ReasoningConfig::On => find(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "default" | "on" | "enabled" | "true"
-            )
-        })
-        .or_else(|| {
-            default
-                .filter(|candidate| values.iter().any(|value| value == *candidate))
-                .map(ToOwned::to_owned)
-        }),
-        ReasoningConfig::Effort(effort) => values
-            .iter()
-            .find(|value| provider_effort(value) == Some(*effort))
-            .map(ToOwned::to_owned),
-        ReasoningConfig::Budget(_) => None,
-    };
-
-    // Capability inventories use `default` to mean "enable the provider's
-    // default reasoning behaviour". It is not necessarily a wire literal:
-    // vLLM, for example, advertises the binary values `none/default` while its
-    // request validator accepts `none` plus named effort levels. Omitting the
-    // field is the portable representation of the default; explicit `on`,
-    // `enabled`, and named levels remain provider-owned wire values.
-    selected.filter(|value| !value.trim().eq_ignore_ascii_case("default"))
-}
-
 /// Mistral accepts tool-call IDs with exactly nine ASCII alphanumeric bytes.
 /// Keep a valid existing ID, otherwise derive a deterministic opaque ID without
 /// changing canonical IDs used by other endpoints.
@@ -520,15 +477,21 @@ pub(crate) fn build_request(
     let reasoning_mode = reasoning_capability.map(|capability| &capability.openai_chat_mode);
     let deepseek_thinking = matches!(
         reasoning_mode,
-        Some(OpenAiChatReasoningMode::DeepSeekThinking)
+        Some(OpenAiChatReasoningMode::DeepSeekThinking | OpenAiChatReasoningMode::DeepSeekToggle)
     );
+    let cerebras_reasoning = matches!(reasoning_mode, Some(OpenAiChatReasoningMode::Cerebras));
     let openrouter_reasoning = matches!(reasoning_mode, Some(OpenAiChatReasoningMode::OpenRouter));
     let provider_uses_system_message = matches!(
         reasoning_mode,
-        Some(OpenAiChatReasoningMode::ProviderValues {
-            system_message: true,
-            ..
-        })
+        Some(
+            OpenAiChatReasoningMode::ProviderValues {
+                system_message: true,
+                ..
+            } | OpenAiChatReasoningMode::Cerebras
+                | OpenAiChatReasoningMode::QwenEnableThinking
+                | OpenAiChatReasoningMode::QwenChatTemplate { .. }
+                | OpenAiChatReasoningMode::Together { .. }
+        )
     );
     let mut messages = Vec::new();
     let cache_marker = if matches!(
@@ -711,7 +674,7 @@ pub(crate) fn build_request(
                         // (the API ignores it), and retaining the model check
                         // prevents cross-model Chat reasoning from leaking in.
                         AssistantPart::Reasoning(reasoning)
-                            if deepseek_thinking
+                            if (deepseek_thinking || cerebras_reasoning)
                                 && assistant.protocol == Protocol::OpenAiChat
                                 && assistant.model == model.spec.id =>
                         {
@@ -790,7 +753,14 @@ pub(crate) fn build_request(
 
                 messages.push(ChatCompletionsMessage::Assistant {
                     content: content_str,
-                    reasoning_content,
+                    reasoning: cerebras_reasoning
+                        .then(|| reasoning_content.clone())
+                        .flatten(),
+                    reasoning_content: if cerebras_reasoning {
+                        None
+                    } else {
+                        reasoning_content
+                    },
                     tool_calls: tool_calls_opt,
                     audio: audio_ref,
                 });
@@ -854,69 +824,64 @@ pub(crate) fn build_request(
         }
     };
 
-    // 5. Reasoning configuration
-    let provider_reasoning = match reasoning_mode {
-        Some(OpenAiChatReasoningMode::ProviderValues {
-            values, default, ..
-        }) => Some((values, default.as_deref())),
+    // Typed profiles are independent: a model's family does not establish its
+    // serving endpoint's control format. Exact supported choices were validated.
+    let enabled = req.reasoning != ReasoningConfig::Off;
+    let always_on =
+        reasoning_capability.is_some_and(|c| c.control == crate::types::ReasoningControl::AlwaysOn);
+    let wire = reasoning_capability
+        .and_then(|c| c.wire_value(&req.reasoning))
+        .filter(|value| !value.eq_ignore_ascii_case("default"));
+    let emits_effort = !always_on
+        && !matches!(
+            reasoning_mode,
+            Some(
+                OpenAiChatReasoningMode::OpenRouter
+                    | OpenAiChatReasoningMode::DeepSeekToggle
+                    | OpenAiChatReasoningMode::QwenEnableThinking
+                    | OpenAiChatReasoningMode::QwenChatTemplate { .. }
+                    | OpenAiChatReasoningMode::Together { effort: false }
+            )
+        );
+    let reasoning_effort = if emits_effort && !(deepseek_thinking && !enabled) {
+        wire.clone()
+    } else {
+        None
+    };
+    let reasoning = if openrouter_reasoning && !always_on {
+        Some(ChatReasoningConfig {
+            effort: wire,
+            enabled: None,
+        })
+    } else if matches!(
+        reasoning_mode,
+        Some(OpenAiChatReasoningMode::Together { .. })
+    ) && !always_on
+    {
+        Some(ChatReasoningConfig {
+            effort: None,
+            enabled: Some(enabled),
+        })
+    } else {
+        None
+    };
+    let thinking = (deepseek_thinking && !always_on).then_some(ChatThinkingConfig {
+        r#type: if enabled { "enabled" } else { "disabled" },
+    });
+    let enable_thinking = matches!(
+        reasoning_mode,
+        Some(OpenAiChatReasoningMode::QwenEnableThinking)
+    )
+    .then_some(enabled);
+    let chat_template_kwargs = match reasoning_mode {
+        Some(OpenAiChatReasoningMode::QwenChatTemplate { preserve_thinking }) => {
+            Some(ChatTemplateThinking {
+                enable_thinking: enabled,
+                preserve_thinking: *preserve_thinking,
+            })
+        }
         _ => None,
     };
-    let reasoning_effort = if let Some((values, default)) = provider_reasoning {
-        provider_reasoning_value(values, default, &req.reasoning)
-    } else if has_reasoning && !openrouter_reasoning {
-        match req.reasoning {
-            ReasoningConfig::Off => None,
-            ReasoningConfig::On => None,
-            ReasoningConfig::Effort(e) => Some(match e {
-                // DeepSeek accepts high/low/medium/max/xhigh but not
-                // `minimal`; map octet's portable minimum to its lowest valid
-                // accepted value. The provider currently maps low and medium
-                // to high internally (DeepSeek Thinking Mode docs).
-                crate::types::ReasoningEffort::Minimal if deepseek_thinking => "low".to_string(),
-                crate::types::ReasoningEffort::Minimal => "minimal".to_string(),
-                crate::types::ReasoningEffort::Low => "low".to_string(),
-                crate::types::ReasoningEffort::Medium => "medium".to_string(),
-                crate::types::ReasoningEffort::High => "high".to_string(),
-                crate::types::ReasoningEffort::Xhigh => "xhigh".to_string(),
-                crate::types::ReasoningEffort::Max => "max".to_string(),
-                crate::types::ReasoningEffort::Ultra => "ultra".to_string(),
-            }),
-            ReasoningConfig::Budget(_) => None,
-        }
-    } else {
-        None
-    };
-    let reasoning = if openrouter_reasoning {
-        match req.reasoning {
-            ReasoningConfig::Effort(e) => Some(ChatReasoningConfig {
-                effort: match e {
-                    crate::types::ReasoningEffort::Minimal => "minimal",
-                    crate::types::ReasoningEffort::Low => "low",
-                    crate::types::ReasoningEffort::Medium => "medium",
-                    crate::types::ReasoningEffort::High => "high",
-                    crate::types::ReasoningEffort::Xhigh => "xhigh",
-                    crate::types::ReasoningEffort::Max => "max",
-                    crate::types::ReasoningEffort::Ultra => "ultra",
-                }
-                .to_string(),
-            }),
-            ReasoningConfig::Off | ReasoningConfig::On | ReasoningConfig::Budget(_) => None,
-        }
-    } else {
-        None
-    };
-    let thinking = deepseek_thinking.then_some(ChatThinkingConfig {
-        r#type: if matches!(
-            &req.reasoning,
-            ReasoningConfig::On | ReasoningConfig::Effort(_)
-        ) {
-            "enabled"
-        } else {
-            // DeepSeek defaults thinking to enabled, so omitting this field
-            // would make canonical `ReasoningConfig::Off` incorrect.
-            "disabled"
-        },
-    });
 
     // 6. Response format
     let response_format_opt = if model.spec.capabilities.structured_output {
@@ -1002,6 +967,8 @@ pub(crate) fn build_request(
         reasoning_effort,
         reasoning,
         thinking,
+        enable_thinking,
+        chat_template_kwargs,
         response_format: response_format_opt,
         modalities: modalities_opt,
         audio: audio_opt,
@@ -2597,6 +2564,7 @@ mod tests {
                 parallel_tool_calls: tools,
                 reasoning: if reasoning {
                     Some(crate::types::ReasoningCapability {
+                        options: None,
                         control: crate::types::ReasoningControl::Effort,
                         exposes_text: true,
                         preserves_state: true,
@@ -2772,7 +2740,7 @@ mod tests {
             .unwrap();
         capability.control = crate::types::ReasoningControl::AlwaysOn;
         capability.openai_chat_mode = OpenAiChatReasoningMode::SystemMessage;
-        let request = Request {
+        let mut request = Request {
             system: Some("system prompt".to_string()),
             messages: vec![Message::User(UserMessage {
                 content: vec![UserPart::Text("hello".to_string())],
@@ -2792,6 +2760,13 @@ mod tests {
             session_id: None,
         };
 
+        assert!(matches!(
+            build_request(&model, &request),
+            Err(AiError::Unsupported(
+                crate::error::UnsupportedError::Reasoning
+            ))
+        ));
+        request.reasoning = ReasoningConfig::On;
         let body: serde_json::Value =
             serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
         assert_eq!(body["messages"][0]["role"], "system");
@@ -3095,7 +3070,7 @@ mod tests {
             max_output_tokens: None,
             temperature: None,
             stop: vec![],
-            reasoning: ReasoningConfig::Effort(ReasoningEffort::Minimal),
+            reasoning: ReasoningConfig::Effort(ReasoningEffort::Low),
             reasoning_mode: crate::types::ReasoningMode::Standard,
             responses: None,
             output_format: OutputFormat::Text,
@@ -3113,7 +3088,7 @@ mod tests {
             body.get("max_completion_tokens").is_none() && body.get("max_tokens").is_none(),
             "DeepSeek must not receive the local capacity reserve as a generated cap"
         );
-        // DeepSeek rejects `minimal`; its lowest accepted effort is `low`.
+        // This fixture explicitly selects the supported low wire value.
         assert_eq!(body["reasoning_effort"], "low");
         assert_eq!(body["messages"][1]["content"], "look this up");
         assert_eq!(

@@ -15,8 +15,7 @@ use crate::protocol::{emit_event, HttpRequestParts};
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
     AssistantPart, ImageSource, Media, Message, OutputFormat, Protocol, ProviderPartMetadata,
-    ReasoningConfig, ReasoningEffort, Request, StopReason, ToolCallId, ToolChoice, ToolResultPart,
-    Usage, UserPart,
+    ReasoningConfig, Request, StopReason, ToolCallId, ToolChoice, ToolResultPart, Usage, UserPart,
 };
 use crate::validate::{normalize_request_reasoning, validate_request};
 
@@ -420,63 +419,30 @@ fn google_thinking_config(
     reasoning: &ReasoningConfig,
     requested_output_limit: Option<u64>,
 ) -> Option<Value> {
+    let cap = model.spec.capabilities.reasoning.as_ref()?;
     let mut config = Map::new();
-    let is_budget_model = model.spec.api_name.starts_with("gemini-2.");
-    match reasoning {
-        ReasoningConfig::Off => {
-            if is_budget_model {
-                config.insert("thinkingBudget".to_owned(), Value::from(0_u64));
-            } else {
-                config.insert(
-                    "thinkingLevel".to_owned(),
-                    Value::String("MINIMAL".to_owned()),
-                );
-            }
+    let budget = match reasoning {
+        ReasoningConfig::Off if cap.control == crate::types::ReasoningControl::TokenBudget => {
+            Some(0)
         }
-        ReasoningConfig::Effort(effort) => {
-            config.insert("includeThoughts".to_owned(), Value::Bool(true));
-            if is_budget_model {
-                let maximum = requested_output_limit.unwrap_or(model.spec.limits.max_output_tokens);
-                config.insert(
-                    "thinkingBudget".to_owned(),
-                    Value::from(google_thinking_budget(*effort).min(maximum)),
-                );
-            } else {
-                config.insert(
-                    "thinkingLevel".to_owned(),
-                    Value::String(google_thinking_level(*effort).to_owned()),
-                );
-            }
-        }
-        // Catalog validation exposes Google reasoning as portable effort only.
-        // Direct codec callers cannot obtain a documented representation for
-        // these variants, so omit rather than guess a provider field.
-        ReasoningConfig::On | ReasoningConfig::Budget(_) => return None,
+        ReasoningConfig::Budget(budget) => Some(*budget),
+        ReasoningConfig::Effort(effort) => cap.budget(*effort),
+        _ => None,
+    };
+    let _ = requested_output_limit; // shared validation reserves answer space
+    if let Some(budget) = budget {
+        config.insert("thinkingBudget".to_owned(), Value::from(budget));
+    } else {
+        let value = cap.wire_value(reasoning)?;
+        config.insert(
+            "thinkingLevel".to_owned(),
+            Value::String(value.to_ascii_uppercase()),
+        );
+    }
+    if *reasoning != ReasoningConfig::Off {
+        config.insert("includeThoughts".to_owned(), Value::Bool(true));
     }
     Some(Value::Object(config))
-}
-
-fn google_thinking_budget(effort: ReasoningEffort) -> u64 {
-    match effort {
-        ReasoningEffort::Minimal => 1_024,
-        ReasoningEffort::Low => 2_048,
-        ReasoningEffort::Medium => 8_192,
-        ReasoningEffort::High => 16_384,
-        ReasoningEffort::Xhigh => 24_576,
-        ReasoningEffort::Max | ReasoningEffort::Ultra => 32_768,
-    }
-}
-
-fn google_thinking_level(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::Minimal => "MINIMAL",
-        ReasoningEffort::Low => "LOW",
-        ReasoningEffort::Medium => "MEDIUM",
-        ReasoningEffort::High
-        | ReasoningEffort::Xhigh
-        | ReasoningEffort::Max
-        | ReasoningEffort::Ultra => "HIGH",
-    }
 }
 
 #[derive(Deserialize)]

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn discovered_reasoning_supports_chat_and_responses_models() {
     let openai = &crate::providers::OPENAI;
-    assert!(discovered_model_supports_reasoning(
+    assert!(!discovered_model_supports_reasoning(
         openai,
         Protocol::OpenAiChat,
         "gemma-4-31b-it"
@@ -632,6 +632,7 @@ fn apple_foundation_models_fill_sparse_inventory_from_embedded_metadata() {
         &cred,
         vec![
             CustomModel {
+                reasoning_source: Some(octet_ai::types::ReasoningMetadataSource::Absent),
                 api_name: "system".into(),
                 context_window: 262_144,
                 max_output_tokens: 16_384,
@@ -639,6 +640,7 @@ fn apple_foundation_models_fill_sparse_inventory_from_embedded_metadata() {
                 ..Default::default()
             },
             CustomModel {
+                reasoning_source: Some(octet_ai::types::ReasoningMetadataSource::Absent),
                 api_name: "pcc".into(),
                 context_window: 262_144,
                 max_output_tokens: 16_384,
@@ -1115,7 +1117,22 @@ fn offline_codex_registration_uses_cached_inventory_without_dynamic_capabilities
             .as_ref()
             .unwrap()
             .max_effort,
-        octet_ai::ReasoningEffort::Max
+        octet_ai::ReasoningEffort::High
+    );
+    // Unsupported Ultra is removed, not silently replaced with an unadvertised
+    // Max. Cached discovery must preserve the remaining exact choice set.
+    assert_eq!(
+        model
+            .spec
+            .capabilities
+            .reasoning
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap()
+            .values,
+        ["high"]
     );
 
     let fallback_path = directory.path().join("fallback-codex.json");
@@ -1212,7 +1229,7 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 #[test]
 fn codex_catalog_query_uses_astra_compatible_client_and_cache_versions() {
     assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.153.2");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 4);
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 5);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -1355,55 +1372,18 @@ fn codex_live_inventory_does_not_inject_unadvertised_astra() {
 }
 
 #[test]
-fn codex_discovery_never_exposes_ultra_without_complete_v2_metadata() {
-    let models = codex_models_from_response(
-        &serde_json::json!({
-            "models": [
-                {
-                    "slug": "gpt-5.6-no-v2",
-                    "supported_reasoning_levels": ["high", "ultra"]
-                },
-                {
-                    "slug": "gpt-5.6-malformed-levels",
-                    "supported_reasoning_levels": ["ultra", {"effort": 42}],
-                    "use_responses_lite": "true",
-                    "multi_agent_version": "v2"
-                },
-                {
-                    "slug": "gpt-5.6-malformed-v2",
-                    "supported_reasoning_levels": ["ultra"],
-                    "multi_agent_version": 2
-                }
-            ]
-        }),
-        None,
-    )
-    .unwrap();
-
-    let no_v2 = models
-        .iter()
-        .find(|model| model.id == "gpt-5.6-no-v2")
-        .unwrap();
-    assert_eq!(no_v2.max_effort, octet_ai::ReasoningEffort::Max);
-    assert_eq!(no_v2.agent_delegation, None);
-
-    let malformed_levels = models
-        .iter()
-        .find(|model| model.id == "gpt-5.6-malformed-levels")
-        .unwrap();
-    assert_eq!(malformed_levels.max_effort, octet_ai::ReasoningEffort::Max);
-    assert!(!malformed_levels.responses_lite);
-    assert_eq!(
-        malformed_levels.agent_delegation,
-        Some(octet_ai::AgentDelegation::V2)
-    );
-
-    let malformed_v2 = models
-        .iter()
-        .find(|model| model.id == "gpt-5.6-malformed-v2")
-        .unwrap();
-    assert_eq!(malformed_v2.max_effort, octet_ai::ReasoningEffort::Max);
-    assert_eq!(malformed_v2.agent_delegation, None);
+fn codex_malformed_exact_choices_fail_closed_and_no_v2_removes_only_ultra() {
+    for levels in [
+        serde_json::json!(["ultra", {"effort":42}]),
+        serde_json::json!(["low", "low"]),
+        serde_json::json!(["ultra"]),
+    ] {
+        assert!(codex_models_from_response(&serde_json::json!({"models":[{"slug":"gpt-5.6-test", "supported_reasoning_levels":levels}]}), None).is_err());
+    }
+    let models = codex_models_from_response(&serde_json::json!({"models":[{"slug":"gpt-5.6-no-v2", "supported_reasoning_levels":["high", "ultra"]}]}), None).unwrap();
+    assert_eq!(models[0].max_effort, octet_ai::ReasoningEffort::High);
+    assert_eq!(models[0].reasoning_options.values, ["high"]);
+    assert_eq!(models[0].agent_delegation, None);
 }
 
 #[test]
@@ -1499,6 +1479,8 @@ fn codex_astra_cache_caps_output_and_honors_lower_metadata() {
         account_id: claims.account_id.clone(),
         plan: codex_plan_cache_key(&claims).map(str::to_owned),
         models: vec![DiscoveredCodexModel {
+            display_name: None,
+            reasoning_options: codex_fallback_reasoning_options("gpt-6-astra"),
             id: "gpt-6-astra".into(),
             context_window: 272_000,
             max_context_window: 872_000,
@@ -1980,6 +1962,8 @@ fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
         structured_output: false,
         reasoning: true,
         reasoning_configurable: true,
+        reasoning_profile: None,
+        reasoning_source: None,
         reasoning_values: Vec::new(),
         reasoning_default: String::new(),
         reasoning_uses_system_message: true,
@@ -2391,6 +2375,7 @@ fn deepseek_v4_pro_is_registered_as_openai_chat_with_env_auth() {
     assert!(matches!(
         model.spec.capabilities.reasoning.as_ref(),
         Some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             openai_chat_mode: OpenAiChatReasoningMode::DeepSeekThinking,
@@ -3141,4 +3126,390 @@ fn fork_launch_copies_the_source_head_and_records_provenance() {
             .map(|stem| stem.to_string_lossy().into_owned())
     );
     assert_eq!(metadata.forked_from_entry_id, Some(source_head.0));
+}
+
+fn thinking_hotfix_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/providers/thinking-hotfix.json"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn reasoning_ingress_distinguishes_absent_unknown_false_and_malformed() {
+    use octet_ai::types::ReasoningMetadataSource as Source;
+    assert_eq!(
+        decode_reasoning_metadata(&serde_json::json!({}))
+            .unwrap()
+            .source,
+        Source::Absent
+    );
+    assert_eq!(
+        decode_reasoning_metadata(&serde_json::json!({"reasoning":null}))
+            .unwrap()
+            .source,
+        Source::Unknown
+    );
+    let false_wins = serde_json::json!({"reasoning":false,"capabilities":{"reasoning":{"supported":true}},"supported_reasoning_levels":["high"]});
+    assert_eq!(
+        decode_reasoning_metadata(&false_wins).unwrap().supported,
+        Some(false)
+    );
+    for values in [
+        serde_json::json!(["low", "low"]),
+        serde_json::json!(["low", "unknown"]),
+        serde_json::json!([]),
+    ] {
+        assert!(decode_reasoning_metadata(
+            &serde_json::json!({"supported_reasoning_levels":values})
+        )
+        .is_err());
+    }
+    assert!(decode_reasoning_metadata(&serde_json::json!({"capabilities":{"reasoning":{"supported":true,"values":["low"],"default":"high"}}})).is_err());
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "cerebras")
+        .unwrap();
+    assert!(discovered_reasoning_capability(
+        declaration,
+        Protocol::OpenAiChat,
+        "qwen-3.8-27b",
+        &decode_reasoning_metadata(&false_wins).unwrap()
+    )
+    .is_none());
+    assert!(sparse_route_reasoning(declaration, Protocol::OpenAiChat, "qwen3.8-27b").is_none());
+    let oss = sparse_route_reasoning(declaration, Protocol::OpenAiChat, "gpt-oss-120b").unwrap();
+    assert!(!oss.supports(&ReasoningConfig::Off));
+    assert_eq!(
+        oss.default_selection(),
+        Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium))
+    );
+}
+
+#[test]
+fn exact_codex_cache_roundtrip_retains_choices_default_label_and_offline_holes() {
+    let fixture = thinking_hotfix_fixture();
+    let models = codex_models_from_response(&fixture["codex_exact"], None).unwrap();
+    let cached: Vec<DiscoveredCodexModel> =
+        serde_json::from_slice(&serde_json::to_vec(&models).unwrap()).unwrap();
+    assert_eq!(models, cached);
+    assert_eq!(cached[0].display_name.as_deref(), Some("GPT-6 Astra"));
+    assert_eq!(cached[0].reasoning_options.values, ["low", "high", "ultra"]);
+    assert_eq!(cached[0].reasoning_options.default.as_deref(), Some("low"));
+    let offline = conservative_offline_codex_models(cached);
+    assert_eq!(offline[0].reasoning_options.values, ["low", "high"]);
+    assert_eq!(offline[0].max_effort, octet_ai::ReasoningEffort::High);
+    assert!(!offline[0].responses_lite);
+    assert_eq!(offline[0].agent_delegation, None);
+}
+
+#[tokio::test]
+async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopback() {
+    use octet_ai::{
+        AssistantPart, Message, Request, ToolResult, ToolResultPart, UserMessage, UserPart,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(&thinking_hotfix_fixture()["cerebras_sparse"]),
+        )
+        .mount(&server)
+        .await;
+    // Synthetic separated reasoning + tool stream, not a production capture.
+    let stream = concat!(
+        "data: {\"id\":\"synthetic\",\"choices\":[{\"delta\":{\"reasoning\":\"Inspect the result.\"}}]}\n\n",
+        "data: {\"id\":\"synthetic\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        "data: {\"id\":\"synthetic\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(stream),
+        )
+        .mount(&server)
+        .await;
+    let url = format!("{}/models", server.uri());
+    let body =
+        tokio::task::spawn_blocking(move || get_models_json_blocking(&url, http::HeaderMap::new()))
+            .await
+            .unwrap()
+            .unwrap();
+    let discovered = api_models_from_response(&body).unwrap().remove(0);
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "cerebras")
+        .unwrap();
+    let capability = discovered_reasoning_capability(
+        declaration,
+        Protocol::OpenAiChat,
+        &discovered.id,
+        &discovered.reasoning_metadata,
+    )
+    .unwrap();
+    let mut catalog = ModelCatalog::default();
+    let route = declaration.route_for_model(&discovered.id).unwrap();
+    catalog
+        .register_endpoint(Endpoint {
+            id: EndpointId(route.endpoint_id.into()),
+            base_url: url::Url::parse(&format!("{}/", server.uri())).unwrap(),
+            auth: Auth::None,
+            default_headers: Default::default(),
+            transport: EndpointTransport::Http,
+            runtime: Default::default(),
+            timeout: Duration::from_secs(5),
+        })
+        .unwrap();
+    let mut caps = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap()
+        .spec
+        .capabilities
+        .clone();
+    caps.reasoning = Some(capability);
+    crate::providers::register_discovered_model(
+        &mut catalog,
+        declaration,
+        &discovered.id,
+        None,
+        caps,
+        ModelLimits {
+            context_window: 32768,
+            max_output_tokens: 4096,
+        },
+        None,
+    )
+    .unwrap();
+    let model = catalog
+        .resolve(&ModelId("cerebras/qwen-3.8-27b".into()))
+        .unwrap();
+    let selected = thinking_to_reasoning(crate::config::ThinkingLevel::On, &model).unwrap();
+    assert_eq!(
+        selected,
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+    );
+    let mut request = Request {
+        system: Some("System contract".into()),
+        messages: vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("Look up".into())],
+        })],
+        tools: vec![ToolDef {
+            name: "lookup".into(),
+            description: "lookup".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        }],
+        tool_choice: octet_ai::ToolChoice::Auto,
+        max_output_tokens: Some(4096),
+        temperature: None,
+        stop: vec![],
+        reasoning: selected,
+        reasoning_mode: ReasoningMode::Standard,
+        responses: None,
+        output_format: octet_ai::OutputFormat::Text,
+        output_modalities: octet_ai::OutputModalities::Text,
+        compatibility: octet_ai::CompatibilityMode::Strict,
+        cache_retention: octet_ai::CacheRetention::None,
+        session_id: None,
+    };
+    let client = AiClient::new();
+    let response = client.complete(&model, request.clone()).await.unwrap();
+    let call = response
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call.clone()),
+            _ => None,
+        })
+        .unwrap();
+    request.messages.push(Message::Assistant(response.message));
+    request.messages.push(Message::User(UserMessage {
+        content: vec![UserPart::ToolResult(ToolResult {
+            tool_call_id: call.id,
+            content: vec![ToolResultPart::Text("actual fixture result".into())],
+            is_error: false,
+            added_tool_names: None,
+        })],
+    }));
+    request.reasoning = ReasoningConfig::Off;
+    client.complete(&model, request).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let posts = requests
+        .iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .map(|r| r.body_json::<serde_json::Value>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[0]["model"], "qwen-3.8-27b");
+    assert_eq!(posts[0]["messages"][0]["role"], "system");
+    assert_eq!(posts[0]["reasoning_effort"], "high");
+    assert_eq!(posts[1]["reasoning_effort"], "none");
+    assert_eq!(posts[1]["messages"][2]["reasoning"], "Inspect the result.");
+    assert!(posts[1]["messages"][2].get("reasoning_content").is_none());
+    assert_eq!(posts[1]["messages"][3]["content"], "actual fixture result");
+    for post in posts {
+        for field in [
+            "enable_thinking",
+            "disable_reasoning",
+            "preserve_thinking",
+            "thinking_budget",
+            "chat_template_kwargs",
+            "thinking",
+        ] {
+            assert!(
+                post.get(field).is_none(),
+                "forbidden Cerebras field {field}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn custom_binary_profiles_discover_cache_and_send_distinct_controls() {
+    use octet_ai::{CompatibilityMode, Message, Request, UserMessage, UserPart};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for fixture_name in ["local_binary", "local_template"] {
+        let directory = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(&thinking_hotfix_fixture()[fixture_name]),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"id\":\"fixture\",\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+                    "data: {\"id\":\"fixture\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")))
+            .expect(2).mount(&server).await;
+        let provider: crate::auth::custom::CustomProvider = serde_json::from_value(serde_json::json!({
+            "base_url": format!("{}/v1/", server.uri()), "auth": {"kind": "none"}, "auto_discover": true
+        })).unwrap();
+        let store = crate::auth::custom::CredentialStore::new(directory.path().join("custom.json"));
+        // Exercise the production registration/discovery/cache path, then a
+        // fresh offline catalog. Only the loopback inventory may be requested.
+        let (online, model) = tokio::task::spawn_blocking(move || {
+            let mut online = ModelCatalog::default();
+            register_custom_openai_provider(
+                &mut online,
+                &store,
+                "fixture",
+                &provider,
+                false,
+                false,
+            )
+            .unwrap();
+            let mut offline = ModelCatalog::default();
+            register_custom_openai_provider(
+                &mut offline,
+                &store,
+                "fixture",
+                &provider,
+                false,
+                true,
+            )
+            .unwrap();
+            let id = ModelId("custom/fixture/qwen-3.8-27b".into());
+            (online.resolve(&id).unwrap(), offline.resolve(&id).unwrap())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            online.spec.capabilities.reasoning,
+            model.spec.capabilities.reasoning
+        );
+        assert_eq!(online.spec.display_name, model.spec.display_name);
+        if fixture_name == "local_template" {
+            assert_eq!(model.spec.display_name.as_deref(), Some("Lab model"));
+        }
+        let mut request = Request {
+            system: Some("Fixture system instruction".into()),
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("Fixture input".into())],
+            })],
+            tools: vec![],
+            tool_choice: octet_ai::ToolChoice::Auto,
+            max_output_tokens: Some(4096),
+            temperature: None,
+            stop: vec![],
+            reasoning: thinking_to_reasoning(crate::config::ThinkingLevel::On, &model).unwrap(),
+            reasoning_mode: ReasoningMode::Standard,
+            responses: None,
+            output_format: octet_ai::OutputFormat::Text,
+            output_modalities: octet_ai::OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: octet_ai::CacheRetention::None,
+            session_id: None,
+        };
+        assert_eq!(request.reasoning, ReasoningConfig::On);
+        let client = AiClient::new();
+        client.complete(&model, request.clone()).await.unwrap();
+        request.reasoning =
+            thinking_to_reasoning(crate::config::ThinkingLevel::Off, &model).unwrap();
+        assert_eq!(request.reasoning, ReasoningConfig::Off);
+        client.complete(&model, request.clone()).await.unwrap();
+        for compatibility in [CompatibilityMode::Strict, CompatibilityMode::Lossy] {
+            request.compatibility = compatibility;
+            request.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+            assert!(matches!(
+                client.complete(&model, request.clone()).await,
+                Err(octet_ai::AiError::Unsupported(
+                    octet_ai::UnsupportedError::Reasoning
+                ))
+            ));
+        }
+        let requests = server.received_requests().await.unwrap();
+        let posts = requests
+            .iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .map(|r| r.body_json::<serde_json::Value>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            posts.len(),
+            2,
+            "unsupported explicit selections must not reach HTTP"
+        );
+        for (index, post) in posts.iter().enumerate() {
+            assert_eq!(post["model"], "qwen-3.8-27b");
+            assert_eq!(post["messages"][0]["role"], "system");
+            if fixture_name == "local_template" {
+                assert_eq!(
+                    post["chat_template_kwargs"],
+                    serde_json::json!({"enable_thinking":index == 0,"preserve_thinking":true})
+                );
+                assert!(post.get("reasoning_effort").is_none());
+            } else {
+                assert!(post.get("chat_template_kwargs").is_none());
+                if index == 0 {
+                    assert!(post.get("reasoning_effort").is_none());
+                } else {
+                    assert_eq!(post["reasoning_effort"], "none");
+                }
+            }
+            for field in [
+                "enable_thinking",
+                "thinking",
+                "reasoning",
+                "disable_reasoning",
+                "preserve_thinking",
+                "thinking_budget",
+            ] {
+                assert!(
+                    post.get(field).is_none(),
+                    "unexpected profile field {field}"
+                );
+            }
+        }
+        server.verify().await;
+    }
 }

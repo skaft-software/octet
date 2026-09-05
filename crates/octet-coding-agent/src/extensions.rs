@@ -1323,6 +1323,7 @@ fn extension_provider_capabilities(
         tools: capabilities.tools,
         parallel_tool_calls: capabilities.parallel_tool_calls,
         reasoning: capabilities.reasoning.then_some(ReasoningCapability {
+            options: None,
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: false,
