@@ -10,6 +10,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     from .helpers import BridgeProcess, NODE
@@ -67,6 +69,70 @@ class ConformanceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(1, completed.returncode)
         self.assertIn("--network-isolated", json.loads(completed.stdout)["error"])
+
+    def test_full_gate_requires_the_pinned_monorepo_example_inventory(self) -> None:
+        # Fixture-only path regression: integrity and execution boundaries are
+        # mocked. This never claims that a real Pi runtime loaded an example.
+        module = conformance_module()
+        profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        examples = profile["official_extension_examples"]
+        self.assertEqual(78, len(examples))
+        for layout in ("monorepo", "wrong-root", "missing-entry"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as temporary:
+                checkout = Path(temporary) / "source"
+                relative = (
+                    "examples/extensions" if layout == "wrong-root"
+                    else "packages/coding-agent/examples/extensions"
+                )
+                examples_root = checkout / relative
+                for example in examples:
+                    path = examples_root / example
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if path.suffix:
+                        path.write_text("export default () => {};\n", encoding="utf-8")
+                    else:
+                        path.mkdir()
+                if layout == "missing-entry":
+                    missing = examples_root / examples[-1]
+                    if missing.is_dir():
+                        missing.rmdir()
+                    else:
+                        missing.unlink()
+                package = Path(temporary) / "package"
+                tui = package / "node_modules/@earendil-works/pi-tui"
+                arguments = SimpleNamespace(
+                    network_isolated=True,
+                    coding_agent_tarball=Path(temporary) / "coding-agent.tgz",
+                    tui_tarball=Path(temporary) / "tui.tgz",
+                    pi_package=package,
+                    source_root=checkout,
+                )
+                with (
+                    patch.object(module, "verify_tarball") as verify_tarball,
+                    patch.object(module, "verify_package_root", side_effect=[package, tui]),
+                    patch.object(module, "node_resolved_package", return_value=tui),
+                    patch.object(module, "git", side_effect=[module.REVISION, ""]),
+                    patch.object(module.shutil, "which", return_value="/fixture/node"),
+                    patch.object(module, "fingerprint", return_value="f" * 64) as fingerprint,
+                    patch.object(module, "load_source") as load_source,
+                ):
+                    if layout != "monorepo":
+                        with self.assertRaisesRegex(module.GateFailure, "exact official example inventory"):
+                            module.run_full(arguments, {})
+                        load_source.assert_not_called()
+                        fingerprint.assert_not_called()
+                    else:
+                        module.run_full(arguments, {})
+                        self.assertEqual(78, load_source.call_count)
+                        self.assertEqual(
+                            [examples_root / example for example in examples],
+                            [call.args[3] for call in load_source.call_args_list],
+                        )
+                        for call in load_source.call_args_list:
+                            self.assertEqual(("/fixture/node", package, checkout), call.args[:3])
+                            self.assertEqual("f" * 64, call.args[4])
+                        self.assertEqual(78, fingerprint.call_count)
+                    self.assertEqual(2, verify_tarball.call_count)
 
     def test_full_gate_compares_the_entire_selected_package_payload(self) -> None:
         module = conformance_module()

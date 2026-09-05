@@ -577,7 +577,7 @@ def run_full(arguments, report):
     checkout = arguments.source_root.resolve()
     if git(["rev-parse", "HEAD"], checkout) != REVISION or git(["status", "--porcelain"], checkout):
         fail("source checkout must be clean and exactly at the pinned revision")
-    examples_root, examples = checkout / "examples/extensions", profile["official_extension_examples"]
+    examples_root, examples = checkout / "packages/coding-agent/examples/extensions", profile["official_extension_examples"]
     if not examples_root.is_dir() or any(not (examples_root / example).exists() for example in examples):
         fail("source checkout lacks the exact official example inventory")
     node = shutil.which("node")
