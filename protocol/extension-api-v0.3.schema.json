@@ -1,8 +1,8 @@
 {
-  "schema_format": "ygg.extension.protocol.schema/v1",
+  "schema_format": "octet.extension.protocol.schema/v1",
   "api_version": "0.3",
-  "schema_id": "ygg.extension.api/0.3",
-  "canonical_encoding": "ygg-canonical-json-v1",
+  "schema_id": "octet.extension.api/0.3",
+  "canonical_encoding": "octet-canonical-json-v1",
   "legacy_adapters": [
     {
       "version": "0.1",
@@ -1139,7 +1139,7 @@
           ]
         },
         {
-          "name": "ygg_version",
+          "name": "octet_version",
           "type": "string",
           "presence": "required",
           "nullable": false
@@ -2017,7 +2017,7 @@
       "name": "initialize-request",
       "value": {
         "api_version": "0.3",
-        "ygg_version": "0.7.0-dev",
+        "octet_version": "0.7.0",
         "extension": {
           "name": "fixture",
           "source": "explicit",
@@ -2038,8 +2038,8 @@
           "label": "café"
         },
         "contract": {
-          "schema": "ygg.extension.api/0.3",
-          "encoding": "ygg-canonical-json-v1",
+          "schema": "octet.extension.api/0.3",
+          "encoding": "octet-canonical-json-v1",
           "required_capabilities": [
             "content_parts",
             "core",
@@ -2114,8 +2114,8 @@
           }
         ],
         "contract": {
-          "schema": "ygg.extension.api/0.3",
-          "encoding": "ygg-canonical-json-v1",
+          "schema": "octet.extension.api/0.3",
+          "encoding": "octet-canonical-json-v1",
           "capabilities": [
             "content_parts",
             "core",

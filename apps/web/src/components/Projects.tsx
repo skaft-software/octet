@@ -143,8 +143,8 @@ export function ProjectsView({
             </span>
             <div>
               <h2>No projects found. Open a folder to get started.</h2>
-              <p>Start ygg from the folder you want to add:</p>
-              <code>ygg --workspace /path/to/project serve</code>
+              <p>Start octet from the folder you want to add:</p>
+              <code>octet --workspace /path/to/project serve</code>
             </div>
           </div>
         ) : null}

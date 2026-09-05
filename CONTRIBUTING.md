@@ -12,12 +12,13 @@ Use lowercase **octet** for current product prose. The
 product authority; include reproducible outcome evidence rather than relying
 on an external website or an illustrative screenshot.
 
-The intended 0.7.0 rename is not yet the source command contract. In this pre-rename checkout,
-keep working `ygg`/`ygg-host`, crate/SDK, `YGG_*`, and `.ygg` spellings in source
-instructions until the coherent rename pass. Do not invent octet download,
-npm, or Homebrew URLs, aliases, or automatic migration. Preserve historical
+The current 0.7.0 source uses `octet`/`octet-host`, `octet-*` crates and SDKs,
+`OCTET_*`, and `.octet`. Keep commands, imports, schemas, generated references,
+and shipped distribution metadata consistent without changing independent API
+or upstream versions. Do not invent public octet downloads, npm/Homebrew
+availability, aliases, or automatic first-party migration. Preserve historical
 changelog/release/benchmark identity and third-party notices. The actual source
-repository remains `skaft-software/ygg`; see the [0.7.0 draft](docs/releases/v0.7.0.md).
+repository remains `skaft-software/ygg`; see the [0.7.0 notes](docs/releases/v0.7.0.md).
 
 ## AI-assisted contributions
 
@@ -82,15 +83,15 @@ Rust version. Install Rust through [rustup](https://rustup.rs/) and install
 `rg` (ripgrep).
 
 ```sh
-git clone https://github.com/skaft-software/ygg.git
-cd ygg
+git clone https://github.com/skaft-software/ygg.git octet
+cd octet
 cargo check --workspace --all-targets --all-features --locked
 ```
 
 Run the binary without installing it:
 
 ```sh
-cargo run -p ygg-coding-agent --bin ygg -- --help
+cargo run -p octet-coding-agent --bin octet -- --help
 ```
 
 Cargo does not garbage-collect stale fingerprints from old toolchains, feature
@@ -128,9 +129,9 @@ cargo test --workspace --all-targets --all-features --profile ci-test --locked
 cargo test --workspace --doc --profile ci-test --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo audit
-cargo audit --file extensions/ygg-serve/Cargo.lock
+cargo audit --file extensions/octet-serve/Cargo.lock
 cargo deny check
-cargo deny --manifest-path extensions/ygg-serve/Cargo.toml check
+cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
 (cd apps/web && npm ci && npm audit --audit-level=high)
 git diff --check
 ```
@@ -149,7 +150,7 @@ The live multimodal test is intentionally ignored unless an explicitly
 configured compatible endpoint is available. Stable Serve releases must pass the
 disposable configured-provider matrix in ordinary CI. Maintainers may also run
 the separately approved credentialed checks described in
-[configured-provider acceptance](docs/experimental/ygg-serve/provider-acceptance.md)
+[configured-provider acceptance](docs/experimental/octet-serve/provider-acceptance.md)
 against the immutable release SHA; that live check is temporarily optional and
 the release workflow records an explicit waiver when it is not selected.
 

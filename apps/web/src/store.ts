@@ -42,9 +42,9 @@ import {
   SessionSequenceGapError,
 } from "./reducer";
 import { isUntitledSession } from "./session-title";
-import type { TransportConnectionState, YggTransport } from "./transport";
+import type { TransportConnectionState, OctetTransport } from "./transport";
 
-export interface YggState {
+export interface OctetState {
   ready: boolean;
   connecting: boolean;
   connection: TransportConnectionState;
@@ -61,7 +61,7 @@ export interface YggState {
   sessions: Record<string, SessionSnapshot>;
 }
 
-const initialState: YggState = {
+const initialState: OctetState = {
   ready: false,
   connecting: true,
   connection: "connecting",
@@ -345,8 +345,8 @@ function contiguousDeferredEvents(
   return replay;
 }
 
-export class YggStore {
-  private state: YggState = initialState;
+export class OctetStore {
+  private state: OctetState = initialState;
   private listeners = new Set<() => void>();
   private unsubscribeTransport: (() => void) | null = null;
   private unsubscribeConnection: (() => void) | null = null;
@@ -362,9 +362,9 @@ export class YggStore {
   private goalRevision = 0;
   private disposed = false;
 
-  constructor(private readonly transport: YggTransport) {}
+  constructor(private readonly transport: OctetTransport) {}
 
-  getSnapshot = (): YggState => this.state;
+  getSnapshot = (): OctetState => this.state;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -702,7 +702,7 @@ export class YggStore {
     }
   }
 
-  private publish(next: YggState): void {
+  private publish(next: OctetState): void {
     if (this.disposed) return;
     this.state = next;
     for (const listener of this.listeners) listener();
@@ -2196,7 +2196,7 @@ export class YggStore {
   }
 }
 
-export function useYggStore(store: YggStore): YggState {
+export function useOctetStore(store: OctetStore): OctetState {
   return useSyncExternalStore(
     store.subscribe,
     store.getSnapshot,

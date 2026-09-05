@@ -64,8 +64,8 @@ import {
 } from "./notifications";
 import {
   sessionIdFromPathname,
-  YggStore,
-  useYggStore,
+  OctetStore,
+  useOctetStore,
 } from "./store";
 import { displaySessionTitle, isUntitledSession } from "./session-title";
 import { resolveDelegatedParentSessionId } from "./delegated-session";
@@ -107,13 +107,13 @@ const statusLabel: Record<SessionStatus, string> = {
 };
 
 const transportMode = transportModeFromSearch(window.location.search);
-const store = new YggStore(createTransport(transportMode));
-const activityPaneStorageKey = "ygg.ui.activity-width";
-const inspectorPaneStorageKey = "ygg.ui.inspector-width";
-const terminalPaneStorageKey = "ygg.ui.terminal-width";
-const terminalPaneOpenStorageKey = "ygg.ui.terminal.open";
+const store = new OctetStore(createTransport(transportMode));
+const activityPaneStorageKey = "octet.ui.activity-width";
+const inspectorPaneStorageKey = "octet.ui.inspector-width";
+const terminalPaneStorageKey = "octet.ui.terminal-width";
+const terminalPaneOpenStorageKey = "octet.ui.terminal.open";
 const notificationPreferenceKey = (hostId: string) =>
-  `ygg.notifications.enabled.${encodeURIComponent(hostId)}`;
+  `octet.notifications.enabled.${encodeURIComponent(hostId)}`;
 
 function writeFleetRoute() {
   const route = `/overview${window.location.search}`;
@@ -702,7 +702,7 @@ function UtilityTopbar({
 }
 
 export default function App() {
-  const state = useYggStore(store);
+  const state = useOctetStore(store);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => !window.matchMedia("(max-width: 760px)").matches,
   );
@@ -1440,7 +1440,7 @@ export default function App() {
   const resolveUserInput = useCallback(
     (
       requestId: string,
-      answer: Parameters<YggStore["resolveUserInput"]>[1],
+      answer: Parameters<OctetStore["resolveUserInput"]>[1],
     ) => store.resolveUserInput(requestId, answer),
     [],
   );
@@ -1492,7 +1492,7 @@ export default function App() {
     [],
   );
   const writeProjectFile = useCallback(
-    (projectId: string, request: Parameters<YggStore["writeProjectFile"]>[1]) =>
+    (projectId: string, request: Parameters<OctetStore["writeProjectFile"]>[1]) =>
       store.writeProjectFile(projectId, request),
     [],
   );

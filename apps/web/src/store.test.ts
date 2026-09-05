@@ -27,8 +27,8 @@ import type {
   UsagePeriod,
   UsageStats,
 } from "./protocol";
-import { sessionIdFromPathname, YggStore } from "./store";
-import type { GoalResponse, YggTransport } from "./transport";
+import { sessionIdFromPathname, OctetStore } from "./store";
+import type { GoalResponse, OctetTransport } from "./transport";
 
 type SessionLoader = (
   sessionId: string,
@@ -37,7 +37,7 @@ type SessionLoader = (
 
 const clone = <T,>(value: T): T => structuredClone(value);
 
-class TestTransport implements YggTransport {
+class TestTransport implements OctetTransport {
   readonly commands: ClientCommand[] = [];
   readonly listeners = new Set<(event: HostEvent) => void>();
   connectCount = 0;
@@ -347,10 +347,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("YggStore", () => {
+describe("OctetStore", () => {
   it("initializes the command center without selecting a task", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     const previousRoute = `${window.location.pathname}${window.location.search}`;
     window.history.replaceState(null, "", "/overview?transport=fixture");
 
@@ -399,7 +399,7 @@ describe("YggStore", () => {
       }
       return { commandId: command.id, accepted: true };
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
 
     await store.initialize();
     expect(transport.connectCount).toBe(0);
@@ -433,7 +433,7 @@ describe("YggStore", () => {
       turnsUsed: 1,
       createdAt: "2026-01-01T00:00:00Z",
     });
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
 
     await store.initialize();
     expect(store.getSnapshot().goal).toMatchObject({
@@ -460,7 +460,7 @@ describe("YggStore", () => {
       turnsUsed: 0,
       createdAt: "2026-01-01T00:00:00Z",
     });
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
 
     await store.initialize();
     transport.emit({
@@ -504,7 +504,7 @@ describe("YggStore", () => {
   it("uses a durable tombstone revision when loading an empty goal", async () => {
     const transport = new TestTransport();
     transport.goalRevisions.set("session-fresh", 3);
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
 
     await store.initialize();
     transport.emit({
@@ -537,7 +537,7 @@ describe("YggStore", () => {
       turnsUsed: 0,
       createdAt: "2026-01-01T00:00:00Z",
     });
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
 
     await store.initialize();
     transport.emit({
@@ -575,7 +575,7 @@ describe("YggStore", () => {
       if (attempt === 1) throw new Error("connection reset");
       return { commandId: command.id, accepted: true };
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     await store.submit("Keep the command id stable", []);
@@ -588,7 +588,7 @@ describe("YggStore", () => {
 
   it("keeps the current session visible and reports a failed selection", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     transport.sessionLoader = async (sessionId) => {
       if (sessionId === "session-done") {
@@ -652,7 +652,7 @@ describe("YggStore", () => {
       }
       return clone(fixtureSessions[sessionId]);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     const oldSelection = store.selectSession("session-live");
@@ -667,7 +667,7 @@ describe("YggStore", () => {
 
   it("keeps a cached selection from regressing behind live session and goal events", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     await store.selectSession("session-live", "none");
     await store.selectSession("session-done", "none");
@@ -748,7 +748,7 @@ describe("YggStore", () => {
       }
       return clone(fixtureSessions[sessionId]);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     transport.getGoal = async () => pendingGoal.promise;
 
@@ -798,7 +798,7 @@ describe("YggStore", () => {
       sessionId === "session-live"
         ? clone(cached)
         : clone(fixtureSessions[sessionId]);
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     await store.selectSession("session-live", "none");
     await store.selectSession("session-done", "none");
@@ -841,7 +841,7 @@ describe("YggStore", () => {
       sessionId === "session-live"
         ? clone(cached)
         : clone(fixtureSessions[sessionId]);
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     await store.selectSession("session-live", "none");
     await store.selectSession("session-done", "none");
@@ -879,7 +879,7 @@ describe("YggStore", () => {
       }
       return clone(fixtureSessions[sessionId]);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     const previousRoute = `${window.location.pathname}${window.location.search}`;
 
     try {
@@ -919,7 +919,7 @@ describe("YggStore", () => {
       loadedSessions.push(sessionId);
       return clone(fixtureSessions[sessionId]);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
 
     const olderInitialization = store.initialize();
     await vi.waitFor(() => expect(connectCall).toBe(1));
@@ -942,7 +942,7 @@ describe("YggStore", () => {
 
   it("batches ordered events into one rendered store publication", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     let publications = 0;
     const unsubscribe = store.subscribe(() => {
@@ -975,7 +975,7 @@ describe("YggStore", () => {
 
   it("keeps catalog PR evidence authoritative while session events advance replay", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     const summary = () =>
       store
@@ -1024,7 +1024,7 @@ describe("YggStore", () => {
 
   it("keeps catalog PR evidence authoritative for unloaded sessions", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     const background = clone(
       fixtureBootstrap.sessions.find(
@@ -1072,7 +1072,7 @@ describe("YggStore", () => {
       }
       return { commandId: command.id, accepted: true };
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     await store.submit(title, []);
@@ -1115,7 +1115,7 @@ describe("YggStore", () => {
 
   it("coalesces a frame of deltas without churning catalog identity", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     const initialBootstrap = store.getSnapshot().bootstrap;
     const initialSummaries = initialBootstrap?.sessions;
@@ -1166,7 +1166,7 @@ describe("YggStore", () => {
 
   it("inserts and refreshes background summaries from other clients", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1174,7 +1174,7 @@ describe("YggStore", () => {
       catalogRevision: fixtureBootstrap.catalogRevision + 1,
       summary: {
         id: "session-phone",
-        projectId: "project-ygg",
+        projectId: "project-octet",
         title: "Started on the phone",
         preview: "Completed",
         status: "done",
@@ -1205,7 +1205,7 @@ describe("YggStore", () => {
       catalogRevision: fixtureBootstrap.catalogRevision + 2,
       summary: {
         id: "session-phone",
-        projectId: "project-ygg",
+        projectId: "project-octet",
         title: "Started on the phone",
         preview: "Needs your input",
         status: "needs_attention",
@@ -1234,7 +1234,7 @@ describe("YggStore", () => {
 
   it("marks a background completion unread and attention states actionable", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1273,7 +1273,7 @@ describe("YggStore", () => {
 
   it("keeps needs-attention input on the active run", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1303,7 +1303,7 @@ describe("YggStore", () => {
 
   it("defaults active-run submissions to steering", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1341,7 +1341,7 @@ describe("YggStore", () => {
       retryable: true,
       currentGeneration: 9,
     });
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     const rejection = await store
@@ -1372,7 +1372,7 @@ describe("YggStore", () => {
       ],
       skills: [],
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     await expect(store.getCommandDiscovery()).resolves.toEqual(
@@ -1396,7 +1396,7 @@ describe("YggStore", () => {
       ...clone(fixtureBootstrap),
       selectedSessionId: null,
     });
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     await store.createSession();
@@ -1410,7 +1410,7 @@ describe("YggStore", () => {
 
   it("answers a typed user-input request through its owning session", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     await store.resolveUserInput("request-layout", {
@@ -1452,12 +1452,12 @@ describe("YggStore", () => {
         ...selected,
         sessionId,
         title: "New session",
-        projectId: "project-ygg",
+        projectId: "project-octet",
         sequence: 0,
         items: [],
       };
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     const first = store.createSession();
@@ -1507,7 +1507,7 @@ describe("YggStore", () => {
       }
       return clone(authoritative);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
 
     try {
       await store.initialize();
@@ -1577,7 +1577,7 @@ describe("YggStore", () => {
       if (loads === 2) return pending.promise;
       return clone(replacement);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1636,7 +1636,7 @@ describe("YggStore", () => {
       if (loads === 1) return clone(fixtureSessions[sessionId]);
       return pending.promise;
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1725,7 +1725,7 @@ describe("YggStore", () => {
       loads += 1;
       return clone(loads === 1 ? oldSnapshot : replacement);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1785,7 +1785,7 @@ describe("YggStore", () => {
       if (loads === 2) throw new Error("snapshot is still being published");
       return clone(replacement);
     };
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
 
     transport.emit({
@@ -1805,7 +1805,7 @@ describe("YggStore", () => {
 
   it("sends checkout for a checkoutable checkpoint after work has finished", async () => {
     const transport = new TestTransport();
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     await store.selectSession("session-done");
 
@@ -1825,7 +1825,7 @@ describe("YggStore", () => {
       ...clone(fixtureSessions[sessionId]),
       status: "disconnected",
     });
-    const store = new YggStore(transport);
+    const store = new OctetStore(transport);
     await store.initialize();
     await store.selectSession("session-done");
 

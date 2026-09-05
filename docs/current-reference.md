@@ -2,17 +2,18 @@
 
 [Documentation](README.md) · [Outcome workflows](workflows.md) · [Security](../SECURITY.md)
 
-This is the substantive CLI, provider, configuration, extension, session, and
-architecture reference retained from the former root README. **octet** is the
-intended 0.7.0 identity; this pre-rename checkout still uses `ygg`, `ygg-host`,
-`ygg-*` crates/packages, `YGG_*`, and `.ygg` roots. Those technical spellings
-below describe inherited source, not working renamed commands or a released
-candidate. Historical version-specific notes retain their original scope.
+This is the current CLI, provider, configuration, extension, session, and
+architecture reference for **octet 0.7.0 source**. Commands use `octet` and
+`octet-host`; first-party crates/packages, environments, and roots use `octet-*`,
+`OCTET_*`, and `.octet`. Source identity is not publication or release qualification.
+Historical version-specific notes retain their original scope and spelling.
 
-Start with the [workflows](workflows.md) for a task-oriented route. Use the
-[0.7.0 draft](releases/v0.7.0.md) for rename and qualification status, not the
-historical install/update appendix below. No automatic Ygg-to-octet migration
-is promised or recommended.
+Start with the [workflows](workflows.md) for a task-oriented route and the
+[0.7.0 notes](releases/v0.7.0.md) for qualification status. The historical
+install/update appendix is not current installation guidance. There are no Ygg
+aliases, old-root readers, or automatic earlier-first-party Hamr/Ygg imports.
+The third-party Codex credential source and explicit Pi import/restore remain
+separate interoperability contracts; original source stores are never modified.
 
 - [Providers and setup](#quick-start)
 - [Tools and authority](#built-in-tools)
@@ -28,18 +29,21 @@ is promised or recommended.
 ### Executable extension bundles
 
 The optional first-party executable extensions are separate, inert packages.
-For example:
+The catalog commands below require separately published, exact-version bundles;
+no public octet 0.7.0 bundle is verified here. For this checkout, select a reviewed
+source with `--extension-dir ./extensions` or install a locally built archive
+with `extension install --path ARCHIVE`. Catalog command reference:
 
 ```sh
-ygg extension install ygg-web-search
-ygg extension list
+octet extension install octet-web-search
+octet extension list
 ```
 
 Published bundles are checksum-verified and installed atomically under
-`~/.ygg/extensions/<id>`. Installation does **not** enable, trust, or start the
+`~/.octet/extensions/<id>`. Installation does **not** enable, trust, or start the
 process. In the TUI, `/extensions` opens an interactive installed-bundle menu;
 use Up/Down and Enter to enable or disable the selected executable extension.
-Selecting the enabled first-party `ygg-web-search` bundle opens its provider
+Selecting the enabled first-party `octet-web-search` bundle opens its provider
 picker, with Brave Search recommended and SearXNG retained as an option. Brave
 setup requests its API key through a private input surface. Trust remains a
 separate decision and is never granted by the menu. If project,
@@ -51,18 +55,18 @@ disabling is blocked while an explicit tool allowlist still requires that
 bundle. For a one-shot launch instead:
 
 ```sh
-ygg --enable-extension ygg-web-search --trust-extension ygg-web-search
+octet --enable-extension octet-web-search --trust-extension octet-web-search
 ```
 
-The small release catalog contains `ygg-browse`, `ygg-mcp`, `ygg-subagents`,
-and `ygg-web-search`. `ygg-mcp` retains normal local stdio support; its remote
+The small release catalog contains `octet-browse`, `octet-mcp`, `octet-subagents`,
+and `octet-web-search`. `octet-mcp` retains normal local stdio support; its remote
 Streamable HTTP transport is blocked by default and requires the conspicuous
 one-shot process-owner flag `--experimental-streamable-http-mcp` (see its
-package README before using it). Use `ygg extension update <name>` or
-`ygg extension remove <name>` to manage one.
+package README before using it). Use `octet extension update <name>` or
+`octet extension remove <name>` to manage one.
 Offline and third-party archives can be installed with
-`ygg extension install --path ./bundle.tar.gz`. Replace one atomically with
-`ygg extension update --path ./new-bundle.tar.gz`. Ygg runs no
+`octet extension install --path ./bundle.tar.gz`. Replace one atomically with
+`octet extension update --path ./new-bundle.tar.gz`. octet runs no
 install hook or dependency provisioner. Packaged skills are discovered but
 still require explicit activation. See the
 [executable-extension documentation](extensions.md) for setup, trust, and
@@ -71,66 +75,66 @@ local-install details.
 ### Graphical Serve extension
 
 The optional first-party Serve package provides a loopback-only web interface.
-It is version-matched to Ygg and installed separately from the terminal binary:
+It is version-matched to octet and installed separately from the terminal binary:
 
 ```sh
-ygg extension install ygg-serve
-ygg serve
+octet extension install octet-serve
+octet serve
 ```
 
 For a headless launch on an operating-system-selected port:
 
 ```sh
-ygg serve --no-open --port 0
+octet serve --no-open --port 0
 ```
 
-Use `ygg extension list` to inspect packages. Run `ygg extension update ygg-serve`
-or `ygg extension remove ygg-serve` to manage Serve. A downloaded release
-archive can be installed with `ygg extension install --path ARCHIVE` or updated
-atomically with `ygg extension update --path ARCHIVE`.
+Use `octet extension list` to inspect packages. Run `octet extension update octet-serve`
+or `octet extension remove octet-serve` to manage Serve. A downloaded release
+archive can be installed with `octet extension install --path ARCHIVE` or updated
+atomically with `octet extension update --path ARCHIVE`.
 Removing the package leaves sessions and other Serve data intact.
 
 ### Container
 
-The included linux/amd64 image builds Ygg from a clean, tracked Git snapshot,
+The included linux/amd64 image builds octet from a clean, tracked Git snapshot,
 uses digest-pinned base images and Debian package snapshots, runs as an
 unprivileged user, and expects an explicit workspace mount. The build script
 refuses tracked changes and excludes all untracked workstation content:
 
 ```sh
-scripts/build-ygg-image.sh ygg:0.6.7
+scripts/build-octet-image.sh octet:0.7.0
 docker run --rm -it \
   -e ANTHROPIC_API_KEY \
   -v "$PWD:/workspace" \
-  ygg:0.6.7 --model claude-sonnet-4-6
+  octet:0.7.0 --model claude-sonnet-4-6
 ```
 
 Only pass credentials and mount paths the container actually needs. The image
-keeps its read-only packaged documentation under `/usr/local/share/ygg`, exposed
-to Ygg through `YGG_PACKAGE_DIR`.
+keeps its read-only packaged documentation under `/usr/local/share/octet`, exposed
+to octet through `OCTET_PACKAGE_DIR`.
 
 ## Quick start
 
 ### Use a cloud model
 
-Set the provider credential, then select a model. ygg discovers the live model catalog where the provider exposes one.
+Set the provider credential, then select a model. octet discovers the live model catalog where the provider exposes one.
 
 ```sh
 export ANTHROPIC_API_KEY='...'
-ygg --model claude-sonnet-4-6
+octet --model claude-sonnet-4-6
 ```
 
 ```sh
 export OPENAI_API_KEY='...'
-ygg --model gpt-5.4
+octet --model gpt-5.4
 ```
 
 The direct OpenAI catalog also includes `gpt-6-astra` on Responses with
 text/image input, a 1.05M-token context window, 128K output, and `low` through
 `max` reasoning effort. Inputs above 272K use its long-context price tier.
-Select it through the same generic path: `ygg --model gpt-6-astra`.
+Select it through the same generic path: `octet --model gpt-6-astra`.
 
-This `0.7.0-dev` dogfood build provides baseline Astra model selection,
+The `0.7.0` source implements baseline Astra model selection,
 text/image requests, reasoning, and ordinary/parallel tool calls. It does not
 yet implement native async tools (`async: true` with a pending-call lifecycle),
 steering an active Responses WebSocket response, or coding-loop reasoning
@@ -140,15 +144,15 @@ Input received during execution is queued for a later model-turn boundary;
 
 ```sh
 export OPENROUTER_API_KEY='...'
-ygg --model openrouter/anthropic/claude-sonnet-4.6
+octet --model openrouter/anthropic/claude-sonnet-4.6
 ```
 
 Mistral's built-in Chat Completions preset uses its native request and reasoning
-content conventions while retaining Ygg's normal model selection:
+content conventions while retaining octet's normal model selection:
 
 ```sh
 export MISTRAL_API_KEY='...'
-ygg --model mistral/mistral-small-latest
+octet --model mistral/mistral-small-latest
 ```
 
 Cloudflare Workers AI requires an account identifier as well as an API key:
@@ -156,7 +160,7 @@ Cloudflare Workers AI requires an account identifier as well as an API key:
 ```sh
 export CLOUDFLARE_ACCOUNT_ID='...'
 export CLOUDFLARE_API_KEY='...'
-ygg --model cloudflare-workers-ai/@cf/openai/gpt-oss-120b
+octet --model cloudflare-workers-ai/@cf/openai/gpt-oss-120b
 ```
 
 Cloudflare AI Gateway routes the built-in Claude, OpenAI, and Workers AI models
@@ -167,18 +171,18 @@ identifier too:
 export CLOUDFLARE_ACCOUNT_ID='...'
 export CLOUDFLARE_GATEWAY_ID='...'
 export CLOUDFLARE_API_KEY='...'
-ygg --model cloudflare-ai-gateway/claude-sonnet-4-5
+octet --model cloudflare-ai-gateway/claude-sonnet-4-5
 ```
 
 Amazon Bedrock uses SigV4 with the standard bounded AWS credential chain: an
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair (and optional session token),
 the selected `AWS_PROFILE`, or ECS/EC2 instance metadata. Select a region with
-`AWS_REGION` (or `YGG_BEDROCK_REGION`); model availability still depends on the
+`AWS_REGION` (or `OCTET_BEDROCK_REGION`); model availability still depends on the
 account and region.
 
 ```sh
 export AWS_REGION=us-east-1
-ygg --model 'bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0'
+octet --model 'bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0'
 ```
 
 Azure OpenAI routes configured deployments through the Responses API. Set an
@@ -190,7 +194,7 @@ version.
 export AZURE_OPENAI_API_KEY='...'
 export AZURE_OPENAI_RESOURCE='my-resource' # or AZURE_OPENAI_ENDPOINT=https://my-resource.openai.azure.com/
 export AZURE_OPENAI_DEPLOYMENT='my-gpt-deployment'
-ygg --model azure-openai/my-gpt-deployment
+octet --model azure-openai/my-gpt-deployment
 ```
 
 Gemini uses Google's native `generateContent` API rather than an OpenAI-compatible
@@ -199,13 +203,13 @@ presets (including tools, structured JSON output, and supported images):
 
 ```sh
 export GEMINI_API_KEY='...'
-ygg --model gemini/gemini-2.5-flash
+octet --model gemini/gemini-2.5-flash
 ```
 
 Vertex AI uses Application Default Credentials and requires an explicit project
 and location. `GOOGLE_APPLICATION_CREDENTIALS`, when set, must name an absolute
-owner-private ADC file; otherwise Ygg checks the owner-private default ADC file.
-Ygg supports `authorized_user` and PKCS#8 `service_account` ADC files, refreshes
+owner-private ADC file; otherwise octet checks the owner-private default ADC file.
+octet supports `authorized_user` and PKCS#8 `service_account` ADC files, refreshes
 short-lived access tokens in memory, and never invokes `gcloud` or persists
 credential values.
 
@@ -213,75 +217,75 @@ credential values.
 export GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/adc.json
 export GOOGLE_CLOUD_PROJECT=my-project
 export GOOGLE_CLOUD_LOCATION=us-central1
-ygg --model vertex/gemini-2.5-flash
+octet --model vertex/gemini-2.5-flash
 ```
 
 ChatGPT subscription users can use the hosted device flow instead of manually managing an API key:
 
 ```sh
-ygg --login codex
-ygg --model gpt-5.6
+octet --login codex
+octet --model gpt-5.6
 ```
 
 When that account's live Codex catalog explicitly advertises the `ultra`
-reasoning level and V2 collaboration for the selected model, Ygg exposes the
-host-side `ultra` tier only while the trusted, enabled `ygg-subagents` extension
+reasoning level and V2 collaboration for the selected model, octet exposes the
+host-side `ultra` tier only while the trusted, enabled `octet-subagents` extension
 is live. Install and activate that extension first so every child session has
 an observable `/subagents` surface:
 
 ```sh
-ygg extension install ygg-subagents
-ygg --enable-extension ygg-subagents --trust-extension ygg-subagents \
+octet extension install octet-subagents
+octet --enable-extension octet-subagents --trust-extension octet-subagents \
   --model gpt-5.6-sol --reasoning ultra
 ```
 
 For a checkout build, rebuild and replace the installed bundle deterministically
-with `./scripts/reinstall-ygg-subagents.sh`; `cargo run` does not update
-`~/.ygg/extensions` automatically.
+with `./scripts/reinstall-octet-subagents.sh`; `cargo run` does not update
+`~/.octet/extensions` automatically.
 
 The extension owns the model-facing `subagent_*` tools and the host's bounded
 child-session service; the coding product does not expose a parallel native
-collaboration tool surface. Ygg still does not infer Ultra, collaboration, or
+collaboration tool surface. octet still does not infer Ultra, collaboration, or
 Responses Lite from a model name or subscription plan; missing or unusable
 account-scoped metadata falls back conservatively. A successful live inventory
-is authoritative: if it omits Astra, Ygg does not inject a Codex Astra route.
+is authoritative: if it omits Astra, octet does not inject a Codex Astra route.
 When it includes Astra, the subscription route is always selectable as
 `codex/gpt-6-astra`, independently of whether a direct OpenAI preset is
 configured.
 
-The baseline dogfood limits above also apply to Codex Astra. Public API support
+The baseline source limits above also apply to Codex Astra. Public API support
 does not establish OAuth feature support: additional Codex capabilities require
 fresh, account-scoped live metadata or verified behavior of that endpoint.
 
-GitHub Copilot is intentionally **not** a `ygg --login` or configuration preset.
+GitHub Copilot is intentionally **not** a `octet --login` or configuration preset.
 An embedding Rust application can own GitHub device login, OAuth storage,
 exchange, refresh, and its vetted inference origin through the credential-safe SDK seam;
-the standalone CLI and NDJSON `ygg-host` do not accept Copilot credentials or
+the standalone CLI and NDJSON `octet-host` do not accept Copilot credentials or
 surface incomplete Copilot models. See [host-owned GitHub Copilot](sdk.md#host-owned-github-copilot).
 
 ### Use custom OpenAI-compatible providers
 
-For a first local model, launch interactive `ygg` with no configured model and
+For a first local model, launch interactive `octet` with no configured model and
 choose **LM Studio** or **OpenAI-compatible endpoint** in the guided setup flow.
 The flow asks for one endpoint, an optional credential source, a discovered or
 manual model ID, and a final review before it writes anything. It never scans
 localhost or a network for servers.
 
-For scripts, `ygg setup` is the same transactional operation without prompts.
+For scripts, `octet setup` is the same transactional operation without prompts.
 It prints a secret-free review receipt by default; add `--yes` only after
 reviewing it. Select LM Studio explicitly before using its documented default
 endpoint, or supply an endpoint yourself:
 
 ```sh
 # One explicitly selected LM Studio endpoint; review only.
-ygg setup --preset lm-studio --manual-model local-model
+octet setup --preset lm-studio --manual-model local-model
 
 # Commit a discovered model inventory after confirmation.
-ygg setup --endpoint https://models.example.test/v1/ \
+octet setup --endpoint https://models.example.test/v1/ \
   --api-key-env EXAMPLE_API_KEY --yes
 
 # Offline/manual recovery makes no discovery request.
-ygg setup --endpoint http://127.0.0.1:8000/v1/ \
+octet setup --endpoint http://127.0.0.1:8000/v1/ \
   --offline --manual-model Qwen3-Coder --yes
 ```
 
@@ -290,10 +294,10 @@ leave the registry unchanged. Setup sends a bounded `GET /models` only to the
 endpoint selected in that invocation, follows no redirects, writes no setup
 telemetry, and never includes API-key or secret-header values in a receipt,
 diagnostic, session, or cache. Print and RPC modes never open the guided flow;
-when no model can be resolved they report the deterministic `ygg setup --yes`
+when no model can be resolved they report the deterministic `octet setup --yes`
 recovery command instead.
 
-Configure all custom endpoints together in `~/.ygg/credentials/custom.json`:
+Configure all custom endpoints together in `~/.octet/credentials/custom.json`:
 
 ```json
 {
@@ -331,12 +335,12 @@ Configure all custom endpoints together in `~/.ygg/credentials/custom.json`:
 
 Apple Foundation Models advertises sparse model metadata, so keep the explicit
 `system` entry at its documented 8192-token context window. Its on-device model
-thinks by default and exposes `on` as the only ygg thinking option; it does not
+thinks by default and exposes `on` as the only octet thinking option; it does not
 support a configurable `reasoning_effort`, so keep `reasoning` enabled and
 `reasoning_configurable` disabled. The `pcc` model has a separate 32768-token
 context window and supports low/medium/high reasoning effort. Configured model
 metadata overrides matching discovery results. When `fm serve` is not running,
-Ygg treats that optional loopback integration as unavailable and skips its
+octet treats that optional loopback integration as unavailable and skips its
 `GET /v1/models` request without printing a connection warning.
 
 Each provider is independently discovered and selectable. Models use stable,
@@ -386,27 +390,27 @@ model discovery during startup; inference still reaches the selected endpoint.
 ### Cold-start lifecycle feedback
 
 Set `lifecycle_feedback` to `true` only for an OpenAI-compatible endpoint that
-implements Ygg's optional readiness extension:
+implements octet's optional readiness extension:
 
 ```json
 { "providers": { "cold-local": { "lifecycle_feedback": true } } }
 ```
 
-On streaming Chat Completions requests, Ygg then sends `x-ygg-lifecycle: 1`.
+On streaming Chat Completions requests, octet then sends `x-octet-lifecycle: 1`.
 The endpoint may return the same header and/or SSE comments such as
-`: ygg-lifecycle: loading; warming model`.
+`: octet-lifecycle: loading; warming model`.
 The accepted states are `queued`, `loading`, and `ready`; malformed values and
 ordinary SSE comments remain invisible. Unconfigured endpoints receive no
 header and keep their ordinary behavior, while ordinary OpenAI clients ignore
 both the optional header and SSE comments.
 
-Feedback is advisory only: Ygg redacts and bounds its detail, displays it as a
+Feedback is advisory only: octet redacts and bounds its detail, displays it as a
 transient readiness status, and never puts it in assistant content, session
 history, or model context. Plain and print modes send it to stderr; `--print`
 stdout remains response-only. It adds no retry or POST-replay behavior,
 including no cold-start-specific handling of a `503` response.
 
-`startup_timeout_secs` still limits how long Ygg waits for response headers. An
+`startup_timeout_secs` still limits how long octet waits for response headers. An
 endpoint must return those headers before that timeout; readiness feedback does
 not extend it. Once a successful streaming response has begun, ordinary body
 idle/deadline limits still apply. Non-streaming requests use the normal
@@ -431,9 +435,9 @@ omitted rates stay zero:
 
 | Mode | Command | Best for |
 | --- | --- | --- |
-| Interactive TUI | `ygg` | Daily work: streaming, tools, pickers, branching, steering, and native scrollback. |
-| Chronological plain mode | `ygg --plain` | Basic terminals, logs, accessibility tooling, and environments where cursor control is undesirable. |
-| Response-only print mode | `ygg -p "prompt"` | Shell composition and scripts that want the final response on stdout. |
+| Interactive TUI | `octet` | Daily work: streaming, tools, pickers, branching, steering, and native scrollback. |
+| Chronological plain mode | `octet --plain` | Basic terminals, logs, accessibility tooling, and environments where cursor control is undesirable. |
+| Response-only print mode | `octet -p "prompt"` | Shell composition and scripts that want the final response on stdout. |
 
 All three frontends use the same agent loop, provider layer, session format, safety policy, and cancellation behavior.
 
@@ -455,9 +459,9 @@ by default, with the access value shown in bold red. Launching with
 The model-visible schema and executable registry are built from the same final
 allowlist. A disabled tool cannot remain advertised to the model. Registration
 does not itself authorize an effect: the default policy (`UnsafeHost`) gives
-authoritatively classified effects the Ygg process's ambient host authority,
+authoritatively classified effects the octet process's ambient host authority,
 subject to the existing tool and sandbox gates. Set `effect_policy`,
-`YGG_EFFECT_POLICY`, or `--effect-policy` to `controlled_bash_approval`,
+`OCTET_EFFECT_POLICY`, or `--effect-policy` to `controlled_bash_approval`,
 `controlled`, or `unsafe_host`; a trusted project may tighten but not relax the
 global profile. `--safe-mode` selects `ControlledBashApproval`, conflicts with
 `--effect-policy`, and requires workspace-mutation approval plus one-shot
@@ -476,21 +480,21 @@ accepted.
 
 ```sh
 # Read-only review
-ygg --tools read,search --no-context-files --offline
+octet --tools read,search --no-context-files --offline
 
 # No file mutation
-ygg --no-edit
+octet --no-edit
 
 # No command execution
-ygg --no-process
+octet --no-process
 
 # No tools at all
-ygg --no-tools
+octet --no-tools
 ```
 
 In the default full-access mode, `bash` runs with the authority of the
 current operating-system user. Like Pi, it passes every complete command to one
-selected shell with `-c`; on Unix Ygg uses an explicit `shell_path` first, then
+selected shell with `-c`; on Unix octet uses an explicit `shell_path` first, then
 `/bin/bash`, `bash` on `PATH`, and finally `sh`. It does not consult `$SHELL`.
 Secret-safe policy diagnostics report only the selected branch (`configured`,
 `system_bash`, `path_bash`, or `sh_fallback`), never a shell path or digest.
@@ -510,12 +514,12 @@ For untrusted repositories, use a container, VM, or restricted account; see
 
 Built-in provider presets include OpenAI, Anthropic, Amazon Bedrock, Azure OpenAI, OpenRouter, DeepSeek, Groq, Cerebras, xAI, Together AI, Fireworks AI, NVIDIA, Hugging Face, Moonshot AI, Xiaomi, MiniMax, OpenCode Zen, Mistral, Cloudflare Workers AI, and Cloudflare AI Gateway. Custom OpenAI-compatible endpoints cover local servers such as llama.cpp, vLLM, SGLang, LM Studio, and compatible gateways.
 
-Capability handling is model-specific. ygg validates modalities, tool use, structured output, output limits, and reasoning before sending a request. When a custom endpoint reports an exact reasoning control—off-only, binary on/off, or named levels—the picker and request wire values follow that metadata exactly.
+Capability handling is model-specific. octet validates modalities, tool use, structured output, output limits, and reasoning before sending a request. When a custom endpoint reports an exact reasoning control—off-only, binary on/off, or named levels—the picker and request wire values follow that metadata exactly.
 
 Direct OpenAI defaults to HTTP/SSE Responses. The Codex route instead selects
 `WebSocketPreferred`, with HTTP/SSE fallback and endpoint-configured zstd HTTP
 request compression (a compression failure retains the valid uncompressed body).
-These choices come from [provider declarations](../crates/ygg-coding-agent/src/providers/declarations.json),
+These choices come from [provider declarations](../crates/octet-coding-agent/src/providers/declarations.json),
 not from selecting the Responses codec alone. They are source contracts, not
 live endpoint qualification.
 
@@ -524,13 +528,13 @@ ordinary and native compact requests. The codec sends the Lite header, places
 tool schemas and developer instructions in input items, requests reasoning
 context across all turns, and strips unsupported image-detail hints. **Lite
 explicitly sends `parallel_tool_calls: false`, even when the model advertises
-parallel tool support.** The [codec and wire fixtures](../crates/ygg-ai/src/protocol/openai_responses.rs)
+parallel tool support.** The [codec and wire fixtures](../crates/octet-ai/src/protocol/openai_responses.rs)
 cover this distinction. Non-Lite routes follow their own capability handling;
 model-side batching never relaxes host effect ordering: only explicitly
 parallel-safe pure or workspace-read calls overlap, while shell and mutation
 effects remain serialized.
 
-The [WebSocket transport](../crates/ygg-ai/src/responses_ws.rs) keeps
+The [WebSocket transport](../crates/octet-ai/src/responses_ws.rs) keeps
 `previous_response_id` only as a best-effort, process-local live-connection
 optimization when fixed request parameters and the prior input/output prefix
 still match. It is not a durable session cursor. Resume reconstructs the full
@@ -541,9 +545,9 @@ also uses full replay instead of guessing a continuation.
 An explicitly recognized pre-generation connection-lifetime rejection may
 retire the socket and route a retry through HTTP. That narrow fallback is not
 a general permission to replay an accepted POST or a disconnected response.
-The inherited agent-layer body-disconnect retry is being removed; until the
-change is integrated and qualified, do not treat the transport's ambiguity
-checks as an end-to-end no-replay guarantee. See [recovery qualification](#reliability-and-security-engineering).
+The agent layer keeps response-body disconnects terminal, including before
+visible output. Deterministic regression fixtures cover this correction; live
+provider recovery remains unqualified. See [recovery qualification](#reliability-and-security-engineering).
 
 ### Reasoning without transcript noise
 
@@ -559,7 +563,7 @@ Event-margin dots identify active collapsed reasoning, assistant responses, and 
 Select a supported level at launch or while the session is running:
 
 ```sh
-ygg --reasoning high
+octet --reasoning high
 ```
 
 ```text
@@ -576,7 +580,7 @@ ygg --reasoning high
 
 The available choices are narrowed to the selected model. `ultra` appears only
 when the model advertises Ultra/V2 support and the trusted, enabled
-`ygg-subagents` extension has a live child-session service. All in-harness child
+`octet-subagents` extension has a live child-session service. All in-harness child
 work goes through its `subagent_*` tools and owner-bound `/subagents` browser;
 the root agent never receives a parallel native collaboration surface. Without
 the extension, Ultra is clamped to the highest ordinary safe effort.
@@ -596,36 +600,69 @@ and priced spend. Completed child usage is
 copied from the child sessions into a dedicated root-session accounting record
 before the root run settles, so delegated spend is durable and appears exactly
 once in the cumulative footer. It also participates in later session cost-limit
-checks. Install, enable, and trust `ygg-subagents` before selecting Ultra.
+checks. Install, enable, and trust `octet-subagents` before selecting Ultra.
 
 Token-budget reasoning is also available for compatible models with
 `--reasoning budget=N`.
 
 ### Multimodal prompts
 
-Paste or mention a supported image in the composer. Attachments are represented as explicit chips, remain ordered with text, and are accepted only when the selected model advertises the required input modality. Unsupported media stays visible as a path plus a diagnostic rather than being silently discarded.
+Use an audio reference to describe a sound, or combine it with visual references
+before asking for a repository change. Follow the
+[audio-led workflow](workflows.md#start-with-an-audio-reference) for an explicit,
+reviewable input recipe; it is not a completed live-provider demonstration.
+
+| Input surface | Supported input and limits |
+| --- | --- |
+| TUI attachment or built-in `read` | PNG/JPEG/GIF/WebP images, up to 5 MiB each; native WAV/MP3 audio, up to 20 MiB each, on a compatible model and OpenAI Chat Completions route. |
+| Native `octet-host` `media` | The same per-file limits; at most eight images (20 MiB total), four audio clips (40 MiB total), and 12 items per request. See the [SDK contract](sdk.md#run-requests). |
+| Serve web composer | PNG/JPEG/GIF/WebP images and bounded document context; audio attachments are not implemented. |
+
+In the TUI, explicitly paste/drop a file path through the terminal's paste
+mechanism or select an `@` path completion. Confirm that an `[Audio #N]` or
+`[Image #N]` chip appears before submitting. Ordinary typed paths, including
+raw-key terminal drops, remain text: mentioning a filename is not automatic
+upload consent. An enabled `read` tool can still read a path under its tool
+policy; use `--no-tools` when you want only explicitly attached input.
+
+Attachments stay ordered with text. Unsupported modalities/formats, unreadable
+files, and oversized files produce a diagnostic; failed TUI attachment keeps
+the path visible instead of creating a media chip. Recognition is not provider
+support: FLAC/Opus/AAC and host-recognized PCM16 do not gain native input support
+merely by having a recognized extension. Current native audio input requires
+both model capability and the OpenAI Chat WAV/MP3 codec; Responses, Anthropic,
+Gemini, and arbitrary OpenAI-compatible endpoints must not be advertised as
+native-audio routes on that basis. There is no automatic transcription or
+transcoding fallback. Invalid file contents may still be rejected by the provider.
+
+Only submit media the selected provider may receive. Original bytes become typed
+model/session input; payload-free transcript summaries and NDJSON events do not
+make stored sessions or their exports safe to publish. Review/redact recordings,
+images, paths, session files, and captures separately. Remote HTTPS image/audio
+`read` is default-off and requires explicit `--allow-remote-read`; `--offline`
+does not prevent inference traffic. See [security](../SECURITY.md).
 
 ### Durable branchable sessions
 
-ygg sessions are bounded append-only JSONL, namespaced by workspace. Complete semantic boundaries are persisted; provisional streaming deltas are not. Each entry points to its parent, which makes checkout and branching cheap without rewriting history.
+octet sessions are bounded append-only JSONL, namespaced by workspace. Complete semantic boundaries are persisted; provisional streaming deltas are not. Each entry points to its parent, which makes checkout and branching cheap without rewriting history.
 
 ```sh
-ygg --continue
-ygg --resume
-ygg --resume SESSION_ID
-ygg --fork SESSION_ID
-ygg --fork
+octet --continue
+octet --resume
+octet --resume SESSION_ID
+octet --fork SESSION_ID
+octet --fork
 
-ygg sessions list
-ygg sessions list --query parser
-ygg sessions inspect SESSION_ID
-ygg sessions rename SESSION_ID "parser hardening"
-ygg sessions tag SESSION_ID rust local-model
-ygg sessions export SESSION_ID --output ./handoff.ygg-session.json
-ygg sessions delete SESSION_ID
-ygg sessions repair SESSION_ID
+octet sessions list
+octet sessions list --query parser
+octet sessions inspect SESSION_ID
+octet sessions rename SESSION_ID "parser hardening"
+octet sessions tag SESSION_ID rust local-model
+octet sessions export SESSION_ID --output ./handoff.octet-session.json
+octet sessions delete SESSION_ID
+octet sessions repair SESSION_ID
 
-ygg doctor
+octet doctor
 ```
 
 - Session listing is read-only and uses lightweight bounded metadata scans.
@@ -641,7 +678,7 @@ See [docs/sessions.md](sessions.md) for the record schema, branch semantics, red
 
 ### Context and compaction
 
-ygg estimates the complete next provider-visible request before every model turn. The generic default `threshold_fraction = 1.0` keeps a fixed 16K coding-turn reserve (or the larger advertised reasoning floor) instead of adding a percentage buffer. Authenticated Codex routes retain the provider-advertised maximum as discovery metadata but use Pi's 272K request window by default; smaller provider windows remain authoritative. This bounds repeated prompt encoding and moves long sessions to compaction before oversized requests dominate latency and cost. `max_active_tokens` may impose a smaller working-set threshold. The product defaults to `mode = "local"`, not native Responses compaction. Local compaction creates a bounded summary at a safe completed-turn boundary, preserves an approximately token-bounded recent tail, and keeps active skill state. The model's advertised maximum output remains the request ceiling and is reduced only when the current input leaves less room in the context window. OpenAI Responses routes can instead use provider-native opaque compaction without exposing that payload in the transcript.
+octet estimates the complete next provider-visible request before every model turn. The generic default `threshold_fraction = 1.0` keeps a fixed 16K coding-turn reserve (or the larger advertised reasoning floor) instead of adding a percentage buffer. Authenticated Codex routes retain the provider-advertised maximum as discovery metadata but use Pi's 272K request window by default; smaller provider windows remain authoritative. This bounds repeated prompt encoding and moves long sessions to compaction before oversized requests dominate latency and cost. `max_active_tokens` may impose a smaller working-set threshold. The product defaults to `mode = "local"`, not native Responses compaction. Local compaction creates a bounded summary at a safe completed-turn boundary, preserves an approximately token-bounded recent tail, and keeps active skill state. The model's advertised maximum output remains the request ceiling and is reduced only when the current input leaves less room in the context window. OpenAI Responses routes can instead use provider-native opaque compaction without exposing that payload in the transcript.
 
 ```toml
 [compaction]
@@ -654,28 +691,28 @@ keep_recent_tokens = 20000
 compact_model = "openrouter/anthropic/claude-haiku-4.5"
 ```
 
-`native-responses` requires the active OpenAI Responses endpoint and model; it never falls back to a Chat or Anthropic summary. The legacy `enabled = true` and `YGG_AUTO_COMPACT=true` spellings continue to select `local`. Run `/compact` at any time to request a manual compaction. The compact footer uses the latest provider turn's authoritative usage rather than cumulative traffic.
+`native-responses` requires the active OpenAI Responses endpoint and model; it never falls back to a Chat or Anthropic summary. The legacy `enabled = true` and `OCTET_AUTO_COMPACT=true` spellings continue to select `local`. Run `/compact` at any time to request a manual compaction. The compact footer uses the latest provider turn's authoritative usage rather than cumulative traffic.
 
 ## Terminal experience
 
-ygg's TUI is built on a vendored, terminal-correct Rust renderer. It treats native terminal behavior as a feature, not an implementation detail.
+octet's TUI is built on a vendored, terminal-correct Rust renderer. It treats native terminal behavior as a feature, not an implementation detail.
 
-- Native scrollback and drag selection are the default (`mouse = "auto"`); Ygg leaves mouse reporting disabled and lets Pi-compatible CRLF appends flow into terminal history.
+- Native scrollback and drag selection are the default (`mouse = "auto"`); octet leaves mouse reporting disabled and lets Pi-compatible CRLF appends flow into terminal history.
 - The default renderer follows logical content height instead of pinning the composer and footer inside a fixed full-screen viewport. It uses Pi's complete retained frame: first render writes every materialized row, ordinary updates repaint the exact first-to-last changed range, and changes above the old viewport clear saved lines before one authoritative full replay.
 - Slash/path completions, panels, reports, streamed Markdown, and other temporary chrome participate in that same complete-frame differential algorithm. They can no longer freeze a semantic commit ledger while unwritten transcript rows fall out of the physical viewport.
-- Generic extension state remains on demand, but `ygg-subagents` is the observed exception: while an owning run has workers, an owner-scoped transcript event is pinned immediately above the composer with the complete bounded roster, worker phase, tool calls, input/output tokens, and spend. Its 250 ms host refresh is nonblocking and retains the last fenced snapshot on failure. `/subagents` remains the arrow-key list/inspector whose Enter action opens a scrollable read-only worker transcript; no extension contribution is allowed to replace the cumulative footer.
+- Generic extension state remains on demand, but `octet-subagents` is the observed exception: while an owning run has workers, an owner-scoped transcript event is pinned immediately above the composer with the complete bounded roster, worker phase, tool calls, input/output tokens, and spend. Its 250 ms host refresh is nonblocking and retains the last fenced snapshot on failure. `/subagents` remains the arrow-key list/inspector whose Enter action opens a scrollable read-only worker transcript; no extension contribution is allowed to replace the cumulative footer.
 - The composer uses an explicitly visible hardware cursor in both the default Pi renderer and the application-owned viewport, including after panels, resize replays, and renderer resumes.
-- A terminal resize reflows the retained semantic transcript at the new width, resets terminal saved lines, and replays Ygg's retained transcript once.
+- A terminal resize reflows the retained semantic transcript at the new width, resets terminal saved lines, and replays octet's retained transcript once.
 - `--mouse app` explicitly captures the mouse and uses a bounded semantic viewport. In that mode, scrolling above the tail stays anchored while streamed Markdown grows, reports new output, and lets PageDown return to live output.
 - Pi retained-frame differential rendering, synchronized frames, and exact changed-range repainting.
 - Responsive wide and narrow layouts with Unicode, ASCII, truecolor, 256-color, 16-color, and no-color fallbacks.
 - Semantic tool intent/lifecycle states, rich Markdown, syntax highlighting, tables, task lists, and links, with bounded sanitized tool-output projections.
 - Prompt colors are tied to the selected model in the compiled default theme.
-- The compiled default theme is the only theme exposed by the v0.6.7 runtime.
+- The compiled default theme is the only theme exposed by the v0.7.0 runtime.
 - Terminal control-sequence sanitization in user- and provider-controlled text.
 - The `sexy-tui-rs` crate enforces its memory-safety boundary with `#![forbid(unsafe_code)]`.
 
-Default `auto`, explicit `terminal`, and `off` modes leave mouse events to the terminal and begin on Pi's primary-screen retained-frame renderer. Terminal-owned resume eagerly materializes the complete active branch so native scrollback never depends on an impossible deferred prepend. PageUp claims Ygg's bounded semantic viewport in every mode and keeps that viewport anchored while output streams; `--mouse app` selects the same viewport from startup, retains tail-first lazy hydration, and additionally captures wheel scrolling and drag selection. Native, uncaptured wheel history remains terminal-owned because portable terminal protocols do not expose its reading offset.
+Default `auto`, explicit `terminal`, and `off` modes leave mouse events to the terminal and begin on Pi's primary-screen retained-frame renderer. Terminal-owned resume eagerly materializes the complete active branch so native scrollback never depends on an impossible deferred prepend. PageUp claims octet's bounded semantic viewport in every mode and keeps that viewport anchored while output streams; `--mouse app` selects the same viewport from startup, retains tail-first lazy hydration, and additionally captures wheel scrolling and drag selection. Native, uncaptured wheel history remains terminal-owned because portable terminal protocols do not expose its reading offset.
 
 Raw protocol arguments and envelopes, unsanitized failure payloads, and
 extension-rendered tool payloads remain internal accountability evidence and are
@@ -688,17 +725,17 @@ and sent to the provider only when required to continue the tool protocol; live
 progress is neither persisted nor sent to the model.
 
 ```sh
-ygg --color auto
-ygg --mouse app
+octet --color auto
+octet --mouse app
 ```
 
 ## Terminal theming
 
-Theme selection is disabled in v0.6.7. The TUI and graphical Serve frontend expose
-only Ygg's compiled default theme; that does **not** mean a fixed accent hue.
+Theme selection is disabled in v0.7.0. The TUI and graphical Serve frontend expose
+only octet's compiled default theme; that does **not** mean a fixed accent hue.
 The selected model's deterministic palette changes the atmosphere while layout,
 interaction grammar, and semantic status colours remain stable. See
-[docs/design/ygg-presentation.md](design/ygg-presentation.md).
+[docs/design/octet-presentation.md](design/octet-presentation.md).
 
 ## Interactive command reference
 
@@ -723,14 +760,14 @@ Type `/` in the composer to open live command discovery.
 | `/status` | Show active model, context, capabilities, and diagnostics. |
 | `/cost` | Show turn and session usage/cost accounting. |
 | `/cache` | Show prompt-cache diagnostics reported by the provider. |
-| `/update` | Check for a newer release; run `ygg update` to install. |
+| `/update` | Check for a newer release; run `octet update` to install. |
 | `/name [name]` | Show or rename the current session. |
 | `/export [path]` | Export the current session with redaction. |
 | `/prompt [name] [arguments]` | List or expand named prompt templates. |
 | `/skills ...` | List, search, inspect, load, unload, or reload skills. |
 | `/extensions [status\|reload]` | Open the installed-extension enable/disable menu, or inspect/reload extension state. |
-| `/subagents` | With `ygg-subagents` enabled, navigate workers and open individual read-only transcripts. |
-| `/quit` | Exit ygg. |
+| `/subagents` | With `octet-subagents` enabled, navigate workers and open individual read-only transcripts. |
+| `/quit` | Exit octet. |
 
 Useful keys:
 
@@ -739,7 +776,7 @@ Useful keys:
 | `Enter` | Submit. |
 | `Shift+Enter` | Insert a newline when the terminal reports enhanced key events. |
 | `Ctrl+C` | Clear a nonempty draft; with an empty draft, abort active work and do nothing when idle. |
-| `Ctrl+D` | Close ygg from any interactive input surface, settling active work and child-process cleanup first. |
+| `Ctrl+D` | Close octet from any interactive input surface, settling active work and child-process cleanup first. |
 | `Ctrl+O` | Globally expand or collapse retained reasoning, compaction, delegated-worker activity, tool evidence, and shell output. |
 | `PageUp` / `PageDown` | Navigate transcript history. |
 | `Tab` | Complete trailing `./`, `../`, `~/`, and absolute path tokens. Directories remain open for continued completion, and spaces are backslash-escaped. |
@@ -750,15 +787,15 @@ Useful keys:
 Configuration layers are deterministic. Later, more explicit layers win:
 
 1. Built-in defaults.
-2. `~/.ygg/config.toml`.
-3. Trusted project `.ygg/config.toml` when `--workspace-trusted` is present.
+2. `~/.octet/config.toml`.
+3. Trusted project `.octet/config.toml` when `--workspace-trusted` is present.
 4. Environment variables.
 5. CLI flags.
 6. Resumed session model/reasoning, unless the CLI explicitly overrides them.
 
 A project configuration may tighten user authority floors but cannot relax them.
 
-Example `~/.ygg/config.toml`:
+Example `~/.octet/config.toml`:
 
 ```toml
 model = "custom/Qwen3 Coder Next"
@@ -772,7 +809,7 @@ plain = false
 
 # unsafe_host is the default. A trusted project may only tighten this profile.
 effect_policy = "unsafe_host"
-# ygg defaults to full host access. Pass --safe-mode to require approval
+# octet defaults to full host access. Pass --safe-mode to require approval
 # for each action. This capability setting independently keeps paths local.
 allow_external_paths = false
 allow_edit = true
@@ -791,7 +828,7 @@ offline = false
 # cost_warning_microdollars = 50000
 
 # Optional benchmark/debug telemetry. It is disabled unless explicitly set.
-# telemetry = "./artifacts/ygg-telemetry.jsonl"
+# telemetry = "./artifacts/octet-telemetry.jsonl"
 
 [compaction]
 mode = "local"
@@ -803,10 +840,10 @@ keep_recent_tokens = 20000
 # compact_model = "provider/model"
 ```
 
-Common environment variables mirror those fields: `YGG_MODEL`, `YGG_REASONING`, `YGG_EFFECT_POLICY`, `YGG_SYSTEM_PROMPT`, `YGG_CACHE_RETENTION`, `YGG_COLOR`, `YGG_MOUSE`, `YGG_WORKSPACE`, `YGG_SESSION_DIR`, `YGG_MAX_TURNS`, `YGG_COMPACTION_MODE`, `YGG_COMPACTION_THRESHOLD_FRACTION`, `YGG_COMPACTION_MAX_ACTIVE_TOKENS`, `YGG_SHELL_PATH`, `YGG_BASH_TIMEOUT_SECS`, `YGG_MAX_OUTPUT_BYTES`, `YGG_OFFLINE`, `YGG_TELEMETRY`, and the `YGG_ALLOW_*` capability controls. Remote URL reads specifically require `allow_remote_read = true`, `YGG_ALLOW_REMOTE_READ=true`, or `--allow-remote-read`; `--offline` always disables them. Use `--safe-mode` for approval-only execution. It resolves `allow_external_paths` to false. The previous `YGG_EXEC_TIMEOUT_SECS` name and boolean `YGG_AUTO_COMPACT` remain compatibility fallbacks.
+Common environment variables mirror those fields: `OCTET_MODEL`, `OCTET_REASONING`, `OCTET_EFFECT_POLICY`, `OCTET_SYSTEM_PROMPT`, `OCTET_CACHE_RETENTION`, `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_WORKSPACE`, `OCTET_SESSION_DIR`, `OCTET_MAX_TURNS`, `OCTET_COMPACTION_MODE`, `OCTET_COMPACTION_THRESHOLD_FRACTION`, `OCTET_COMPACTION_MAX_ACTIVE_TOKENS`, `OCTET_SHELL_PATH`, `OCTET_BASH_TIMEOUT_SECS`, `OCTET_MAX_OUTPUT_BYTES`, `OCTET_OFFLINE`, `OCTET_TELEMETRY`, and the `OCTET_ALLOW_*` capability controls. Remote URL reads specifically require `allow_remote_read = true`, `OCTET_ALLOW_REMOTE_READ=true`, or `--allow-remote-read`; `--offline` always disables them. Use `--safe-mode` for approval-only execution. It resolves `allow_external_paths` to false. The previous `OCTET_EXEC_TIMEOUT_SECS` name and boolean `OCTET_AUTO_COMPACT` remain compatibility fallbacks.
 
 Telemetry is opt-in and separate from durable sessions. `--telemetry PATH` writes
-owner-only `ygg.telemetry.v1` JSONL records for run boundaries, model request
+owner-only `octet.telemetry.v1` JSONL records for run boundaries, model request
 latency/TTFT, disjoint input/cache/output usage, retries, tool timings and
 repetition signals, secret-safe policy admission decisions, compaction outcomes,
 and terminal status. Policy decisions identify the allowed/denied effect, stable
@@ -817,14 +854,14 @@ prompts, arguments, results, or provider payloads. See
 [docs/benchmarks/README.md](benchmarks/README.md) for the
 schema and measurement methodology.
 
-For renderer diagnostics, `YGG_TUI_WRITE_LOG=/path/to/ansi.log` captures the
+For renderer diagnostics, `OCTET_TUI_WRITE_LOG=/path/to/ansi.log` captures the
 raw ANSI stream written by the interactive TUI. An existing directory creates a
 unique `tui-<timestamp>-<pid>.log` inside it. Capture is disabled by default;
 logs can contain displayed prompts and tool output, so handle them as sensitive.
 
-`reasoning_mode = "pro"`, `YGG_REASONING_MODE=pro`, and
+`reasoning_mode = "pro"`, `OCTET_REASONING_MODE=pro`, and
 `--reasoning-mode pro` are accepted only to load legacy configuration and
-sessions. Ygg migrates that selection to `reasoning = "ultra"` only when current
+sessions. octet migrates that selection to `reasoning = "ultra"` only when current
 model metadata advertises complete Ultra/V2 support; otherwise it removes the
 obsolete mode, keeps the independently selected supported effort, and emits a
 warning. New configuration should use `reasoning` alone.
@@ -845,7 +882,7 @@ warning. New configuration should use `reasoning` alone.
 | Pi compatibility | `pi install <PATH>`, `pi list` |
 | Customization | `--system-prompt`, `--prompt`, `--debug-prompt`, `--prompt-template`, `--skill-dir`, `--extension-dir`, `--enable-extension`, `--trust-extension` |
 
-Run `ygg --help`, `ygg sessions --help`, `ygg migrate pi --help`, and `ygg pi --help` for the authoritative generated reference.
+Run `octet --help`, `octet sessions --help`, `octet migrate pi --help`, and `octet pi --help` for the authoritative generated reference.
 
 ## Filesystem-native customization
 
@@ -853,24 +890,26 @@ Prompts, skills, and extensions use one deterministic resolver:
 
 | Kind | Global | Trusted project | Explicit source |
 | --- | --- | --- | --- |
-| Prompts | `~/.ygg/prompts/*.{md,toml}` | `.ygg/prompts/*.{md,toml}` | `--prompt-template` |
-| Skills | `~/.ygg/skills/*/SKILL.md` | `.ygg/skills/*/SKILL.md` | `--skill-dir` |
-| Extensions | `~/.ygg/extensions/*/extension.toml` | `.ygg/extensions/*/extension.toml` | `--extension-dir` |
+| Prompts | `~/.octet/prompts/*.{md,toml}` | `.octet/prompts/*.{md,toml}` | `--prompt-template` |
+| Skills | `~/.octet/skills/*/SKILL.md` | `.octet/skills/*/SKILL.md` | `--skill-dir` |
+| Extensions | `~/.octet/extensions/*/extension.toml` | `.octet/extensions/*/extension.toml` | `--extension-dir` |
 
 Roots are resolved global → trusted project → explicit. Inputs must be bounded regular files; symlinked roots, candidates, and entrypoints are rejected. Reload builds a complete immutable generation before swapping it into the running product.
 
 ### Pi migration inventory
 
-`ygg migrate pi --dry-run` reads bounded Pi user/project settings and package
+`octet migrate pi --dry-run` reads bounded Pi user/project settings and package
 manifests, resolves installed local/npm/git packages without installing them,
 and parses JavaScript, TypeScript, and TSX with tree-sitter to classify
 portable resources and extension API dependencies. It executes no package
 code, starts no provider or model, changes no files, and reports an estimated
 model use of zero tokens.
 
-Use `--json` for the versioned machine-readable inventory. This release does
-not yet copy resources or apply package recipes. Reviewed local Pi sources can
-be linked inertly through `ygg pi install`; the pinned bridge remains disabled
+Use `--json` for the versioned machine-readable inventory. This scanner does
+not copy resources or apply package recipes. The separate, explicitly invoked
+`octet migrate import pi` imports a bounded portable subset and supports
+`octet migrate restore`; it never copies credentials or modifies Pi source stores.
+Reviewed local Pi sources can be linked inertly through `octet pi install`; the pinned bridge remains disabled
 and untrusted until explicitly activated. See
 [docs/pi-migration.md](pi-migration.md) for the exact Pi profile,
 classifications, bounds, and remaining compatibility gaps.
@@ -879,15 +918,15 @@ classifications, bounds, and remaining compatibility gaps.
 
 Markdown and TOML prompt templates can accept arguments and include bounded files. Selection name and content hash are persisted as session provenance. `--debug-prompt` exposes the exact final expansion before it reaches the provider.
 
-You can also replace the entire composed system instructions via `system_prompt` (config), `YGG_SYSTEM_PROMPT`, or `--system-prompt`; AGENTS/context/skills are ignored when it is set. Passing `--system-prompt` with no argument sets an explicit empty prompt.
+You can also replace the entire composed system instructions via `system_prompt` (config), `OCTET_SYSTEM_PROMPT`, or `--system-prompt`; AGENTS/context/skills are ignored when it is set. Passing `--system-prompt` with no argument sets an explicit empty prompt.
 
 ### Skills
 
-Skills are explicit, inspectable capability packages. ygg discovers metadata, activates only selected skills, injects active instructions once, and loads referenced resources lazily through bounded reads. Activation and resource reads are durable session events.
+Skills are explicit, inspectable capability packages. octet discovers metadata, activates only selected skills, injects active instructions once, and loads referenced resources lazily through bounded reads. Activation and resource reads are durable session events.
 
 ### Executable extensions
 
-Ygg is a small agent kernel and JSON-RPC bus. MCP bridges, browsers, web search,
+octet is a small agent kernel and JSON-RPC bus. MCP bridges, browsers, web search,
 computer use, memory, LSP, subagent orchestration, and caffeinate belong in
 replaceable subprocess extensions; the host owns the model loop, bounded
 transport, sessions, permissions, process cleanup, and generic host services
@@ -902,7 +941,7 @@ backoff after a successful handshake. The coding product currently leaves
 approval issuance and secret brokerage unconfigured, so policy requests remain
 default-deny and `secrets` is not offered. Replacement processes must initialize
 successfully before cutover. Python extensions can use the dependency-free
-[`ygg-extension-sdk`](../sdk/python/README.md) instead of reimplementing the
+[`octet-extension-sdk`](../sdk/python/README.md) instead of reimplementing the
 protocol loop.
 
 Discovery does not execute code. An extension must be enabled and its exact
@@ -918,28 +957,28 @@ Start with [examples/README.md](../examples/README.md), then read [docs/resource
 
 ### Self-documentation
 
-Ygg releases ship `README.md`, `docs/`, `examples/`, and `sdk/` beside the
+octet releases ship `README.md`, `docs/`, `examples/`, and `sdk/` beside the
 binary's package assets. The default system prompt points the model to their
-absolute paths and tells it to read them when answering Ygg questions or making
-Ygg changes. The shell installer places those assets under the matching
-`share/ygg/` data directory; `YGG_PACKAGE_DIR` or `YGG_DATA_DIR` can override
+absolute paths and tells it to read them when answering octet questions or making
+octet changes. The shell installer places those assets under the matching
+`share/octet/` data directory; `OCTET_PACKAGE_DIR` or `OCTET_DATA_DIR` can override
 that asset root for other layouts. Cargo-installed binaries embed the text
 portion of the same assets and materialize a versioned copy under the Cargo
-root's `share/ygg/` directory, refreshing it after a Cargo-channel update.
+root's `share/octet/` directory, refreshing it after a Cargo-channel update.
 
-When Ygg runs from its source checkout, the system prompt instead points to
+When octet runs from its source checkout, the system prompt instead points to
 that checkout's `README.md`, `docs/`, `examples/`, `sdk/`, `crates/`, and
-`ygg-coding-agent` crate so it can inspect and extend the implementation. The
-repository [documentation landing page](README.md) is the authoritative task index. The inherited source still has legacy website fallback
-metadata; it is not required to read the contracts in this checkout.
+`octet-coding-agent` crate so it can inspect and extend the implementation. The
+repository [documentation landing page](README.md) is the authoritative task index. The source website identity `https://skaft.org/octet` is proposed branding,
+not verification of publication or a dependency for reading these contracts.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    UI["TUI / plain / print"] --> Product["ygg-coding-agent"]
-    Product --> Agent["ygg-agent"]
-    Agent --> AI["ygg-ai"]
+    UI["TUI / plain / print"] --> Product["octet-coding-agent"]
+    Product --> Agent["octet-agent"]
+    Agent --> AI["octet-ai"]
     AI --> Local["Local OpenAI-compatible servers"]
     AI --> Cloud["Cloud providers"]
     Agent --> Bus["JSON-RPC extension bus"]
@@ -949,26 +988,26 @@ flowchart LR
     Product --> Resources["Prompts · skills · instructions"]
 ```
 
-### `ygg-ai`
+### `octet-ai`
 
 The provider-independent inference crate owns canonical messages, media, tools, reasoning state and effort, structured output, request validation, cross-protocol conversion, authentication, exact integer pricing, SSE parsing, streaming completion assembly, and capability-driven Responses Lite encoding. Collaboration metadata remains a model capability here; host orchestration does not.
 
-### `ygg-agent`
+### `octet-agent`
 
 The agent runtime is the kernel: it owns sessions, model conversations, context
 reconstruction, compaction, tool execution, steering, cancellation, retries,
 checkpoints, usage records, cache accounting, the frontend event stream,
 extension transport/supervision, and bounded child-session services. The coding
 product exposes that child-session service only through the observing
-`ygg-subagents` extension; no parallel native root delegation surface is
+`octet-subagents` extension; no parallel native root delegation surface is
 installed.
 
-### `ygg-coding-agent`
+### `octet-coding-agent`
 
 The product crate owns configuration, provider discovery, credentials, prompts,
 resources, extensions, session commands, hydration, terminal presentation, and
 three user-facing modes. It creates extension-owned child
-sessions at every effort when `ygg-subagents` is active, and permits Ultra only
+sessions at every effort when `octet-subagents` is active, and permits Ultra only
 when live model metadata and that owner-bound observation service form complete
 Ultra semantics.
 
@@ -976,24 +1015,24 @@ Ultra semantics.
 
 The vendored terminal renderer supplies editing, key handling, fuzzy completion, rich Markdown, syntax highlighting, semantic diffs, terminal image handling, capability degradation, responsive widgets, and differential live rendering.
 
-Detailed contracts live in [docs/design/ygg-ai.md](design/ygg-ai.md), [docs/design/ygg-agent.md](design/ygg-agent.md), [docs/design/ygg-coding-agent.md](design/ygg-coding-agent.md), and [docs/design/ygg-tui.md](design/ygg-tui.md).
+Detailed contracts live in [docs/design/octet-ai.md](design/octet-ai.md), [docs/design/octet-agent.md](design/octet-agent.md), [docs/design/octet-coding-agent.md](design/octet-coding-agent.md), and [docs/design/octet-tui.md](design/octet-tui.md).
 
 ## Reliability and security engineering
 
-ygg is intentionally honest about where its boundary ends.
+octet is intentionally honest about where its boundary ends.
 
 - **Workspace paths:** descriptor-relative, no-follow file operations prevent parent-symlink replacement from redirecting built-in reads and mutations.
 - **Bounded inputs:** provider streams, discovery payloads, configuration, credentials, context, sessions, tool arguments/results, and local reads have byte/count limits.
 - **Crash behavior:** complete records survive; a torn final append is narrowly repairable; unresolved mutation is reported as indeterminate and never replayed.
 - **Cancellation:** provider streams, retry waits, compaction, tools, delegated agents, and descendant process/agent groups observe cancellation.
 - **Delegation provenance:** subagent-extension team directories and files are owner-private and created through descriptor-relative, no-follow operations. Spawns, status changes, and interrupts are synced before becoming visible; a journal failure cancels the team and rejects further work.
-- **Network recovery:** distinguish a non-timeout connection-establishment failure from an ambiguous accepted request. Sending a POST, awaiting response headers, or losing a response body can leave provider execution indeterminate; absence of visible text does not prove that replay is safe. The release correction must keep response-body disconnects terminal at the agent layer, including before visible output. This checkout still contains the inherited body-retry path pending integration and exact-source regression checks; removing provisional TUI output does not make that replay safe. No live recovery qualification is claimed.
+- **Network recovery:** distinguish a non-timeout connection-establishment failure from an ambiguous accepted request. Sending a POST, awaiting response headers, or losing a response body can leave provider execution indeterminate; absence of visible text does not prove that replay is safe. Response-body disconnects are terminal at the agent layer, including before visible output. The integrated correction has deterministic regression coverage; removing provisional TUI output is not a reason to replay. Live-provider recovery and exact renamed-candidate qualification remain separate gates.
 - **Secret handling:** credential files are owner-private, sensitive headers are marked, redirects are disabled, provider diagnostics redact request credentials, debug formatting redacts secrets, and session export applies bounded deterministic redaction.
 - **Terminal safety:** untrusted terminal controls are neutralized; terminal capabilities degrade without changing semantic content.
 - **Dependency policy:** `cargo audit` and `cargo deny` cover advisories, licenses, bans, duplicate visibility, and source policy as release gates.
 - **Verification:** protocol fixtures, adversarial streaming tests, filesystem race tests, VT100 rendering, PTY shutdown tests, and full workspace tests cover the release invariants.
 
-These controls do not contain a command the user has chosen to enable. Run ygg inside an OS isolation boundary when the repository, model, or extension is untrusted. Read the full [security policy](../SECURITY.md) before using autonomous tools on sensitive machines.
+These controls do not contain a command the user has chosen to enable. Run octet inside an OS isolation boundary when the repository, model, or extension is untrusted. Read the full [security policy](../SECURITY.md) before using autonomous tools on sensitive machines.
 
 ## Development
 
@@ -1012,7 +1051,7 @@ cargo deny check
 Build the release binary:
 
 ```sh
-cargo build --release --locked -p ygg-coding-agent --bin ygg
+cargo build --release --locked -p octet-coding-agent --bin octet
 ```
 
 CI uses the additive `ci-test` profile above; ordinary `cargo test` remains
@@ -1024,9 +1063,9 @@ The declared MSRV is Rust 1.86. Command execution is Unix-only. See [CONTRIBUTIN
 ## Repository map
 
 ```text
-crates/ygg-ai/            provider-independent inference and protocols
-crates/ygg-agent/         agent runtime, tools, sessions, and extensions
-crates/ygg-coding-agent/  CLI, provider discovery, resources, and TUI
+crates/octet-ai/            provider-independent inference and protocols
+crates/octet-agent/         agent runtime, tools, sessions, and extensions
+crates/octet-coding-agent/  CLI, provider discovery, resources, and TUI
 crates/sexy-tui-rs/       vendored terminal rendering library
 sdk/python/              dependency-free Python extension SDK
 docs/                     public product and architecture contracts
@@ -1044,20 +1083,20 @@ third_party/              upstream license texts
 | [Security policy](../SECURITY.md) | Authority boundary, containment, threat model, and private reporting. |
 | [Changelog](../CHANGELOG.md) | Release-level behavior and compatibility changes. |
 | [Public roadmap](../ROADMAP.md) | Current release outcomes, engineering principles, evidence campaigns, and non-goals. |
-| [Release notes](releases/v0.6.7.md) | Current installation, highlights, compatibility notes, and limitations. |
+| [Release notes](releases/v0.7.0.md) | Current source identity, implementation, compatibility, and outstanding qualification gates. |
 | [Resources](resources.md) | Discovery, precedence, trust, bounds, diagnostics, and reload. |
 | [Pi migration](pi-migration.md) | Zero-token setup inventory, AST classification, safety bounds, and staged compatibility architecture. |
 | [Extensions](extensions.md) | Manifest, JSON-RPC protocol, contributions, lifecycle, and trust. |
 | [Python extension SDK](../sdk/python/README.md) | Decorators, stdio framing, handshake, logging, and host requests. |
 | [Native SDK host](sdk.md) | Versioned NDJSON application protocol, sessions, providers, safety, and cancellation. |
-| [Themes](themes.md) | v0.6.7 default-only status and reserved schema. |
+| [Themes](themes.md) | v0.7.0 default-only status and reserved schema. |
 | [Sessions](sessions.md) | Commands, JSONL schema, branching, export, redaction, and repair. |
-| [AI architecture](design/ygg-ai.md) | Canonical inference model, validation, transport, and streaming. |
-| [Agent architecture](design/ygg-agent.md) | Run loop, persistence, tools, cancellation, and compaction. |
-| [Product contract](design/ygg-coding-agent.md) | Bootstrap, modes, configuration, resources, and UX. |
-| [TUI architecture](design/ygg-tui.md) | Rendering, terminal capability handling, scrolling, and the compiled default presentation. |
-| [Presentation contract](design/ygg-presentation.md) | Stable Ygg structure, adaptive model atmosphere, and durable/live/diagnostic layers. |
-| [Command and picker surface contract](design/ygg-command-picker-surfaces.md) | Shared transient discovery, selection, status, action, and terminal-capability vocabulary. |
+| [AI architecture](design/octet-ai.md) | Canonical inference model, validation, transport, and streaming. |
+| [Agent architecture](design/octet-agent.md) | Run loop, persistence, tools, cancellation, and compaction. |
+| [Product contract](design/octet-coding-agent.md) | Bootstrap, modes, configuration, resources, and UX. |
+| [TUI architecture](design/octet-tui.md) | Rendering, terminal capability handling, scrolling, and the compiled default presentation. |
+| [Presentation contract](design/octet-presentation.md) | Stable octet structure, adaptive model atmosphere, and durable/live/diagnostic layers. |
+| [Command and picker surface contract](design/octet-command-picker-surfaces.md) | Shared transient discovery, selection, status, action, and terminal-capability vocabulary. |
 | [Benchmarking](benchmarks/README.md) | Optional telemetry, systems measurements, failure taxonomy, and shootout methodology. |
 | [Build profiles](build-profiles.md) | CI test artifacts, profiler-friendly release-like builds, and comparison commands. |
 | [Beta protocol](benchmarks/beta-protocol.md) | Opt-in first-ten-user daily-driver validation. |
@@ -1090,7 +1129,7 @@ ygg --version   # ygg 0.6.7
 ygg --help
 ```
 
-> Development builds from this checkout identify as `ygg 0.7.0-dev`; this is not a released `v0.7.0` tag.
+> Historical pre-rename snapshot: development builds identified as `ygg 0.7.0-dev`, not a released `v0.7.0` tag. This is not the current checkout identity.
 
 No Rust toolchain is needed. Prebuilt binaries cover GNU/Linux x86-64, macOS
 x86-64, and macOS Apple silicon; Linux musl is not included. Use the same binary

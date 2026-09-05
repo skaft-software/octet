@@ -4,7 +4,7 @@ A small retained terminal UI and a reusable semantic rich-text renderer for Rust
 It renders directly to terminal rows (no Ratatui dependency), keeps differential
 updates stable, and degrades to deterministic escape-free text.
 
-**Ygg vendored package 0.3.1 · workspace MSRV Rust 1.86**
+**octet vendored package 0.3.1 · workspace MSRV Rust 1.86**
 
 ## Highlights
 
@@ -28,16 +28,16 @@ updates stable, and degrades to deterministic escape-free text.
 
 ## Workspace dependency
 
-Ygg consumes this directory directly and pins its package version exactly:
+octet consumes this directory directly and pins its package version exactly:
 
 ```toml
 [dependencies]
 sexy-tui-rs = { version = "=0.3.1", path = "../sexy-tui-rs" }
 ```
 
-The path above is relative to `crates/ygg-coding-agent`; adjust it for another
+The path above is relative to `crates/octet-coding-agent`; adjust it for another
 workspace. The `0.3.1` vendored line has not been synchronized to a public
-standalone tag, so use this Ygg source rather than assuming an external release.
+standalone tag, so use this octet source rather than assuming an external release.
 
 Default features include syntax highlighting:
 
@@ -286,7 +286,7 @@ Code backgrounds are absent unless a theme explicitly supplies one.
   accept pre-styled ANSI strings are for trusted compatibility content only.
 
 See [`docs/rich-rendering.md`](docs/rich-rendering.md) for architecture and
-[`docs/ygg-integration.md`](docs/ygg-integration.md) for migration boundaries.
+[`docs/octet-integration.md`](docs/octet-integration.md) for migration boundaries.
 
 ## Text editing model
 
@@ -358,9 +358,9 @@ image callers should use the out-of-band `ImageRenderPlan` foundation above.
 `set_show_hardware_cursor`, and `request_render_force` expose the corresponding
 Pi policies.
 
-`set_inline_scrollback(true)` retains the older Ygg-specific pinned-frame
+`set_inline_scrollback(true)` retains the older octet-specific pinned-frame
 experiment as an explicit compatibility extension. It is not the Pi-equivalent
-core and Ygg's coding-agent frontend no longer enables it.
+core and octet's coding-agent frontend no longer enables it.
 
 Terminal event-loop ownership is intentionally backend-specific: construct a
 `Terminal`, feed input to `TUI::handle_input`, call `request_render` after state

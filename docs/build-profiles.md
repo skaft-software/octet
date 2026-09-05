@@ -1,8 +1,8 @@
 # Cargo build profiles
 
-Ygg keeps Cargo's ordinary `dev`, `test`, and `release` behavior unchanged.
+octet keeps Cargo's ordinary `dev`, `test`, and `release` behavior unchanged.
 Two additive profiles make CI test artifacts and profiler builds explicit. The
-root workspace and the independently rooted `extensions/ygg-serve` workspace
+root workspace and the independently rooted `extensions/octet-serve` workspace
 each declare them, because Cargo resolves profile definitions from the active
 workspace root.
 
@@ -18,7 +18,7 @@ The Rust test jobs in CI use this profile. To reproduce their profile locally:
 ```sh
 cargo test --workspace --all-targets --all-features --profile ci-test --locked
 cargo test --workspace --doc --profile ci-test --locked
-cargo test --manifest-path extensions/ygg-serve/Cargo.toml --profile ci-test --locked
+cargo test --manifest-path extensions/octet-serve/Cargo.toml --profile ci-test --locked
 ```
 
 Omit `--profile ci-test` to keep Cargo's normal local test behavior.
@@ -33,18 +33,18 @@ analysis:
 - `lto = "off"` disables both cross-crate and local ThinLTO; and
 - `strip = "none"` retains symbols.
 
-Build a profiler-friendly Ygg binary with:
+Build a profiler-friendly octet binary with:
 
 ```sh
-cargo build --profile profiling --locked -p ygg-coding-agent --bin ygg
+cargo build --profile profiling --locked -p octet-coding-agent --bin octet
 ```
 
-The binary is written to `target/profiling/ygg` (or
-`$CARGO_TARGET_DIR/profiling/ygg` when that variable is set). Build the
+The binary is written to `target/profiling/octet` (or
+`$CARGO_TARGET_DIR/profiling/octet` when that variable is set). Build the
 independent Serve backend with:
 
 ```sh
-cargo build --manifest-path extensions/ygg-serve/Cargo.toml --profile profiling --locked
+cargo build --manifest-path extensions/octet-serve/Cargo.toml --profile profiling --locked
 ```
 
 On platforms that split debug information, keep the generated companion debug

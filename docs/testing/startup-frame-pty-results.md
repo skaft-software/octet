@@ -1,5 +1,8 @@
 # Startup frame PTY lane results
 
+> Historical pre-rename fixture report, retained as originally recorded below.
+> It is not qualification of the renamed octet 0.7.0 candidate.
+
 ## Focused result
 
 The focused PTY lane passed with the current binary and an explicitly selected

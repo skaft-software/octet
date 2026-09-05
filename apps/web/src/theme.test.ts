@@ -28,11 +28,22 @@ describe("stored type preferences", () => {
     const style = document.documentElement.style;
     expect(style.getPropertyValue("--ui-family")).toContain('"Local Grotesk"');
     expect(style.getPropertyValue("--mono-family")).toContain('"Local Mono"');
-    expect(values.get("ygg.ui.font")).toBe("local");
+    expect(values.get("octet.ui.font")).toBe("local");
+  });
+
+  it("does not read or rewrite earlier first-party storage", () => {
+    localStorage.setItem("ygg.ui.font", "geist");
+    localStorage.setItem("ygg.ui.size", "12");
+    applyStoredTypePreferences();
+    expect(document.documentElement.style.getPropertyValue("--ui-family")).toContain('"Local Grotesk"');
+    expect(document.documentElement.style.getPropertyValue("--font-body")).toBe("14px");
+    expect(values.get("octet.ui.font")).toBe("local");
+    expect(values.get("ygg.ui.font")).toBe("geist");
+    expect(values.get("ygg.ui.size")).toBe("12");
   });
 
   it("uses one interface size and one compact metadata size", () => {
-    localStorage.setItem("ygg.ui.size", "13");
+    localStorage.setItem("octet.ui.size", "13");
 
     applyStoredTypePreferences();
 

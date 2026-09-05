@@ -1,4 +1,10 @@
-# Ygg Extension Protocol Reference
+# octet Extension Protocol Reference
+
+**Identity boundary:** octet 0.7.0 uses only octet first-party names, including
+`octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`. Retained API
+numbers 0.1/0.2/0.3 do not imply aliases for old Ygg wire names or imports.
+First-party shipped SDK/extension distributions are version 0.7.0; independent
+examples keep their own versions.
 
 > **Legacy API versions:** `0.1` (frozen compatibility) and `0.2`
 > (supported stateful wire). API `0.3` is defined by the generated
@@ -6,7 +12,7 @@
 >
 > Every request and response uses the standard JSON-RPC 2.0 envelope with
 > exactly one JSON object per line on **stdout**. Human diagnostics belong on
-> **stderr**, which Ygg drains and exposes as bounded diagnostic events.
+> **stderr**, which octet drains and exposes as bounded diagnostic events.
 >
 > Extensions send process-to-host messages at any time after initialization.
 > For graceful shutdown, the host sends a JSON-RPC `shutdown` request; the
@@ -14,16 +20,17 @@
 > was lost or finally torn down and should also make the extension exit.
 
 The manifest selects exactly one wire version. API `0.1` remains available,
-byte-compatible at initialization, for trusted text-oriented extensions. It
+with its frozen initialization structure in the octet namespace, for trusted
+text-oriented extensions. It
 does not gain API `0.2` cancellation, progress, structured/media retention,
 parent-correlation, or terminal lifecycle guarantees. API `0.2` adds those
 stateful guarantees through explicit initialization negotiation; support is
 never inferred from the extension package version. Installable bundles also
-carry an exact `requires_ygg` requirement in `extension.toml`; it is validated
+carry an exact `requires_octet` requirement in `extension.toml`; it is validated
 before a process can start and is packaging metadata, not an initialization
 field or protocol-version substitute.
 
-This protocol is the bus of a deliberately small agent kernel. Ygg hosts model
+This protocol is the bus of a deliberately small agent kernel. octet hosts model
 conversations, session/result persistence, permissions and approvals, process
 supervision/cleanup, and resource limits. MCP, browser use, computer use, web
 search, memory, LSP, subagent orchestration, and caffeinate remain replaceable
@@ -31,7 +38,7 @@ subprocess extensions. Generic host services in this document support those
 extensions without moving their domain protocols into the host.
 
 Implemented limits in this reference are protocol, queue, concurrency,
-artifact, timeout, and process-tree cleanup bounds. Ygg does not yet enforce OS
+artifact, timeout, and process-tree cleanup bounds. octet does not yet enforce OS
 CPU/RSS/FD/PID quotas or sandbox trusted extensions; they run with the current
 user's authority.
 
@@ -79,11 +86,11 @@ The **first** host request, sent immediately after the child process starts.
   "method": "initialize",
   "params": {
     "api_version": "0.1",
-    "ygg_version": "0.7.0-dev",
+    "octet_version": "0.7.0",
     "extension": {
       "name": "hello-world",
       "version": "0.1.0",
-      "manifest_path": "/home/user/.ygg/extensions/hello-world/extension.toml",
+      "manifest_path": "/home/user/.octet/extensions/hello-world/extension.toml",
       "source": "global"
     },
     "workspace": "/home/user/project",
@@ -231,7 +238,7 @@ the six names above. A non-empty subscription without the feature is invalid.
 
 The working-tree coding host conditionally appends `agent_sessions` to
 `optional_features` only for the trusted, enabled first-party
-`ygg-subagents` extension when its child-session service can be bound. The
+`octet-subagents` extension when its child-session service can be bound. The
 service is available independently of the selected reasoning effort; Ultra is
 separately gated on the live provider's V2 metadata. A response may negotiate
 it only when it was offered. The service is bound after the Agent is
@@ -670,7 +677,7 @@ Sent when the host wants the extension to exit gracefully.
 On normal shutdown, the host first waits `shutdown_timeout` (2 seconds by
 default) for the JSON-RPC reply. Whether the request is acknowledged or times
 out, it then waits up to the same per-stage timeout for the child to exit. If
-the child does not exit, Ygg terminates the child process group. Normal product
+the child does not exit, octet terminates the child process group. Normal product
 shutdown runs these per-connection sequences concurrently inside a separate
 3-second aggregate deadline; dropping a remaining connection also terminates
 its process group.
@@ -928,9 +935,9 @@ snapshot as a JSON-RPC notification:
 ```
 
 `parent_request_id` correlates a handler-time snapshot to the active host request;
-Ygg derives its owner rather than accepting a session name from the extension.
+octet derives its owner rather than accepting a session name from the extension.
 A background publisher instead supplies the complete host-issued
-`resource_owner` triple it previously received; Ygg accepts it only if that exact
+`resource_owner` triple it previously received; octet accepts it only if that exact
 triple was issued to this process generation. The fields are mutually
 exclusive. Omitting both declares process-scoped state, which must contain no
 session-owned data. Stale/foreign triples and snapshots for another active
@@ -974,7 +981,7 @@ attaches manifest identity, a non-repeating process-instance fence, generation,
 and active resource owner, ignores or diagnoses stale updates, and retains the
 latest accepted replacement for explicit TUI views, Serve, and bounded headless
 fallbacks. Generic snapshots do not become ambient chrome. The coding TUI
-recognizes owner-fenced `ygg-subagents` activities as a first-party observed
+recognizes owner-fenced `octet-subagents` activities as a first-party observed
 surface, renders the complete bounded roster and its structured metrics in a
 persistent transcript event above the composer during the owning run from
 native `AgentEvent::DelegationUpdated` events, and does not poll a status
@@ -1015,7 +1022,7 @@ Event variants are:
 - `output {stream: "stdout"|"stderr", encoding: "utf8"|"base64", data}`
 
 Inactive-request and non-monotonic progress is ignored with a diagnostic.
-Accepted output uses Ygg's existing 8 KiB chunking and bounded progress sink,
+Accepted output uses octet's existing 8 KiB chunking and bounded progress sink,
 which may coalesce/drop under pressure. Progress is ephemeral: it is not a
 model result and is not persisted in the conversation transcript.
 
@@ -1068,7 +1075,7 @@ Requires `artifacts`. Publish either small inline base64 data:
 }
 ```
 
-or a relative path under `YGG_EXTENSION_SCRATCH` by replacing `data` with
+or a relative path under `OCTET_EXTENSION_SCRATCH` by replacing `data` with
 `"path": "screenshots/result.png"`. Exactly one source is required. Success
 returns `{ "artifact_id": "..." }`; malformed or rejected publication uses
 `-32602`, while a request without an active host-owned session context uses
@@ -1173,7 +1180,7 @@ manifest's `[capabilities].secrets` allowlist:
 ```
 
 Success returns `{ "value": string }`. Values are UTF-8, may be empty, and are
-capped at 64 KiB. Ygg derives the extension identity and the complete
+capped at 64 KiB. octet derives the extension identity and the complete
 `{session_id, extension_instance_id, process_generation}` resource owner from
 the active parent rather than accepting either from child JSON. The broker
 receives that identity, owner, parent request ID, and exact logical name.
@@ -1181,7 +1188,7 @@ receives that identity, owner, parent request ID, and exact logical name.
 An undeclared/invalid name returns `-32602`; no active owner or service returns
 `-32002`. A broker returning no value or failing always returns the same
 `-32004` `secret is unavailable` response, keeping provider details host-side.
-Ygg does not persist or log the value and best-effort wipes the host broker
+octet does not persist or log the value and best-effort wipes the host broker
 buffer and serialized writer frame after use. Once delivered, however, the
 extension holds an ordinary process-memory string: API `0.2` does not promise
 end-to-end zeroization. The coding product currently configures no broker and
@@ -1212,13 +1219,13 @@ existing extension-owned names:
 
 The request contains complete `ToolDefinition` objects, not patches. Names in
 one request must be unique. The request and complete prospective catalog are
-capped at 256 tools. Ygg validates the complete result, reserves names against
+capped at 256 tools. octet validates the complete result, reserves names against
 host tools and other extensions, applies the active host tool policy, and
 publishes the extension group atomically. After a parseable request ID,
 malformed parameters, a schema error, duplicate, or name conflict return
 `-32602` and leave the previously published group unchanged.
 
-Success returns the new per-process epoch and the complete set Ygg accepted:
+Success returns the new per-process epoch and the complete set octet accepted:
 
 ```json
 {
@@ -1234,7 +1241,7 @@ Success returns the new per-process epoch and the complete set Ygg accepted:
 The returned list is authoritative: policy may omit requested tools. Revision
 `0` is the initialize catalog, and every accepted mutation increments it once.
 The epoch resets to `0` for a new process generation. If acknowledgement cannot
-be delivered after publication, Ygg removes the extension's dynamic group and
+be delivered after publication, octet removes the extension's dynamic group and
 terminates the generation so host and extension cannot continue with different
 catalogs.
 
@@ -1261,7 +1268,7 @@ no-op catalog changes as revision clocks.
 
 The exact initialize catalog is authoritative epoch `0` and is the only
 deterministic first-request catalog. Once a post-initialize catalog change is
-accepted, Ygg advertises it at the next model-request boundary after
+accepted, octet advertises it at the next model-request boundary after
 publication. It does not infer catalog quiescence, so a registration sent
 immediately after `initialize` is not guaranteed to appear on turn one; put
 turn-one tools in the manifest and initialize response. A provider request
@@ -1311,7 +1318,8 @@ model session:
 The host derives the resource owner from `parent_request_id`; the extension
 cannot submit an owner. `policy` is mandatory. Its tools are a non-empty,
 duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`
-(`read`/`search` is the default and recommended scope); depth is exactly one;
+(the first-party extension defaults to all five; explicitly select
+`read`/`search` for read-only work); depth is exactly one;
 concurrency is 1..=8; returned UTF-8 bytes are 512..=16,384. The turn, cost,
 and wall-time ceilings are optional per child: `max_turns: null`,
 `max_cost_microdollars: null`, and `timeout_ms: null` inherit the parent
@@ -1321,7 +1329,7 @@ explicit values are 1..=256 turns, 1..=50,000,000 microdollars, and
 of the parent's optional cumulative session-token setting, so a parent with no
 ceiling produces a child with no ceiling; a non-null 1,000..=64,000 value may
 request a stricter cap. Every child starts with a fresh context while inheriting
-the parent model's context window and resolved per-request output limit. Ygg
+the parent model's context window and resolved per-request output limit. octet
 freezes a detached effective tool snapshot containing only the granted tools
 (no collaboration or agent tools), applies the requested ceilings or inherits
 the parent's ceilings when they are omitted, and owns limit settlement even
@@ -1426,7 +1434,7 @@ All mutation continues
 through the owner-bound `agent_sessions` methods. The list contains only roots
 spawned by this principal/owner and their descendants. Child contexts remain
 independent and their tokens never become parent prompt context. Before the root
-run settles, Ygg stops and briefly joins these children, aggregates each child
+run settles, octet stops and briefly joins these children, aggregates each child
 session's durable usage and exact cost (including picodollar remainder), and
 appends one `delegated_agent` usage record per child to the root session. The
 live TUI adds the current presentation cost only until those records are
@@ -1469,7 +1477,7 @@ session-owner string, not the extension process generation, so supervised
 restart/reload can resume an existing tree. Process shutdown requests shutdown
 of the service's owned trees; a complete process-host rebuild creates a new
 service boundary. Hosted agents are a separate capability; these methods
-create Ygg child conversations.
+create octet child conversations.
 Observe their state through `agent/list`/`agent/wait`. Delegated child turns do
 not currently emit extension `session/*` or `turn/*` lifecycle notifications;
 that notification stream covers the owning/root product session.
@@ -1647,7 +1655,7 @@ reference, safety, parentage, and bound rules.
 | `dynamic_tools` | no | Transactional `tools/register`, `tools/unregister`, and revision-pinned `tool/call` |
 | `runtime_commands` | no | Initialize-time authoritative fixed command catalog for compatibility runtimes; no live mutations |
 | `agent_sessions` | conditional | Principal/owner-scoped `agent/*` child model-session service |
-| `delegation_telemetry_v1` | conditional first-party requirement | Native owner-run `AgentEvent::DelegationUpdated` child telemetry; required by `ygg-subagents` when `agent_sessions` is offered |
+| `delegation_telemetry_v1` | conditional first-party requirement | Native owner-run `AgentEvent::DelegationUpdated` child telemetry; required by `octet-subagents` when `agent_sessions` is offered |
 | `approvals` | conditional | Original-intent/active-owner-bound single-use `policy/evaluate` retry tokens; also requires `policy_intents` |
 | `secrets` | conditional | Owner-scoped `secret/get` for exact manifest-allowlisted names |
 
@@ -1671,11 +1679,11 @@ error. The supervisor uses `backoff` after an unexpected exit or terminal
 transport failure and `parked` after its retry budget or a permanent
 manifest/version/re-registration error.
 
-**Reload:** Ygg starts and fully negotiates candidate generation `N+1` while
+**Reload:** octet starts and fully negotiates candidate generation `N+1` while
 `N` remains ready. A process negotiating `dynamic_tools` may replace its tool
 catalog; otherwise changed tools, or any changed command/hook/UI contribution,
 are rejected with `re-registration required` and require a full host rebuild.
-Ygg reserves candidate tool names, marks `N` draining, waits the bounded drain,
+octet reserves candidate tool names, marks `N` draining, waits the bounded drain,
 cancels the remainder, emits remaining lifecycle terminals, and waits for
 shutdown acknowledgement or timeout. It then seeds lifecycle state and
 atomically routes new calls to `N+1`. If candidate launch or negotiation fails,
@@ -1730,10 +1738,10 @@ Every extension child receives:
 
 | Variable | Value |
 |---|---|
-| `YGG_EXTENSION_API_VERSION` | Exact manifest-selected version (`"0.1"` or `"0.2"`) |
-| `YGG_EXTENSION_NAME` | Extension manifest name |
-| `YGG_EXTENSION_DIR` | Extension directory (beside manifest) |
-| `YGG_EXTENSION_MANIFEST` | Absolute path to `extension.toml` |
-| `YGG_WORKSPACE` | Active workspace root |
-| `YGG_EXTENSION_SCRATCH` | Host-owned scratch directory for the active process generation |
+| `OCTET_EXTENSION_API_VERSION` | Exact manifest-selected version (`"0.1"` or `"0.2"`) |
+| `OCTET_EXTENSION_NAME` | Extension manifest name |
+| `OCTET_EXTENSION_DIR` | Extension directory (beside manifest) |
+| `OCTET_EXTENSION_MANIFEST` | Absolute path to `extension.toml` |
+| `OCTET_WORKSPACE` | Active workspace root |
+| `OCTET_EXTENSION_SCRATCH` | Host-owned scratch directory for the active process generation |
 | `SSH_AUTH_SOCK` | Forwarded only for an API `0.2` manifest that explicitly declares it in `[capabilities].environment` and only when present in the host |

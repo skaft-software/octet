@@ -174,9 +174,9 @@ describe("sidebar session lifecycle", () => {
   it("collapses projects independently", () => {
     const sessions = [
       activeSession({
-        id: "session-ygg",
-        projectId: "project-ygg",
-        title: "Ygg task",
+        id: "session-octet",
+        projectId: "project-octet",
+        title: "octet task",
       }),
       activeSession({
         id: "session-notes",
@@ -190,38 +190,38 @@ describe("sidebar session lifecycle", () => {
       />,
     );
 
-    const yggToggle = screen.getByRole("button", {
-      name: "Collapse project ygg, 1 task",
+    const octetToggle = screen.getByRole("button", {
+      name: "Collapse project octet, 1 task",
     });
     const notesToggle = screen.getByRole("button", {
       name: "Collapse project Research notes, 1 task",
     });
-    const yggTask = screen.getByRole("button", {
-      name: "Open task Ygg task, Ready",
+    const octetTask = screen.getByRole("button", {
+      name: "Open task octet task, Ready",
     });
     const notesTask = screen.getByRole("button", {
       name: "Open task Notes task, Ready",
     });
 
-    fireEvent.click(yggToggle);
-    expect(yggToggle).toHaveAttribute("aria-expanded", "false");
-    expect(yggTask).not.toBeVisible();
+    fireEvent.click(octetToggle);
+    expect(octetToggle).toHaveAttribute("aria-expanded", "false");
+    expect(octetTask).not.toBeVisible();
     expect(notesToggle).toHaveAttribute("aria-expanded", "true");
     expect(notesTask).toBeVisible();
 
     fireEvent.click(notesToggle);
     expect(notesTask).not.toBeVisible();
-    fireEvent.click(yggToggle);
-    expect(yggTask).toBeVisible();
+    fireEvent.click(octetToggle);
+    expect(octetTask).toBeVisible();
     expect(notesTask).not.toBeVisible();
   });
 
   it("reveals a project whenever one of its tasks is selected", () => {
     const sessions = [
       activeSession({
-        id: "session-ygg",
-        projectId: "project-ygg",
-        title: "Ygg task",
+        id: "session-octet",
+        projectId: "project-octet",
+        title: "octet task",
       }),
       activeSession({
         id: "session-notes",
@@ -267,7 +267,7 @@ describe("sidebar session lifecycle", () => {
       <Sidebar
         {...sidebarProps({
           sessions,
-          selectedSessionId: "session-ygg",
+          selectedSessionId: "session-octet",
         })}
       />,
     );
@@ -293,9 +293,9 @@ describe("sidebar session lifecycle", () => {
   it("reveals a selected task when it moves between projects", () => {
     const sessions = [
       activeSession({
-        id: "session-ygg",
-        projectId: "project-ygg",
-        title: "Ygg task",
+        id: "session-octet",
+        projectId: "project-octet",
+        title: "octet task",
       }),
       activeSession({
         id: "session-notes",
@@ -313,13 +313,13 @@ describe("sidebar session lifecycle", () => {
     );
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Collapse project ygg, 1 task",
+        name: "Collapse project octet, 1 task",
       }),
     );
 
     const movedSessions = sessions.map((session) =>
       session.id === "session-notes"
-        ? { ...session, projectId: "project-ygg" }
+        ? { ...session, projectId: "project-octet" }
         : session,
     );
     rerender(
@@ -333,7 +333,7 @@ describe("sidebar session lifecycle", () => {
 
     expect(
       screen.getByRole("button", {
-        name: "Collapse project ygg, 2 tasks",
+        name: "Collapse project octet, 2 tasks",
       }),
     ).toHaveAttribute("aria-expanded", "true");
     expect(
@@ -344,9 +344,9 @@ describe("sidebar session lifecycle", () => {
   it("expands matching projects while searching and restores collapse state", () => {
     const sessions = [
       activeSession({
-        id: "session-ygg",
-        projectId: "project-ygg",
-        title: "Ygg task",
+        id: "session-octet",
+        projectId: "project-octet",
+        title: "octet task",
       }),
       activeSession({
         id: "session-notes",
@@ -399,9 +399,9 @@ describe("sidebar session lifecycle", () => {
     const onSelectSession = vi.fn();
     const sessions = [
       activeSession({
-        id: "session-ygg",
-        projectId: "project-ygg",
-        title: "Ygg task",
+        id: "session-octet",
+        projectId: "project-octet",
+        title: "octet task",
       }),
       activeSession({
         id: "session-notes",

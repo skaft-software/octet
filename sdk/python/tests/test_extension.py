@@ -1,9 +1,14 @@
 import io
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
 import threading
 import unittest
 
-from ygg_extension import Extension, Logger, RpcError
+from octet_extension import Extension, Logger, RpcError
 
 
 API_VERSION = "0.1"
@@ -286,6 +291,25 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(replies[2]["result"][0]["content"], "hi")
         self.assertEqual(replies[3]["result"]["text"], "ready")
         self.assertEqual(replies[4]["result"]["segments"][0]["text"], "ok")
+
+
+class CleanIdentityTests(unittest.TestCase):
+    def test_previous_environment_prefix_is_not_read(self):
+        with patch.dict(os.environ, {"YGG_EXTENSION_API_VERSION": "0.2"}, clear=True):
+            self.assertEqual(Extension().api_version, "0.1")
+        with patch.dict(os.environ, {"OCTET_EXTENSION_API_VERSION": "0.2"}, clear=True):
+            self.assertEqual(Extension().api_version, "0.2")
+
+    def test_previous_import_name_is_not_a_source_alias(self):
+        # -S keeps installed site packages outside this checkout-only assertion.
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", "import octet_extension; import ygg_extension"],
+            cwd=Path(__file__).resolve().parents[1],
+            env={"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No module named 'ygg_extension'", result.stderr)
 
 
 class LoggerTests(unittest.TestCase):

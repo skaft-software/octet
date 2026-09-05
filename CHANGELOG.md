@@ -1,12 +1,12 @@
 # Changelog
 
-All notable changes to Ygg are documented here. This project follows Semantic Versioning while pre-1.0 APIs may evolve rapidly.
+All notable changes to octet are documented here. This project follows Semantic Versioning while pre-1.0 APIs may evolve rapidly.
 
 ## 0.7.0 — draft, unreleased
 
 ### Identity and documentation
 
-- Introduce **octet** as the intended lowercase product identity: a
+- Adopt **octet** as the lowercase product identity: a
   high-performance coding agent, extensible in any language, free and open source.
 - Add repository-owned documentation navigation and source-grounded workflows
   for reviewable changes, bounded delegation, custom tools, and native-host
@@ -15,13 +15,21 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
   checksums and reproducible exports; adopt the byte, icon/favicon and octet
   labels in the bundled web client. Asset proofs and browser fixtures are not
   actual product captures or native-terminal qualification.
-- Separate historical Ygg installation and benchmark evidence from current
-  guidance. This pre-rename checkout still uses `ygg`/`ygg-host`, `ygg-*` crates and
-  SDKs, `YGG_*`, `.ygg`, and `0.7.0-dev`; the clean rename and exact-candidate
-  release qualification remain pending. No automatic old-brand migration,
-  renamed installation channel, comparative performance, or readiness is claimed.
+- Use `octet`/`octet-host`, `octet-*` crates and SDKs, `OCTET_*`, `.octet`,
+  renamed first-party schema/bridge fields, and `0.7.0` distribution metadata.
+  APIs 0.1/0.2/0.3, native-host protocol 1, upstream pins, and independent
+  example/schema versions remain distinct.
+- Remove automatic earlier-first-party Hamr/Ygg credential and package-hotfix
+  migration; preserve third-party Codex credential interoperability and explicit
+  Pi import/restore without modifying source stores or existing Ygg data.
+- Integrate fixture-backed retry, typed-media, consent, and local-compaction
+  corrections. Exact renamed-candidate, live-provider, full-Pi, platform/native,
+  model-driven outcome, and independent-review qualification remain gates.
+- Retain historical Ygg installation and benchmark evidence separately. No
+  renamed public installation channel, comparative performance, or readiness
+  is claimed; the real source/release repository remains `skaft-software/ygg`.
 
-See [the 0.7.0 draft](docs/releases/v0.7.0.md) for intended identity and gates.
+See [the 0.7.0 notes](docs/releases/v0.7.0.md) for implementation and gates.
 Historical entries below are unchanged.
 
 ## 0.6.7 — 2026-09-02

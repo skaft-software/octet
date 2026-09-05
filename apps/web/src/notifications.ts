@@ -37,7 +37,7 @@ interface PersistedTransitions {
 }
 
 function storageKey(hostId: string): string {
-  return `ygg.notifications.v${NOTIFICATION_VERSION}.${encodeURIComponent(hostId)}`;
+  return `octet.notifications.v${NOTIFICATION_VERSION}.${encodeURIComponent(hostId)}`;
 }
 
 function transitionKey(summary: SessionSummary): string {
@@ -146,7 +146,7 @@ export class AttentionNotificationManager {
 
     const notification = this.adapter.show(copy.title, {
       body: copy.body,
-      tag: `ygg-session-${summary.id}`,
+      tag: `octet-session-${summary.id}`,
       silent: false,
     });
     notification.setOnClick(() => {

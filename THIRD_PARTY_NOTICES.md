@@ -1,13 +1,13 @@
 # Third-Party Notices
 
-Ygg itself is distributed under the MIT License in [`LICENSE`](LICENSE).
+octet itself is distributed under the MIT License in [`LICENSE`](LICENSE).
 The following notices identify upstream projects whose work or architecture
-informed Ygg. These notices do not change Ygg's license, and the upstream
+informed octet. These notices do not change octet's license, and the upstream
 projects remain subject to their own licenses.
 
 ## Pi
 
-Ygg uses agent-architecture concepts and terminal interaction patterns from
+octet uses agent-architecture concepts and terminal interaction patterns from
 [Pi](https://github.com/earendil-works/pi). The vendored `sexy-tui-rs` crate is
 a Rust port of Pi's TUI architecture.
 
@@ -18,7 +18,7 @@ a Rust port of Pi's TUI architecture.
 
 ## Terminal-Bench
 
-Ygg's development, evaluation, and release-hardening work were informed by
+octet's development, evaluation, and release-hardening work were informed by
 [Terminal-Bench](https://github.com/harbor-framework/terminal-bench), a
 benchmark and evaluation harness for agents operating in terminal
 environments.

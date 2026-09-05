@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 
-from ygg_extension import (
+from octet_extension import (
     MAX_INPUT_PROMPT_BYTES,
     MAX_INPUT_VALUE_BYTES,
     MAX_SECRET_VALUE_BYTES,
@@ -424,7 +424,7 @@ class CancellationAndConcurrencyTests(unittest.TestCase):
         host.writer.wait_for(lambda message: message.get("id") == 10)
         host.writer.wait_for(lambda message: message.get("id") == 11)
         self.assertFalse(host.writer.concurrent_write)
-        self.assertEqual(set(host.writer.writer_threads), {"ygg-extension-writer"})
+        self.assertEqual(set(host.writer.writer_threads), {"octet-extension-writer"})
         host.shutdown()
 
     def test_normal_result_wins_before_late_cancellation(self):

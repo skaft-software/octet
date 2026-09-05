@@ -2,7 +2,7 @@
 
 This is a reproducible, credential-free **harness**, not a published performance
 result. It exercises the checked-in Pi compatibility fixture and writes bounded
-`ygg.pi.runtime.evidence.v1` JSON. It exists to establish the evidence shape and
+`octet.pi.runtime.evidence.v1` JSON. It exists to establish the evidence shape and
 to catch regressions while the API 0.3 runtime manager is still being built.
 
 The emitted release decision is always `hold`. Do not turn a fixture result into
@@ -26,7 +26,7 @@ python3 scripts/bench-pi-runtime.py \
 The script uses only the Python standard library and passes Node argument vectors
 directly to `subprocess`; it does not execute a shell command. It creates a
 fresh temporary HOME/XDG configuration tree, retains only a small allowlist of
-locale/time/PATH variables, does not read normal Ygg/Pi configuration, does not
+locale/time/PATH variables, does not read normal octet/Pi configuration, does not
 inherit provider credentials, and never launches or contacts a model/provider.
 It requires a local Node executable because the measured compatibility fixture is
 Node-based. It makes no package-manager or network request.

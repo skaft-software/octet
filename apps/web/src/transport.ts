@@ -65,7 +65,7 @@ export type TransportConnectionState =
   "connecting" | "connected" | "reconnecting";
 type ConnectionListener = (state: TransportConnectionState) => void;
 
-export interface YggTransport {
+export interface OctetTransport {
   getProjectCatalog(): Promise<ProjectCatalog>;
   getRepositoryContext(projectId: string): Promise<RepositoryContextSnapshot>;
   getUsageStats(period: UsagePeriod): Promise<UsageStats>;
@@ -472,7 +472,7 @@ function decodeGoalState(value: unknown): GoalState | null {
 
 function decodeGoalResponse(response: Response, value: unknown): GoalResponse {
   const goal = decodeGoalState(value);
-  const rawRevision = response.headers.get("x-ygg-goal-revision");
+  const rawRevision = response.headers.get("x-octet-goal-revision");
   if (rawRevision === null) {
     return { goal, revision: goal?.revision ?? 0 };
   }
@@ -487,7 +487,7 @@ function decodeGoalResponse(response: Response, value: unknown): GoalResponse {
   return { goal, revision };
 }
 
-export class FixtureTransport implements YggTransport {
+export class FixtureTransport implements OctetTransport {
   private bootstrap = clone(fixtureBootstrap);
   private sessions = clone(fixtureSessions);
   private listeners = new Set<EventListener>();
@@ -539,7 +539,7 @@ export class FixtureTransport implements YggTransport {
         worktree: "present",
         head: "aa56661f9b1f14933b57848d08144e8604e2e9cb",
         branchState: "named",
-        branch: "explore/ygg-serve-web-v2",
+        branch: "explore/octet-serve-web-v2",
         dirty: true,
         ahead: 0,
         behind: 0,
@@ -1199,7 +1199,7 @@ export class FixtureTransport implements YggTransport {
         "README.md",
         {
           content:
-            "# ygg fixture project\n\nThis browser edits only trusted project files.\n",
+            "# octet fixture project\n\nThis browser edits only trusted project files.\n",
           modifiedAtMs: initialModifiedAtMs,
           gitStatus: [{ kind: "modified" }],
         },
@@ -1216,7 +1216,7 @@ export class FixtureTransport implements YggTransport {
       [
         "src/main.ts",
         {
-          content: 'export const greeting = "Hello from ygg";\n',
+          content: 'export const greeting = "Hello from octet";\n',
           modifiedAtMs: initialModifiedAtMs,
           gitStatus: [{ kind: "untracked" }],
         },
@@ -2109,7 +2109,7 @@ export class FixtureTransport implements YggTransport {
 
 const SESSION_REQUEST_TIMEOUT_MS = 30_000;
 
-export class HttpTransport implements YggTransport {
+export class HttpTransport implements OctetTransport {
   private listeners = new Set<EventListener>();
   private connectionListeners = new Set<ConnectionListener>();
   private connectionState: TransportConnectionState = "connecting";
@@ -2812,7 +2812,7 @@ export class HttpTransport implements YggTransport {
           this.dispatch(projection.event);
         }
       } catch {
-        socket.close(1002, "Invalid ygg event");
+        socket.close(1002, "Invalid octet event");
       }
     });
 
@@ -3054,7 +3054,7 @@ export class HttpTransport implements YggTransport {
   }
 }
 
-const loopbackDeviceStorageKey = "ygg:loopback-device-id";
+const loopbackDeviceStorageKey = "octet:loopback-device-id";
 const validDeviceId = /^[A-Za-z0-9_.:-]{1,128}$/;
 let volatileLoopbackDeviceId: string | undefined;
 
@@ -3073,8 +3073,8 @@ export function transportModeFromSearch(search: string): TransportMode {
 export function resolveClientDeviceId(): string | undefined {
   const injected =
     document
-      .querySelector<HTMLMetaElement>('meta[name="ygg-device-id"]')
-      ?.content.trim() || document.documentElement.dataset.yggDeviceId?.trim();
+      .querySelector<HTMLMetaElement>('meta[name="octet-device-id"]')
+      ?.content.trim() || document.documentElement.dataset.octetDeviceId?.trim();
   if (injected && validDeviceId.test(injected)) return injected;
 
   const host = window.location.hostname;
@@ -3100,7 +3100,7 @@ export function resolveClientDeviceId(): string | undefined {
 
 export function createTransport(
   mode = transportModeFromSearch(window.location.search),
-): YggTransport {
+): OctetTransport {
   // Vite folds import.meta.env.DEV to false for production builds. That makes
   // FixtureTransport and its fixture-data imports unreachable and removable
   // from the production dependency graph.

@@ -5,18 +5,18 @@ The default case measures cold process launch.  Additional commands can be
 provided as ``NAME=ARGV`` values (parsed with :mod:`shlex`, never a shell), and
 an arbitrary long-lived command can be measured for RSS/PSS and CPU with
 ``--idle-command``.  The same runner can therefore be used for another agent
-without pretending that a Ygg-specific command is a competitor comparison.
+without pretending that a octet-specific command is a competitor comparison.
 
 Examples:
 
     python3 scripts/bench-systems.py \
-      --binary ./target/release/ygg --repetitions 9 \
-      --output /tmp/ygg-systems.json
+      --binary ./target/release/octet --repetitions 9 \
+      --output /tmp/octet-systems.json
 
     python3 scripts/bench-systems.py \
-      --command sessions='./target/release/ygg --offline sessions list' \
-      --idle-command idle='./target/release/ygg --plain --offline ...' \
-      --concurrency 1,2,4 --telemetry /tmp/ygg-telemetry.jsonl
+      --command sessions='./target/release/octet --offline sessions list' \
+      --idle-command idle='./target/release/octet --plain --offline ...' \
+      --concurrency 1,2,4 --telemetry /tmp/octet-telemetry.jsonl
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-SCHEMA = "ygg.systems-benchmark.v1"
+SCHEMA = "octet.systems-benchmark.v1"
 DEFAULT_REPETITIONS = 9
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_IDLE_SECONDS = 1.0
@@ -466,7 +466,7 @@ def telemetry_summary(paths: list[str]) -> dict[str, Any]:
                     value = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(value, dict) and value.get("schema") == "ygg.telemetry.v1":
+                if isinstance(value, dict) and value.get("schema") == "octet.telemetry.v1":
                     records.append(value)
     request_latencies = [float(record["elapsed_ms"]) for record in records if record.get("record") == "model_request_finished" and isinstance(record.get("elapsed_ms"), (int, float))]
     ttft = [float(record["ttft_ms"]) for record in records if record.get("record") == "model_request_finished" and isinstance(record.get("ttft_ms"), (int, float))]
@@ -484,7 +484,7 @@ def telemetry_summary(paths: list[str]) -> dict[str, Any]:
         "request_elapsed_ms": summarize(request_latencies),
         "ttft_ms": summarize(ttft),
         "tool_elapsed_ms": summarize(tool_latencies),
-        "usage_semantics": "uncached_input_tokens + cache_read_tokens + cache_write_tokens = provider_input_tokens; total_tokens is Ygg's normalized canonical total.",
+        "usage_semantics": "uncached_input_tokens + cache_read_tokens + cache_write_tokens = provider_input_tokens; total_tokens is octet's normalized canonical total.",
     }
 
 
@@ -512,7 +512,7 @@ def print_summary(report: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="ygg", help="default executable for the cold-launch case")
+    parser.add_argument("--binary", default="octet", help="default executable for the cold-launch case")
     parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--idle-seconds", type=float, default=DEFAULT_IDLE_SECONDS)
@@ -590,7 +590,7 @@ def main() -> int:
             "memory": "sampled after a settle interval; RSS and best-effort Linux PSS; no inference server included; summaries over per-run peaks",
             "cpu": "OS-reported process CPU percentage sampled with memory; summaries over per-run peaks",
             "concurrency": "complete sums of directly launched agent processes at each level; raw samples and per-run peaks retained",
-            "telemetry": "reads ygg.telemetry.v1 without raw prompts, arguments, or provider payloads",
+            "telemetry": "reads octet.telemetry.v1 without raw prompts, arguments, or provider payloads",
         },
     }
     encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"

@@ -39,7 +39,7 @@ class PiRuntimeEvidenceHarnessTests(unittest.TestCase):
             )
             self.assertIn('"decision": "hold"', completed.stdout)
             artifact = json.loads((output / "results.json").read_text(encoding="utf-8"))
-            self.assertEqual("ygg.pi.runtime.evidence.v1", artifact["schema"])
+            self.assertEqual("octet.pi.runtime.evidence.v1", artifact["schema"])
             self.assertEqual("0.3", artifact["api"]["version"])
             self.assertEqual(
                 {"no_extension", "legacy_eager", "lazy", "shared_workspace", "pi_aggregate"},

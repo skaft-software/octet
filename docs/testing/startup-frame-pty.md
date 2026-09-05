@@ -1,7 +1,7 @@
 # Startup frame PTY lane
 
-`startup-frame-pty` is a small Unix regression lane for Ygg's primary-screen
-startup boundary. It runs the compiled `ygg` binary under a controlled PTY and
+`startup-frame-pty` is a small Unix regression lane for octet's primary-screen
+startup boundary. It runs the compiled `octet` binary under a controlled PTY and
 checks the bytes and emulated terminal state rather than relying on a human
 terminal or a live provider.
 
@@ -18,7 +18,7 @@ running it when a shared build cache is required.
 
 The real-binary contract runs twice, with `--mouse auto` and `--mouse app`:
 
-- a 96x18 PTY is seeded with two `YGG_PTY_STALE_STARTUP_*` rows before Ygg
+- a 96x18 PTY is seeded with two `OCTET_PTY_STALE_STARTUP_*` rows before octet
   starts;
 - the initial splash frame and the first ready frame are parsed through
   `vt100`; the visible stale rows must be gone;
@@ -36,8 +36,8 @@ than clearing saved lines, that shortening the transient fixture removes its
 visible rows, and that it also avoids alternate-screen mode.
 
 The expected normalized contracts and row fixtures are in
-`crates/ygg-coding-agent/tests/fixtures/startup-frame-pty/`. The harness is
-`crates/ygg-coding-agent/tests/startup_frame_pty.rs`.
+`crates/octet-coding-agent/tests/fixtures/startup-frame-pty/`. The harness is
+`crates/octet-coding-agent/tests/startup_frame_pty.rs`.
 
 ## Isolation and safety
 
@@ -58,7 +58,7 @@ An explicitly selected local v0.6.7 binary can be compared without making it a
 default test dependency:
 
 ```bash
-YGG_STARTUP_FRAME_BASELINE=/absolute/path/to/ygg-v0.6.7 \
+OCTET_STARTUP_FRAME_BASELINE=/absolute/path/to/ygg-v0.6.7 \
   scripts/test-startup-frame-pty.sh --nocapture
 ```
 

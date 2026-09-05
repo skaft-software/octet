@@ -41,7 +41,7 @@ const themeCatalog: ThemeOption[] = [
   {
     id: "theme-37a8eec1ce19687d132fe290",
     theme: {
-      name: "Ygg Default",
+      name: "octet Default",
       source: "bundled",
       revision: 1,
       scheme: "unknown",
@@ -123,7 +123,7 @@ const previewMarkup = `<!doctype html>
   </head>
   <body>
     <main class="page">
-      <div class="eyebrow">ygg release pulse</div>
+      <div class="eyebrow">octet release pulse</div>
       <h1>Everything important, ready for review.</h1>
       <p>A live summary of the release candidate, grounded in the checks and files consulted during this session.</p>
       <section class="grid">
@@ -146,8 +146,8 @@ export const fixtureBootstrap: HostBootstrap = {
   selectedSessionId: "session-fresh",
   projects: [
     {
-      id: "project-ygg",
-      name: "ygg",
+      id: "project-octet",
+      name: "octet",
       trusted: true,
       archived: false,
       available: true,
@@ -169,7 +169,7 @@ export const fixtureBootstrap: HostBootstrap = {
   sessions: [
     {
       id: "session-fresh",
-      projectId: "project-ygg",
+      projectId: "project-octet",
       title: "New session",
       preview: "Ready when you are",
       status: "idle",
@@ -183,7 +183,7 @@ export const fixtureBootstrap: HostBootstrap = {
     },
     {
       id: "session-live",
-      projectId: "project-ygg",
+      projectId: "project-octet",
       title: "Refine onboarding preview",
       preview: "Checking the responsive states",
       status: "working",
@@ -198,7 +198,7 @@ export const fixtureBootstrap: HostBootstrap = {
     },
     {
       id: "session-attention",
-      projectId: "project-ygg",
+      projectId: "project-octet",
       title: "Prepare signed macOS build",
       preview: "Needs access to the signing key",
       status: "needs_attention",
@@ -213,7 +213,7 @@ export const fixtureBootstrap: HostBootstrap = {
     },
     {
       id: "session-done",
-      projectId: "project-ygg",
+      projectId: "project-octet",
       title: "Review release readiness",
       preview: "Release pulse is ready",
       status: "done",
@@ -329,7 +329,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
     sequence: 1,
     title: "New session",
     status: "idle",
-    projectId: "project-ygg",
+    projectId: "project-octet",
     modelId: "claude-sonnet-4-6",
     reasoning: "high",
     authority: "workspace",
@@ -351,7 +351,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
     title: "Refine onboarding preview",
     status: "working",
     activeRunId: "run-live",
-    projectId: "project-ygg",
+    projectId: "project-octet",
     modelId: "gpt-5.4",
     reasoning: "high",
     authority: "workspace",
@@ -524,7 +524,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
     sequence: 16,
     title: "Prepare signed macOS build",
     status: "needs_attention",
-    projectId: "project-ygg",
+    projectId: "project-octet",
     modelId: "claude-sonnet-4-6",
     reasoning: "medium",
     authority: "readOnly",
@@ -562,7 +562,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
         status: "succeeded",
         rawToolName: "bash",
         label: "Built release application",
-        target: "target/release/ygg.app",
+        target: "target/release/octet.app",
         commandPreview: "cargo build --release",
         detail: "Build completed without warnings.",
         state: "committed",
@@ -581,7 +581,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
         requestId: "approval-keychain",
         title: "Allow signing identity access?",
         description:
-          "ygg wants to use “Developer ID Application” from this Mac’s Keychain to sign the build.",
+          "octet wants to use “Developer ID Application” from this Mac’s Keychain to sign the build.",
         scopeLabel: "This signing step only",
         state: "streaming",
         createdAt: at(48),
@@ -612,7 +612,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
       {
         id: "output-build",
         kind: "file",
-        title: "ygg.app",
+        title: "octet.app",
         subtitle: "Unsigned release build · 42 MB",
         mimeType: "application/x-macos-app",
         updatedAt: at(42),
@@ -626,7 +626,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
     sequence: 41,
     title: "Review release readiness",
     status: "done",
-    projectId: "project-ygg",
+    projectId: "project-octet",
     modelId: "qwen3.5-27b",
     reasoning: "high",
     authority: "workspace",
@@ -852,7 +852,7 @@ export const fixtureSessions: Record<string, SessionSnapshot> = {
         title: "Release pulse",
         kind: "web",
         status: "live",
-        urlLabel: "ygg.local/release-pulse",
+        urlLabel: "octet.local/release-pulse",
         fixtureId: "release-pulse",
         outputId: "output-release-pulse",
       },
@@ -1038,7 +1038,7 @@ function createPerformanceSession(): SessionSnapshot {
     title: "Profile 1,000-item transcript",
     status: "working",
     activeRunId: "performance-run",
-    projectId: "project-ygg",
+    projectId: "project-octet",
     modelId: "gpt-5.4",
     reasoning: "high",
     authority: "workspace",
@@ -1073,7 +1073,7 @@ function createPerformanceReplaySession(): SessionSnapshot {
     title: "Recovered replay after reconnect",
     status: "working",
     activeRunId: "performance-replay-run",
-    projectId: "project-ygg",
+    projectId: "project-octet",
     modelId: "claude-sonnet-4-6",
     reasoning: "high",
     authority: "workspace",

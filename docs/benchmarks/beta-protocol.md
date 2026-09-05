@@ -1,7 +1,7 @@
 # Ten-user daily-driver beta protocol
 
 This is an opt-in, no-telemetry-required protocol for the first ten developers.
-The purpose is to find reasons a capable developer abandons Ygg before it earns
+The purpose is to find reasons a capable developer abandons octet before it earns
 repeated use.
 
 ## Setup
@@ -9,23 +9,24 @@ repeated use.
 Give each participant the same short checklist and no author assistance unless
 they are blocked for 15 minutes:
 
-1. Install from the pinned release instructions or build from source.
+1. Build the unpublished checkout in isolation; use pinned release instructions
+   only after publication and platform acceptance are separately verified.
 2. Configure either a local OpenAI-compatible endpoint or a cloud provider.
-3. Run `ygg --help`, start one session, and complete a small repository task.
-4. Exit, resume with `ygg --continue`, and complete a second task.
+3. Run `octet --help`, start one session, and complete a small repository task.
+4. Exit, resume with `octet --continue`, and complete a second task.
 5. Cancel one intentionally long-running operation and regain the prompt.
 6. Inspect `/status` (or the equivalent status command) and report the active
    model, endpoint class, and context information.
 
 Do not ask participants to enable telemetry.  If they volunteer diagnostics,
-`ygg --telemetry ./ygg-telemetry.jsonl` produces a redacted operational trace;
+`octet --telemetry ./octet-telemetry.jsonl` produces a redacted operational trace;
 participants should inspect it before sharing.
 
 ## Per-participant record
 
 Collect only through an issue template, interview, or an exported local form:
 
-- OS, CPU/RAM/GPU, Ygg version, install method, and competitor normally used
+- OS, CPU/RAM/GPU, octet version, install method, and competitor normally used
 - provider class (`local`, `remote`, or `subscription`), not credentials
 - installed successfully without author help: yes/no and minutes
 - first task completed: yes/no and minutes
@@ -33,8 +34,8 @@ Collect only through an issue template, interview, or an exported local form:
 - crashes, hangs, provider configuration failures, and abandoned tasks
 - days active and sessions completed over 14 days
 - which existing agent they returned to, if any, and why
-- one thing Ygg did better and one thing it did worse
-- whether they would notice if Ygg disappeared
+- one thing octet did better and one thing it did worse
+- whether they would notice if octet disappeared
 
 Never request API keys, raw prompts, private repositories, unredacted session
 files, or mandatory background telemetry.
@@ -55,4 +56,4 @@ explicitly selected telemetry. It must exclude credentials, authorization
 headers, raw prompts, tool arguments/results, workspace paths where possible,
 and session content unless the participant deliberately redacts and approves
 it. The bundle command should be an export convenience, not a prerequisite for
-using Ygg.
+using octet.

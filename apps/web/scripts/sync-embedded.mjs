@@ -18,7 +18,7 @@ const distributionDirectory = join(webDirectory, "dist");
 const embeddedDirectory = join(
   repositoryDirectory,
   "extensions",
-  "ygg-serve",
+  "octet-serve",
   "web",
 );
 const assets = [
@@ -148,7 +148,7 @@ async function writeEmbedded(payload, sums, bundleHash) {
   const expected = resolve(
     repositoryDirectory,
     "extensions",
-    "ygg-serve",
+    "octet-serve",
     "web",
   );
   if (resolve(embeddedDirectory) !== expected) {

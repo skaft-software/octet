@@ -53,14 +53,14 @@ body:
         - External/community extension
         - Provider definition or compatibility data
         - TUI / frontend presentation
-        - Ygg Serve
+        - octet Serve
         - Documentation / release / infrastructure
         - Unknown — needs design discussion
     validations:
       required: true
   - type: textarea
     attributes:
-      label: Why this belongs in Ygg
+      label: Why this belongs in octet
       description: Explain why an existing extension, provider definition, or external tool cannot solve it.
     validations:
       required: true

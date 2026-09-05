@@ -85,7 +85,7 @@ describe("attention notification manager", () => {
       "octet finished",
       expect.objectContaining({
         body: "Review the release is ready to review.",
-        tag: "ygg-session-session-one",
+        tag: "octet-session-session-one",
       }),
     );
 

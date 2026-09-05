@@ -1,0 +1,42 @@
+{
+  "assets": [
+    {
+      "kind": "installer",
+      "name": "install-octet.sh",
+      "sha256": "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb",
+      "url": "https://github.com/skaft-software/ygg/releases/download/v0.7.0/install-octet.sh"
+    },
+    {
+      "kind": "binary",
+      "name": "octet-0.7.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "e7ab051b6c1c9e079171c9f264c39d954116cae49944eec831aebccac8da986b",
+      "target": "aarch64-apple-darwin",
+      "url": "https://github.com/skaft-software/ygg/releases/download/v0.7.0/octet-0.7.0-aarch64-apple-darwin.tar.gz"
+    },
+    {
+      "kind": "binary",
+      "name": "octet-0.7.0-x86_64-apple-darwin.tar.gz",
+      "sha256": "533d5d66c05286dfc249c5464d60129193b98fe810f9e6bd10a96408b2164ea4",
+      "target": "x86_64-apple-darwin",
+      "url": "https://github.com/skaft-software/ygg/releases/download/v0.7.0/octet-0.7.0-x86_64-apple-darwin.tar.gz"
+    },
+    {
+      "kind": "binary",
+      "name": "octet-0.7.0-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "b457b9ffe95f850991bebd2b32ff8bdbdeb8a038d6c298b9e721363258536066",
+      "target": "x86_64-unknown-linux-gnu",
+      "url": "https://github.com/skaft-software/ygg/releases/download/v0.7.0/octet-0.7.0-x86_64-unknown-linux-gnu.tar.gz"
+    }
+  ],
+  "checksum_manifest": {
+    "name": "OCTET_SHA256SUMS",
+    "sha256": "113e5d14f78a22fee2bb525b25be57ed512aa2610761d5a1a60d43b410f163b3"
+  },
+  "repository": "skaft-software/ygg",
+  "schema": "octet.release.metadata.v1",
+  "source_commit": "0123456789abcdef0123456789abcdef01234567",
+  "tag": "v0.7.0",
+  "version": "0.7.0",
+  "workflow_commit": "abcdef0123456789abcdef0123456789abcdef01",
+  "workflow_ref": "skaft-software/ygg/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v0.7.0"
+}

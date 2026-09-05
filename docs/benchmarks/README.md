@@ -1,10 +1,10 @@
-# Benchmarking Ygg
+# Benchmarking octet
 
 This directory contains reproducibility evidence. A result is publishable only
 when its losses, environment, binary identity, raw outputs, and any adjudication
 exclusions are retained.
 
-Current artifacts include the compact canonical Terminal-Bench 2.1
+Historical Ygg artifacts (not octet 0.7.0 results) include the compact canonical Terminal-Bench 2.1
 [evidence package](tb21-v0.6.2/README.md), the frozen
 control fingerprint ([baseline-v0.6.2.md](baseline-v0.6.2.md)), the reconciled
 failure report
@@ -16,18 +16,21 @@ the scoped coding-agent
 credential-free [Pi runtime evidence harness](pi-runtime-evidence.md), and the
 opt-in beta protocol ([beta-protocol.md](beta-protocol.md)).
 
+The pinned [Harbor adapter](../../evaluation/harbor/README.md) reproduces historical
+Ygg 0.6.2 only. It is not an octet 0.7.0 evaluation adapter or campaign.
+
 ## Optional agent telemetry
 
 Enable telemetry explicitly; normal sessions do not create it:
 
 ```console
-ygg --telemetry ./artifacts/run.jsonl --model <model> "<task>"
+octet --telemetry ./artifacts/run.jsonl --model <model> "<task>"
 ```
 
 `--telemetry` also accepts a relative path, resolved from the invocation
-directory. `YGG_TELEMETRY` and `telemetry = "..."` in `~/.ygg/config.toml`
+directory. `OCTET_TELEMETRY` and `telemetry = "..."` in `~/.octet/config.toml`
 are equivalent configuration layers. The file is created with owner-only
-permissions and contains bounded JSONL records under `ygg.telemetry.v1`.
+permissions and contains bounded JSONL records under `octet.telemetry.v1`.
 
 Telemetry records:
 
@@ -55,7 +58,7 @@ Usage semantics are explicit: `uncached_input_tokens` is the provider's
 standard-rate input bucket. `cache_read_tokens` and `cache_write_tokens` are
 disjoint additions; `cache_write_1h_tokens` is a subset of cache writes.
 `provider_input_tokens` is the three disjoint prompt buckets' sum.
-`reasoning_tokens` is a subset of output. `total_tokens` is Ygg's canonical
+`reasoning_tokens` is a subset of output. `total_tokens` is octet's canonical
 normalized sum, not a promise that an overlapping or omitted provider wire
 `total_tokens` was preserved. Records with usage include `usage_scope`:
 `request`, `operation`, or `run_cumulative`; never sum cumulative snapshots.
@@ -69,24 +72,24 @@ or raw context bodies. Those limitations must be stated in reports.
 `scripts/bench-systems.py` uses only the Python standard library and real OS
 process measurements. It reports medians and p95s over repeated runs, best
 available RSS/PSS, CPU samples, direct-process concurrency totals, and parsed
-Ygg telemetry:
+octet telemetry:
 
 ```console
 python3 scripts/bench-systems.py \
-  --binary ./target/release/ygg \
+  --binary ./target/release/octet \
   --repetitions 9 \
-  --command sessions='./target/release/ygg --offline sessions list' \
-  --output ./artifacts/systems/ygg.json
+  --command sessions='./target/release/octet --offline sessions list' \
+  --output ./artifacts/systems/octet.json
 ```
 
 For a long-lived process, provide an explicit command whose stdin remains open:
 
 ```console
 python3 scripts/bench-systems.py \
-  --idle-command idle='./target/release/ygg --plain --model <local-model>' \
+  --idle-command idle='./target/release/octet --plain --model <local-model>' \
   --concurrency 1,2,4 \
   --repetitions 9 \
-  --output ./artifacts/systems/ygg-idle.json
+  --output ./artifacts/systems/octet-idle.json
 ```
 
 The runner never invokes command strings through a shell. Use `env`, a wrapper
@@ -152,7 +155,7 @@ benchmark adjudication.
 
 Before starting a full campaign, record:
 
-1. Ygg version, commit, binary hash, compiler and OS image.
+1. octet version, commit, binary hash, compiler and OS image.
 2. Harbor version/commit, exact dataset revision, task count, attempts, timeout,
    concurrency, and retry policy.
 3. Model identifier and weight digest, provider/server version and endpoint
@@ -170,7 +173,7 @@ inputs changed between control and candidate.
 ## Same-model harness shootout
 
 Use one immutable endpoint and one task manifest. For each harness, collect:
-accuracy, success/hour, wall time per success, model requests, Ygg/tool calls or
+accuracy, success/hour, wall time per success, model requests, octet/tool calls or
 the closest equivalent, provider input/output/cache buckets, retries, timeouts,
 agent RSS/PSS, and crashes. Publish raw per-trial records and a table that
 separates runtime overhead, UI latency, agentic efficiency, and successful-task

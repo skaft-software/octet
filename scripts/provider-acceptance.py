@@ -879,7 +879,7 @@ def stage_audio_fixture(path: pathlib.Path) -> None:
 
 def run_route(host: pathlib.Path, route: Route) -> None:
     validate_route(route)
-    with tempfile.TemporaryDirectory(prefix="ygg-provider-acceptance-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="octet-provider-acceptance-") as temporary:
         root = pathlib.Path(temporary)
         home = root / "home"
         workspace = root / "workspace"
@@ -887,7 +887,7 @@ def run_route(host: pathlib.Path, route: Route) -> None:
         home.mkdir(mode=0o700)
         workspace.mkdir(mode=0o700)
         sessions.mkdir(mode=0o700)
-        canary = f"YGG_ACCEPTANCE_{uuid.uuid4().hex.upper()}"
+        canary = f"OCTET_ACCEPTANCE_{uuid.uuid4().hex.upper()}"
         request_id = f"accept-{uuid.uuid4().hex}"
         run_id = f"run-{uuid.uuid4().hex}"
         request: dict[str, object] = {
@@ -955,33 +955,33 @@ def routes_from_environment() -> list[Route]:
         Route(
             label="OpenAI Responses",
             provider="acceptance-openai-responses",
-            model=required_environment("YGG_ACCEPTANCE_OPENAI_RESPONSES_MODEL"),
+            model=required_environment("OCTET_ACCEPTANCE_OPENAI_RESPONSES_MODEL"),
             base_url="https://api.openai.com/v1",
-            api_key=required_environment("YGG_ACCEPTANCE_OPENAI_API_KEY"),
+            api_key=required_environment("OCTET_ACCEPTANCE_OPENAI_API_KEY"),
             provider_mode="openai-responses",
         ),
         Route(
             label="Anthropic Messages",
             provider="acceptance-anthropic-messages",
-            model=required_environment("YGG_ACCEPTANCE_ANTHROPIC_MODEL"),
+            model=required_environment("OCTET_ACCEPTANCE_ANTHROPIC_MODEL"),
             base_url="https://api.anthropic.com/v1",
-            api_key=required_environment("YGG_ACCEPTANCE_ANTHROPIC_API_KEY"),
+            api_key=required_environment("OCTET_ACCEPTANCE_ANTHROPIC_API_KEY"),
             provider_mode="anthropic-messages",
         ),
         Route(
             label="OpenAI Chat",
-            provider=required_environment("YGG_ACCEPTANCE_OPENAI_CHAT_PROVIDER"),
-            model=required_environment("YGG_ACCEPTANCE_OPENAI_CHAT_MODEL"),
-            base_url=required_environment("YGG_ACCEPTANCE_OPENAI_CHAT_BASE_URL"),
-            api_key=required_environment("YGG_ACCEPTANCE_OPENAI_CHAT_API_KEY"),
+            provider=required_environment("OCTET_ACCEPTANCE_OPENAI_CHAT_PROVIDER"),
+            model=required_environment("OCTET_ACCEPTANCE_OPENAI_CHAT_MODEL"),
+            base_url=required_environment("OCTET_ACCEPTANCE_OPENAI_CHAT_BASE_URL"),
+            api_key=required_environment("OCTET_ACCEPTANCE_OPENAI_CHAT_API_KEY"),
             provider_mode="openai-compatible",
         ),
         Route(
             label="native audio",
-            provider=required_environment("YGG_ACCEPTANCE_AUDIO_PROVIDER"),
-            model=required_environment("YGG_ACCEPTANCE_AUDIO_MODEL"),
-            base_url=required_environment("YGG_ACCEPTANCE_AUDIO_BASE_URL"),
-            api_key=required_environment("YGG_ACCEPTANCE_AUDIO_API_KEY"),
+            provider=required_environment("OCTET_ACCEPTANCE_AUDIO_PROVIDER"),
+            model=required_environment("OCTET_ACCEPTANCE_AUDIO_MODEL"),
+            base_url=required_environment("OCTET_ACCEPTANCE_AUDIO_BASE_URL"),
+            api_key=required_environment("OCTET_ACCEPTANCE_AUDIO_API_KEY"),
             provider_mode="openai-compatible",
             audio=True,
         ),
@@ -1060,12 +1060,12 @@ def stage_host(source: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print("usage: provider-acceptance.py PATH_TO_YGG_HOST", file=sys.stderr)
+        print("usage: provider-acceptance.py PATH_TO_OCTET_HOST", file=sys.stderr)
         return 2
     source_host = pathlib.Path(sys.argv[1])
     try:
-        with tempfile.TemporaryDirectory(prefix="ygg-acceptance-host-") as staging:
-            host = stage_host(source_host, pathlib.Path(staging) / "ygg-host")
+        with tempfile.TemporaryDirectory(prefix="octet-acceptance-host-") as staging:
+            host = stage_host(source_host, pathlib.Path(staging) / "octet-host")
             routes = routes_from_environment()
             for route in routes:
                 try:

@@ -29,8 +29,8 @@ import time
 from typing import Any
 
 
-SCHEMA = "ygg.pi.runtime.evidence.v1"
-DRIVER_SCHEMA = "ygg.pi.runtime.benchmark-driver.v1"
+SCHEMA = "octet.pi.runtime.evidence.v1"
+DRIVER_SCHEMA = "octet.pi.runtime.benchmark-driver.v1"
 PROFILES = ("no_extension", "legacy_eager", "lazy", "shared_workspace", "pi_aggregate")
 MAX_REPETITIONS = 31
 MAX_RESOURCE_SAMPLES = 256
@@ -46,8 +46,8 @@ def repository_root() -> Path:
 
 
 def load_identity_helpers(root: Path) -> Any:
-    path = root / "extensions/ygg-pi-compat/tests/helpers.py"
-    spec = importlib.util.spec_from_file_location("ygg_pi_bench_identity", path)
+    path = root / "extensions/octet-pi-compat/tests/helpers.py"
+    spec = importlib.util.spec_from_file_location("octet_pi_bench_identity", path)
     if spec is None or spec.loader is None:
         raise EvidenceError("cannot load the hermetic Pi identity helper")
     module = importlib.util.module_from_spec(spec)
@@ -70,7 +70,7 @@ def command_output(command: list[str], *, timeout: float = 5.0) -> str | None:
 
 
 def scrubbed_environment(work: Path) -> dict[str, str]:
-    """Do not pass provider credentials, user homes, npm config, or Ygg config."""
+    """Do not pass provider credentials, user homes, npm config, or octet config."""
     home = work / "home"
     home.mkdir(parents=True, exist_ok=True)
     environment = {
@@ -390,8 +390,8 @@ def bridge_spec(
     node = shutil.which("node")
     if node is None:
         raise EvidenceError("node is required for the Pi runtime evidence harness")
-    bridge = root / "extensions/ygg-pi-compat/bridge.mjs"
-    fake_pi = root / "extensions/ygg-pi-compat/tests/fixtures/fake-pi"
+    bridge = root / "extensions/octet-pi-compat/bridge.mjs"
+    fake_pi = root / "extensions/octet-pi-compat/tests/fixtures/fake-pi"
     agent_dir = work / "agent"
     manifest = work / "manifest" / "extension.toml"
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -421,7 +421,7 @@ def bridge_spec(
         aggregate_digest=aggregate_digest,
         manifest_path=manifest,
         command_name=command_name,
-        ygg_version="0.6.7",
+        octet_version="0.7.0",
         agent_dir=agent_dir,
     )
     command = [node, str(bridge)]
@@ -450,8 +450,8 @@ def bridge_spec(
             str(manifest),
             "--link-identity",
             link,
-            "--ygg-version",
-            "0.6.7",
+            "--octet-version",
+            "0.7.0",
             "--command",
             command_name,
         ]
@@ -460,7 +460,7 @@ def bridge_spec(
         "workspace": str(root),
         "host": {},
         "protocol": {"optional_features": ["lifecycle_events"]},
-        "ygg_version": "0.6.7",
+        "octet_version": "0.7.0",
         "extension": {
             "name": command_name,
             "version": "fixture",
@@ -475,7 +475,7 @@ def baseline_spec(root: Path) -> tuple[list[str], dict[str, Any], str]:
     node = shutil.which("node")
     if node is None:
         raise EvidenceError("node is required for the Pi runtime evidence harness")
-    return [node, str(root / "extensions/ygg-pi-compat/tests/fixtures/runtime-idle.mjs")], {"workspace": str(root)}, "activate"
+    return [node, str(root / "extensions/octet-pi-compat/tests/fixtures/runtime-idle.mjs")], {"workspace": str(root)}, "activate"
 
 
 def start_and_initialize(
@@ -520,10 +520,10 @@ def one_profile(
     interval_ms: int,
     maximum_samples: int,
 ) -> dict[str, Any]:
-    fixtures = root / "extensions/ygg-pi-compat/tests/fixtures"
+    fixtures = root / "extensions/octet-pi-compat/tests/fixtures"
     extension = fixtures / "fixture-extension.mjs"
     aggregate = [fixtures / "aggregate/first.mjs", fixtures / "aggregate/second.mjs"]
-    with tempfile.TemporaryDirectory(prefix="ygg-pi-evidence-") as directory:
+    with tempfile.TemporaryDirectory(prefix="octet-pi-evidence-") as directory:
         work = Path(directory)
         if profile == "no_extension":
             command, params, tool = baseline_spec(root)
@@ -707,7 +707,7 @@ def sha256_file(path: Path) -> str:
 
 
 def fixture_inputs(root: Path, identity: Any) -> dict[str, Any]:
-    fixtures = root / "extensions/ygg-pi-compat/tests/fixtures"
+    fixtures = root / "extensions/octet-pi-compat/tests/fixtures"
     runtime = fixtures / "fake-pi"
     try:
         package = json.loads((runtime / "package.json").read_text(encoding="utf-8"))
@@ -722,7 +722,7 @@ def fixture_inputs(root: Path, identity: Any) -> dict[str, Any]:
     return {
         "adapter": "hermetic_fixture",
         "benchmark_driver_sha256": sha256_file(Path(__file__).resolve()),
-        "bridge": {"path": "extensions/ygg-pi-compat/bridge.mjs", "sha256": sha256_file(root / "extensions/ygg-pi-compat/bridge.mjs")},
+        "bridge": {"path": "extensions/octet-pi-compat/bridge.mjs", "sha256": sha256_file(root / "extensions/octet-pi-compat/bridge.mjs")},
         "pi_runtime": {
             "kind": "checked_in_fake_pi",
             "name": package.get("name"),
@@ -824,7 +824,7 @@ def main() -> int:
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     all_runs: dict[str, list[dict[str, Any]]] = {profile: [] for profile in PROFILES}
-    with tempfile.TemporaryDirectory(prefix="ygg-pi-evidence-home-") as environment_directory:
+    with tempfile.TemporaryDirectory(prefix="octet-pi-evidence-home-") as environment_directory:
         environment = scrubbed_environment(Path(environment_directory))
         for profile in PROFILES:
             for repetition in range(arguments.repetitions):
@@ -844,7 +844,7 @@ def main() -> int:
     artifact = {
         "schema": SCHEMA,
         "schema_version": 1,
-        "api": {"version": "0.3", "schema": "ygg.extension.api/0.3"},
+        "api": {"version": "0.3", "schema": "octet.extension.api/0.3"},
         "driver": {"schema": DRIVER_SCHEMA, "name": "hermetic_fixture", "reload_semantics": "process_restart"},
         "inputs": fixture_inputs(root, identity),
         "metadata": system_metadata(arguments.candidate, node),

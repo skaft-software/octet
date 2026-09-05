@@ -17,7 +17,7 @@ const catalog: ProjectCatalog = {
   projects: [
     {
       id: "prj_safe",
-      name: "ygg",
+      name: "octet",
       trusted: false,
       archived: false,
       available: true,
@@ -95,7 +95,7 @@ describe("projects", () => {
       }),
     ).toBeVisible();
     expect(
-      screen.getByText("ygg --workspace /path/to/project serve"),
+      screen.getByText("octet --workspace /path/to/project serve"),
     ).toBeVisible();
     expect(screen.queryByText("No trusted project is available")).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
@@ -176,11 +176,11 @@ describe("projects", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Rename" }));
-    const input = screen.getByRole("textbox", { name: "Rename ygg" });
+    const input = screen.getByRole("textbox", { name: "Rename octet" });
     await user.clear(input);
-    await user.type(input, "Ygg workspace");
+    await user.type(input, "octet workspace");
     await user.click(screen.getByRole("button", { name: "Save project name" }));
-    expect(rename).toHaveBeenCalledWith("prj_safe", "Ygg workspace");
+    expect(rename).toHaveBeenCalledWith("prj_safe", "octet workspace");
 
     await user.click(screen.getByRole("button", { name: "Archive" }));
     expect(archive).not.toHaveBeenCalled();

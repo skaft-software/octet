@@ -16,25 +16,25 @@ append-only sessions keep the work inspectable and resumable.
 [Examples](examples/README.md) · [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md)
 
-> **0.7.0 identity work in progress, not a released candidate.** This checkout
-> still builds `ygg` and `ygg-host`, with `ygg-*` crates/packages, `YGG_*`
-> environment variables, and `.ygg` data roots. Commands below deliberately use
-> those current source spellings. The intended octet rename is not an alias or
-> an automatic migration of an existing Ygg installation. See the
-> [draft release notes](docs/releases/v0.7.0.md) for the remaining gates.
-> The source repository remains [skaft-software/ygg](https://github.com/skaft-software/ygg).
+> **octet 0.7.0 source, unpublished and not yet release-qualified.** This checkout
+> defines `octet` and `octet-host`, `octet-*` crates/packages, `OCTET_*`
+> environment variables, and separate `.octet` user/project roots. There are no
+> Ygg aliases, old-root fallbacks, or automatic first-party data migrations.
+> Existing Ygg installations and data remain separate. The actual source repository
+> remains [skaft-software/ygg](https://github.com/skaft-software/ygg).
+> [Release notes and qualification gates](docs/releases/v0.7.0.md).
 
 ## What will you build?
 
 | Outcome | Start here |
 | --- | --- |
-| Fix a defect, verify the regression, and hand off the evidence | [A reviewable repository change](docs/workflows.md#1-make-a-reviewable-repository-change): use the checked-in prompt template, inspect before editing, verify, then resume or export the session. |
-| Give the harness a domain tool and a repeatable workflow | [Build and use an extension](docs/workflows.md#2-build-and-use-a-domain-extension): adapt the Git tool example, connect the manifest and handler, test the protocol, and explicitly enable the selected source. |
+| Turn an audio reference into a reviewed implementation brief | [Start with sound](docs/workflows.md#start-with-an-audio-reference): attach native WAV/MP3 on a compatible OpenAI Chat route, optionally compare images, and review the brief before coding. |
+| Build a tool, use it on a real task, and reuse it | [Repository-contract extension](docs/workflows.md#2-build-and-use-a-domain-extension): adapt the Git example into a bounded contract-inspection tool, test it, and use its evidence in a second repository. |
+| Delegate two audits and integrate a continued worker's findings | [Read-only delegation](docs/workflows.md#delegate-independent-investigations): separate investigations, verify unique findings, and resume a useful worker in its durable session. |
 | Add a repository assistant to your own application | [Embed a read-only assistant](docs/workflows.md#3-embed-a-read-only-repository-assistant): negotiate the native host protocol, stream a bounded run, and retain a resumable session. |
 
-For independent investigations, the first recipe also shows how to
-[delegate read-only work](docs/workflows.md#delegate-independent-investigations)
-without giving workers file mutation or shell authority. These are source-grounded
+The [reviewable-change recipe](docs/workflows.md#1-make-a-reviewable-repository-change)
+also covers inspect/edit/verify and session handoff. These are source-grounded
 recipes, not fabricated demo transcripts or measured 0.7.0 results.
 
 ## Build this checkout
@@ -43,9 +43,9 @@ On macOS or GNU/Linux, install Rust 1.86+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep), then from the repository root:
 
 ```sh
-cargo build --release --locked -p ygg-coding-agent --bins
-./target/release/ygg --version
-./target/release/ygg --help
+cargo build --release --locked -p octet-coding-agent --bins
+./target/release/octet --version
+./target/release/octet --help
 ```
 
 This builds locally without replacing an installed binary. If you set
@@ -56,7 +56,7 @@ dependencies are separate from the free, MIT-licensed agent.
 
 There is no verified octet download, npm package, or Homebrew installation
 command advertised here. Historical Ygg channels are documented separately in
-the [inherited source reference](docs/current-reference.md#historical-ygg-distribution-reference).
+the [historical Ygg reference](docs/current-reference.md#historical-ygg-distribution-reference).
 
 ## Control and boundaries
 

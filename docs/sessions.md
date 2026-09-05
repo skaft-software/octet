@@ -1,6 +1,6 @@
-# Ygg sessions
+# octet sessions
 
-Ygg stores each conversation as bounded, append-only JSONL under the configured
+octet stores each conversation as bounded, append-only JSONL under the configured
 session directory, namespaced by workspace. The JSONL file is the durable
 conversation and branch history. Readable names and tags live in small sidecars
 under the workspace store's `.metadata/` directory so older binaries can still
@@ -14,31 +14,31 @@ resume picker independent of total transcript bytes. It contains bounded
 derived titles, active-branch message counts, and transcript size/mtime
 fingerprints; JSONL and `.metadata/` remain authoritative. The interactive
 picker can enumerate all workspace-key directories under the shared session
-root and uses each directory's `.workspace` marker for display. Ygg streams only
+root and uses each directory's `.workspace` marker for display. octet streams only
 missing or stale transcripts, refreshes the active row when an app closes
 normally, and removes rows for missing sessions. An unavailable, locked,
-corrupt, oversized, or newer-version catalog never blocks session access: Ygg
+corrupt, oversized, or newer-version catalog never blocks session access: octet
 falls back to bounded JSONL scans, and rebuilds catalogs whose SQLite contents
-are corrupt. Deleting the `.catalog/` directory is safe; Ygg recreates it on
+are corrupt. Deleting the `.catalog/` directory is safe; octet recreates it on
 demand.
 
 ## Commands
 
 ```console
-ygg sessions list
-ygg sessions list --query review
-ygg sessions inspect <id>
-ygg sessions rename <id> "parser cleanup"
-ygg sessions tag <id> rust local-model
-ygg sessions export <id>
-ygg sessions export <id> --output ./handoff.ygg-session.json
-ygg sessions delete <id>
-ygg sessions repair <id>
+octet sessions list
+octet sessions list --query review
+octet sessions inspect <id>
+octet sessions rename <id> "parser cleanup"
+octet sessions tag <id> rust local-model
+octet sessions export <id>
+octet sessions export <id> --output ./handoff.octet-session.json
+octet sessions delete <id>
+octet sessions repair <id>
 ```
 
 `list` searches IDs, names, derived titles, tags, internal JSONL paths, and
 dates encoded in IDs. Lists and searches are intentionally scoped to the
-selected workspace's store; Ygg does not maintain a cross-workspace index.
+selected workspace's store; octet does not maintain a cross-workspace index.
 Modified times are shown as readable relative ages. `inspect` validates the
 file read-only and reports its derived active-branch title, size, entry count,
 head, checkpoint and usage totals, plus branch roots and leaves. Both `inspect`
@@ -139,7 +139,7 @@ by both file bytes and record count.
 
 ## Portable export and redaction
 
-Export writes an owner-private `ygg-session-export` version 1 JSON package with
+Export writes an owner-private `octet-session-export` version 1 JSON package with
 source identity, readable metadata, and validated records. Existing paths are
 not replaced without `--force`.
 
@@ -151,7 +151,7 @@ userinfo, private-key blocks, and JSON objects or arrays serialized inside
 strings. It preserves surrounding prose and UTF-8, and reports each replaced
 value or credential fragment. This is a safety filter, not a proof that
 arbitrary prose contains no secret. Use `--include-secrets` only for a trusted
-destination; Ygg prints an explicit warning when raw values are requested.
+destination; octet prints an explicit warning when raw values are requested.
 
 HTML export, hosted viewers, and cloud sharing are intentionally outside this
 local-first session boundary.

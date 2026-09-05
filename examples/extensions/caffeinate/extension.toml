@@ -1,7 +1,7 @@
 name = "caffeinate"
 version = "0.2.0"
 api_version = "0.2"
-description = "Keep macOS awake while Ygg owns one or more active turns"
+description = "Keep macOS awake while octet owns one or more active turns"
 
 [entrypoint]
 command = "extension.py"

@@ -1,18 +1,24 @@
 # Executable extensions
 
+**Identity boundary:** octet 0.7.0 uses only octet first-party names, including
+`octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`. Retained API
+numbers 0.1/0.2/0.3 do not imply aliases for old Ygg wire names or imports.
+First-party shipped SDK/extension distributions are version 0.7.0; independent
+examples keep their own versions.
+
 > **Protocol reference:** [`docs/extensions/PROTOCOL-REFERENCE.md`](extensions/PROTOCOL-REFERENCE.md)
 > contains the complete API `0.1`/`0.2` JSON-RPC method, request/response,
 > type, and lifecycle reference. API `0.3` is separately generated from its
 > schema at [`docs/extensions/API-0.3-REFERENCE.md`](extensions/API-0.3-REFERENCE.md).
 
-Ygg supports trusted local extension processes alongside native Rust
+octet supports trusted local extension processes alongside native Rust
 `Extension` implementations. Process extensions use JSON-RPC 2.0 messages,
 one compact JSON object per line, over stdin/stdout. They may be written in any
 language that can read and write JSON lines.
 
 ## Kernel boundary
 
-Ygg is a small agent kernel and JSON-RPC bus. The host owns only services that
+octet is a small agent kernel and JSON-RPC bus. The host owns only services that
 an extension must already have in order to exist safely:
 
 - starting, supervising, stopping, and force-killing extension process groups;
@@ -39,11 +45,11 @@ request, concurrency, artifact, shutdown, and process-tree cleanup bounds. OS
 CPU/RSS/FD/PID isolation is not implemented; trusted extensions still run with
 the current user's operating-system authority.
 
-For example, one lightweight `ygg-mcp` process can supervise any number of MCP
-servers and publish their changing catalogs without teaching the Ygg host MCP:
+For example, one lightweight `octet-mcp` process can supervise any number of MCP
+servers and publish their changing catalogs without teaching the octet host MCP:
 
 ```text
-Ygg <- JSON-RPC -> ygg-mcp <- MCP -> Ableton MCP
+octet <- JSON-RPC -> octet-mcp <- MCP -> Ableton MCP
 ```
 
 The extra local hop is intentional. It preserves language neutrality,
@@ -82,9 +88,9 @@ use within those boundaries. API `0.3` adds no operating-system sandbox or
 implicit access beyond negotiated host capabilities.
 
 Pi migration is capability-oriented rather than a promise to reproduce Pi's
-in-process ABI. `ygg migrate pi --dry-run` inventories package resources and
-extension surfaces without executing them; `ygg pi install` creates an inert
-wrapper for the bounded `ygg-pi-compat` subset. See [Migrating from
+in-process ABI. `octet migrate pi --dry-run` inventories package resources and
+extension surfaces without executing them; `octet pi install` creates an inert
+wrapper for the bounded `octet-pi-compat` subset. See [Migrating from
 Pi](pi-migration.md) for the scanner contract, classifications, and staged
 compatibility architecture.
 
@@ -102,8 +108,8 @@ so use full-access mode only inside separate OS-level isolation.
 Each direct child directory contains one file named `extension.toml`:
 
 ```text
-.ygg/extensions/git-tools/extension.toml
-~/.ygg/extensions/git-tools/extension.toml
+.octet/extensions/git-tools/extension.toml
+~/.octet/extensions/git-tools/extension.toml
 ```
 
 Precedence is global, then trusted project, then explicit directories in
@@ -119,7 +125,7 @@ discovery and trust; aliases are rejected with a diagnostic.
 Use repeatable command-line options for one-off tinkering:
 
 ```console
-ygg \
+octet \
     --extension-dir ./my-extensions \
     --enable-extension hello-world \
     --trust-extension hello-world
@@ -135,14 +141,14 @@ trusted_extensions = ["hello-world"]
 ```
 
 A bare persistent trust name applies only to the matching extension under
-`~/.ygg/extensions`. It never transfers to a same-named project or explicit
+`~/.octet/extensions`. It never transfers to a same-named project or explicit
 extension. Persist trust for either of those sources with its exact absolute
 manifest path:
 
 ```toml
 enabled_extensions = ["git-tools"]
 trusted_extensions = [
-  "git-tools@/absolute/project/.ygg/extensions/git-tools/extension.toml",
+  "git-tools@/absolute/project/.octet/extensions/git-tools/extension.toml",
 ]
 ```
 
@@ -153,7 +159,7 @@ never written back as a persistent name grant.
 A trusted project config may suggest `enabled_extensions`, but it cannot grant
 itself executable trust. The default full-access policy permits a fully enabled
 and trusted extension to start; `--safe-mode` keeps it stopped. Persistent trust
-must come from the user config or environment (`YGG_TRUSTED_EXTENSIONS`);
+must come from the user config or environment (`OCTET_TRUSTED_EXTENSIONS`);
 one-shot trust comes from `--trust-extension`.
 
 The agent crate exposes both pieces of the boundary:
@@ -174,7 +180,7 @@ name = "git-tools"
 version = "0.2.0"
 api_version = "0.2"
 # Required for an installable bundle; optional for an unpackaged local copy.
-requires_ygg = "=0.7.0-dev"
+requires_octet = "=0.7.0"
 description = "Small local git helpers"
 
 [entrypoint]
@@ -238,9 +244,9 @@ do not expose workspace paths, trust inputs, child stderr, or secrets.
 
 Bare entrypoint commands are first resolved beside the manifest, then through
 `PATH`. Arguments are passed directly without a shell. The child working
-directory is the active workspace. Ygg supplies `YGG_EXTENSION_API_VERSION`,
-`YGG_EXTENSION_NAME`, `YGG_EXTENSION_DIR`, `YGG_EXTENSION_MANIFEST`, and
-`YGG_WORKSPACE`. Every generation also receives `YGG_EXTENSION_SCRATCH` for
+directory is the active workspace. octet supplies `OCTET_EXTENSION_API_VERSION`,
+`OCTET_EXTENSION_NAME`, `OCTET_EXTENSION_DIR`, `OCTET_EXTENSION_MANIFEST`, and
+`OCTET_WORKSPACE`. Every generation also receives `OCTET_EXTENSION_SCRATCH` for
 host-verified artifact publication. To keep an existing extension on the
 frozen wire, leave `api_version = "0.1"` in its manifest. Semantic
 `presentation` is API `0.2`-only and is rejected on a frozen `0.1` manifest.
@@ -269,7 +275,7 @@ undeclared name readable.
 `[capabilities].environment` is a narrow API `0.2` ambient broker, not arbitrary
 environment inheritance. The current reviewed allowlist contains only
 `SSH_AUTH_SOCK`, for an extension that must use the user's already configured
-agent without collecting credentials. Ygg's default subprocess environment
+agent without collecting credentials. octet's default subprocess environment
 still excludes the socket. It is copied only when explicitly declared and
 present, is never persisted or logged by the host, and grants signing authority
 to the trusted extension process; enable it only under the same full-access and
@@ -310,12 +316,12 @@ Each extension may declare at most 64 flags. Unknown fields, duplicate names,
 wrong default types, invalid identifiers, oversized values, and unsupported
 type spellings are rejected at manifest validation.
 
-Ygg reads only validated manifest metadata to construct these options; it never
+octet reads only validated manifest metadata to construct these options; it never
 starts or imports an extension to discover flags. A flag is registered only when
 its selected extension is both enabled and trusted. Selected flags must not
 collide with a built-in option, another selected extension flag, or a generated
 boolean inverse; a collision rejects the invocation before extension startup.
-They appear in `ygg --help` for ordinary no-subcommand startup. Authentication,
+They appear in `octet --help` for ordinary no-subcommand startup. Authentication,
 package/migration/Pi, and other early-exit command paths retain their existing
 static parsing.
 
@@ -328,7 +334,7 @@ pre-start manifest surface; see its explicit compatibility diagnostic.
 
 ## Transport contract
 
-Stdout is protocol-only. Human diagnostics belong on stderr, which Ygg drains
+Stdout is protocol-only. Human diagnostics belong on stderr, which octet drains
 and exposes as bounded diagnostic events. The default maximum JSON line is 1
 MiB, the default in-flight request cap is 64, and ordinary requests time out
 after 30 seconds. A bounded dedicated writer serializes complete frames; API
@@ -343,7 +349,7 @@ Every request and response uses the standard JSON-RPC envelope:
 ```
 
 The initial host request is always `initialize`. Its parameters include API and
-Ygg versions, extension identity and source, the workspace, capability and
+octet versions, extension identity and source, the workspace, capability and
 contribution declarations, and inspectable session/model/reasoning/active-skill
 state. API `0.3` additionally receives the host-resolved manifest CLI values as
 `flag_values`; legacy API `0.1` and `0.2` initialization fields are unchanged.
@@ -391,11 +397,11 @@ optional `request_progress`, `artifacts`, `lifecycle_events`, `policy_intents`,
 `dynamic_tools`, and `runtime_commands`. `runtime_commands` affects only the
 initialize catalog: it does not authorize post-initialize command registration,
 and a reload must return the same command definitions or require a product
-rebuild. For the enabled first-party `ygg-subagents` process, the
+rebuild. For the enabled first-party `octet-subagents` process, the
 host additionally requires `delegation_telemetry_v1` whenever it offers
 `agent_sessions`; an older bundle is rejected during initialization with an
 actionable reinstall diagnostic instead of silently losing metrics. The native
-schema is `ygg.delegation.telemetry.v1` and `/extensions status` shows it with
+schema is `octet.delegation.telemetry.v1` and `/extensions status` shows it with
 the manifest and bundle digests. It conditionally appends `agent_sessions`,
 `approvals`, and `secrets` only when the corresponding host service is
 configured; `approvals` also requires negotiated `policy_intents`, while
@@ -407,7 +413,7 @@ Omitting the lifecycle subscription list while negotiating that feature
 subscribes to all six session/turn/tool start/settle notifications. API `0.1`
 omits `protocol` entirely and forbids `output_schema`.
 
-When the trusted, enabled `ygg-subagents` extension successfully negotiates
+When the trusted, enabled `octet-subagents` extension successfully negotiates
 its child-session service, the working-tree host offers `agent_sessions` and
 creates the extension-only V2 delegation manager used by that service. The
 service is available independently of the parent's reasoning effort, while
@@ -416,7 +422,7 @@ when the observing extension is unavailable, and an extension must not return a
 feature the host did not offer.
 
 Host-to-extension methods are typed in
-`ygg_agent::extension_process::methods`:
+`octet_agent::extension_process::methods`:
 
 | Method | Result |
 | --- | --- |
@@ -441,7 +447,7 @@ initialization:
 | Method | Envelope |
 | --- | --- |
 | `notification` | notification; no `id` |
-| `confirmation/request` | request with string or numeric `id`; Ygg answers that `id` |
+| `confirmation/request` | request with string or numeric `id`; octet answers that `id` |
 | `context/contribution` | unsolicited context notification |
 | `status/contribution` | unsolicited semantic TUI notification |
 | `presentation/update` | API `0.2` complete monotonic frontend-neutral presentation snapshot |
@@ -462,7 +468,7 @@ initialization:
 ### Live tool catalogs
 
 An API `0.2` extension that negotiates `dynamic_tools` may change its tool
-catalog without restarting Ygg. Initialization still returns exactly the tools
+catalog without restarting octet. Initialization still returns exactly the tools
 declared in `extension.toml`; dynamic mutations begin only after initialization
 and host registration are complete. That initialize response is authoritative
 catalog epoch `0` and is the only deterministic catalog for the first model
@@ -484,18 +490,18 @@ returned names are the complete catalog the host actually published, after
 host tool policy is applied; an extension must not assume every requested name
 was accepted.
 
-Publication is transactional. Ygg validates the complete prospective catalog,
+Publication is transactional. octet validates the complete prospective catalog,
 reserves names against core tools and other extensions, applies policy, and
 only then swaps the extension-owned group. With a parseable request ID,
 conflicts or malformed parameters return `-32602` and leave the previous catalog
-visible. If Ygg cannot deliver an acknowledgement after publication, it removes
+visible. If octet cannot deliver an acknowledgement after publication, it removes
 the group and terminates that process generation instead of allowing host and
 child catalogs to diverge.
 
 Each model request uses one frozen schema-and-implementation snapshot. An
 accepted post-initialize mutation becomes visible at the next model-request
 boundary after publication; it never changes the tools halfway through a
-provider request. Ygg does not guess when a provider has finished its startup
+provider request. octet does not guess when a provider has finished its startup
 registrations or wait for an implicit catalog-quiescence period, so a mutation
 sent immediately after `initialize` is not guaranteed to enter the first
 request's snapshot. Reload follows the same rule: the replacement's initialize
@@ -578,7 +584,7 @@ in status labels, node titles, provenance, or reconnect state.
 
 Every action names an already manifest-declared extension command. Generic
 extension state stays out of persistent chrome. The coding TUI makes one
-first-party observed exception for `ygg-subagents`: while the owning root run
+first-party observed exception for `octet-subagents`: while the owning root run
 has workers, it renders the latest owner-fenced `subagent` activities as a
 persistent transcript event directly above the composer from native
 `AgentEvent::DelegationUpdated` telemetry. The event always includes the
@@ -595,7 +601,7 @@ activation makes the user config non-authoritative.
 fallback, `/extensions inspect <agent-session:…>` opens a
 current parent-bound delegated transcript, and
 `/extensions action <extension> <action-id>` performs validated interactive
-routing. The enabled `ygg-subagents` package specializes its no-argument
+routing. The enabled `octet-subagents` package specializes its no-argument
 `/subagents` command into a live arrow-key worker list whose owner-bound refresh
 reconciles authoritative `agent_sessions` state and preserves focus by stable
 node ID; Enter revalidates and opens the selected worker's bounded read-only
@@ -620,11 +626,11 @@ authoritative evidence path.
 
 The working-tree `agent_sessions` feature is the narrow reverse service a
 subagent-orchestrator extension needs. In the coding product, the
-`ygg-subagents` extension is the sole owner and observer of this service: its
+`octet-subagents` extension is the sole owner and observer of this service: its
 successful negotiation creates an extension-only V2 manager, and the host does
 not expose the parallel native root collaboration tools. Every in-harness child
 therefore enters the owner-bound extension tree before it can run. Every
-request includes the active `parent_request_id`; Ygg derives the durable resource
+request includes the active `parent_request_id`; octet derives the durable resource
 owner from that host model-tool call or declared command invocation rather than
 accepting one from child parameters. Command ownership is what lets a validated
 presentation action inspect or stop an existing child without switching the
@@ -658,7 +664,7 @@ binding and creates a locked read-only inspector. The host record also exposes
 current structured phase/tool, host-observed tool-call count, turn count,
 disjoint token buckets, and exact priced whole-microdollar cost. Every child has
 a fresh independent model context; child tokens are never inserted into the
-parent's request context. On root settlement Ygg stops and briefly joins the
+parent's request context. On root settlement octet stops and briefly joins the
 child set, aggregates each child's durable usage/cost records including
 picodollar remainders, and appends one `delegated_agent` usage record per child
 to the root session before its checkpoint. That root ledger is accounting, not
@@ -685,8 +691,9 @@ never the manifest path.
 Malformed parameters with a parseable request ID return `-32602`;
 service, ownership, delegation-limit, persistence, and operation failures return
 `-32002`. Message, follow-up, list, wait, and interrupt accept only IDs or paths
-in that principal's owned child trees; follow-up is refused for bounded extension
-children. `agent/wait` defaults to 30 seconds and is capped at 60 seconds. Parent
+in that principal's owned child trees. Follow-up resumes a settled child in its
+durable session; shut-down/orphaned targets and children still stopping are
+rejected. `agent/wait` defaults to 30 seconds and is capped at 60 seconds. Parent
 settlement cancels outstanding reverse requests; extension shutdown stops its
 owned child trees. The service deliberately keys trees by extension principal
 plus the durable session owner, not by process generation: a supervised restart
@@ -695,7 +702,7 @@ new service boundary.
 
 The kernel owns the actual model conversations, persistence, permission
 inheritance, and team resource limits. The extension owns orchestration policy.
-Hosted-agent services remain separate: `agent_sessions` creates in-harness Ygg
+Hosted-agent services remain separate: `agent_sessions` creates in-harness octet
 children, not remote hosted agents. Child state is observed through
 `agent/list` and `agent/wait`: delegated child turns do not currently fan out
 as extension `session/*` or `turn/*` lifecycle notifications, which remain the
@@ -756,7 +763,7 @@ host-derived `resource_owner`:
 Extensions must namespace browser tabs, MCP connections, LSP documents,
 memory handles, and comparable state by this three-part owner rather than
 trusting a model-supplied identifier. `session_id` is a SHA-256-derived
-namespace that remains stable when the same persisted Ygg session is reopened
+namespace that remains stable when the same persisted octet session is reopened
 at the same canonical path. `extension_instance_id` changes when the process
 host is rebuilt, including when generation numbering starts over, while
 `process_generation` fences stale handles after an extension reload or
@@ -801,7 +808,7 @@ surface. Extension header, status, footer, notification, and confirmation
 features remain separate protocol surfaces. The coding TUI does not request or
 render generic persistent extension header/status/footer contributions. Its one
 composer-adjacent exception is the host-owned renderer for owner-fenced
-`ygg-subagents` activity metrics described above; the extension supplies
+`octet-subagents` activity metrics described above; the extension supplies
 semantic data, never rows or a footer value.
 
 In the interactive frontend, confirmation requests made while an extension
@@ -821,7 +828,7 @@ Cancellation never claims rollback and unsafe ambiguous work is not replayed.
 
 Use `/extensions` to open the installed executable-bundle activation menu.
 Up/Down moves, Enter toggles the selected bundle, and Escape closes it. Selecting
-an enabled `ygg-web-search` opens a nested provider picker; Brave Search is
+an enabled `octet-web-search` opens a nested provider picker; Brave Search is
 recommended and requests its API key through correlated secret input, while
 SearXNG remains available. The menu updates only `enabled_extensions`; provider
 state remains extension-owned, and it never creates or removes a trust grant.
@@ -841,7 +848,7 @@ the product boundary.
 
 ## Python SDK
 
-Ygg ships a dependency-free Python package for extensions that use the stdio
+octet ships a dependency-free Python package for extensions that use the stdio
 protocol. Install it from a checkout before copying an example or building an
 extension:
 
@@ -849,7 +856,7 @@ extension:
 python3 -m pip install ./sdk/python
 ```
 
-The package is named `ygg-extension-sdk` and exposes `ygg_extension.Extension`.
+The package is named `octet-extension-sdk` and exposes `octet_extension.Extension`.
 Decorate tools and commands with their manifest metadata, then call
 `Extension.run()`; the SDK owns JSON-RPC 2.0 JSON-lines framing, one serialized
 stdout writer, bounded concurrent dispatch, API negotiation, ambient
@@ -858,7 +865,7 @@ bounded shutdown/drain. It keeps structured logs on stderr and exits on
 shutdown or stdin close. API `0.1` manifests keep their legacy wire behavior.
 
 ```python
-from ygg_extension import Extension
+from octet_extension import Extension
 
 ext = Extension(api_version="0.2")
 
@@ -939,7 +946,7 @@ contributions must remain compatible or return a clear "re-registration
 required" error so the frontend can rebuild intentionally.
 On an accepted reload, the old generation stops admission, drains to a bounded
 deadline, cancels the remainder, emits terminal lifecycle observations, and
-reaches its shutdown acknowledgement or timeout. Ygg then seeds replacement
+reaches its shutdown acknowledgement or timeout. octet then seeds replacement
 lifecycle state and atomically cuts new calls over to it. Pending
 confirmations, progress, artifacts, approvals, secret lookups, and other child
 operations cannot cross generations.
@@ -962,7 +969,7 @@ There is no independent heartbeat for an otherwise live process. A full product
 rebuild creates a new extension instance and supervisor, resetting in-memory
 backoff/parked history rather than resuming the old watcher.
 
-Sleep inhibition is a capability, not a kernel prerequisite. Ygg therefore has
+Sleep inhibition is a capability, not a kernel prerequisite. octet therefore has
 no core sleep inhibitor. The `caffeinate` example is a supervised API `0.2`,
 version `0.2.0` extension: it reference-counts owning/root `turn/started` and
 `turn/settled` observations, clears remaining state on `session/settled`, and
@@ -993,8 +1000,8 @@ compose them:
 - **Computer use** drives the desktop or application UI and needs its own
   approval and observation boundary.
 - **Hosted agents** are remote provider services reached by an extension. They
-  are not Ygg child conversations.
-- **In-harness subagents** are child Ygg model sessions created through the
+  are not octet child conversations.
+- **In-harness subagents** are child octet model sessions created through the
   host's bounded agent-session service and orchestrated by an extension.
 
 MCP, LSP, memory, and caffeinate remain separate extension domains too. Sharing
@@ -1003,56 +1010,60 @@ failure policy, or user-facing tool semantics.
 
 ## Installable extension bundles
 
+The catalog examples below describe source behavior conditional on separately
+verified publication. They are not a claim that an octet 0.7.0 bundle can be
+downloaded now. Use an explicit reviewed source or local archive for this checkout.
+
 Executable-extension bundles use the same `extension.toml` that the runtime
-loads; they do not use the Ygg Serve application launcher manifest. An archive
+loads; they do not use the octet Serve application launcher manifest. An archive
 contains exactly one root directory named for the extension, all regular files
 needed by its declared runtime, and optional documentation, fixtures, and
 skills:
 
 ```text
-ygg-web-search/
+octet-web-search/
 ├── extension.toml
 ├── extension.py
-├── install.json             # written by Ygg, not shipped in the archive
+├── install.json             # written by octet, not shipped in the archive
 └── skills/
-    └── ygg-web-search/
+    └── octet-web-search/
         └── SKILL.md
 ```
 
 A packaged manifest must select a bundle-supported API version and add exact
-Ygg compatibility alongside its independent extension version. New API `0.3`
+octet compatibility alongside its independent extension version. New API `0.3`
 packages must follow the generated
 [API `0.3` reference](extensions/API-0.3-REFERENCE.md); existing API `0.2`
 packages remain installable. API `0.1` remains supported only for unpackaged
 legacy runtime compatibility and cannot be installed as a bundle:
 
 ```toml
-name = "ygg-web-search"
-version = "0.2.0"
+name = "octet-web-search"
+version = "0.7.0"
 api_version = "0.2"
-requires_ygg = "=0.7.0-dev"
+requires_octet = "=0.7.0"
 ```
 
-`requires_ygg` is optional for an unpackaged local extension, but when present
+`requires_octet` is optional for an unpackaged local extension, but when present
 it is enforced during discovery. It is mandatory and must be the exact running
-Ygg version for every installed bundle. The first-party release catalog is
-intentionally small: `ygg-browse`, `ygg-mcp`, `ygg-subagents`, and
-`ygg-web-search`. Install, inspect, update, and remove a
+octet version for every installed bundle. The first-party release catalog is
+intentionally small: `octet-browse`, `octet-mcp`, `octet-subagents`, and
+`octet-web-search`. Install, inspect, update, and remove a
 published package with:
 
 ```console
-ygg extension install ygg-web-search
-ygg extension list
-ygg extension update ygg-web-search
-ygg extension remove ygg-web-search
+octet extension install octet-web-search
+octet extension list
+octet extension update octet-web-search
+octet extension remove octet-web-search
 ```
 
 A third-party or offline bundle is installed from a local archive, not an
 arbitrary URL or registry:
 
 ```console
-ygg extension install --path ./my-extension-0.1.0.tar.gz
-ygg extension update --path ./my-extension-0.2.0.tar.gz
+octet extension install --path ./my-extension-0.1.0.tar.gz
+octet extension update --path ./my-extension-0.2.0.tar.gz
 ```
 
 The local update archive must carry the same managed package ID; it is validated
@@ -1060,18 +1071,18 @@ and swapped with the same rollback behavior as a published update.
 
 Official installs download the archive and the release `SHA256SUMS` over HTTPS,
 then verify the archive digest. Local installs compute and record the same
-SHA-256 digest. Ygg rejects oversized archives, entries, manifests, paths, file
+SHA-256 digest. octet rejects oversized archives, entries, manifests, paths, file
 counts, and expanded data; non-UTF-8 or non-portable paths; multiple roots,
 duplicates, links, devices, and other special entries; a directory/manifest
-name mismatch; API or exact Ygg incompatibility; and an unsafe relative
+name mismatch; API or exact octet incompatibility; and an unsafe relative
 entrypoint. It extracts regular files into a same-filesystem private staging
-directory and publishes `~/.ygg/extensions/<id>/` with an atomic rename. An
+directory and publishes `~/.octet/extensions/<id>/` with an atomic rename. An
 update validates the complete candidate before moving the current package and
 rolls that move back if publication fails, so a failed update leaves the prior
 bundle usable.
 
-`install.json` records schema, ID, extension version, API version, exact Ygg
-requirement, official URL or canonical local source, archive digest, and the Ygg
+`install.json` records schema, ID, extension version, API version, exact octet
+requirement, official URL or canonical local source, archive digest, and the octet
 version that installed it. `remove` accepts only a managed bundle and removes
 only that package directory. Configuration, provider state, sessions,
 artifacts, browser profiles, and other data must live outside it and are not
@@ -1084,45 +1095,45 @@ normal `--enable-extension` and `--trust-extension` gates remain available for
 one-shot invocation. Packaged skills
 under `skills/*/SKILL.md` are discovered as user-installed skill candidates,
 but remain inactive until the user explicitly loads them. A user skill under
-`~/.ygg/skills` and an explicit `--skill-dir` retain higher precedence.
+`~/.octet/skills` and an explicit `--skill-dir` retain higher precedence.
 
 There is no install hook: bundle installation never runs `pip`, downloads a
 browser, provisions a model, starts a server, or invokes extension code.
 Runtime dependencies and explicit post-install setup remain the extension's
 responsibility and must be documented. Local packages have no remembered
 remote update source; published catalog updates are the only downloads made by
-`ygg extension update`. The one-time v0.6.2 hotfix migration refreshes managed
-first-party bundles and Ygg Serve installed by v0.6.0 or v0.6.1, and removes the
-retired managed `ygg-hermes-memory` bundle without removing its external data.
+`octet extension update`. There is no automatic earlier-first-party package
+hotfix migration, old-root scan, or retired-package cleanup in octet. Existing
+Ygg installations and external data remain separate and untouched.
 
 ## First-party application packages
 
-The complete Ygg Serve application package remains separate from executable
+The complete octet Serve application package remains separate from executable
 extension bundles. It uses `package.toml`, contains a target-specific
-`bin/ygg-serve-runtime`, and is never loaded by executable-extension discovery:
+`bin/octet-serve-runtime`, and is never loaded by executable-extension discovery:
 
 ```console
-ygg extension install ygg-serve
-ygg extension update ygg-serve
-ygg extension remove ygg-serve
-ygg serve
+octet extension install octet-serve
+octet extension update octet-serve
+octet extension remove octet-serve
+octet serve
 ```
 
-It is installed under `~/.ygg/extensions/ygg-serve/` with its own
+It is installed under `~/.octet/extensions/octet-serve/` with its own
 `package.toml`, executable, and `install.json`. The application manifest
-declares the package ID/version, exact Ygg version, target triple, launcher
+declares the package ID/version, exact octet version, target triple, launcher
 arguments and executable SHA-256, plus loopback/process/workspace capabilities.
 Official installs download the matching target archive and shared release
 `SHA256SUMS`; local archives use:
 
 ```console
-ygg extension install --path ./ygg-serve-0.6.7-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.7.0-TARGET.tar.gz
 ```
 
 The application archive keeps its existing strict two-file payload contract and
-atomic installation. `ygg serve` revalidates compatibility and the executable
+atomic installation. `octet serve` revalidates compatibility and the executable
 checksum before replacing the launcher process. As a first-party replacement
-Ygg process, that runtime inherits the launcher's configuration and provider
+octet process, that runtime inherits the launcher's configuration and provider
 environment; the sanitized child environment used for model-controlled tools
 and executable extensions does not apply. Removal deletes only application
 package files; sessions, project metadata, and other user data remain outside

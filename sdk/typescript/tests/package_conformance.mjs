@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const packageRoot = resolve(new URL('..', import.meta.url).pathname);
-const staging = mkdtempSync(join(tmpdir(), 'ygg-api-v03-pack-'));
-const installRoot = mkdtempSync(join(tmpdir(), 'ygg-api-v03-install-'));
+const staging = mkdtempSync(join(tmpdir(), 'octet-api-v03-pack-'));
+const installRoot = mkdtempSync(join(tmpdir(), 'octet-api-v03-install-'));
 
 try {
   const packed = JSON.parse(
@@ -31,7 +31,7 @@ try {
     [
       '--input-type=module',
       '--eval',
-      "import { API_VERSION, hostOffer } from '@ygg/extension-api-v03'; console.log(API_VERSION, hostOffer(32, 1).limits.max_frame_bytes);",
+      "import { API_VERSION, hostOffer } from '@skaft-software/octet-extension-api-v03'; console.log(API_VERSION, hostOffer(32, 1).limits.max_frame_bytes);",
     ],
     { cwd: installRoot, encoding: 'utf8' },
   ).trim();

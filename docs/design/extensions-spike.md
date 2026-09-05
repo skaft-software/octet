@@ -3,7 +3,7 @@
 > **Status:** research evidence retained; architecture superseded by the
 > tiny-kernel decision below
 > **Observed:** 2026-08-16
-> **Ygg target:** workspace version `0.4.0`, repository rooted at
+> **Historical Ygg target:** workspace version `0.4.0`, repository rooted at
 > `84c2fb8b654b107e869ed9b8add29b3a50043e60`
 > **Capabilities:** WebSearch, BrowserUse, Caffeinate, Subagents, MCP,
 > Language Server Protocol (LSP), and Memory
@@ -13,16 +13,16 @@
 This section supersedes the original accepted recommendation in this spike.
 The cross-product evidence remains useful, but the former proposal for
 host-owned WebSearch, Browser, MCP, LSP, memory, delegation, and caffeinate
-managers is no longer Ygg's architecture.
+managers is no longer octet's architecture.
 
 The central architectural conclusion is:
 
-> **Ygg is a tiny agent kernel. Everything interesting is a subprocess
+> **octet is a tiny agent kernel. Everything interesting is a subprocess
 > extension speaking JSON-RPC.**
 
 Recommended ownership:
 
-| Ygg host/kernel owns | Subprocess extensions own |
+| octet host/kernel owns | Subprocess extensions own |
 | --- | --- |
 | model conversations and bounded child model sessions | MCP bridging and MCP server lifecycle |
 | JSON-RPC transport and process supervision/cleanup | web search and result/citation behavior |
@@ -35,15 +35,15 @@ Recommended ownership:
 
 The host may expose generic services—child model sessions, secrets, artifacts,
 and approvals—because extensions cannot bootstrap or enforce those services
-themselves. A generic service is not a domain manager. `ygg-mcp`, for example,
-is one long-lived Rust extension that speaks JSON-RPC to Ygg, speaks MCP to its
+themselves. A generic service is not a domain manager. `octet-mcp`, for example,
+is one long-lived Rust extension that speaks JSON-RPC to octet, speaks MCP to its
 servers, and publishes live tools with `tools/register` and
 `tools/unregister`.
 
 Web search, browser use, computer use, hosted agents, and in-harness subagents
 remain separate capabilities. Search is retrieval; browser use owns web-page
 state; computer use controls the OS UI; hosted agents are remote provider
-services; in-harness subagents are bounded child Ygg model sessions requested
+services; in-harness subagents are bounded child octet model sessions requested
 through a host service.
 
 ### Implementation status (2026-08-16)
@@ -92,7 +92,7 @@ This spike answers four questions:
 
 1. What product behavior makes each capability useful every day?
 2. Which process, state, security, and failure semantics are required?
-3. Which semantics must Ygg own, and which are safely replaceable?
+3. Which semantics must octet own, and which are safely replaceable?
 4. What must change in the executable-extension protocol first?
 
 It does **not** propose a general extension marketplace, claim an OS sandbox for
@@ -114,11 +114,11 @@ Exact snapshots and source paths are catalogued in [Evidence](#evidence).
 Claude Code and Google Antigravity are proprietary; all conclusions about their
 internals remain explicitly qualified.
 
-## Current Ygg baseline
+## Current octet baseline
 
 ### What API `0.1` already gets right
 
-Ygg has a strong narrow base:
+octet has a strong narrow base:
 
 - JSON-RPC 2.0 over JSON Lines is language-neutral and easy to implement.
 - Discovery, enablement, workspace trust, and executable trust are separate.
@@ -138,8 +138,8 @@ Ygg has a strong narrow base:
   bytes, and provider references.
 
 The relevant implementation is primarily
-`crates/ygg-agent/src/extension_process.rs`, `crates/ygg-agent/src/tool.rs`, and
-`crates/ygg-coding-agent/src/extensions.rs`.
+`crates/octet-agent/src/extension_process.rs`, `crates/octet-agent/src/tool.rs`, and
+`crates/octet-coding-agent/src/extensions.rs`.
 
 ### API `0.1` limits that motivated `0.2`
 
@@ -167,13 +167,13 @@ on extension shutdown. No sleep-inhibitor path remains in the kernel.
 
 Cells summarize the inspected snapshot, not an evergreen product claim.
 
-| Capability | Current Ygg | OpenAI Codex | Claude Code | Google Antigravity | Hermes Agent |
+| Capability | Current octet | OpenAI Codex | Claude Code | Google Antigravity | Hermes Agent |
 | --- | --- | --- | --- | --- | --- |
 | **WebSearch** | No first-party search manager; API `0.2` can carry structured/media provider results but does not supply search policy, citations, or cache | Open-source `web.run` extension covers search/image search/open/click/find/screenshot and vertical data commands, with typed begin/end items and result payloads (**OSS**) | Packaged `WebSearch` and `WebFetch` schemas expose domain filtering, URL fetch, processed text, and structured hit URLs/titles (**PACKAGE**) | `NewSearchWebTool` and related symbols indicate an integrated search tool (**STATIC**) | Brave, DDGS, SearXNG, Exa, Parallel, Tavily, and Firecrawl adapters; extraction/cache limits, secret checks, DNS-aware SSRF checks, pinned-IP transport (**OSS**) |
 | **BrowserUse** | No browser manager; API `0.2` bridges verified owner-and-generation-scoped screenshots/audio, but not browser sessions or action policy | Bundled Browser plugin `26.803.41515` documents persistent tabs/REPL handles, semantic DOM interaction, post-action checks, screenshots, scoped CDP, untrusted-page rules, and action-time confirmation (**PACKAGE**) | No equivalent native persistent browser was established; official marketplace distributes Playwright as an external MCP server (**PACKAGE**) | Browser tools and `BrowserSubagent` symbols indicate integrated browsing/subagent paths (**STATIC**) | Local/cloud providers, CDP and Browser Use, semantic accessibility snapshots, task-isolated persistent sessions, reaping, dialogs, frames/OOPIF, redaction, and network policy (**OSS**) |
 | **Caffeinate** | API `0.2` version `0.2.0` extension: terminal lifecycle observations, overlapping-turn reference counting, bounded macOS helper, status, and shutdown cleanup; no core inhibitor | Core cross-platform `SleepInhibitor`: macOS IOKit assertion, Linux helper backends with parent-death handling, Windows power request, drop cleanup (**OSS**) | Binary strings indicate macOS `caffeinate`, Linux `systemd-inhibit`, restart/spawn-error/explicit-stop paths (**STATIC**) | No sleep-inhibitor symbols found in the inspected binary (**NEGATIVE/STATIC**) | No sleep-inhibitor implementation found in the inspected tree (**NEGATIVE**) |
 | **Subagents** | V2 harness orchestration exists; the extension host-service bridge is working-tree implementation so orchestrators can remain subprocesses | Hierarchical registry, roles/paths, optional turn forking, follow-ups, messaging, waits, interrupts, shared depth/concurrency controls (**OSS**) | Packaged `Agent` schema and `claude agents` expose background agents, models/effort/permissions, addressable names, worktree/remote isolation, output and stop controls (**PACKAGE/CLI**) | Agent derivation, cancellation, workspace isolation, and subagent-management symbols are present (**STATIC**) | Isolated child conversations, summary return, parallel/background/nested agents, steering/stopping, limits, stalls/timeouts, worktrees, cost rollups, lifecycle plugins, durable async delivery (**OSS**) |
-| **MCP** | No first-party bridge yet; `dynamic_tools` now supplies the catalog seam for a `ygg-mcp` extension | Stdio and Streamable HTTP, OAuth/config/env/headers, parallel/deferred startup, reusable connections, required/optional servers, cached revisioned catalogs, resources, cancellation, elicitation, approval policy (**OSS**) | `mcp add/get/list/remove/login/logout`, stdio/HTTP, headers/env, user/local/project scopes, project-config approval, health and OAuth login (**CLI/PACKAGE**) | MCP manager/call symbols plus tools/prompts/resources/progress-related symbols indicate broad support (**STATIC**) | Stdio, Streamable HTTP and SSE; reuse, keepalive, reconnect/backoff/parking/revival, pagination/refresh, tools/resources/prompts, sampling, elicitation, structured/media content, cancellation and cleanup (**OSS**) |
+| **MCP** | No first-party bridge yet; `dynamic_tools` now supplies the catalog seam for a `octet-mcp` extension | Stdio and Streamable HTTP, OAuth/config/env/headers, parallel/deferred startup, reusable connections, required/optional servers, cached revisioned catalogs, resources, cancellation, elicitation, approval policy (**OSS**) | `mcp add/get/list/remove/login/logout`, stdio/HTTP, headers/env, user/local/project scopes, project-config approval, health and OAuth login (**CLI/PACKAGE**) | MCP manager/call symbols plus tools/prompts/resources/progress-related symbols indicate broad support (**STATIC**) | Stdio, Streamable HTTP and SSE; reuse, keepalive, reconnect/backoff/parking/revival, pagination/refresh, tools/resources/prompts, sampling, elicitation, structured/media content, cancellation and cleanup (**OSS**) |
 | **LSP** | No host LSP manager | No comparable native LSP subsystem found in the examined Rust sources (**NEGATIVE**) | Generated schemas and official plugins describe definition/references/hover/workspace/document symbols, server commands, language maps, timeouts, transport and diagnostics (**PACKAGE/STATIC**) | In-process `language_server/lsp/lsp.Serve` and related symbols indicate integrated language-server support (**STATIC**) | Lazy long-lived clients per server/workspace, background loop, git-root gating, document versions, push/pull diagnostics, baseline deltas, cancellation, idle reap and graceful shutdown (**OSS**) |
 | **Memory** | Session/context primitives exist, but no scoped memory product or provenance/retrieval lifecycle | Asynchronous two-phase root-session extraction/consolidation, filesystem artifacts, citations/pruning/telemetry; replaceable `MemoriesBackend` tools, while core owns startup orchestration; stable feature default-disabled (**OSS**) | Packaged/static evidence identifies auto-memory settings, project-scoped directory, `MEMORY.md`, pause/resume, disable env var, and provenance tags (**PACKAGE/STATIC**) | Layered memory/retrieval, summary-store, SQLite/WAL, trajectories/watchers/indexed search symbols indicate a broad integrated subsystem (**STATIC**) | Bounded profile-scoped `MEMORY.md`/`USER.md`, frozen session snapshot, locked atomic edits, drift backups, provider isolation, background review, plus SQLite FTS5 session search (**OSS**) |
 
@@ -199,12 +199,12 @@ Cells summarize the inspected snapshot, not an evergreen product claim.
   Hermes's DNS-aware URL-safety module was found for remote MCP endpoints, so
   that omission should not be copied.
 
-## Patterns worth carrying into Ygg
+## Patterns worth carrying into octet
 
 ### 1. Extension managers own domain invariants; the kernel owns enforcement
 
 Hermes's web, browser, and memory provider APIs and Codex's memory backend are
-useful extension seams. In Ygg, the long-lived extension manager owns its
+useful extension seams. In octet, the long-lived extension manager owns its
 domain state, caching, protocol lifecycle, and backend variation. The kernel
 owns only enforceable permissions, generic approvals/artifacts/secrets, durable
 session identity, model-session creation, process cleanup, and resource bounds.
@@ -226,7 +226,7 @@ adapters.
 
 ### 4. Live progress is ephemeral; terminal results are durable
 
-Ygg's native `ToolProgress` already has the right persistence rule. Codex emits
+octet's native `ToolProgress` already has the right persistence rule. Codex emits
 start/completion items; Hermes forwards progress and keeps final structured
 results. Extension progress should be bounded and disposable, while exactly one
 terminal result is persisted and sent to the model.
@@ -235,7 +235,7 @@ terminal result is persisted and sent to the model.
 
 Hermes delivers a background completion as a new turn instead of mutating an
 already completed conversation prefix. Its claim/ack persistence also avoids
-losing completion during a crash. Ygg's subagent-orchestrator extension should
+losing completion during a crash. octet's subagent-orchestrator extension should
 use the same principle while the host persists and runs the child model
 sessions it creates.
 
@@ -252,10 +252,10 @@ useful inputs. They must not be able to mark their own operation safe. Codex's
 conservative MCP defaults and Hermes's exact `readOnlyHint is True` rule are
 safer than treating missing metadata as read-only.
 
-## Recommended Ygg architecture
+## Recommended octet architecture
 
 ```text
-Ygg host / kernel
+octet host / kernel
 ├── model loop and child model sessions
 ├── bounded JSON-RPC bus
 ├── sessions, tool calls, and tool-result persistence
@@ -265,7 +265,7 @@ Ygg host / kernel
 └── memory, message, concurrency, artifact, and process limits
 
 Subprocess extensions
-├── ygg-mcp ───────────── MCP servers and live tool catalogs
+├── octet-mcp ───────────── MCP servers and live tool catalogs
 ├── web search ────────── retrieval, normalization, citations
 ├── browser use ───────── tabs, page state, web actions
 ├── computer use ──────── desktop observation and actions
@@ -278,7 +278,7 @@ Subprocess extensions
 A common kernel supervisor provides process groups, generation IDs,
 startup/shutdown deadlines, health, restart/backoff, drain, and diagnostics.
 It never needs to understand MCP, LSP, CDP, a memory schema, or a search
-provider. Each extension speaks its domain protocol on the far side of the Ygg
+provider. Each extension speaks its domain protocol on the far side of the octet
 JSON-RPC boundary.
 
 ### Core-versus-extension decision rule
@@ -339,7 +339,7 @@ The web-search extension should publish a search surface with at least:
   stable citation ID.
 
 Codex's broad `web.run` command union is a useful model-facing interface, while
-Hermes demonstrates the backend portability and network defenses. Ygg need not
+Hermes demonstrates the backend portability and network defenses. octet need not
 ship finance/weather/sports/time commands in the first slice; those are product
 breadth, not architectural prerequisites.
 
@@ -355,7 +355,7 @@ Provider credentials should come from a host secret broker or scoped launch
 environment, never an ambient dotenv inherited by every extension. For network
 policy to be enforceable, a future optional generic egress broker may perform
 HTTP for the extension. An extension that opens its own sockets is trusted
-local code; Ygg may validate declared intent and results, but cannot claim to
+local code; octet may validate declared intent and results, but cannot claim to
 constrain malicious code without an OS sandbox.
 
 #### Network boundary
@@ -409,7 +409,7 @@ control for an explicit fallback.
 
 #### State and isolation
 
-- Scope browser contexts to `(Ygg session, task/subagent)`.
+- Scope browser contexts to `(octet session, task/subagent)`.
 - Default to an ephemeral profile. Attaching to a personal profile or reusing
   cookies requires explicit user choice.
 - Give each subagent isolated tabs/context unless sharing is intentional.
@@ -513,8 +513,8 @@ host-service behavior, not a reason to move orchestration into the kernel.
 
 ### MCP
 
-Build MCP as a long-lived `ygg-mcp` extension. It speaks MCP directly to its
-servers, translates their tool catalogs onto Ygg's JSON-RPC bus, and publishes
+Build MCP as a long-lived `octet-mcp` extension. It speaks MCP directly to its
+servers, translates their tool catalogs onto octet's JSON-RPC bus, and publishes
 changes through `tools/register` and `tools/unregister`. The additional local
 hop is cheap beside inference and external execution; replaceability and a
 small host are worth it. MCP catalog revisions, annotations, progress,
@@ -548,7 +548,7 @@ does not sandbox a malicious server.
 Codex exposes `Auto`, `Prompt`, `Writes`, and `Approve` modes and defaults
 conservatively for destructive/open-world tools unless a tool is read-only.
 Hermes places its trust gate before transport and requires exact positive
-read-only annotation for an untrusted server to bypass approval. Ygg should
+read-only annotation for an untrusted server to bypass approval. octet should
 retain that conservative direction without copying Hermes's `trust = full`
 default.
 
@@ -600,7 +600,7 @@ The LSP extension owns:
 
 - `initialize`/`initialized` and graceful `shutdown`/`exit`;
 - `didOpen`, monotonic-version `didChange`, `didSave`, and `didClose`;
-- freshness after Ygg or external filesystem edits;
+- freshness after octet or external filesystem edits;
 - `$/cancelRequest` and progress forwarding;
 - push and pull diagnostics;
 - idle reaping, crash restart, and bounded logs.
@@ -646,7 +646,7 @@ This preserves provider prefix caching and makes the context inspectable.
 
 Use locked, no-follow, atomic writes; reject unreadable source files rather than
 overwriting them; retain a bounded drift backup when the on-disk file changes
-outside Ygg. Every item or generated summary carries source scope, file/session/
+outside octet. Every item or generated summary carries source scope, file/session/
 turn identity, timestamp/version, and trust classification. Retrieved memory is
 data, never an instruction that can grant authority.
 
@@ -803,7 +803,7 @@ Rules:
 - `structured_content` is required exactly when the tool declared
   `output_schema`, validated against that schema, retained for UI/session use,
   and lowered to the model only by host policy;
-- image/audio parts become existing `ygg_ai::Media` values;
+- image/audio parts become existing `octet_ai::Media` values;
 - arbitrary local paths and remote media URLs are not trusted directly;
 - media references are accepted only through the matching verified artifact
   owner and generation, not as arbitrary extension paths or URLs;
@@ -887,7 +887,7 @@ returns `deny` without a token.
 
 This token still cannot constrain malicious unsandboxed code. Actual
 enforcement requires either a host-executed broker (network, secret fill,
-artifact write, browser action) or a future OS sandbox. Ygg must continue to say
+artifact write, browser action) or a future OS sandbox. octet must continue to say
 so plainly.
 
 ### 6. Host-mediated secrets
@@ -929,7 +929,7 @@ catalog at epoch zero, and later mutations follow the same next-boundary rule.
 API `0.2` model-tool and tool-hook contexts carry a host-derived
 `resource_owner {session_id, extension_instance_id, process_generation}`.
 Stateful extensions key browser, MCP, LSP, memory, and similar handles by that
-triple. The durable session component survives reopening a persisted Ygg
+triple. The durable session component survives reopening a persisted octet
 session at the same canonical path. The instance component changes across a
 complete process-host rebuild, and the generation component prevents a reloaded
 or automatically restarted extension process from accepting stale handles
@@ -1045,7 +1045,7 @@ Daily-driver extensions should minimize the first boundary by requesting
 narrowly scoped secrets and approvals from generic host brokers and persisting
 model-visible outcomes through the normal tool/session path. The extension
 still performs its domain actions. Without an OS sandbox or a broker that
-executes a particular operation, Ygg must not claim that a policy request can
+executes a particular operation, octet must not claim that a policy request can
 contain malicious trusted code.
 
 ## Persistence, observability, and UX
@@ -1130,7 +1130,7 @@ capability extensions.
 
 ### Phase 3 — proving extensions
 
-- Build `ygg-mcp` as the live-catalog proof: one extension, multiple MCP
+- Build `octet-mcp` as the live-catalog proof: one extension, multiple MCP
   servers, dynamic publication, and generation-safe reconnect.
 - Use the migrated API `0.2` Caffeinate example as the terminal-lifecycle and
   subprocess-ownership proof; no core inhibitor remains.
@@ -1243,7 +1243,7 @@ serialized fixtures where practical.
 - Do not implement BrowserUse as a fresh one-shot tool process.
 - Do not merge search retrieval, browser control, and computer use into one
   authority boundary.
-- Do not add MCP or LSP protocol managers to the Ygg host; keep each in its
+- Do not add MCP or LSP protocol managers to the octet host; keep each in its
   long-lived extension and publish model tools over JSON-RPC.
 - Do not let a subagent-orchestrator extension access the global conversation
   registry or widen budgets; give it a scoped host service instead.
@@ -1256,22 +1256,22 @@ serialized fixtures where practical.
 
 ## Evidence
 
-### Ygg
+### octet
 
 - Repository root commit:
   `84c2fb8b654b107e869ed9b8add29b3a50043e60`; workspace version `0.4.0`.
 - The worktree was dirty during inspection. In particular, the tracked
-  `crates/ygg-agent/src/delegation.rs` and
-  `crates/ygg-agent/tests/delegation.rs` contain working-tree changes beyond the
+  `crates/octet-agent/src/delegation.rs` and
+  `crates/octet-agent/tests/delegation.rs` contain working-tree changes beyond the
   repository-root commit. Their V2 implementation informs the working-tree
   status above but is not attributed to that commit or treated as shipped.
 - Primary implementation:
-  - `crates/ygg-agent/src/extension_process.rs`
-  - `crates/ygg-agent/src/extension.rs`
-  - `crates/ygg-agent/src/tool.rs`
-  - `crates/ygg-ai/src/types.rs`
-  - `crates/ygg-coding-agent/src/extensions.rs`
-  - frontend call sites under `crates/ygg-coding-agent/src/modes/`, plus
+  - `crates/octet-agent/src/extension_process.rs`
+  - `crates/octet-agent/src/extension.rs`
+  - `crates/octet-agent/src/tool.rs`
+  - `crates/octet-ai/src/types.rs`
+  - `crates/octet-coding-agent/src/extensions.rs`
+  - frontend call sites under `crates/octet-coding-agent/src/modes/`, plus
     `host.rs` and `extensions/serve.rs`
 - Contract/docs:
   - `docs/extensions.md`
@@ -1410,7 +1410,7 @@ serialized fixtures where practical.
 
 Build the small, bulletproof agent kernel and let independent long-lived
 extensions own every capability above it. Any language can participate through
-the same JSON-RPC bus. Dynamic catalogs let `ygg-mcp` and similar bridges
+the same JSON-RPC bus. Dynamic catalogs let `octet-mcp` and similar bridges
 publish what they discover; stable ownership and supervision isolate their
 state; scoped host services let an orchestrator create child model sessions
 without moving orchestration into core. The extra local hop is a deliberate

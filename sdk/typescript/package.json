@@ -1,7 +1,7 @@
 {
-  "name": "@ygg/extension-api-v03",
-  "version": "0.3.0",
-  "description": "Schema-generated canonical wire contract for Ygg extension API 0.3",
+  "name": "@skaft-software/octet-extension-api-v03",
+  "version": "0.7.0",
+  "description": "Schema-generated canonical wire contract for octet extension API 0.3",
   "type": "module",
   "exports": {
     ".": {

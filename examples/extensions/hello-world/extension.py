@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Minimal dependency-free Ygg executable extension using the Python SDK."""
+"""Minimal dependency-free octet executable extension using the Python SDK."""
 
-from ygg_extension import Extension
+from octet_extension import Extension
 
 
 ext = Extension()

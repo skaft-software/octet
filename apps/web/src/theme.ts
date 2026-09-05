@@ -31,7 +31,7 @@ const storedFontStacks: Record<string, { ui: string; mono: string }> = {
 
 export function applyStoredTypePreferences(): void {
   const root = document.documentElement;
-  const storedStackId = localStorage.getItem("ygg.ui.font");
+  const storedStackId = localStorage.getItem("octet.ui.font");
   const migratedStackId =
     storedStackId === "ibm-plex-mono" ? "geist" : storedStackId;
   const stackId =
@@ -39,7 +39,7 @@ export function applyStoredTypePreferences(): void {
       ? migratedStackId
       : "local";
   const stack = storedFontStacks[stackId];
-  const sizeValue = Number(localStorage.getItem("ygg.ui.size") ?? "14");
+  const sizeValue = Number(localStorage.getItem("octet.ui.size") ?? "14");
   const size = [12, 13, 14, 15].includes(sizeValue) ? sizeValue : 14;
   root.style.setProperty("--ui-family", stack.ui);
   root.style.setProperty("--mono-family", stack.mono);
@@ -49,5 +49,5 @@ export function applyStoredTypePreferences(): void {
   root.removeAttribute("data-color-scheme");
   root.removeAttribute("data-density");
   root.removeAttribute("data-motion");
-  localStorage.setItem("ygg.ui.font", stackId);
+  localStorage.setItem("octet.ui.font", stackId);
 }

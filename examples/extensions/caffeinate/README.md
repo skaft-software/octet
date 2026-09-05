@@ -1,6 +1,6 @@
 # caffeinate executable extension
 
-This API `0.2` Python extension keeps a Mac awake while Ygg owns one or more
+This API `0.2` Python extension keeps a Mac awake while octet owns one or more
 active turns. Sleep inhibition is domain behavior, so it lives here rather
 than in the agent kernel. The extension observes `turn/started`,
 `turn/settled`, and `session/settled`, reference-counts overlapping turns, and
@@ -9,7 +9,7 @@ observed turn settles.
 
 The `-i` assertion prevents idle system sleep without forcing the display to
 stay on or overriding explicit sleep choices. The `-t 1800` argument bounds the
-assertion to 30 minutes if Ygg cannot deliver a cleanup boundary. This example
+assertion to 30 minutes if octet cannot deliver a cleanup boundary. This example
 does not pass `-w`, so it does not bind `caffeinate` to the extension PID.
 `/caffeinate` reports whether the inhibitor is active, and the interactive TUI
 shows an `awake` status contribution while it is running. Unsupported systems
@@ -21,17 +21,17 @@ Install the SDK before copying the directory:
 python3 -m pip install ./sdk/python
 ```
 
-Copy the directory to `.ygg/extensions/caffeinate/`, then explicitly enable and
+Copy the directory to `.octet/extensions/caffeinate/`, then explicitly enable and
 trust it. Executable-extension startup requires the default full-access policy.
 For a project extension, one invocation is:
 
 ```console
-ygg --workspace-trusted \
+octet --workspace-trusted \
     --enable-extension caffeinate \
     --trust-extension caffeinate
 ```
 
-Full-access mode uses the Ygg process's ambient operating-system authority; run
+Full-access mode uses the octet process's ambient operating-system authority; run
 this example only from an appropriately isolated, trusted environment.
 
 The extension requires macOS and `/usr/bin/caffeinate`. It reads no files and

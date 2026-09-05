@@ -272,7 +272,7 @@ def main() -> int:
     total_input = sum(row["provider_input_tokens"] for row in rows)
     total_cache = sum(row["cache_read_tokens"] for row in rows)
     report = {
-        "schema": "ygg.harbor-usage-audit.v1",
+        "schema": "octet.harbor-usage-audit.v1",
         "job": str(args.job),
         "equations": {
             "provider_input_tokens": "uncached_input_tokens + cache_read_tokens + cache_write_tokens",

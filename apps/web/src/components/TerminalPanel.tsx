@@ -17,10 +17,10 @@ import {
 } from "../transport";
 
 const maximumCachedTerminals = 4;
-const terminalFontSizeKey = "ygg.ui.terminal.font-size";
-const terminalLegacyOwnerKeyPrefix = "ygg.ui.terminal.owner.";
-const terminalOwnerKeysPrefix = "ygg.ui.terminal.owners.";
-const terminalSelectedOwnerPrefix = "ygg.ui.terminal.selected-owner.";
+const terminalFontSizeKey = "octet.ui.terminal.font-size";
+const terminalLegacyOwnerKeyPrefix = "octet.ui.terminal.owner.";
+const terminalOwnerKeysPrefix = "octet.ui.terminal.owners.";
+const terminalSelectedOwnerPrefix = "octet.ui.terminal.selected-owner.";
 const terminalMinimumFontSize = 11;
 const terminalMaximumFontSize = 20;
 const terminalDefaultFontSize = 13;

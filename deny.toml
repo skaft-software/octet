@@ -8,13 +8,13 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-# Dependency path: ygg-coding-agent -> sexy-tui-rs -> syntect 5.3 -> bincode
-# 1.3.3. This advisory is an unmaintained warning, not a vulnerability. Ygg
+# Dependency path: octet-coding-agent -> sexy-tui-rs -> syntect 5.3 -> bincode
+# 1.3.3. This advisory is an unmaintained warning, not a vulnerability. octet
 # invokes only `SyntaxSet::load_defaults_newlines`, which decodes syntect's
 # compile-time embedded syntax dump; no session, extension, workspace, or other
 # attacker-supplied bytes reach bincode. Removal plan: upgrade when syntect
 # migrates its default-syntax dump off bincode 1, or replace `default-syntaxes`
-# with a Ygg-built trusted SyntaxSet if upstream does not migrate.
+# with a octet-built trusted SyntaxSet if upstream does not migrate.
 ignore = [
   # Indirectly pulled by lopdf 0.42.0 for PDF font parsing. This is an
   # unmaintained warning, not a known vulnerability; no newer lopdf release

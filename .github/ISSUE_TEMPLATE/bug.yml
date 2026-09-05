@@ -1,5 +1,5 @@
 name: Bug or regression
-description: Report reproducible incorrect behavior in a supported Ygg path.
+description: Report reproducible incorrect behavior in a supported octet path.
 title: "bug: "
 labels:
   - bug
@@ -20,8 +20,8 @@ body:
           required: true
   - type: input
     attributes:
-      label: Ygg version or commit
-      placeholder: ygg 0.6.5 or a full commit SHA
+      label: octet version or commit
+      placeholder: octet 0.7.0 or a full commit SHA
     validations:
       required: true
   - type: input
@@ -38,7 +38,7 @@ body:
         - Agent / tools / sessions
         - Provider / model / authentication
         - Extensions / MCP / Pi compatibility
-        - Ygg Serve
+        - octet Serve
         - Install / update / release
         - Documentation
         - Other

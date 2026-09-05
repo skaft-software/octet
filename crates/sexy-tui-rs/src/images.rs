@@ -1464,7 +1464,7 @@ pub struct ImageAnchor {
     layout: ImageLayout,
 }
 
-const IMAGE_ANCHOR_PREFIX: &str = "\x1bP+ygg-image;";
+const IMAGE_ANCHOR_PREFIX: &str = "\x1bP+octet-image;";
 const IMAGE_ANCHOR_SUFFIX: &str = "\x1b\\";
 
 impl ImageAnchor {
@@ -3112,7 +3112,7 @@ mod tests {
         );
         assert!(!marker.contains("IDAT"));
         assert!(!marker.contains("_G"));
-        assert!(ImageAnchor::parse("\x1bP+ygg-image;v=2,p=kitty,i=41,c=7,r=3\x1b\\").is_none());
+        assert!(ImageAnchor::parse("\x1bP+octet-image;v=2,p=kitty,i=41,c=7,r=3\x1b\\").is_none());
     }
 
     #[test]

@@ -1,11 +1,17 @@
-# ygg-extension-sdk
+# octet-extension-sdk
 
-`ygg-extension-sdk` is the dependency-free Python SDK for Ygg's executable
+**Identity boundary:** octet 0.7.0 uses only octet first-party names, including
+`octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`. Retained API
+numbers 0.1/0.2/0.3 do not imply aliases for old Ygg wire names or imports.
+First-party shipped SDK/extension distributions are version 0.7.0; independent
+examples keep their own versions.
+
+`octet-extension-sdk` is the dependency-free Python SDK for octet's executable
 extension protocol. It owns JSON-RPC 2.0 JSON-lines framing, flushes every
 response, validates the `initialize` negotiation against the selected manifest,
 and keeps diagnostics on structured stderr logs.
 
-The SDK sits on Ygg's tiny-kernel boundary. Ygg owns model conversations,
+The SDK sits on octet's tiny-kernel boundary. octet owns model conversations,
 JSON-RPC transport and supervision, session/tool-result persistence,
 permissions/approvals, cleanup, and shared limits. The extension process owns
 the capability: MCP, web search, browser use, computer use, memory, LSP,
@@ -18,8 +24,8 @@ concurrency, cooperative request cancellation, correlated progress and host
 requests, ephemeral input, structured/media results, artifact publication,
 lifecycle events, live tool catalogs, scoped child model sessions, and graceful
 drain. It also supports conditionally offered single-use approval retries and
-owner-scoped secret lookup. Select `api_version = "0.2"` in the manifest; Ygg
-exports the matching `YGG_EXTENSION_API_VERSION` and the SDK follows it
+owner-scoped secret lookup. Select `api_version = "0.2"` in the manifest; octet
+exports the matching `OCTET_EXTENSION_API_VERSION` and the SDK follows it
 automatically. Override the constructor explicitly only for a standalone
 harness or test:
 
@@ -28,7 +34,7 @@ ext = Extension(api_version="0.2", max_concurrent_requests=4)
 ```
 
 API `0.3` contract models and canonical-wire validators are generated in
-`ygg_extension.api_v03`; see the generated
+`octet_extension.api_v03`; see the generated
 [API `0.3` reference](../../docs/extensions/API-0.3-REFERENCE.md). The
 `Extension` runtime remains the explicit API `0.1`/`0.2` adapter and does
 not silently translate either legacy wire onto API `0.3`.
@@ -42,7 +48,7 @@ python3 -m pip install ./sdk/python
 A minimal extension is:
 
 ```python
-from ygg_extension import Extension
+from octet_extension import Extension
 
 ext = Extension()
 
@@ -68,7 +74,7 @@ must exactly match the manifest declarations; a mismatch is rejected during
 the handshake instead of being silently advertised. Tools published later with
 negotiated `dynamic_tools` are post-initialize catalog entries and need not be
 listed in the bootstrap manifest. The initialize tool set is epoch `0` and the
-only deterministic first-request catalog. Put every turn-one tool there; Ygg
+only deterministic first-request catalog. Put every turn-one tool there; octet
 does not wait for an implicit post-initialize registration-quiescence period.
 
 ## Contribution points
@@ -119,13 +125,13 @@ The API `0.1` hook payloads are:
 - `after_tool_call`: `{"name": string, "arguments": object, "output": string,
   "is_error": bool}`
 
-`after_response` is success-only in both API versions: Ygg invokes it after a
+`after_response` is success-only in both API versions: octet invokes it after a
 complete assistant response, not after failed, cancelled, interrupted,
 disconnected, or shutdown runs. API `0.2` extensions use terminal lifecycle
 observations for cleanup and may use this hook only for bounded response-content
 synchronization.
 
-Tool handlers may return `content`, `is_error`, and `metadata`. The current Ygg
+Tool handlers may return `content`, `is_error`, and `metadata`. The current octet
 API `0.1` subprocess adapter uses `content` and `is_error` but discards
 `metadata`; do not rely on it reaching a frontend, renderer, or persisted result.
 
@@ -158,12 +164,12 @@ optional features are ignored. The SDK currently supports
 `request_cancellation`, `content_parts`, `request_progress`, `artifacts`,
 `lifecycle_events`, `policy_intents`, `dynamic_tools`, `agent_sessions`,
 `delegation_telemetry_v1`, `approvals`, and `secrets`. The host requires
-`delegation_telemetry_v1` for the first-party `ygg-subagents` bundle whenever it
+`delegation_telemetry_v1` for the first-party `octet-subagents` bundle whenever it
 offers `agent_sessions`; incompatible installed bundles fail initialization
 with a reinstall diagnostic. The host offers `agent_sessions` only when its
 configured, owner-bound child-session service is available for the extension;
 the coding product enables that service only for the trusted, enabled
-`ygg-subagents` extension. It offers `approvals` only when approval issuance is
+`octet-subagents` extension. It offers `approvals` only when approval issuance is
 enabled, and `secrets` only when a broker is configured and the manifest secret
 allowlist is non-empty. `approvals` also requires `policy_intents`. The coding
 product currently leaves approvals off, configures no secret broker, and answers
@@ -188,7 +194,7 @@ ext.negotiated_concurrency    # int
 API `0.2` packages may declare `presentation = true` in `[contributes]` and
 publish a complete frontend-neutral snapshot with `publish_presentation()` (or
 its `presentation` alias). The call is valid only after initialization. Calls
-inside a handler automatically include its `parent_request_id`, allowing Ygg to
+inside a handler automatically include its `parent_request_id`, allowing octet to
 derive the exact owner. A background publisher passes the complete
 `resource_owner=` triple it received from the host; omitting both produces
 process-scoped state and must not expose session-owned data. Each revision must
@@ -203,7 +209,7 @@ references are `session`, `artifact`, `resource`, and a host-vetted, user-clicke
 HTTP(S) `url`.
 
 The SDK locally enforces the 256 KiB snapshot, 128-activity, 256-node, 64-action,
-portable-revision, and monotonic-revision bounds; Ygg remains authoritative for
+portable-revision, and monotonic-revision bounds; octet remains authoritative for
 the complete schema, tree depth/parentage, stable IDs, URL safety, command
 routing, the 32-updates-per-second generation rate, generation/owner fencing,
 and frontend reduction. Presentation state is not a
@@ -214,7 +220,7 @@ into labels/reconnect state. Tool results remain immutable evidence.
 ## Dynamic tool catalogs
 
 When `dynamic_tools` is negotiated, an initialized extension can add, replace,
-or remove tools without restarting Ygg:
+or remove tools without restarting octet:
 
 ```python
 def search_handler(args):
@@ -254,7 +260,7 @@ epoch; it begins at `0` after initialization and after each process restart.
 On reload, the replacement initialize response is again authoritative epoch
 `0`; later mutations follow the same next-boundary rule.
 
-Ygg freezes one tool schema-and-implementation set for each model request and
+octet freezes one tool schema-and-implementation set for each model request and
 sends that epoch as `tool/call.catalog_revision`. To cover calls from an older
 in-flight turn, the SDK retains the eight most recent committed catalogs. It
 also makes a staged catalog addressable before the mutation acknowledgement is
@@ -265,10 +271,10 @@ silently dispatching to a newer handler.
 ## Child model sessions
 
 When the host offers and the extension negotiates `agent_sessions`, a tool
-handler can orchestrate bounded in-harness Ygg child conversations:
+handler can orchestrate bounded in-harness octet child conversations:
 
 ```python
-from ygg_extension import text_content, tool_result
+from octet_extension import text_content, tool_result
 
 @ext.tool(name="orchestrate", description="Delegate a bounded investigation")
 def orchestrate(args):
@@ -345,7 +351,7 @@ the extension owns orchestration policy. Child trees are keyed by extension
 principal plus durable session owner rather than process generation, so a
 supervised restart or reload can resume them. Explicit extension shutdown stops
 the owned trees.
-These helpers create local in-harness Ygg children, not hosted-agent jobs.
+These helpers create local in-harness octet children, not hosted-agent jobs.
 Use `list_agents` and `wait_agents` for child state: delegated child turns do
 not currently arrive through the extension's `session/*` or `turn/*` lifecycle
 handlers, which observe the owning/root product session.
@@ -359,7 +365,7 @@ token. Poll it between side effects, wait on it during interruptible work, or
 raise the standard cancellation error:
 
 ```python
-from ygg_extension import current_cancellation
+from octet_extension import current_cancellation
 
 @ext.tool(name="fetch_many", description="Fetch several records")
 def fetch_many(args):
@@ -403,7 +409,7 @@ API `0.2` tool results use content parts. String returns are converted to one
 text part for migration convenience; helpers make the full envelope explicit:
 
 ```python
-from ygg_extension import image_content, text_content, tool_result
+from octet_extension import image_content, text_content, tool_result
 
 @ext.tool(
     name="capture",
@@ -451,7 +457,7 @@ process generation. Passing a leaked ID from another owner in an image/audio
 result fails as an unavailable artifact.
 
 An API `0.2` tool may declare `output_schema=` alongside its argument
-`parameters=`. Ygg validates `structured_content` against that schema. API
+`parameters=`. octet validates `structured_content` against that schema. API
 `0.1` tools cannot declare an output schema.
 
 ## Parent correlation and lifecycle
@@ -516,7 +522,7 @@ The [`caffeinate`](../../examples/extensions/caffeinate) example is the current
 API `0.2`, version `0.2.0` lifecycle proof. It reference-counts owning/root
 `turn/started` and `turn/settled` events, clears remaining state on
 `session/settled`, and explicitly stops its bounded macOS helper during
-extension shutdown. Sleep inhibition is entirely extension-owned; no core Ygg
+extension shutdown. Sleep inhibition is entirely extension-owned; no core octet
 inhibitor remains.
 
 For a host-managed capability, submit a structured action intent before the
@@ -566,7 +572,7 @@ api_token = ext.get_secret("browser.api_token")
 the same active owner-scoped parent correlation as other host services. The
 manifest list is an exact allowlist, not environment injection: names are
 duplicate-free, at most 64 ASCII bytes, start with a letter or underscore, and
-then use only letters, digits, underscore, hyphen, or dot. Ygg supplies the
+then use only letters, digits, underscore, hyphen, or dot. octet supplies the
 broker with the manifest-bound extension identity, the full resource-owner
 triple, parent request ID, and requested name. A no-value result and provider
 failure both surface as the same `-32004` `secret is unavailable` error.

@@ -641,7 +641,7 @@ impl<'a> TUI<'a> {
     /// `20be4b18d4c57487f8993d2762bace129f0cf7c6`.
     /// Keep this control flow structurally aligned with
     /// `packages/tui/src/tui.ts`; named upstream cases live in
-    /// `tests/pi_tui_render.rs`. Ygg-specific native-scrollback policy belongs
+    /// `tests/pi_tui_render.rs`. octet-specific native-scrollback policy belongs
     /// only to the explicit `inline_scrollback` compatibility path below.
     fn render_pi_frame(&mut self) {
         let width_u16 = self.terminal.columns();
@@ -1425,7 +1425,7 @@ impl<'a> TUI<'a> {
         self.begin_synchronized_output();
 
         // A terminal reflows the old grid and saved lines before delivering
-        // its resize event. Rebuilding Ygg-owned history below avoids trying to
+        // its resize event. Rebuilding octet-owned history below avoids trying to
         // repair terminal-dependent physical rows after that reflow.
         if self.capabilities.plain {
             self.write_plain_changes(&new_lines, first_changed_hint, previous_len);
@@ -3725,16 +3725,16 @@ mod tests {
         );
         let (terminal, _, _, _, _, writes) = recording_terminal(size.clone(), capabilities);
         let mut tui = TUI::new(Box::new(terminal));
-        tui.set_window_title("ygg · model\x07\x1b · thinking");
+        tui.set_window_title("octet · model\x07\x1b · thinking");
         assert_eq!(
             writes.borrow().join(""),
-            "\x1b]2;ygg · model · thinking\x07"
+            "\x1b]2;octet · model · thinking\x07"
         );
 
         let (terminal, _, _, _, _, writes) =
             recording_terminal(size, crate::capabilities::TerminalCapabilities::plain());
         let mut plain = TUI::new(Box::new(terminal));
-        plain.set_window_title("ygg");
+        plain.set_window_title("octet");
         assert!(writes.borrow().is_empty());
     }
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import eventEnvelopeGolden from "../../../extensions/ygg-serve/fixtures/event-envelope.json";
-import hostBootstrapGolden from "../../../extensions/ygg-serve/fixtures/host-bootstrap.json";
+import eventEnvelopeGolden from "../../../extensions/octet-serve/fixtures/event-envelope.json";
+import hostBootstrapGolden from "../../../extensions/octet-serve/fixtures/host-bootstrap.json";
 import {
   createTransport,
   FixtureTransport,
@@ -65,7 +65,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-describe("HTTP Ygg transport", () => {
+describe("HTTP octet transport", () => {
   beforeEach(() => {
     FakeWebSocket.instances = [];
     vi.stubGlobal(
@@ -82,7 +82,7 @@ describe("HTTP Ygg transport", () => {
     } catch {
       // Some hardened/jsdom environments intentionally omit storage.
     }
-    document.documentElement.removeAttribute("data-ygg-device-id");
+    document.documentElement.removeAttribute("data-octet-device-id");
     window.history.replaceState(null, "", "/");
   });
 
@@ -110,11 +110,11 @@ describe("HTTP Ygg transport", () => {
     };
     const fetchMock = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse(goal, { "x-ygg-goal-revision": "1" }))
+      .mockResolvedValueOnce(jsonResponse(goal, { "x-octet-goal-revision": "1" }))
       .mockResolvedValueOnce(
         jsonResponse(
           { ...goal, status: "paused", revision: 2 },
-          { "x-ygg-goal-revision": "2" },
+          { "x-octet-goal-revision": "2" },
         ),
       );
     vi.stubGlobal("fetch", fetchMock);
@@ -146,7 +146,7 @@ describe("HTTP Ygg transport", () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
-        jsonResponse(null, { "x-ygg-goal-revision": "7" }),
+        jsonResponse(null, { "x-octet-goal-revision": "7" }),
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1207,7 +1207,7 @@ describe("HTTP Ygg transport", () => {
     const ack = await transport.send({
       id: "command-create-live",
       type: "session.create",
-      projectId: "project-ygg",
+      projectId: "project-octet",
       modelId: "gpt-5.6",
       reasoning: "high",
       authority: "fullAccess",
@@ -1216,7 +1216,7 @@ describe("HTTP Ygg transport", () => {
 
     expect(snapshot).toMatchObject({
       sessionId: "session-created",
-      projectId: "project-ygg",
+      projectId: "project-octet",
       title: "New session",
       modelId: "gpt-5.6",
       actorGeneration: 4,

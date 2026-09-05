@@ -4,17 +4,68 @@
 
 These recipes connect checked-in examples to useful outcomes. They are
 **source-grounded instructions, not recorded successful 0.7.0 demonstrations**.
-Commands deliberately use the current pre-rename `ygg` spelling. Build both
+Commands use the current octet 0.7.0 source names; publication and exact-candidate
+qualification are separate gates. Build both
 binaries using the [checkout instructions](../README.md#build-this-checkout).
 Run commands below from the checkout root; substitute your actual configured
 model for `MODEL_ID` and your task for the example prompt.
 
 Use a disposable repository and isolated account, VM, or container for
 experiments. A source build does not replace installed binaries, but running it
-can still read and write the current user's `.ygg` configuration, credentials,
-and sessions. Do not use a personal Ygg home to qualify the clean octet rename.
+can still read and write the current user's `.octet` configuration, credentials,
+and sessions. Use a fresh isolated HOME for qualification, never an existing
+Ygg or octet home; do not copy installed credentials into a fixture.
 Only provide credentials and workspace data the selected provider may receive.
 `--offline` suppresses optional discovery, not inference network traffic.
+
+## Start with an audio reference
+
+**Intended outcome:** turn a sound reference into an inspectable brief, optionally
+compare it with images, then use the reviewed brief for a repository task. This
+is a native-media input recipe, not a transcription service or a qualified demo.
+
+1. Prepare a short, non-sensitive WAV or MP3 clip you have permission to send.
+   Keep it below 20 MiB. Optional PNG/JPEG/GIF/WebP visual references must each
+   be below 5 MiB. Do not use private conversations or customer media as fixtures.
+2. Choose a model whose exact route supports native audio through OpenAI Chat
+   Completions. The checked-in `gpt-audio-1.5` preset declares that contract, but
+   account availability and live success still require qualification. For a
+   configured, authorized OpenAI account, launch without tools or project context:
+
+   ```sh
+   ./target/release/octet --model gpt-audio-1.5 --no-tools --no-context-files
+   ```
+
+3. Explicitly paste/drop the clip's path through terminal paste or select its
+   `@` path completion; verify the `[Audio #N]` chip. Add image chips only if
+   that same model accepts images. If only a path and diagnostic appear, stop:
+   no media attachment was accepted. Merely typing a path does not upload it.
+   Ask, for example:
+
+   ```text
+   Describe the attached sound's rhythm, texture, and mood. Separate observations
+   from uncertain interpretations. If images are attached, compare their visual
+   direction with the sound. Produce a short implementation brief; do not claim
+   to have built anything or infer private facts about people in the recording.
+   ```
+
+4. Compare the answer with the actual clip/images yourself. Preserve errors and
+   uncertain claims. Only after reviewing the brief, carry it into the
+   [repository-change recipe](#1-make-a-reviewable-repository-change) and request
+   a narrow implementation with tests. The tool-free input run cannot edit files.
+
+The [media contract](current-reference.md#multimodal-prompts) lists input limits,
+privacy, and unsupported failures. There is no automatic conversion of FLAC,
+Opus, AAC, or PCM16 into supported audio; a text/image model or a Responses route
+is not an audio route. Gemini 3.8 Flash is a proposed demonstration choice, not a
+qualified native-audio route or successful outcome. The Serve web composer does
+not yet accept audio; use the TUI or explicit native-host `media` input instead.
+
+**Evidence to retain:** authorized input hashes (not raw private media), exact
+source/model/route, attachment chips, sanitized prompt/result, failures, and the
+reviewed brief. Media remains durable session input even when the transcript is
+payload-free. Review session exports and captures before sharing; no accepted
+live capture or model-driven success is asserted here.
 
 ## 1. Make a reviewable repository change
 
@@ -32,7 +83,7 @@ a substitute for tool-policy enforcement or review.
    configuration or trusting every project resource:
 
    ```sh
-   ./target/release/ygg --model MODEL_ID --safe-mode \
+   ./target/release/octet --model MODEL_ID --safe-mode \
      --no-context-files --tools read,search,edit,write,bash \
      --prompt-template ./examples/prompts/grounded-implement.toml \
      --prompt grounded-implement --debug-prompt \
@@ -51,10 +102,10 @@ a substitute for tool-policy enforcement or review.
 
    ```text
    /name parser regression
-   /export ./parser-handoff.ygg-session.json
+   /export ./parser-handoff.octet-session.json
    ```
 
-   Use `./target/release/ygg --continue` in the same workspace to reopen the
+   Use `./target/release/octet --continue` in the same workspace to reopen the
    latest session, or use `--resume SESSION_ID` to select it explicitly. The
    [session contract](sessions.md) explains branching, narrow torn-tail repair,
    and redaction. Export is redacted by default, but review the file before
@@ -69,17 +120,17 @@ the model obeyed every instruction.
 
 When two investigations are genuinely independent, keep one parent responsible
 for the patch and final verification. The checked-in
-[subagents package](../extensions/ygg-subagents/README.md) and its
-[skill](../extensions/ygg-subagents/skills/ygg-subagents/SKILL.md) describe the
+[subagents package](../extensions/octet-subagents/README.md) and its
+[skill](../extensions/octet-subagents/skills/octet-subagents/SKILL.md) describe the
 owner-bound service, optional ceilings, continuation, and explicit stop behavior.
 
 In a **separate full-access, OS-isolated run**, use the matching checkout
 extension without installing or replacing a bundle in your personal home:
 
 ```sh
-./target/release/ygg --model MODEL_ID --no-context-files \
+./target/release/octet --model MODEL_ID --no-context-files \
   --extension-dir ./extensions \
-  --enable-extension ygg-subagents --trust-extension ygg-subagents
+  --enable-extension octet-subagents --trust-extension octet-subagents
 ```
 
 Check `/extensions status` for the selected source and successful `agent_sessions`
@@ -104,6 +155,25 @@ completion. Shared cwd is not filesystem isolation. There are at most eight
 active children and depth one, not an arbitrary recursive team. Child usage
 is accounted separately from parent prompt context. Record accepted unique
 findings and failed/cancelled workers, not just a polished combined answer.
+
+Make the result an audit handoff rather than two summaries: assign stable finding
+IDs, inspect each cited location yourself, separate duplicates from accepted
+unique findings, and record unresolved disagreements. Then continue one useful
+worker while its owner-bound host record still exists:
+
+```text
+Continue regression-map in its existing session: verify whether the proposed
+regression covers the boundary parser-path identified. Keep the same read/search
+scope and inherited model. Return only new evidence, corrected finding IDs,
+and uncertainty; do not edit or run commands.
+```
+
+The parent uses `subagent_continue` with the displayed worker target. An active
+worker receives steering; a settled worker resumes its durable conversation.
+A stopping or orphaned worker is rejected rather than silently recreated. Inspect
+authoritative settlement again and integrate the follow-up into the reviewed
+finding table. Retain both original audits and the continuation; a call
+acknowledgement or fixture smoke is not proof of a useful audit outcome.
 
 ## 2. Build and use a domain extension
 
@@ -132,7 +202,7 @@ Git and repository configuration are not an OS containment boundary.
    on `PATH`. Use the explicit examples directory and one-invocation trust:
 
    ```sh
-   ./target/release/ygg --model MODEL_ID --no-context-files \
+   ./target/release/octet --model MODEL_ID --no-context-files \
      --extension-dir ./examples/extensions \
      --enable-extension git-tools --trust-extension git-tools
    ```
@@ -162,6 +232,40 @@ Git and repository configuration are not an OS containment boundary.
    `/extensions reload` after a compatible change and verify that the selected
    source actually reinitializes; discovery never implies execution.
 
+### Make it a reusable repository-contract tool
+
+For a substantial adaptation, ask octet to build a `repo_contract` tool in your
+copied example, rather than merely rename `git_status`. Give it this bounded
+implementation task in the isolated full-access development session:
+
+```text
+Adapt the copied git-tools extension into repo-contract. Add a repo_contract
+operation that inventories only the explicitly selected repository's README,
+Cargo.toml, package.json, and pyproject.toml when present. Read bounded regular
+files; reject symlinks, traversal, excessive sizes, and unknown arguments.
+Return documented build/test commands with source locations and explicit missing
+or conflicting-contract diagnostics. Never execute commands found in a document,
+import project code, contact a network, or read configuration/credential roots.
+Keep API 0.1 text results unless we deliberately choose and test another API.
+Keep directory, manifest, handler names, and trust identity consistent. Add tests
+for malformed manifests, missing files, conflicting commands, links, oversized
+input, and deterministic ordering. Do not commit or install globally.
+```
+
+Review the implementation and run its tests, then launch a **fresh** session with
+only that copied source enabled and trusted. Ask the model to use `repo_contract`
+to produce a build/verification plan and compare every cited result with the
+actual repository. Keep disagreements visible; document text is untrusted input,
+not permission to execute its suggested commands.
+
+For reuse, keep the reviewed source and tests as a local artifact and select the
+same source in a second disposable repository. Verify at least one expected
+missing/contradictory contract there and record the model's actual tool call,
+result, and corrected plan. Source hashes, API/runtime versions, successful and
+failed cases, and the second-use artifact distinguish build/use/reuse evidence
+from a handler that only passed its own fixtures. This is a recipe for a tool to
+build; the checked-in Git example does not already implement `repo_contract`.
+
 For repeatable context shaping rather than a tool, adapt
 [local-model-workflow](../examples/extensions/local-model-workflow/README.md).
 Its [handler](../examples/extensions/local-model-workflow/extension.py) generates
@@ -189,12 +293,12 @@ while Rust owns the provider loop and durable conversation. The application
 owns its UI, workspace selection, credential handling, and cancellation.
 
 The [native host contract](sdk.md) includes complete request/event examples.
-The checked-in [cross-process fixture](../crates/ygg-coding-agent/tests/host_protocol.rs)
+The checked-in [cross-process fixture](../crates/octet-coding-agent/tests/host_protocol.rs)
 shows a real host client, bounded frame handling, an inline fake provider, and
 session resume. It is the starting implementation evidence, not a live-provider
 acceptance result.
 
-1. Launch `./target/release/ygg-host` in a dedicated process group. Drain stdout
+1. Launch `./target/release/octet-host` in a dedicated process group. Drain stdout
    as UTF-8 NDJSON and drain stderr independently with a retention cap. Send:
 
    ```json
@@ -220,6 +324,10 @@ acceptance result.
    retain the returned `sessionFile`, and display only bounded, appropriately
    sanitized content. For a later turn, use a new request/run ID and
    `resume_session` with that same regular session file inside `session_dir`.
+   For example, ask “Using the commands you identified, which verification is
+   missing from the README?” with new request/run IDs and the same read-only
+   tool grant. Verify the answer against the source and retained earlier turn;
+   the `sessionFile` field alone does not prove useful conversation continuity.
 4. On ordinary completion send `shutdown` and wait for its flushed response.
    On timeout or caller cancellation terminate the **entire dedicated process
    group** and drain it to exit. Protocol v1 has no in-band abort command.

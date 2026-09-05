@@ -1,7 +1,7 @@
-# Official executable-extension bundles attached to each canonical Ygg release.
+# Official executable-extension bundles attached to each canonical octet release.
 # Keep one lowercase package ID per line; release packaging and the compiled
 # package manager consume this same catalog.
-ygg-browse
-ygg-mcp
-ygg-subagents
-ygg-web-search
+octet-browse
+octet-mcp
+octet-subagents
+octet-web-search

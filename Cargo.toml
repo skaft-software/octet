@@ -2,19 +2,19 @@
 resolver = "2"
 members = [
     "crates/sexy-tui-rs",
-    "crates/ygg-ai",
-    "crates/ygg-agent",
-    "crates/ygg-coding-agent",
-    "crates/ygg-migrate-types",
+    "crates/octet-ai",
+    "crates/octet-agent",
+    "crates/octet-coding-agent",
+    "crates/octet-migrate-types",
 ]
-exclude = ["extensions/ygg-serve"]
+exclude = ["extensions/octet-serve"]
 
 [workspace.package]
-version = "0.7.0-dev"
+version = "0.7.0"
 edition = "2021"
 authors = ["Skaft Software"]
 repository = "https://github.com/skaft-software/ygg"
-homepage = "https://skaft.org/ygg"
+homepage = "https://skaft.org/octet"
 rust-version = "1.86"
 license = "MIT"
 
@@ -60,4 +60,4 @@ strip = "none"
 # Upstream 0.42.0 declares 1.85 but uses let-chain syntax stabilized later;
 # this local patch only rewrites that syntax and does not change parser logic.
 [patch.crates-io]
-lopdf = { path = "extensions/ygg-serve/vendor/lopdf" }
+lopdf = { path = "extensions/octet-serve/vendor/lopdf" }

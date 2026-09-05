@@ -124,24 +124,24 @@ test("collapses sidebar projects without hiding their neighbors", async ({
   page,
 }) => {
   await ensureSidebar(page);
-  const yggToggle = page.getByRole("button", {
-    name: "Collapse project ygg, 4 tasks",
+  const octetToggle = page.getByRole("button", {
+    name: "Collapse project octet, 4 tasks",
   });
   const notesToggle = page.getByRole("button", {
     name: "Collapse project Research notes, 1 task",
   });
-  const yggTask = page.getByRole("button", {
+  const octetTask = page.getByRole("button", {
     name: /Open task Review release readiness/,
   });
   const notesTask = page.getByRole("button", {
     name: /Open task Summarize provider notes/,
   });
 
-  await yggToggle.click();
+  await octetToggle.click();
   await expect(
-    page.getByRole("button", { name: "Expand project ygg, 4 tasks" }),
+    page.getByRole("button", { name: "Expand project octet, 4 tasks" }),
   ).toHaveAttribute("aria-expanded", "false");
-  await expect(yggTask).toBeHidden();
+  await expect(octetTask).toBeHidden();
   await expect(notesToggle).toHaveAttribute("aria-expanded", "true");
   await expect(notesTask).toBeVisible();
 
@@ -150,10 +150,10 @@ test("collapses sidebar projects without hiding their neighbors", async ({
     .fill("release readiness");
   await expect(
     page.getByRole("button", {
-      name: "Collapse project ygg, 1 task",
+      name: "Collapse project octet, 1 task",
     }),
   ).toHaveAttribute("aria-expanded", "true");
-  await expect(yggTask).toBeVisible();
+  await expect(octetTask).toBeVisible();
 });
 
 test("uses the command center to triage exceptions and restore focus", async ({
@@ -176,7 +176,7 @@ test("uses the command center to triage exceptions and restore focus", async ({
       .getByRole("button")
       .first(),
   ).toHaveAccessibleName(
-    "Open task Prepare signed macOS build, Needs you, ygg",
+    "Open task Prepare signed macOS build, Needs you, octet",
   );
   await expectNoViewportOverflow(page);
   if (testInfo.project.name === "desktop" && process.platform === "darwin") {
@@ -216,7 +216,7 @@ test("uses the command center to triage exceptions and restore focus", async ({
   await expect(page.getByLabel("Message octet")).toBeVisible();
 
   await page.evaluate(() =>
-    window.localStorage.setItem("ygg.ui.terminal.open", "true"),
+    window.localStorage.setItem("octet.ui.terminal.open", "true"),
   );
   await page.goto("/overview?transport=fixture");
   await expect(
@@ -250,14 +250,14 @@ test("opens in a fresh, quiet session with the standard composer", async ({
   ).toBeVisible();
   await expect(page.locator(".brand-row .octet-glyph")).toHaveCount(0);
   await expect(page.locator(".local-identity")).toHaveCount(0);
-  await expect(page.getByText("Connected to local ygg")).toHaveCount(0);
+  await expect(page.getByText("Connected to local octet")).toHaveCount(0);
   await expect(
     page
       .getByRole("tabpanel", { name: "Active tasks" })
       .getByText("Tasks", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "ygg", exact: true }),
+    page.getByRole("region", { name: "octet", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("region", { name: "Research notes", exact: true }),
@@ -918,12 +918,12 @@ test("@isolated-performance does not pull a scrolled-away performance transcript
       observer: undefined as PerformanceObserver | undefined,
     };
     const probeWindow = window as typeof window & {
-      __yggPerformanceProbe?: typeof probe;
+      __octetPerformanceProbe?: typeof probe;
     };
-    probeWindow.__yggPerformanceProbe = probe;
+    probeWindow.__octetPerformanceProbe = probe;
     const transcript = document.querySelector(".transcript");
     const completionObserver = new MutationObserver(() => {
-      const active = probeWindow.__yggPerformanceProbe;
+      const active = probeWindow.__octetPerformanceProbe;
       if (
         !active?.running ||
         transcript?.getAttribute("data-session-sequence") !== "1061"
@@ -939,7 +939,7 @@ test("@isolated-performance does not pull a scrolled-away performance transcript
       });
     }
     const frame = (timestamp: number) => {
-      const active = probeWindow.__yggPerformanceProbe;
+      const active = probeWindow.__octetPerformanceProbe;
       if (!active?.running) return;
       active.frameTimestamps.push(timestamp);
       if (
@@ -957,7 +957,7 @@ test("@isolated-performance does not pull a scrolled-away performance transcript
     if (probe.longTaskObservationSupported) {
       try {
         const observer = new PerformanceObserver((list) => {
-          const active = probeWindow.__yggPerformanceProbe;
+          const active = probeWindow.__octetPerformanceProbe;
           if (!active?.running) return;
           for (const entry of list.getEntries()) {
             active.longTasks.push(entry.duration);
@@ -985,8 +985,8 @@ test("@isolated-performance does not pull a scrolled-away performance transcript
       const check = () => {
         const transcript = document.querySelector('.transcript');
         const probe = (window as typeof window & {
-          __yggPerformanceProbe?: { running: boolean };
-        }).__yggPerformanceProbe;
+          __octetPerformanceProbe?: { running: boolean };
+        }).__octetPerformanceProbe;
         const streamingMessage = transcript?.querySelector<HTMLElement>(
           '.assistant-message.is-streaming',
         );
@@ -1017,7 +1017,7 @@ test("@isolated-performance does not pull a scrolled-away performance transcript
       ),
     );
     const probeWindow = window as typeof window & {
-      __yggPerformanceProbe?: {
+      __octetPerformanceProbe?: {
         frameTimestamps: number[];
         longTaskObservationSupported: boolean;
         longTasks: number[];
@@ -1028,7 +1028,7 @@ test("@isolated-performance does not pull a scrolled-away performance transcript
         samplingCompletedAt?: number;
       };
     };
-    const probe = probeWindow.__yggPerformanceProbe;
+    const probe = probeWindow.__octetPerformanceProbe;
     if (!probe) return null;
     probe.running = false;
     const steadyFrameTimestamps =
@@ -1408,8 +1408,8 @@ test("uses one fixed workbench appearance", async ({ page }) => {
   await expect
     .poll(() =>
       page.evaluate(() => ({
-        font: localStorage.getItem("ygg.ui.font"),
-        size: localStorage.getItem("ygg.ui.size"),
+        font: localStorage.getItem("octet.ui.font"),
+        size: localStorage.getItem("octet.ui.size"),
         bodySize: getComputedStyle(document.documentElement)
           .getPropertyValue("--font-body")
           .trim(),

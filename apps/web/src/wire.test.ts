@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import extensionPresentationGolden from "../../../crates/ygg-coding-agent/fixtures/extension-presentation.json";
-import eventEnvelopeGolden from "../../../extensions/ygg-serve/fixtures/event-envelope.json";
-import hostBootstrapGolden from "../../../extensions/ygg-serve/fixtures/host-bootstrap.json";
-import hostCommandAckGolden from "../../../extensions/ygg-serve/fixtures/host-command-ack.json";
-import hostCommandGolden from "../../../extensions/ygg-serve/fixtures/host-command.json";
-import liveUserDeliveryGolden from "../../../extensions/ygg-serve/fixtures/live-user-delivery.json";
-import completionReviewItemGolden from "../../../extensions/ygg-serve/fixtures/completion-review-item.json";
-import semanticToolEventGolden from "../../../extensions/ygg-serve/fixtures/semantic-tool-event.json";
-import sessionCommandGolden from "../../../extensions/ygg-serve/fixtures/session-command.json";
-import sessionSnapshotGolden from "../../../extensions/ygg-serve/fixtures/session-snapshot.json";
+import extensionPresentationGolden from "../../../crates/octet-coding-agent/fixtures/extension-presentation.json";
+import eventEnvelopeGolden from "../../../extensions/octet-serve/fixtures/event-envelope.json";
+import hostBootstrapGolden from "../../../extensions/octet-serve/fixtures/host-bootstrap.json";
+import hostCommandAckGolden from "../../../extensions/octet-serve/fixtures/host-command-ack.json";
+import hostCommandGolden from "../../../extensions/octet-serve/fixtures/host-command.json";
+import liveUserDeliveryGolden from "../../../extensions/octet-serve/fixtures/live-user-delivery.json";
+import completionReviewItemGolden from "../../../extensions/octet-serve/fixtures/completion-review-item.json";
+import semanticToolEventGolden from "../../../extensions/octet-serve/fixtures/semantic-tool-event.json";
+import sessionCommandGolden from "../../../extensions/octet-serve/fixtures/session-command.json";
+import sessionSnapshotGolden from "../../../extensions/octet-serve/fixtures/session-snapshot.json";
 import {
   decodeWireCommandAck,
   encodeClientCommand,
@@ -1509,7 +1509,7 @@ describe("authoritative Rust wire contract", () => {
       {
         id: "command-create",
         type: "session.create",
-        projectId: "project-ygg",
+        projectId: "project-octet",
         modelId: "gpt-5.6",
         reasoning: "high",
         authority: "fullAccess",
@@ -1880,7 +1880,7 @@ describe("authoritative Rust wire contract", () => {
   it("projects the path-free project catalog and exact lifecycle commands", () => {
     const project = {
       id: "prj_11111111111111111111111111111111",
-      name: "ygg",
+      name: "octet",
       trusted: false,
       archived: false,
       available: true,
@@ -2058,7 +2058,7 @@ describe("authoritative Rust wire contract", () => {
           id: "command-extension-action",
           type: "extension.invokeAction",
           sessionId: "session-demo",
-          extension: "ygg-web-search",
+          extension: "octet-web-search",
           extensionInstanceId: "instance-search",
           generation: 3,
           revision: 7,
@@ -2078,7 +2078,7 @@ describe("authoritative Rust wire contract", () => {
       command: {
         type: "extension.invokeAction",
         data: {
-          extension: "ygg-web-search",
+          extension: "octet-web-search",
           extensionInstanceId: "instance-search",
           generation: 3,
           revision: 7,

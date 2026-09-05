@@ -127,7 +127,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
   const expectedBundleHash = (
     await readFile(
       new URL(
-        "../../../extensions/ygg-serve/web/bundle.sha256",
+        "../../../extensions/octet-serve/web/bundle.sha256",
         import.meta.url,
       ),
       "utf8",
@@ -169,7 +169,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
         `${origin}/?transport=fixture`,
       );
       expect(documentResponse?.status()).toBe(200);
-      expect(documentResponse?.headers()["x-ygg-web-bundle"]).toBe(
+      expect(documentResponse?.headers()["x-octet-web-bundle"]).toBe(
         expectedBundleHash,
       );
 
@@ -454,7 +454,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
       const exportedText = await exported.text();
       expect(headers["content-type"]).toBe("application/json; charset=utf-8");
       expect(headers["content-disposition"]).toBe(
-        `attachment; filename="ygg-session-${sessionId}.json"`,
+        `attachment; filename="octet-session-${sessionId}.json"`,
       );
       expect(headers["cache-control"]).toBe("no-store");
       expect(headers["x-content-type-options"]).toBe("nosniff");
@@ -465,7 +465,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
       );
 
       const exportedJson = JSON.parse(exportedText) as Record<string, unknown>;
-      expect(exportedJson.format).toBe("ygg-session-export");
+      expect(exportedJson.format).toBe("octet-session-export");
       expect(exportedJson.redacted).toBe(true);
       expect(exportedJson.redaction_count).toEqual(expect.any(Number));
       expect(exportedJson.redaction_count).not.toBe(0);
@@ -515,7 +515,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
         `${origin}/session/${encodeURIComponent(sessionId)}`,
       );
       expect(documentResponse?.status()).toBe(200);
-      expect(documentResponse?.headers()["x-ygg-web-bundle"]).toBe(
+      expect(documentResponse?.headers()["x-octet-web-bundle"]).toBe(
         expectedBundleHash,
       );
       expect((await bootstrapResponse).status()).toBe(200);

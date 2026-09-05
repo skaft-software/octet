@@ -1,6 +1,6 @@
 # local-model-workflow executable extension
 
-This Python example uses the dependency-free `ygg-extension-sdk` package to
+This Python example uses the dependency-free `octet-extension-sdk` package to
 show how a local-model workflow can remain explicit and inspectable instead of
 silently rewriting prompts. It contributes:
 
@@ -17,8 +17,8 @@ Install the SDK before copying the directory:
 python3 -m pip install ./sdk/python
 ```
 
-Copy the directory to `.ygg/extensions/local-model-workflow/`, explicitly
-enable and trust it before restarting Ygg or using `/extensions reload`.
+Copy the directory to `.octet/extensions/local-model-workflow/`, explicitly
+enable and trust it before restarting octet or using `/extensions reload`.
 `--safe-mode` discovers the manifest but never starts its process. The existing frontend integration exposes its
 typed hook, context, status, and event contributions. The extension itself
 reads no files, launches no child subprocesses, accesses no network, and uses no

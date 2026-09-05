@@ -1,10 +1,10 @@
 # Migrating from Pi
 
-Ygg can inventory an installed Pi setup without running package code or invoking
+octet can inventory an installed Pi setup without running package code or invoking
 a model:
 
 ```console
-ygg migrate pi --dry-run
+octet migrate pi --dry-run
 ```
 
 This is the first, deterministic stage of Pi migration. It is an inspection and
@@ -18,12 +18,12 @@ selected project's `.pi/settings.json`. `PI_CODING_AGENT_DIR` or `--pi-home`
 can select another user directory, and `--project` can select another project:
 
 ```console
-ygg migrate pi --dry-run --project /path/to/project
-ygg migrate pi --dry-run --json > pi-migration.json
+octet migrate pi --dry-run --project /path/to/project
+octet migrate pi --dry-run --json > pi-migration.json
 ```
 
 The scanner invocation is always a dry run; `--dry-run` makes that intent
-explicit. It exits before normal Ygg configuration, provider discovery, session
+explicit. It exits before normal octet configuration, provider discovery, session
 startup, extension startup, or model bootstrap. It therefore consumes zero
 model tokens.
 
@@ -33,21 +33,21 @@ A separate, opt-in command imports the portable subset of a Pi setup. It does
 not change the existing scanner behavior:
 
 ```console
-ygg migrate import pi --dry-run
-ygg migrate import pi --source /path/to/pi/agent --dry-run --json
-ygg migrate import pi --source /path/to/pi/agent
-ygg migrate import pi --source /path/to/pi/agent --yes
+octet migrate import pi --dry-run
+octet migrate import pi --source /path/to/pi/agent --dry-run --json
+octet migrate import pi --source /path/to/pi/agent
+octet migrate import pi --source /path/to/pi/agent --yes
 ```
 
 Without `--source`, the importer checks `PI_CODING_AGENT_DIR`, then the standard
-Pi agent locations. It runs Ygg's built-in, read-only API 0.3 adapter rather
+Pi agent locations. It runs octet's built-in, read-only API 0.3 adapter rather
 than executing Pi packages or a user-selected adapter command. The host owns
 all destination decisions and writes.
 
-The importer can select a model already known to Ygg, copy portable skills into
-`~/.ygg/skills/`, and add local stdio MCP declarations to `~/.ygg/mcp.json`.
+The importer can select a model already known to octet, copy portable skills into
+`~/.octet/skills/`, and add local stdio MCP declarations to `~/.octet/mcp.json`.
 A Pi provider/API-model pair is selected only when it has exactly one match in
-Ygg's built-in catalog; Ygg persists that catalog entry's canonical ID. Custom,
+octet's built-in catalog; octet persists that catalog entry's canonical ID. Custom,
 unknown, and ambiguous provider/model values are skipped rather than guessed.
 Every imported skill is wrapped in host-authored frontmatter with
 `disable-model-invocation: true`; every imported MCP server has `enabled: false`
@@ -61,17 +61,17 @@ JSON `model_diagnostics`. The command never writes the Pi source setup, contacts
 a network service, starts an imported MCP server, starts an extension, or invokes
 a model.
 
-Imports track the hashes they own in `~/.ygg/migrations/pi-state.json`. A
+Imports track the hashes they own in `~/.octet/migrations/pi-state.json`. A
 changed destination is a conflict and requires an interactive confirmation or
 `--yes`; `--dry-run` performs the same validation without writing anything.
 Before an import changes a destination, it creates a private backup under
-`~/.ygg/backups/migrate/` and prints its path. Restore it only when the current
+`~/.octet/backups/migrate/` and prints its path. Restore it only when the current
 destination still matches the import:
 
 ```console
-ygg migrate restore ~/.ygg/backups/migrate/IMPORT-DIRECTORY
+octet migrate restore ~/.octet/backups/migrate/IMPORT-DIRECTORY
 # Explicitly overwrite a destination changed after import:
-ygg migrate restore ~/.ygg/backups/migrate/IMPORT-DIRECTORY --yes
+octet migrate restore ~/.octet/backups/migrate/IMPORT-DIRECTORY --yes
 ```
 
 ## Plan, preflight, and publish a compatible extension
@@ -81,15 +81,15 @@ inert aggregate plan. `--with` is ordered: the first source loads first and all
 sources share one Pi process, event bus, `globalThis`, and registry set.
 
 ```console
-ygg pi plan ./first.ts --with ./second-package --with ./third.ts \
+octet pi plan ./first.ts --with ./second-package --with ./third.ts \
   --name pi-compat-0-84-4 --pi-package /reviewed/pi-coding-agent \
   --output /private/review/pi-aggregate-plan.json
-ygg pi preflight --plan /private/review/pi-aggregate-plan.json
-ygg pi publish --plan /private/review/pi-aggregate-plan.json
-ygg pi list
+octet pi preflight --plan /private/review/pi-aggregate-plan.json
+octet pi publish --plan /private/review/pi-aggregate-plan.json
+octet pi list
 ```
 
-`ygg pi install ...` remains a shorthand for compile, preflight, and publish in
+`octet pi install ...` remains a shorthand for compile, preflight, and publish in
 one local command. It is useful for a reviewed one-off source; the explicit
 three-step form leaves an auditable handoff between review and publication.
 `--output` requires an existing non-symlink parent and a new file, so a plan is
@@ -108,7 +108,7 @@ The canonical plan pins, in order:
   Bun lock files);
 - the canonical Pi package root and a package-integrity SHA-256 over its exact
   `package.json` bytes and reviewed `dist/` tree;
-- the bridge, Pi, and Ygg versions, the `pi_aggregate` lifecycle profile, and
+- the bridge, Pi, and octet versions, the `pi_aggregate` lifecycle profile, and
   the explicit-enable/explicit-trust requirement.
 
 `preflight` re-reads all of those inputs without importing a source. `publish`
@@ -121,29 +121,29 @@ through a link identity. The bridge checks those values before and after its Pi
 loader imports source, and rejects a startup whose source/runtime changed during
 that interval.
 
-The generated wrapper lives under `~/.ygg/extensions/`, points at existing
+The generated wrapper lives under `~/.octet/extensions/`, points at existing
 sources, and does not install npm dependencies, run lifecycle scripts, copy the
 Pi package, or enable/trust itself. It remains disabled and untrusted until the
 user makes both decisions:
 
 ```console
-ygg --enable-extension pi-extension-name --trust-extension pi-extension-name
+octet --enable-extension pi-extension-name --trust-extension pi-extension-name
 ```
 
-`ygg pi list` reports metadata freshness only; it deliberately does **not** claim
+`octet pi list` reports metadata freshness only; it deliberately does **not** claim
 that the user has enabled or trusted a link. To remove a generated link from
 discovery without deleting the reviewed package, use the reversible local
 rollback action:
 
 ```console
-ygg pi rollback pi-extension-name
+octet pi rollback pi-extension-name
 ```
 
 The command moves only a validated generated package into a private rollback
-directory beside the extension root and leaves Ygg's enable/trust policy intact.
+directory beside the extension root and leaves octet's enable/trust policy intact.
 Review its records before manually restoring it.
 
-Bridge profile `0.3.0` targets exactly Pi `0.84.4` and Node 22.19 or newer. Its
+The first-party bridge distribution `0.7.0` targets exactly Pi `0.84.4` and Node 22.19 or newer. Its
 live Pi protocol remains API `0.2`: API `0.3` currently has no available
 lifecycle-event or dynamic-command surface for this bridge. Publication also
 writes a canonical `pi-runtime-evidence.json` sidecar using the generated API
@@ -152,10 +152,10 @@ the future runtime manager; it is **not** a claim that Pi lifecycle behavior has
 been upgraded to API `0.3`.
 
 The exhaustive per-event/API/UI ledger and completion gates are maintained in
-[`extensions/ygg-pi-compat/COMPATIBILITY.md`](../extensions/ygg-pi-compat/COMPATIBILITY.md).
+[`extensions/octet-pi-compat/COMPATIBILITY.md`](../extensions/octet-pi-compat/COMPATIBILITY.md).
 Its canonical machine-readable form is
-[`0.84.4.ledger.json`](../extensions/ygg-pi-compat/profiles/0.84.4.ledger.json).
-`python3 extensions/ygg-pi-compat/conformance.py --check --json` validates its
+[`0.84.4.ledger.json`](../extensions/octet-pi-compat/profiles/0.84.4.ledger.json).
+`python3 extensions/octet-pi-compat/conformance.py --check --json` validates its
 118 public surfaces, 78 official examples, 33 TUI audit rows, six plan-mode
 journeys, fixture links, and profile digest without claiming that a real Pi
 package was run. The separate full gate accepts only local integrity-verified
@@ -164,13 +164,13 @@ network isolation.
 
 It supports Pi tools, transformed result details/error/usage, live tool catalogs,
 notifications, confirmations, text input, basic lifecycle/context events, and
-local Pi event-bus behavior. On a Ygg host negotiating `runtime_commands`, Pi's
+local Pi event-bus behavior. On a octet host negotiating `runtime_commands`, Pi's
 initial command catalog is exposed under its native slash names; the generated
 `/<name> COMMAND ...` route remains only as a fallback for older hosts.
 Unsupported TUI, provider, session, compaction, agent-control, and mutation
 surfaces remain explicit migration diagnostics rather than silent no-ops. Pi
 `registerFlag` is also diagnosed: its runtime registration cannot safely become
-a Ygg API `0.3` manifest flag without running the source before trust and CLI
+a octet API `0.3` manifest flag without running the source before trust and CLI
 construction.
 
 The scanner:
@@ -198,11 +198,11 @@ The human and JSON reports use migration-path classifications:
 
 | Path | Meaning |
 | --- | --- |
-| `direct` | Pi skill or Markdown prompt content has a deterministic Ygg resource path. The dry run does not copy it. |
-| `replace` | Reserved for an exact package/version/source-hash recipe that selects a Ygg-native replacement. No replacement recipes ship in this first scanner slice. |
+| `direct` | Pi skill or Markdown prompt content has a deterministic octet resource path. The dry run does not copy it. |
+| `replace` | Reserved for an exact package/version/source-hash recipe that selects a octet-native replacement. No replacement recipes ship in this first scanner slice. |
 | `bridge` | The extension uses only surfaces implemented by the pinned compatibility process. A generated link still needs a successful runtime handshake before it is known compatible. |
-| `native_port` | The extension uses a known Pi 0.84.4 mutation or registration that needs an explicit Ygg-native port or a future bounded host primitive. |
-| `manual` | The extension depends on arbitrary Pi TUI/editor components, custom providers, or deep session/compaction internals; redesign is required. Pi JSON themes are also manual because Ygg themes use a different semantic schema. |
+| `native_port` | The extension uses a known Pi 0.84.4 mutation or registration that needs an explicit octet-native port or a future bounded host primitive. |
+| `manual` | The extension depends on arbitrary Pi TUI/editor components, custom providers, or deep session/compaction internals; redesign is required. Pi JSON themes are also manual because octet themes use a different semantic schema. |
 | `blocked` | The package could not be resolved/read or parsed completely, or it uses names outside the pinned Pi 0.84.4 public compatibility profile. |
 
 `bridge` describes a migration candidate, not current runtime availability or
@@ -240,14 +240,14 @@ The scanner does not:
 
 - execute or import a Pi extension;
 - run an npm lifecycle script or install a missing package;
-- trust and start a Ygg executable extension;
+- trust and start a octet executable extension;
 - send source, settings, or the report to a model or network service;
-- copy, rewrite, or delete Pi or Ygg files; or
+- copy, rewrite, or delete Pi or octet files; or
 - read Pi authentication/model credential stores.
 
 Settings, package manifests, source files, lockfiles, resource counts, relative
 import closure, and aggregate hashing all have fixed limits. Selected files use
-Ygg's descriptor-bound, no-follow regular-file reader. Symlinked package roots
+octet's descriptor-bound, no-follow regular-file reader. Symlinked package roots
 and resources are rejected. `--npm-root` only adds an explicitly selected legacy
 `node_modules` search root; the scanner never executes a configured
 `npmCommand` from Pi settings.
@@ -255,15 +255,15 @@ and resources are rejected. `--npm-root` only adds an explicitly selected legacy
 Static authority signals are conservative inventory, not proof that a package
 will or will not exercise an effect at runtime. The compatibility host runs
 third-party npm code with the launching user's operating-system authority under
-Ygg's executable-extension trust model. See [Executable
+octet's executable-extension trust model. See [Executable
 extensions](extensions.md#kernel-boundary) and the [security
 policy](../SECURITY.md).
 
 ## Migration architecture
 
 Universal Pi source compatibility is deliberately not the goal. Pi extensions
-can mutate in-process agent, provider, session, and TUI state that Ygg keeps
-behind a language-neutral subprocess boundary. Recreating that ABI in the Ygg
+can mutate in-process agent, provider, session, and TUI state that octet keeps
+behind a language-neutral subprocess boundary. Recreating that ABI in the octet
 kernel would compromise the boundary rather than improve migration.
 
 The intended staged system is:
@@ -277,10 +277,10 @@ scanner/compiler
 
 ### Deterministic scanner/compiler
 
-The shipped dry run is the inventory front end for this stage. `ygg pi plan`
+The shipped dry run is the inventory front end for this stage. `octet pi plan`
 compiles an inert source/lock/runtime-integrity aggregate; `preflight` verifies
 it and `publish` creates the generated wrapper only after that verification.
-`ygg pi install` is the one-command shorthand. None installs dependencies or
+`octet pi install` is the one-command shorthand. None installs dependencies or
 executes package code. Future recipes can copy compatible skills/prompts,
 transform known configuration, and cache intermediate results by source and lock
 hash. Those operations should remain deterministic and model-free.
@@ -288,7 +288,7 @@ hash. Those operations should remain deterministic and model-free.
 ### Compatibility process
 
 A generated Pi aggregate hosts a deliberately bounded subset of Pi's
-`ExtensionAPI` through one persistent `ygg-pi-compat` process. Ordered `--with`
+`ExtensionAPI` through one persistent `octet-pi-compat` process. Ordered `--with`
 sources are compiled into a source/lock/runtime-integrity plan, preflighted, and
 published as one aggregate lock. The one real `ExtensionRunner` preserves their
 local event bus, `globalThis`, and shared registries. Runtime-manager-owned lazy
@@ -305,7 +305,7 @@ still needs a live command-catalog protocol.
 ### Exact recipes
 
 A recipe may replace an implementation with the capability it provides—for
-example, importing MCP configuration into a future `ygg-mcp` package instead of
+example, importing MCP configuration into a future `octet-mcp` package instead of
 porting a Pi-specific MCP UI. Recipe lookup must require the package identity,
 exact installed version, source hash, and lock hash. Name-only recipes are not
 safe enough to apply automatically.
@@ -325,14 +325,14 @@ Capability migration is often practical even when exact UX is not:
 - basic tools, commands, notifications, and local event-bus behavior are strong
   bridge candidates;
 - MCP, search, browser, LSP, memory, and subagent behavior belong in replaceable
-  Ygg extension processes, not the kernel;
+  octet extension processes, not the kernel;
 - Pi input transforms, safe tool-argument replacement with host revalidation,
   pre-persistence tool-result transforms, extension-scoped durable state, and
   per-turn tool-policy overlays are evidence for possible narrow future APIs;
 - custom provider/OAuth/stream handlers, mutable session-tree/compaction hooks,
   and arbitrary editor/header/footer/widget components are not transparent
   bridge targets; and
-- Ygg should evolve semantic, frontend-neutral UI contributions rather than an
+- octet should evolve semantic, frontend-neutral UI contributions rather than an
   arbitrary component ABI.
 
 None of those possible protocol additions is implied by the current dry-run
@@ -344,8 +344,8 @@ path.
 
 The intended promise is:
 
-> Ygg can inspect a Pi setup, migrate portable resources without model tokens,
-> replace known infrastructure with exact Ygg-native recipes, run a bounded
+> octet can inspect a Pi setup, migrate portable resources without model tokens,
+> replace known infrastructure with exact octet-native recipes, run a bounded
 > compatible subset through an explicitly trusted bridge, and identify exactly
 > what still requires a port.
 

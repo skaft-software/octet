@@ -25,9 +25,9 @@ jobs:
       # cargo-audit validates Cargo.lock by default; unlike Cargo, current
       # cargo-audit releases do not accept Cargo's `--locked` flag.
       - run: cargo audit
-      - run: cargo audit --file extensions/ygg-serve/Cargo.lock
+      - run: cargo audit --file extensions/octet-serve/Cargo.lock
       - run: cargo deny check
-      - run: cargo deny --manifest-path extensions/ygg-serve/Cargo.toml check
+      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
       - run: npm ci
         working-directory: apps/web
       - run: npm audit --audit-level=high
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Install pinned nightly toolchain
         run: rustup toolchain install nightly-2026-08-01 --profile minimal --component rust-src --target x86_64-unknown-linux-gnu --no-self-update
-      - run: RUSTFLAGS="-Zsanitizer=address" RUSTDOCFLAGS="-Zsanitizer=address" cargo +nightly-2026-08-01 test -Zbuild-std --target x86_64-unknown-linux-gnu -p ygg-agent --lib
+      - run: RUSTFLAGS="-Zsanitizer=address" RUSTDOCFLAGS="-Zsanitizer=address" cargo +nightly-2026-08-01 test -Zbuild-std --target x86_64-unknown-linux-gnu -p octet-agent --lib
 
   coverage:
     runs-on: ubuntu-24.04

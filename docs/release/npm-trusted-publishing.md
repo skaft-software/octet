@@ -1,15 +1,20 @@
 # npm trusted publishing
 
-Ygg's npm distribution is four immutable packages:
+octet's npm source packaging contract defines four immutable packages. These
+names are not proof of registry rights, availability, or publication; use the
+[local checkout build](../../README.md#build-this-checkout) today. The actual
+source/release/OIDC repository remains `skaft-software/ygg`.
 
-- `@skaft-software/ygg` is the shell-only public launcher.
-- `@skaft-software/ygg-darwin-arm64`, `@skaft-software/ygg-darwin-x64`, and
-  `@skaft-software/ygg-linux-x64-gnu` contain the native runtime and packaged
+The source package identities are:
+
+- `@skaft-software/octet` is the shell-only public launcher.
+- `@skaft-software/octet-darwin-arm64`, `@skaft-software/octet-darwin-x64`, and
+  `@skaft-software/octet-linux-x64-gnu` contain the native runtime and packaged
   documentation.
 
 All four versions are the exact version of the canonical `vX.Y.Z` release tag.
 The launcher has no npm lifecycle hook and resolves only the installed optional
-platform package before `exec`-ing `ygg` or `ygg-host`. It does not download a
+platform package before `exec`-ing `octet` or `octet-host`. It does not download a
 runtime. Linux musl and unsupported CPUs fail closed.
 
 ## Local release gate
@@ -18,15 +23,15 @@ Package only the already verified native release assets; do not build from a
 mutable checkout or read `Cargo.toml` to choose the release version:
 
 ```sh
-scripts/package-ygg-npm.sh VERSION release-assets npm-assets \
-  release-assets/YGG_SHA256SUMS
-python3 scripts/create-ygg-npm-manifest.py VERSION vVERSION \
-  SOURCE_COMMIT WORKFLOW_COMMIT release-assets/YGG_RELEASE_METADATA.json \
-  npm-assets npm-assets/YGG_NPM_MANIFEST.json npm-assets/YGG_NPM_SHA256SUMS
-python3 scripts/verify-ygg-npm.py VERSION npm-assets
+scripts/package-octet-npm.sh VERSION release-assets npm-assets \
+  release-assets/OCTET_SHA256SUMS
+python3 scripts/create-octet-npm-manifest.py VERSION vVERSION \
+  SOURCE_COMMIT WORKFLOW_COMMIT release-assets/OCTET_RELEASE_METADATA.json \
+  npm-assets npm-assets/OCTET_NPM_MANIFEST.json npm-assets/OCTET_NPM_SHA256SUMS
+python3 scripts/verify-octet-npm.py VERSION npm-assets
 ```
 
-`YGG_RELEASE_METADATA.json` is generated from the signed native checksum
+`OCTET_RELEASE_METADATA.json` is generated from the signed native checksum
 manifest and records the tag, source commit, release-workflow identity, pinned
 URLs, and SHA-256 values. The protected release job verifies its Sigstore
 bundle and regenerates the document before packaging. The npm manifest records
@@ -45,14 +50,14 @@ identity; a mere non-empty provenance field is insufficient.
 ## Protected publication
 
 A maintainer must configure npm trusted publishers for all four packages to the
-repository's `release-ygg.yml` workflow and the `stable-release-publish`
+repository's `release-octet.yml` workflow and the `stable-release-publish`
 environment. The workflow uses GitHub OIDC with `npm publish --provenance`; it
 must not use `NPM_TOKEN`, `NODE_AUTH_TOKEN`, a checked-in `.npmrc`, or another
 long-lived registry credential. The environment is the human approval boundary.
 
 Canonical binary tag runs leave npm publication disabled. Only after the four
 trusted publishers and cryptographic provenance verification are ready, dispatch
-`release-ygg.yml` from the exact canonical `vX.Y.Z` tag with `release_tag` set to
+`release-octet.yml` from the exact canonical `vX.Y.Z` tag with `release_tag` set to
 that tag and `publish_npm=true`.
 
 The publication job pins npm CLI `11.5.1` (or a later explicitly reviewed
@@ -81,19 +86,21 @@ and do not reuse the version.
 
 An authorized maintainer should deprecate the affected package version with a
 short failure message, record the registry response, and cut a new canonical
-Ygg patch release. Publish the new version platform-first, verify all four
+octet patch release. Publish the new version platform-first, verify all four
 packages, and announce the replacement. A pending GitHub/npm release should be
 left untouched until its provenance is understood; revocation or closure is an
 explicit maintainer action.
 
 ## Installation and updates
 
-For a published version, users can install the global channel with:
+The following is a **future published-channel template**, not a current install
+recommendation. Use it only after the exact package/version and provenance have
+been independently verified and publication was authorized:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/ygg@VERSION
+npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/octet@VERSION
 ```
 
-`ygg update` automatically offers npm only for a physically validated global
+`octet update` automatically offers npm only for a physically validated global
 layout. Local project and `npx` layouts receive a manual command instead, so a
-Ygg process never mutates a project's dependencies implicitly.
+octet process never mutates a project's dependencies implicitly.

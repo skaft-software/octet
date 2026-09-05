@@ -1239,7 +1239,7 @@ function validateChildGraph(
 }
 
 /**
- * Strictly projects the path-free RuntimeSnapshot JSON emitted by ygg-serve.
+ * Strictly projects the path-free RuntimeSnapshot JSON emitted by octet-serve.
  *
  * Every object denies unknown fields. Collection limits and the Rust DTO's
  * cross-field invariants are checked again before UI code receives a value.

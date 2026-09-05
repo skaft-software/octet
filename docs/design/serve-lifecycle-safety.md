@@ -1,12 +1,12 @@
 # Serve lifecycle and safety design
 
 This document records the safety contracts implemented by the experimental
-`ygg serve` host. They protect Ygg's own trust, persistence, and protocol
-boundaries. They do **not** turn Ygg into an operating-system sandbox.
+`octet serve` host. They protect octet's own trust, persistence, and protocol
+boundaries. They do **not** turn octet into an operating-system sandbox.
 
 ## Security model
 
-`ygg serve` is a loopback service for a trusted local user. The agent and any
+`octet serve` is a loopback service for a trusted local user. The agent and any
 enabled command run with that user's operating-system authority. A hostile
 repository, model, or child process still requires isolation with a restricted
 user, container, VM, or platform sandbox.
@@ -39,8 +39,8 @@ user's authority can deliberately create a new session, fully daemonize before
 it is observed, or launch work through another service. Use an OS sandbox or
 container when that behavior must be prevented.
 
-The implementation is Serve-local in `extensions/ygg-serve/src/process_tree.rs`
-so `extensions/ygg-serve` remains independently buildable.
+The implementation is Serve-local in `extensions/octet-serve/src/process_tree.rs`
+so `extensions/octet-serve` remains independently buildable.
 
 ## Trusted project filesystem
 
@@ -97,7 +97,7 @@ retaining valid ownerless legacy records. Legacy records with a top-level
 
 ## Client generations
 
-A WebSocket connection and a `YggStore.initialize()` call each belong to one
+A WebSocket connection and a `OctetStore.initialize()` call each belong to one
 monotonic generation. Reconnect or reinitialization invalidates prior work.
 Callbacks, replay responses, reconnect timers, and initialization completions
 check that generation before mutating state. A stale connection therefore
@@ -153,7 +153,7 @@ directory removes that accounting history.
 
 ## Context and lifecycle telemetry
 
-`ygg-agent` owns an ephemeral `ContextTracker` for each run. It observes the
+`octet-agent` owns an ephemeral `ContextTracker` for each run. It observes the
 actual model input, provider stream, retries, tool boundaries, compaction, and
 terminal settlement. Reading a snapshot does not append to or rewrite the
 conversation session.
@@ -186,12 +186,12 @@ operational state, not persisted conversation history.
 
 Adversarial coverage lives with the owning package:
 
-- process descendants and UTF-8: `extensions/ygg-serve/src/pty.rs` and
+- process descendants and UTF-8: `extensions/octet-serve/src/pty.rs` and
   `tests/repository_context.rs`;
 - root swaps, symlinks, hard links, concurrent replacement, and synced writes:
-  `extensions/ygg-serve/tests/project_fs.rs`;
-- quota races and duplicate recovery: `extensions/ygg-serve/src/attachment.rs`;
+  `extensions/octet-serve/tests/project_fs.rs`;
+- quota races and duplicate recovery: `extensions/octet-serve/src/attachment.rs`;
 - deletion, shared references, legacy/corrupt records, and restart recovery:
   store unit tests plus coding-agent Serve adapter tests; and
 - telemetry reconciliation and strict wire decoding:
-  `crates/ygg-agent`, coding-agent adapter tests, and `apps/web/src/wire.test.ts`.
+  `crates/octet-agent`, coding-agent adapter tests, and `apps/web/src/wire.test.ts`.

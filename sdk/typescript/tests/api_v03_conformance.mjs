@@ -115,6 +115,16 @@ for (const entry of JSON.parse(readFileSync(resolve(negativeFixtures, "manifest.
   }
 }
 
+const renamedInitialize = readFixture("initialize-request");
+assert.equal(renamedInitialize.octet_version, "0.7.0");
+assert.equal(api.API_VERSION, "0.3");
+assert.equal(api.SCHEMA_ID, "octet.extension.api/0.3");
+assert.equal(api.CANONICAL_ENCODING, "octet-canonical-json-v1");
+const oldInitialize = { ...renamedInitialize, ygg_version: renamedInitialize.octet_version };
+delete oldInitialize.octet_version;
+assert.equal(errorCode(() => api.parseInitializeRequest(oldInitialize)), -32602);
+assert.equal(errorCode(() => api.parseInitializeRequest({ ...renamedInitialize, ygg_version: "0.7.0" })), -32602);
+
 assert.equal(api.runtimeSupportsApiVersion("0.1"), true);
 assert.equal(api.bundleSupportsApiVersion("0.1"), false);
 assert.equal(api.bundleSupportsApiVersion("0.2"), true);

@@ -36,7 +36,7 @@ docs/superpowers/
 .env
 .env.*
 !.env.example
-/.ygg/
+/.octet/
 /.codex/
 /.claude/
 /AGENTS.md
@@ -48,4 +48,4 @@ docs/superpowers/
 /sessions/
 
 # Internal release-audit working documents
-/YGG_ADVERSARIAL_REVIEW.md
+/OCTET_ADVERSARIAL_REVIEW.md

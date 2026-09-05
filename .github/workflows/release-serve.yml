@@ -1,13 +1,13 @@
-name: Ygg Serve extension release
+name: octet Serve extension release
 
 on:
   push:
     tags:
-      - "ygg-serve-v*"
+      - "octet-serve-v*"
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing canonical Ygg tag to receive the extension assets
+        description: Existing canonical octet tag to receive the extension assets
         required: true
         type: string
       require_provider_acceptance:
@@ -49,9 +49,9 @@ jobs:
           if [[ -n "$INPUT_RELEASE_TAG" ]]; then
             tag="$INPUT_RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            tag=${GITHUB_REF_NAME#ygg-serve-}
+            tag=${GITHUB_REF_NAME#octet-serve-}
             if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then
-              echo "Serve source tags must start with ygg-serve-" >&2
+              echo "Serve source tags must start with octet-serve-" >&2
               exit 1
             fi
           else
@@ -67,8 +67,8 @@ jobs:
               echo "manual releases must dispatch this workflow from the exact canonical tag $tag" >&2
               exit 1
             fi
-          elif [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "ygg-serve-$tag" ]]; then
-            echo "Serve release pushes must use ygg-serve-$tag" >&2
+          elif [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "octet-serve-$tag" ]]; then
+            echo "Serve release pushes must use octet-serve-$tag" >&2
             exit 1
           fi
 
@@ -78,9 +78,9 @@ jobs:
           if [[ "$workflow_commit" != "$source_commit" ]]; then
             if [[ "$GITHUB_EVENT_NAME" != push \
               || "$GITHUB_REF_TYPE" != tag \
-              || "$GITHUB_REF_NAME" != "ygg-serve-$tag" ]]; then
+              || "$GITHUB_REF_NAME" != "octet-serve-$tag" ]]; then
               echo "workflow ref $workflow_commit does not match canonical release source $source_commit" >&2
-              echo "tooling-only repairs must use the dedicated ygg-serve-$tag tag" >&2
+              echo "tooling-only repairs must use the dedicated octet-serve-$tag tag" >&2
               exit 1
             fi
             if ! git merge-base --is-ancestor "$source_commit" "$workflow_commit"; then
@@ -88,7 +88,7 @@ jobs:
               exit 1
             fi
             unexpected_paths=$(git diff --name-only "$source_commit" "$workflow_commit" \
-              | grep -Ev '^\.github/workflows/release-(ygg|serve)\.yml$' || true)
+              | grep -Ev '^\.github/workflows/release-(octet|serve)\.yml$' || true)
             if [[ -n "$unexpected_paths" ]]; then
               echo "tooling-only repair changes non-release-workflow paths:" >&2
               printf '%s\n' "$unexpected_paths" >&2
@@ -118,7 +118,7 @@ jobs:
           if ! release_state=$(gh release view "$tag" \
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
-            echo "canonical release $tag does not exist; publish Ygg first" >&2
+            echo "canonical release $tag does not exist; publish octet first" >&2
             exit 1
           fi
           IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
@@ -202,9 +202,9 @@ jobs:
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
-      - run: cargo audit --file extensions/ygg-serve/Cargo.lock
+      - run: cargo audit --file extensions/octet-serve/Cargo.lock
       - run: cargo deny check
-      - run: cargo deny --manifest-path extensions/ygg-serve/Cargo.toml check
+      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
       - run: npm ci
         working-directory: apps/web
       - run: npm audit --audit-level=high
@@ -235,29 +235,29 @@ jobs:
       # Build publishable runtimes from clean runner state; release jobs do not
       # restore mutable branch or pull-request compilation caches.
       - name: Build optimized Serve runtime
-        run: cargo build --release --locked --target "${{ matrix.target }}" -p ygg-coding-agent --features serve
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p octet-coding-agent --features serve
       - name: Verify runtime and embedded web bundle
         run: |
           target="${{ matrix.target }}"
-          binary="target/$target/release/ygg"
+          binary="target/$target/release/octet"
           test -x "$binary"
-          test "$("$binary" --version)" = "ygg ${{ needs.resolve.outputs.version }}"
-          scripts/smoke-ygg-serve-installed.sh "$binary"
+          test "$("$binary" --version)" = "octet ${{ needs.resolve.outputs.version }}"
+          scripts/smoke-octet-serve-installed.sh "$binary"
       - name: Package standalone extension archive reproducibly
         shell: bash
         run: |
           set -euo pipefail
           version="${{ needs.resolve.outputs.version }}"
-          scripts/package-ygg-serve-release.sh \
+          scripts/package-octet-serve-release.sh \
             "${{ matrix.target }}" \
-            "$RUNNER_TEMP/ygg-serve-release" \
+            "$RUNNER_TEMP/octet-serve-release" \
             "${{ needs.resolve.outputs.tag }}"
-          scripts/package-ygg-serve-release.sh \
+          scripts/package-octet-serve-release.sh \
             "${{ matrix.target }}" \
-            "$RUNNER_TEMP/ygg-serve-release-reproducibility-check" \
+            "$RUNNER_TEMP/octet-serve-release-reproducibility-check" \
             "${{ needs.resolve.outputs.tag }}"
-          archive="$RUNNER_TEMP/ygg-serve-release/ygg-serve-$version-${{ matrix.target }}.tar.gz"
-          repeated_archive="$RUNNER_TEMP/ygg-serve-release-reproducibility-check/ygg-serve-$version-${{ matrix.target }}.tar.gz"
+          archive="$RUNNER_TEMP/octet-serve-release/octet-serve-$version-${{ matrix.target }}.tar.gz"
+          repeated_archive="$RUNNER_TEMP/octet-serve-release-reproducibility-check/octet-serve-$version-${{ matrix.target }}.tar.gz"
           test -f "$archive"
           cmp "$archive" "$repeated_archive"
       - name: Verify install, launch, list, and removal
@@ -266,37 +266,37 @@ jobs:
           set -euo pipefail
           target="${{ matrix.target }}"
           version="${{ needs.resolve.outputs.version }}"
-          archive="$RUNNER_TEMP/ygg-serve-release/ygg-serve-$version-$target.tar.gz"
+          archive="$RUNNER_TEMP/octet-serve-release/octet-serve-$version-$target.tar.gz"
           test -f "$archive"
-          cargo build --locked --target "$target" -p ygg-coding-agent --no-default-features
-          launcher="$PWD/target/$target/debug/ygg"
-          package_home="$RUNNER_TEMP/ygg-package-home"
-          mkdir -p "$package_home/.ygg/serve-data"
-          printf 'preserve\n' > "$package_home/.ygg/serve-data/sentinel"
+          cargo build --locked --target "$target" -p octet-coding-agent --no-default-features
+          launcher="$PWD/target/$target/debug/octet"
+          package_home="$RUNNER_TEMP/octet-package-home"
+          mkdir -p "$package_home/.octet/serve-data"
+          printf 'preserve\n' > "$package_home/.octet/serve-data/sentinel"
           (
             cd "$(dirname "$archive")"
             HOME="$package_home" "$launcher" extension install --path "./$(basename "$archive")"
           )
-          test -f "$package_home/.ygg/extensions/ygg-serve/package.toml"
-          test -x "$package_home/.ygg/extensions/ygg-serve/bin/ygg-serve-runtime"
-          test -f "$package_home/.ygg/extensions/ygg-serve/install.json"
-          HOME="$package_home" "$launcher" extension list | grep -F "ygg-serve"
-          HOME="$package_home" scripts/smoke-ygg-serve-installed.sh "$launcher"
-          HOME="$package_home" "$launcher" extension remove ygg-serve
-          test ! -e "$package_home/.ygg/extensions/ygg-serve"
-          grep -Fx "preserve" "$package_home/.ygg/serve-data/sentinel"
+          test -f "$package_home/.octet/extensions/octet-serve/package.toml"
+          test -x "$package_home/.octet/extensions/octet-serve/bin/octet-serve-runtime"
+          test -f "$package_home/.octet/extensions/octet-serve/install.json"
+          HOME="$package_home" "$launcher" extension list | grep -F "octet-serve"
+          HOME="$package_home" scripts/smoke-octet-serve-installed.sh "$launcher"
+          HOME="$package_home" "$launcher" extension remove octet-serve
+          test ! -e "$package_home/.octet/extensions/octet-serve"
+          grep -Fx "preserve" "$package_home/.octet/serve-data/sentinel"
       - name: Preserve Linux launcher for published-package verification
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ygg-extension-test-launcher
-          path: target/x86_64-unknown-linux-gnu/debug/ygg
+          name: octet-extension-test-launcher
+          path: target/x86_64-unknown-linux-gnu/debug/octet
           if-no-files-found: error
           retention-days: 2
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ygg-serve-${{ matrix.target }}
-          path: ${{ runner.temp }}/ygg-serve-release/*.tar.gz
+          name: octet-serve-${{ matrix.target }}
+          path: ${{ runner.temp }}/octet-serve-release/*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -319,16 +319,16 @@ jobs:
           version="${{ needs.resolve.outputs.version }}"
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue
-            scripts/package-ygg-extension-release.sh \
+            scripts/package-octet-extension-release.sh \
               "$extension" \
-              "$RUNNER_TEMP/ygg-extension-release" \
+              "$RUNNER_TEMP/octet-extension-release" \
               "${{ needs.resolve.outputs.tag }}"
-            scripts/package-ygg-extension-release.sh \
+            scripts/package-octet-extension-release.sh \
               "$extension" \
-              "$RUNNER_TEMP/ygg-extension-release-reproducibility-check" \
+              "$RUNNER_TEMP/octet-extension-release-reproducibility-check" \
               "${{ needs.resolve.outputs.tag }}"
-            archive="$RUNNER_TEMP/ygg-extension-release/$extension-$version.tar.gz"
-            repeated="$RUNNER_TEMP/ygg-extension-release-reproducibility-check/$extension-$version.tar.gz"
+            archive="$RUNNER_TEMP/octet-extension-release/$extension-$version.tar.gz"
+            repeated="$RUNNER_TEMP/octet-extension-release-reproducibility-check/$extension-$version.tar.gz"
             test -f "$archive"
             cmp "$archive" "$repeated"
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
@@ -337,13 +337,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ needs.resolve.outputs.version }}"
-          cargo build --locked -p ygg-coding-agent --no-default-features
-          launcher="$PWD/target/debug/ygg"
-          package_home="$RUNNER_TEMP/ygg-bundle-package-home"
+          cargo build --locked -p octet-coding-agent --no-default-features
+          launcher="$PWD/target/debug/octet"
+          package_home="$RUNNER_TEMP/octet-bundle-package-home"
           mkdir -p "$package_home"
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue
-            archive="$RUNNER_TEMP/ygg-extension-release/$extension-$version.tar.gz"
+            archive="$RUNNER_TEMP/octet-extension-release/$extension-$version.tar.gz"
             python3 - "$extension" "$archive" <<'PY'
           import pathlib
           import subprocess
@@ -374,21 +374,21 @@ jobs:
               cd "$(dirname "$archive")"
               HOME="$package_home" "$launcher" extension install --path "./$(basename "$archive")"
             )
-            test -f "$package_home/.ygg/extensions/$extension/extension.toml"
-            test -f "$package_home/.ygg/extensions/$extension/install.json"
+            test -f "$package_home/.octet/extensions/$extension/extension.toml"
+            test -f "$package_home/.octet/extensions/$extension/install.json"
             (
               cd "$(dirname "$archive")"
               HOME="$package_home" "$launcher" extension update --path "./$(basename "$archive")"
             )
             HOME="$package_home" "$launcher" extension list | grep -F "$extension"
-            test ! -e "$package_home/.ygg/config.toml"
+            test ! -e "$package_home/.octet/config.toml"
             HOME="$package_home" "$launcher" extension remove "$extension"
-            test ! -e "$package_home/.ygg/extensions/$extension"
+            test ! -e "$package_home/.octet/extensions/$extension"
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ygg-executable-extension-bundles
-          path: ${{ runner.temp }}/ygg-extension-release/*.tar.gz
+          name: octet-executable-extension-bundles
+          path: ${{ runner.temp }}/octet-extension-release/*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -409,12 +409,12 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          pattern: ygg-serve-*
+          pattern: octet-serve-*
           path: release-assets
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ygg-executable-extension-bundles
+          name: octet-executable-extension-bundles
           path: release-assets
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
@@ -451,7 +451,7 @@ jobs:
           verify=(
             --certificate-identity "$COSIGN_IDENTITY"
             --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"
-            --certificate-github-workflow-name "Ygg Serve extension release"
+            --certificate-github-workflow-name "octet Serve extension release"
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
           )
@@ -465,7 +465,7 @@ jobs:
             --bundle SHA256SUMS.sigstore.json \
             "${verify[@]}" \
             SHA256SUMS
-      - name: Attach assets to the canonical Ygg release
+      - name: Attach assets to the canonical octet release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -520,7 +520,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_commit }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ygg-extension-test-launcher
+          name: octet-extension-test-launcher
           path: test-bin
       - name: Install, update, and remove from the published release
         shell: bash
@@ -528,15 +528,15 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
-          launcher="$PWD/test-bin/ygg"
+          launcher="$PWD/test-bin/octet"
           chmod 0755 "$launcher"
-          test_home="$RUNNER_TEMP/ygg-published-package-home"
-          mkdir -p "$test_home/.ygg/serve-data"
-          printf 'preserve\n' > "$test_home/.ygg/serve-data/sentinel"
+          test_home="$RUNNER_TEMP/octet-published-package-home"
+          mkdir -p "$test_home/.octet/serve-data"
+          printf 'preserve\n' > "$test_home/.octet/serve-data/sentinel"
 
           installed=false
           for attempt in 1 2 3 4 5; do
-            if HOME="$test_home" "$launcher" extension install ygg-serve; then
+            if HOME="$test_home" "$launcher" extension install octet-serve; then
               installed=true
               break
             fi
@@ -544,15 +544,15 @@ jobs:
             sleep $((attempt * 2))
           done
           if [[ "$installed" != true ]]; then
-            echo "could not install ygg-serve from $RELEASE_TAG" >&2
+            echo "could not install octet-serve from $RELEASE_TAG" >&2
             exit 1
           fi
 
-          HOME="$test_home" "$launcher" extension update ygg-serve
-          HOME="$test_home" "$launcher" extension list | grep -F "ygg-serve"
-          HOME="$test_home" "$launcher" extension remove ygg-serve
-          test ! -e "$test_home/.ygg/extensions/ygg-serve"
-          grep -Fx "preserve" "$test_home/.ygg/serve-data/sentinel"
+          HOME="$test_home" "$launcher" extension update octet-serve
+          HOME="$test_home" "$launcher" extension list | grep -F "octet-serve"
+          HOME="$test_home" "$launcher" extension remove octet-serve
+          test ! -e "$test_home/.octet/extensions/octet-serve"
+          grep -Fx "preserve" "$test_home/.octet/serve-data/sentinel"
 
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue
@@ -569,11 +569,11 @@ jobs:
               echo "could not install $extension from $RELEASE_TAG" >&2
               exit 1
             fi
-            test -f "$test_home/.ygg/extensions/$extension/extension.toml"
-            test -f "$test_home/.ygg/extensions/$extension/install.json"
+            test -f "$test_home/.octet/extensions/$extension/extension.toml"
+            test -f "$test_home/.octet/extensions/$extension/install.json"
             HOME="$test_home" "$launcher" extension update "$extension"
             HOME="$test_home" "$launcher" extension list | grep -F "$extension"
-            test ! -e "$test_home/.ygg/config.toml"
+            test ! -e "$test_home/.octet/config.toml"
             HOME="$test_home" "$launcher" extension remove "$extension"
-            test ! -e "$test_home/.ygg/extensions/$extension"
+            test ! -e "$test_home/.octet/extensions/$extension"
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)

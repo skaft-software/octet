@@ -1,6 +1,6 @@
-# Ygg roadmap
+# octet roadmap
 
-Ygg is building a high-performance coding agent for real work: fast,
+octet is building a high-performance coding agent for real work: fast,
 context-efficient, and deeply integrated.
 
 Local-model support, native execution, durable sessions, and language-neutral
@@ -9,7 +9,7 @@ extensions are evidence for that promise, not separate product stories.
 The long-term architectural direction is broader than a plugin list:
 
 > Models are interchangeable brains. Extensions are senses, hands, instruments,
-> and institutions. Ygg is the language-neutral nervous system connecting them.
+> and institutions. octet is the language-neutral nervous system connecting them.
 
 A near-term consequence of that architecture is:
 
@@ -57,7 +57,7 @@ user outcome.
 
 ## Measurements that organize the work
 
-Ygg evaluates roadmap progress with:
+octet evaluates roadmap progress with:
 
 - same-model, same-task end-to-end completion time;
 - task success and human acceptance;
@@ -92,7 +92,7 @@ They do not replace them.
 
 ### Refactor in service of ownership
 
-Ygg is not currently three million lines of live source. Current public `main` is
+octet is not currently three million lines of live source. Current public `main` is
 roughly 484,000 text lines, including tests, generated/vendor files, benchmarks,
 documentation, and configuration. The maintenance problem is nevertheless real:
 several handwritten production modules are 5,000–17,000 lines and own unrelated
@@ -273,9 +273,9 @@ Tracking: [TB4 campaign #194](https://github.com/skaft-software/ygg/issues/194).
 
 ### First adoption gate
 
-- 25 independent users install Ygg and complete a real repository task.
+- 25 independent users install octet and complete a real repository task.
 - At least 10 return within seven days.
-- At least 5 use Ygg on three separate days within 14 days.
+- At least 5 use octet on three separate days within 14 days.
 - Publish denominators, exclusions, abandonment reasons, and representative
   criticism without requiring telemetry or private user data.
 
@@ -316,7 +316,7 @@ scheduler, and a persistent multi-agent pane in the ordinary TUI.
 - Thin native/LAN companion clients after Serve's host/client protocol settles.
 - Additional pinned Pi profiles and migration recipes.
 
-Ygg is not currently an industrial safety kernel. Safety-critical physical
+octet is not currently an industrial safety kernel. Safety-critical physical
 actions require external interlocks, human control, and a separately reviewed
 safety architecture.
 

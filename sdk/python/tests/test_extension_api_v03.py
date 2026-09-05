@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import unittest
 
-from ygg_extension import api_v03 as api
+from octet_extension import api_v03 as api
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -23,6 +23,18 @@ class ExtensionApiV03ConformanceTests(unittest.TestCase):
         with self.assertRaises(api.ContractError) as caught:
             callback()  # type: ignore[operator]
         return caught.exception.code
+
+    def test_previous_first_party_wire_identity_is_not_an_alias(self) -> None:
+        current = dict(self.fixture("initialize-request"))
+        self.assertEqual(current["octet_version"], "0.7.0")
+        self.assertEqual(api.API_VERSION, "0.3")
+        self.assertEqual(api.SCHEMA_ID, "octet.extension.api/0.3")
+        self.assertEqual(api.CANONICAL_ENCODING, "octet-canonical-json-v1")
+        old = dict(current)
+        old["ygg_version"] = old.pop("octet_version")
+        self.assertEqual(self.error_code(lambda: api.parse_initialize_request(old)), -32602)
+        current["ygg_version"] = "0.7.0"
+        self.assertEqual(self.error_code(lambda: api.parse_initialize_request(current)), -32602)
 
     def test_canonical_fixtures_are_byte_exact_and_manifest_hashed(self) -> None:
         manifest = self.fixture("manifest")

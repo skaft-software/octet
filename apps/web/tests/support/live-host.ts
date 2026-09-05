@@ -55,9 +55,9 @@ export const COMPACTION_PROMPT = "E2E_COMPACTION_REQUEST";
 export const COMPACTION_REPLY = "## Goal\nPreserve deterministic E2E history.\n\n## Progress\nConfigured-provider compaction completed.";
 
 const launchLine =
-  /^Open ygg once: (http:\/\/127\.0\.0\.1:(\d+)\/__ygg\/launch\/([0-9a-f]{64}))$/;
+  /^Open octet once: (http:\/\/127\.0\.0\.1:(\d+)\/__octet\/launch\/([0-9a-f]{64}))$/;
 const launchTokenInLog =
-  /(\/__ygg\/launch\/)[0-9a-f]{64}/g;
+  /(\/__octet\/launch\/)[0-9a-f]{64}/g;
 const maxProviderRequestBytes = 1024 * 1024;
 const defaultWaitMs = 20_000;
 
@@ -159,7 +159,7 @@ function responseForPrompt(prompt: string): string {
 
 function streamChunk(content: string): string {
   return `data: ${JSON.stringify({
-    id: "chat-ygg-e2e",
+    id: "chat-octet-e2e",
     object: "chat.completion.chunk",
     created: 1,
     model: LIVE_API_MODEL,
@@ -175,7 +175,7 @@ function streamChunk(content: string): string {
 
 function streamFinished(): string {
   return `data: ${JSON.stringify({
-    id: "chat-ygg-e2e",
+    id: "chat-octet-e2e",
     object: "chat.completion.chunk",
     created: 1,
     model: LIVE_API_MODEL,
@@ -196,7 +196,7 @@ function streamFinished(): string {
 
 function streamToolCall(): string {
   const started = {
-    id: "chat-ygg-e2e-tool",
+    id: "chat-octet-e2e-tool",
     object: "chat.completion.chunk",
     created: 1,
     model: LIVE_API_MODEL,
@@ -222,7 +222,7 @@ function streamToolCall(): string {
     ],
   };
   const finished = {
-    id: "chat-ygg-e2e-tool",
+    id: "chat-octet-e2e-tool",
     object: "chat.completion.chunk",
     created: 1,
     model: LIVE_API_MODEL,
@@ -579,13 +579,13 @@ export class LiveHostHarness {
   }
 
   static async create(): Promise<LiveHostHarness> {
-    const root = await mkdtemp(join(tmpdir(), "ygg-live-e2e-"));
+    const root = await mkdtemp(join(tmpdir(), "octet-live-e2e-"));
     await chmod(root, 0o700);
     const defaultBinary = resolve(
       dirname(fileURLToPath(import.meta.url)),
-      "../../../../target/debug/ygg",
+      "../../../../target/debug/octet",
     );
-    const configuredBinary = process.env.YGG_E2E_BINARY;
+    const configuredBinary = process.env.OCTET_E2E_BINARY;
     const binaryPath = configuredBinary
       ? isAbsolute(configuredBinary)
         ? configuredBinary
@@ -599,17 +599,17 @@ export class LiveHostHarness {
   }
 
   get origin(): string {
-    if (!this.currentOrigin) throw new Error("The ygg host is not running.");
+    if (!this.currentOrigin) throw new Error("The octet host is not running.");
     return this.currentOrigin;
   }
 
   get port(): number {
-    if (!this.currentPort) throw new Error("The ygg host is not running.");
+    if (!this.currentPort) throw new Error("The octet host is not running.");
     return this.currentPort;
   }
 
   async start(port = 0): Promise<HostStart> {
-    if (this.child) throw new Error("The ygg host is already running.");
+    if (this.child) throw new Error("The octet host is already running.");
     await access(this.binaryPath, constants.X_OK);
 
     const child = spawn(
@@ -642,7 +642,7 @@ export class LiveHostHarness {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           NO_PROXY: "127.0.0.1,localhost",
           no_proxy: "127.0.0.1,localhost",
-          YGG_E2E_PROVIDER_TOKEN: LIVE_PROVIDER_TOKEN,
+          OCTET_E2E_PROVIDER_TOKEN: LIVE_PROVIDER_TOKEN,
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -677,7 +677,7 @@ export class LiveHostHarness {
 
     if (!child.stdout || !child.stderr) {
       this.child = null;
-      throw new Error("The ygg host did not expose process output.");
+      throw new Error("The octet host did not expose process output.");
     }
     const stdout = createInterface({ input: child.stdout });
     const stderr = createInterface({ input: child.stderr });
@@ -695,14 +695,14 @@ export class LiveHostHarness {
         settled = true;
         launched.reject(
           new Error(
-            `ygg serve exited before launch (${code ?? signal ?? "unknown"}).\n${this.sanitizedOutput.join("\n")}`,
+            `octet serve exited before launch (${code ?? signal ?? "unknown"}).\n${this.sanitizedOutput.join("\n")}`,
           ),
         );
       }
     });
 
     try {
-      return await withTimeout(launched.promise, "the ygg launch URL", 30_000);
+      return await withTimeout(launched.promise, "the octet launch URL", 30_000);
     } catch (error) {
       await this.stop(false);
       throw error;
@@ -734,19 +734,19 @@ export class LiveHostHarness {
 
     let result: { code: number | null; signal: NodeJS.Signals | null };
     try {
-      result = await withTimeout(exited, "clean ygg shutdown", 20_000);
+      result = await withTimeout(exited, "clean octet shutdown", 20_000);
     } catch {
       child.kill("SIGTERM");
       try {
-        result = await withTimeout(exited, "forced ygg shutdown", 5_000);
+        result = await withTimeout(exited, "forced octet shutdown", 5_000);
       } catch {
         child.kill("SIGKILL");
-        result = await withTimeout(exited, "killed ygg shutdown", 5_000);
+        result = await withTimeout(exited, "killed octet shutdown", 5_000);
       }
     }
     if (expectClean && result.code !== 0) {
       throw new Error(
-        `ygg serve did not shut down cleanly (${result.code ?? result.signal ?? "unknown"}).\n${this.sanitizedOutput.join("\n")}`,
+        `octet serve did not shut down cleanly (${result.code ?? result.signal ?? "unknown"}).\n${this.sanitizedOutput.join("\n")}`,
       );
     }
   }
@@ -825,8 +825,8 @@ export class LiveHostHarness {
     const directories = [
       this.homeDir,
       join(this.homeDir, ".config"),
-      join(this.homeDir, ".ygg"),
-      join(this.homeDir, ".ygg", "credentials"),
+      join(this.homeDir, ".octet"),
+      join(this.homeDir, ".octet", "credentials"),
       this.workspaceDir,
       this.sessionDir,
       this.processTempDir,
@@ -841,7 +841,7 @@ export class LiveHostHarness {
       { mode: 0o600 },
     );
     await writeFile(
-      join(this.homeDir, ".ygg", "config.toml"),
+      join(this.homeDir, ".octet", "config.toml"),
       "[compaction]\nmode = \"local\"\nthreshold_fraction = 0.85\nkeep_recent_tokens = 1\n",
       { mode: 0o600 },
     );
@@ -850,7 +850,7 @@ export class LiveHostHarness {
   private async writeProviderRegistry(): Promise<void> {
     const path = join(
       this.homeDir,
-      ".ygg",
+      ".octet",
       "credentials",
       "custom.json",
     );
@@ -880,7 +880,7 @@ export class LiveHostHarness {
           auto_discover: false,
           auth: {
             kind: "bearer_env",
-            var: "YGG_E2E_PROVIDER_TOKEN",
+            var: "OCTET_E2E_PROVIDER_TOKEN",
           },
         },
       },

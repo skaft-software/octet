@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Inspectable local-model workflow contributions for Ygg."""
+"""Inspectable local-model workflow contributions for octet."""
 
 from pathlib import Path
 
-from ygg_extension import Extension
+from octet_extension import Extension
 
 
 ext = Extension()
