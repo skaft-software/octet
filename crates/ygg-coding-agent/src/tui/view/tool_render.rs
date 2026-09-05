@@ -206,7 +206,15 @@ pub(super) fn render_diff_only(
     let Some(ref diff) = tool_diff(panel) else {
         return Vec::new();
     };
-    let parsed = UnifiedDiff::parse(diff);
+    let mut parsed = UnifiedDiff::parse(diff);
+    // The edit/write tool row already identifies this one file. Repeating two
+    // absolute headers can consume the whole preview before either changed
+    // line is visible. Full disclosure keeps the original headers intact.
+    if !expanded {
+        parsed
+            .lines
+            .retain(|line| line.kind != DiffLineKind::FileHeader);
+    }
     let render_width = width.saturating_sub(output_indent_width);
     let options = DiffRenderOptions {
         line_numbers: width >= 70,

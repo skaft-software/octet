@@ -939,18 +939,23 @@ pub async fn thinking_picker(
     input: &mut EventStream,
     levels: &[ThinkingLevel],
 ) -> anyhow::Result<Option<ThinkingLevel>> {
-    let items: Vec<String> = levels.iter().map(|l| l.label().into()).collect();
+    let mut items: Vec<String> = levels.iter().map(|l| l.label().into()).collect();
+    let (_, current) = shell.selected_identity();
+    let initial = mark_current_choice(
+        &mut items,
+        levels.iter().position(|level| level.label() == current),
+    );
     let action_levels = levels.to_vec();
     let Some(index) = pick_list(
         shell,
         input,
         OrdinarySurfaceMetadata::with_purpose(
             "Select thinking level",
-            "Choose the reasoning effort for subsequent prompts",
+            "Choose effort for subsequent prompts and the startup default",
         ),
         items,
         vec![None; levels.len()],
-        0,
+        initial,
         PanelAction::SelectThinking(action_levels),
     )
     .await?
@@ -1218,6 +1223,15 @@ fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPresentation 
     presentation
 }
 
+fn mark_current_choice(labels: &mut [String], current: Option<usize>) -> usize {
+    if let Some(index) = current {
+        labels[index].push_str(" (current)");
+        index
+    } else {
+        0
+    }
+}
+
 /// Ask the user to select one model, preserving cancellation for workflows
 /// such as `/logout` that must not mutate credentials until a replacement model
 /// has been chosen.
@@ -1226,18 +1240,23 @@ pub async fn optional_model_picker(
     input: &mut EventStream,
     catalog: &ModelCatalog,
 ) -> anyhow::Result<Option<ModelId>> {
-    let presentation = model_picker_presentation(catalog);
+    let mut presentation = model_picker_presentation(catalog);
+    let (current, _) = shell.selected_identity();
+    let initial = mark_current_choice(
+        &mut presentation.labels,
+        presentation.ids.iter().position(|id| id.0 == current),
+    );
 
     let Some(index) = pick_list(
         shell,
         input,
         OrdinarySurfaceMetadata::with_purpose(
             "Select model",
-            "Choose the model used for subsequent prompts",
+            "Choose the model for subsequent prompts and the startup default",
         ),
         presentation.labels,
         presentation.descriptions,
-        0,
+        initial,
         PanelAction::SelectGroupedModel {
             models: presentation.ids.clone(),
             providers: presentation.providers,
@@ -1270,6 +1289,15 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use tokio_stream::wrappers::ReceiverStream;
+
+    #[test]
+    fn active_choice_is_focused_and_marked_without_reordering() {
+        let mut labels = vec!["off".into(), "high".into(), "max".into()];
+        assert_eq!(mark_current_choice(&mut labels, Some(2)), 2);
+        assert_eq!(labels, ["off", "high", "max (current)"]);
+        let mut empty = Vec::new();
+        assert_eq!(mark_current_choice(&mut empty, None), 0);
+    }
 
     #[tokio::test]
     async fn live_styled_document_rerenders_at_panel_content_width_after_resize() {

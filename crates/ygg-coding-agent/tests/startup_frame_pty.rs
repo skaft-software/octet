@@ -3,8 +3,8 @@
 //! Deterministic PTY/frame regression coverage for primary-screen startup.
 //!
 //! The real binary is run against a disposable HOME, workspace, session store,
-//! and inert local custom-provider record. No prompt is submitted, so the test
-//! exercises terminal lifecycle only and never needs credentials or a network.
+//! and a local custom-provider record. Startup tests submit no prompt. API-wait
+//! tests use only a gated loopback fixture, never credentials or a live model.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -197,11 +197,26 @@ struct PtyYgg {
 
 impl PtyYgg {
     fn spawn(binary: &Path, mode: MouseMode) -> Self {
+        Self::spawn_configured(binary, mode, None, false)
+    }
+
+    fn spawn_configured(binary: &Path, mode: MouseMode, api: Option<&str>, color: bool) -> Self {
         let root = tempfile::tempdir().expect("PTY test tempdir");
         let home = root.path().join("home");
         let workspace = root.path().join("workspace");
         let sessions = root.path().join("sessions");
         create_inert_environment(&home, &workspace, &sessions);
+        if let Some(base_url) = api {
+            let credential = serde_json::json!({
+                "base_url": base_url, "api_key": "", "api_name": "probe",
+                "headers": [], "models": [], "auto_discover": false,
+            });
+            fs::write(
+                home.join(".ygg/credentials/custom.json"),
+                credential.to_string(),
+            )
+            .expect("loopback provider fixture");
+        }
 
         let mut pty = Pty::open(INITIAL_COLUMNS, INITIAL_ROWS);
         // Rows exist before the child is exec'd, exactly as stale shell output
@@ -219,7 +234,7 @@ impl PtyYgg {
                 "--no-context-files",
                 "--no-tools",
                 "--color",
-                "never",
+                if color { "always" } else { "never" },
                 "--mouse",
                 mode.as_arg(),
                 "--model",
@@ -744,6 +759,366 @@ fn legacy_inline_startup_frame_pty_contract() {
         include_str!("fixtures/startup-frame-pty/legacy-inline.trace"),
         &trace.debug_report(),
     );
+}
+
+/// One HTTP owner, one explicit response gate per request. It sends headers
+/// immediately, but no provider events until the test releases the body.
+struct HeldChatApi {
+    url: String,
+    arrived: std::sync::mpsc::Receiver<usize>,
+    release: std::sync::mpsc::Sender<()>,
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl HeldChatApi {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/v1/", listener.local_addr().unwrap());
+        let (arrived_tx, arrived) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let counted = count.clone();
+        let stopped = stop.clone();
+        let worker = thread::spawn(move || {
+            while !stopped.load(Ordering::SeqCst) {
+                let mut socket = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("loopback accept: {error}"),
+                };
+                // BSD/macOS accept inherits O_NONBLOCK from the listener;
+                // read timeouts only bound blocking sockets.
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut bytes = [0; 1024];
+                    let n = socket.read(&mut bytes).unwrap();
+                    assert!(n > 0, "request ended before headers");
+                    request.extend_from_slice(&bytes[..n]);
+                    assert!(request.len() <= 128 * 1024, "bounded loopback request");
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1"));
+                assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                assert!(length <= 128 * 1024);
+                while request.len() < header_end + length {
+                    let mut bytes = [0; 1024];
+                    let n = socket.read(&mut bytes).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&bytes[..n]);
+                }
+                let body = concat!(
+                    "data: {\"id\":\"fixture\",\"model\":\"probe\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"fixture response done\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                socket.flush().unwrap();
+                let index = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                if arrived_tx.send(index).is_err() {
+                    break;
+                }
+                loop {
+                    if stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    match released.recv_timeout(Duration::from_millis(50)) {
+                        Ok(()) => {
+                            let _ = socket.write_all(body.as_bytes());
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            }
+        });
+        Self {
+            url,
+            arrived,
+            release,
+            count,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn wait_for_request(&self, ygg: &mut PtyYgg, index: usize) {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            // A PTY has a small bounded output buffer. Keep draining it while
+            // waiting for HTTP so the fixture itself cannot block the renderer.
+            ygg.pty.read_available();
+            match self.arrived.try_recv() {
+                Ok(actual) => {
+                    assert_eq!(actual, index);
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(error) => panic!(
+                    "HTTP fixture closed: {error}; terminal: {}",
+                    visible_bytes(&ygg.pty.output)
+                ),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "HTTP request {index} did not arrive; terminal: {}",
+                visible_bytes(&ygg.pty.output)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl Drop for HeldChatApi {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.release.send(());
+        if let Some(worker) = self.worker.take() {
+            if let Err(panic) = worker.join() {
+                if !thread::panicking() {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        }
+    }
+}
+
+fn status_colors(parser: &vt100::Parser, label: &str, columns: u16) -> Option<Vec<vt100::Color>> {
+    parser
+        .screen()
+        .rows(0, columns)
+        .enumerate()
+        .find_map(|(row, text)| {
+            let index = text.find(label)?;
+            let column = text[..index].chars().count();
+            Some(
+                (column..column + label.chars().count())
+                    .map(|col| {
+                        parser
+                            .screen()
+                            .cell(row as u16, col as u16)
+                            .unwrap()
+                            .fgcolor()
+                    })
+                    .collect(),
+            )
+        })
+}
+
+fn await_screen(
+    ygg: &mut PtyYgg,
+    parser: &mut vt100::Parser,
+    consumed: &mut usize,
+    text: &str,
+    budget: Duration,
+) {
+    let deadline = Instant::now() + budget;
+    loop {
+        ygg.pty.read_available();
+        parser.process(&ygg.pty.output[*consumed..]);
+        *consumed = ygg.pty.output.len();
+        if parser.screen().contents().contains(text) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "screen did not show {text:?} within {budget:?}: {}",
+            parser.screen().contents()
+        );
+        assert!(
+            ygg.child.try_wait().unwrap().is_none(),
+            "fixture binary exited"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn assert_held_activity_pty(compact: bool, color: bool) {
+    const INPUT_BUDGET: Duration = Duration::from_millis(500);
+    const SAMPLE: Duration = Duration::from_millis(640);
+    let api = HeldChatApi::start();
+    let mut ygg = PtyYgg::spawn_configured(
+        Path::new(env!("CARGO_BIN_EXE_ygg")),
+        MouseMode::Auto,
+        Some(&api.url),
+        color,
+    );
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(
+        &mut ygg,
+        &mut parser,
+        &mut consumed,
+        "custom/probe",
+        STARTUP_TIMEOUT,
+    );
+    // Settle finite startup animation before measuring steady idle/redraw work.
+    ygg.pty.drain_for(Duration::from_secs(3));
+    parser.process(&ygg.pty.output[consumed..]);
+    consumed = ygg.pty.output.len();
+    let idle_start = consumed;
+    ygg.pty.drain_for(SAMPLE);
+    let idle_frames = frame_ranges(&ygg.pty.output[idle_start..]).len();
+    assert!(
+        idle_frames <= 1,
+        "idle redraw must remain bounded: {idle_frames}"
+    );
+    ygg.pty.write_input(b"fixture initial prompt\r");
+    api.wait_for_request(&mut ygg, 1);
+    let (label, request_count) = if compact {
+        api.release.send(()).unwrap();
+        await_screen(
+            &mut ygg,
+            &mut parser,
+            &mut consumed,
+            "completed",
+            STARTUP_TIMEOUT,
+        );
+        // A trailing space bypasses the slash-completion Enter owner and
+        // submits the actual no-argument command in one terminal keypress.
+        ygg.pty.write_input(b"/compact \r");
+        api.wait_for_request(&mut ygg, 2);
+        ("Compacting context", 2)
+    } else {
+        ("Working", 1)
+    };
+    await_screen(&mut ygg, &mut parser, &mut consumed, label, INPUT_BUDGET);
+    // Nothing releases this response gate during sampling or user interaction.
+    let mut palettes = vec![status_colors(&parser, label, INITIAL_COLUMNS).unwrap()];
+    let sample_start = consumed;
+    ygg.pty.drain_for(SAMPLE);
+    let sample_end = ygg.pty.output.len();
+    let frames = frame_ranges(&ygg.pty.output[sample_start..sample_end]);
+    for frame in &frames {
+        let end = sample_start + frame.end;
+        parser.process(&ygg.pty.output[consumed..end]);
+        consumed = end;
+        if let Some(colors) = status_colors(&parser, label, INITIAL_COLUMNS) {
+            if !palettes.contains(&colors) {
+                palettes.push(colors);
+            }
+        }
+    }
+    assert!(
+        frames.len() <= 12,
+        "bounded 80 ms animation cadence, not busy redraw: {}",
+        frames.len()
+    );
+    if color {
+        assert!(palettes.len() >= 3, "held {label} must change ANSI cell styles without provider events: {} palettes / {} frames", palettes.len(), frames.len());
+    } else {
+        assert_eq!(
+            palettes.len(),
+            1,
+            "no-color status style intentionally static"
+        );
+        assert!(
+            frames.len() <= 2,
+            "static profile should write only elapsed-second changes"
+        );
+    }
+    ygg.pty.write_input(b"draft remains local");
+    await_screen(
+        &mut ygg,
+        &mut parser,
+        &mut consumed,
+        "draft remains local",
+        INPUT_BUDGET,
+    );
+    let resize_start = ygg.pty.output.len();
+    parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
+    ygg.resize(RESIZED_COLUMNS, RESIZED_ROWS);
+    ygg.wait_until(INPUT_BUDGET, |bytes| {
+        synchronized_frame_end_containing(&bytes[resize_start..], b"\x1b[2J").is_some()
+    });
+    parser.process(&ygg.pty.output[consumed..]);
+    consumed = ygg.pty.output.len();
+    assert!(parser.screen().contents().contains("draft remains local"));
+    let replay = sexy_tui_rs::strip_terminal_sequences(&String::from_utf8_lossy(
+        &ygg.pty.output[resize_start..],
+    ));
+    assert_eq!(
+        replay.matches("permissions:").count(),
+        1,
+        "resize replays exactly one welcome card"
+    );
+    ygg.pty.write_input(b"\x1b");
+    await_screen(
+        &mut ygg,
+        &mut parser,
+        &mut consumed,
+        if compact {
+            "compaction cancelled"
+        } else {
+            "interrupted"
+        },
+        INPUT_BUDGET,
+    );
+    assert!(parser.screen().contents().contains("draft remains local"));
+    assert!(
+        !parser.screen().contents().contains(label),
+        "no stale active status after cancellation"
+    );
+    // After local settlement, retire the cancelled fixture socket and allow
+    // the listener to observe any incorrectly duplicated POST before shutdown.
+    api.release.send(()).unwrap();
+    ygg.pty.drain_for(Duration::from_millis(100));
+    assert_eq!(
+        api.count.load(std::sync::atomic::Ordering::SeqCst),
+        request_count,
+        "no duplicate provider request"
+    );
+    let shutdown = ygg.shutdown();
+    assert!(shutdown.status.success());
+    assert!(shutdown.termios_restored);
+    parser.process(&shutdown.output[consumed..]);
+    assert!(!parser.screen().hide_cursor());
+    assert!(!parser.screen().bracketed_paste());
+    assert!(!uses_alternate_screen(&shutdown.output));
+    assert_eq!(
+        count_bytes(&shutdown.output, FRAME_BEGIN),
+        count_bytes(&shutdown.output, FRAME_END)
+    );
+    eprintln!("held-api-pty compact={compact} color={color}: idle_frames={idle_frames}, active_frames={}, palettes={}, input_budget_ms=500, no_duplicate_posts=true, restored=true", frames.len(), palettes.len());
+}
+
+#[test]
+fn real_ygg_held_api_wait_pty_contract() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for compact in [false, true] {
+        for color in [true, false] {
+            assert_held_activity_pty(compact, color);
+        }
+    }
 }
 
 fn create_inert_environment(home: &Path, workspace: &Path, sessions: &Path) {

@@ -153,11 +153,14 @@ pub(crate) enum ToolImagePlaceholder {
     SessionImageLimit,
     SessionByteLimit,
     TerminalRegistryLimit,
+    /// Coarse live-owner omission, not exact parity with durable-image reasons.
+    OwnerPresentationBoundary,
 }
 
 impl ToolImagePlaceholder {
     fn text(self) -> &'static str {
         match self {
+            Self::OwnerPresentationBoundary => "[image unavailable: owner presentation boundary]",
             Self::NotInline => "[image unavailable: inline payload required]",
             Self::Invalid => "[image unavailable: invalid inline payload]",
             Self::ImageByteLimit => "[image unavailable: image byte limit]",
@@ -260,6 +263,21 @@ pub(crate) fn project_tool_images<'a>(
         item_bytes = item_bytes.saturating_add(bytes);
         session_budget.retain(bytes);
         images.push(ToolResultImage::ready(image));
+    }
+    images
+}
+
+/// Project the explicitly opted-in owner's ToolFinished image copy. A bounded
+/// metadata flag supplies overflow feedback without manufacturing Media bytes.
+pub(crate) fn project_tool_output_images(
+    output: &ygg_agent::ToolOutput,
+    session_budget: &mut ToolImageBudget,
+) -> Vec<ToolResultImage> {
+    let mut images = project_tool_images(output.media(), session_budget);
+    if output.presentation_images_omitted() {
+        images.push(ToolResultImage::Placeholder(
+            ToolImagePlaceholder::OwnerPresentationBoundary,
+        ));
     }
     images
 }
@@ -392,6 +410,21 @@ fn push_message(
                 .iter()
                 .any(|part| matches!(part, UserPart::ToolResult(_)));
             let prompt_color = (!contains_tool_result).then_some(prompt_color).flatten();
+            // Chat lowering alone emits [one ToolResult, Media...], with
+            // text-only result content. Do not capture ordinary user attachments
+            // or arbitrary mixed user/tool messages as tool presentation images.
+            let adjacent_tool_media = match user.content.as_slice() {
+                [UserPart::ToolResult(result), rest @ ..]
+                    if result
+                        .content
+                        .iter()
+                        .all(|part| matches!(part, ToolResultPart::Text(_)))
+                        && rest.iter().all(|part| matches!(part, UserPart::Media(_))) =>
+                {
+                    rest
+                }
+                _ => &[],
+            };
             let mut text = String::new();
             for part in &user.content {
                 match part {
@@ -412,14 +445,24 @@ fn push_message(
                             is_error: result.is_error,
                             duration_ms: tool_result_duration_ms(metadata),
                             images: project_tool_images(
-                                result.content.iter().filter_map(|part| match part {
-                                    ToolResultPart::Media(media) => Some(media),
-                                    ToolResultPart::Text(_) => None,
-                                }),
+                                result
+                                    .content
+                                    .iter()
+                                    .filter_map(|part| match part {
+                                        ToolResultPart::Media(media) => Some(media),
+                                        ToolResultPart::Text(_) => None,
+                                    })
+                                    .chain(adjacent_tool_media.iter().filter_map(
+                                        |part| match part {
+                                            UserPart::Media(media) => Some(media),
+                                            _ => None,
+                                        },
+                                    )),
                                 image_budget,
                             ),
                         })
                     }
+                    UserPart::Media(Media::Image(_)) if !adjacent_tool_media.is_empty() => {}
                     UserPart::Media(media) => text.push_str(&media_marker(media)),
                 }
             }
@@ -741,6 +784,94 @@ mod tests {
             model: ModelId("test".into()),
             protocol: Protocol::OpenAiChat,
         }))
+    }
+
+    fn synthetic_png() -> Media {
+        Media::image_bytes(
+            bytes::Bytes::from_static(&[
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+                1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100,
+                248, 15, 0, 1, 5, 1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+                130,
+            ]),
+            "image/png".parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn tool_images_hydrate_for_nested_and_chat_adjacent_protocol_shapes() {
+        for protocol in [
+            Protocol::OpenAiChat,
+            Protocol::OpenAiResponses,
+            Protocol::AnthropicMessages,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+            let mut result = ToolResult {
+                tool_call_id: ToolCallId("image-call".into()),
+                content: vec![ToolResultPart::Text("read=image".into())],
+                is_error: false,
+                added_tool_names: None,
+            };
+            let content = if protocol == Protocol::OpenAiChat {
+                vec![
+                    UserPart::ToolResult(result),
+                    UserPart::Media(synthetic_png()),
+                ]
+            } else {
+                result.content.push(ToolResultPart::Media(synthetic_png()));
+                vec![UserPart::ToolResult(result)]
+            };
+            session
+                .append(EntryValue::Message(Message::User(UserMessage { content })))
+                .unwrap();
+            let items = hydrate_transcript(&session).unwrap();
+            assert_eq!(items.len(), 1, "{protocol:?}");
+            let TranscriptItem::ToolResult { images, .. } = &items[0] else {
+                panic!("tool result")
+            };
+            assert_eq!(images.len(), 1);
+            assert!(
+                matches!(&images[0], ToolResultImage::Ready { .. }),
+                "{images:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_attachments_and_mixed_tool_messages_do_not_become_tool_images() {
+        let result = ToolResult {
+            tool_call_id: ToolCallId("call".into()),
+            content: vec![ToolResultPart::Text("done".into())],
+            is_error: false,
+            added_tool_names: None,
+        };
+        for content in [
+            vec![
+                UserPart::Text("look ".into()),
+                UserPart::Media(synthetic_png()),
+            ],
+            vec![
+                UserPart::ToolResult(result),
+                UserPart::Text("my attachment ".into()),
+                UserPart::Media(synthetic_png()),
+            ],
+        ] {
+            let mut items = Vec::new();
+            let mut budget = ToolImageBudget::default();
+            push_message(
+                &mut items,
+                &mut budget,
+                &Message::User(UserMessage { content }),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(budget.image_count, 0);
+            assert!(items.iter().any(|item| matches!(item, TranscriptItem::User { text, .. } if text.contains("[image image/png"))));
+            assert!(!items.iter().any(|item| matches!(item, TranscriptItem::ToolResult { images, .. } if !images.is_empty())));
+        }
     }
 
     #[test]

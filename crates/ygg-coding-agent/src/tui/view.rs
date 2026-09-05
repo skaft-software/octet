@@ -26,7 +26,8 @@ use ygg_ai::{ModalitySet, Model, ModelId, ToolCallId, Usage};
 use crate::config::Config;
 use crate::hydrate::{
     hydrate_transcript_at_with_image_budget, hydrate_transcript_tail_with_image_budget,
-    project_tool_images, tool_image_limits, ToolImageBudget, ToolImagePlaceholder, ToolResultImage,
+    project_tool_output_images, tool_image_limits, ToolImageBudget, ToolImagePlaceholder,
+    ToolResultImage,
 };
 #[cfg(test)]
 use crate::presentation::summarize_tool;
@@ -1858,6 +1859,9 @@ impl ShellState {
 
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
         reasoning.is_working_activity()
+            || (!reasoning.finished
+                && reasoning.text.is_empty()
+                && reasoning.reasoning_heading.as_deref() == Some("Compacting context"))
             || (!reasoning.text.is_empty()
                 && !self.verbose_tools
                 && !reasoning.finished
@@ -2757,13 +2761,9 @@ impl InteractiveShell {
                 let index = state.tool_panels.get(id).copied();
                 let completed_images = if index.is_some() {
                     match result {
-                        Ok(output) => project_tool_images(
-                            output.content_parts().iter().filter_map(|part| match part {
-                                ygg_agent::ToolOutputContentPart::Media(media) => Some(media),
-                                ygg_agent::ToolOutputContentPart::Text(_) => None,
-                            }),
-                            &mut state.tool_image_budget,
-                        ),
+                        Ok(output) => {
+                            project_tool_output_images(output, &mut state.tool_image_budget)
+                        }
                         Err(_) => Vec::new(),
                     }
                 } else {
@@ -3420,6 +3420,11 @@ impl InteractiveShell {
         invalidate_extension_autocomplete(&mut state);
     }
 
+    pub(crate) fn selected_identity(&self) -> (String, String) {
+        let state = self.state.borrow();
+        (state.model.clone(), state.reasoning.clone())
+    }
+
     pub fn set_identity(&mut self, provider: &str, model: &str, reasoning: &str) {
         let mut state = self.state.borrow_mut();
         let welcome_changed = state.model != model || state.reasoning != reasoning;
@@ -3718,53 +3723,12 @@ impl InteractiveShell {
     /// Drain the editor and resolve chips into ordered parts.
     pub fn drain_composed(&mut self) -> ComposedInput {
         let mut state = self.state.borrow_mut();
-        let mut text = state.editor.take_text();
+        let text = state.editor.take_text();
         invalidate_extension_autocomplete(&mut state);
 
-        // Drag/drop is not consistently delivered as a bracketed-paste event.
-        // When it arrives as ordinary keys, promote every existing media path
-        // at submit time even if the user added prompt text around it.
-        let dropped = composer::dropped_paths_in_text(&text);
-        if !dropped.is_empty() {
-            let mut rewritten = String::with_capacity(text.len());
-            let mut cursor = 0;
-            let mut errors = Vec::new();
-            for (range, path) in dropped {
-                rewritten.push_str(&text[cursor..range.start]);
-                let replacement = if composer::media_kind_for_path(&path).is_some() {
-                    let modalities = state.input_modalities;
-                    match state.ledger.attach_media(&path, modalities) {
-                        Ok(chip) => Some(chip),
-                        Err(error) => {
-                            errors.push(error.to_string());
-                            None
-                        }
-                    }
-                } else if composer::file_kind_for_path(&path).is_some() {
-                    match state.ledger.attach_file_reference(&path) {
-                        Ok(chip) => Some(chip),
-                        Err(error) => {
-                            errors.push(error.to_string());
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                if let Some(replacement) = replacement {
-                    rewritten.push_str(&replacement);
-                } else {
-                    rewritten.push_str(&text[range.clone()]);
-                }
-                cursor = range.end;
-            }
-            rewritten.push_str(&text[cursor..]);
-            text = rewritten;
-            for error in errors {
-                state.push_block(TranscriptBlock::Notice(error));
-            }
-        }
-
+        // Ordinary path text is not consent to read or transmit a file. Only
+        // attachment chips already shown by explicit paste/@ selection resolve
+        // to media here; raw-key drops remain inspectable text.
         if state.ledger.is_empty() {
             ComposedInput::from_text(text)
         } else {

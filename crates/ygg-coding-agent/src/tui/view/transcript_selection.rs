@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::presentation::{format_duration, RunOutcome};
 
 use super::outcome_render::{
-    bounded_outcome_detail, completion_text, completion_with_warnings_text,
+    bounded_outcome_detail, completion_text, completion_with_warnings_text, warning_detail,
 };
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{bounded_tool_failure_reason, looks_like_diff};
@@ -93,9 +93,13 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             RunOutcome::Completed { elapsed, .. } => {
                 completion_text(*elapsed, " · ", outcome.tokens_per_second)
             }
-            RunOutcome::CompletedWithWarnings { elapsed, .. } => {
-                completion_with_warnings_text(*elapsed, " · ", outcome.tokens_per_second)
-            }
+            RunOutcome::CompletedWithWarnings {
+                elapsed, warnings, ..
+            } => format!(
+                "{}\n{}",
+                completion_with_warnings_text(*elapsed, " · ", outcome.tokens_per_second),
+                warning_detail(*warnings),
+            ),
             RunOutcome::Failed { elapsed, reason } => format!(
                 "failed · {}\n{}",
                 format_duration(*elapsed),

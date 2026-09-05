@@ -2670,29 +2670,24 @@ fn media_path_paste_attaches_a_chip_and_composes_media_parts() {
 }
 
 #[test]
-fn raw_key_drop_with_surrounding_prompt_still_attaches_media() {
+fn ordinary_typed_media_path_is_not_upload_consent() {
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("screen shot.png");
-    std::fs::write(&image, b"png").unwrap();
-
+    std::fs::write(&image, b"synthetic-private-image-sentinel").unwrap();
     let mut shell = InteractiveShell::test_shell();
     shell.set_input_modalities(ygg_ai::ModalitySet::none().with(ygg_ai::Modality::Image));
     let escaped = image.display().to_string().replace(' ', "\\ ");
-    for character in format!("{escaped} diagnose this UI").chars() {
+    let prompt = format!("Explain this pathname; do not open it: {escaped}");
+    for character in prompt.chars() {
         shell.apply_edit(EditAction::Char(character));
     }
-
     let composed = shell.drain_composed();
-    assert!(composed
-        .display_text
-        .contains("[Image #1] diagnose this UI"));
+    assert_eq!(composed.display_text, prompt);
     assert!(composed
         .parts
         .iter()
-        .any(|part| matches!(part, ygg_agent::InputPart::Media(ygg_ai::Media::Image(_)))));
-    assert!(composed.parts.iter().any(
-        |part| matches!(part, ygg_agent::InputPart::Text(text) if text.contains("diagnose this UI"))
-    ));
+        .all(|part| matches!(part, ygg_agent::InputPart::Text(_))));
+    assert!(composed.attachments.is_empty());
 }
 
 #[test]
@@ -3309,7 +3304,13 @@ fn resumed_session_restores_every_write_as_a_diff_panel() {
 
     assert!(rendered.contains("current format"), "{rendered}");
     assert!(rendered.contains("legacy format"), "{rendered}");
-    assert!(rendered.matches("/dev/null").count() >= 2, "{rendered}");
+    assert!(
+        rendered.contains("new.rs") && rendered.contains("legacy.rs"),
+        "{rendered}"
+    );
+    shell.set_verbose_tools(true);
+    let expanded = strip_terminal_sequences(&render_shell(&shell.state.borrow(), 120).join("\n"));
+    assert!(expanded.matches("/dev/null").count() >= 2, "{expanded}");
 }
 
 #[test]
@@ -5698,7 +5699,7 @@ fn transcript_events_prompt_and_composer_share_one_grid() {
 }
 
 #[test]
-fn tool_rendering_shows_concise_failures_but_hides_raw_evidence() {
+fn tool_rendering_shows_bounded_failure_evidence_but_hides_transport_metadata() {
     use ygg_agent::{ToolError, ToolOutput};
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("openai");
@@ -5726,7 +5727,7 @@ fn tool_rendering_shows_concise_failures_but_hides_raw_evidence() {
     assert!(!plain.contains("provider-call-secret"), "{plain:?}");
     assert!(!plain.contains("exit=1"), "{plain:?}");
     assert!(!plain.contains("duration=0.2s"), "{plain:?}");
-    assert!(!plain.contains("76 passed"), "{plain:?}");
+    assert!(plain.contains("stderr: FAILED 76 passed"), "{plain:?}");
     assert!(plain.contains("command exited 1"), "{plain:?}");
     let stale = ToolCallId("stale-edit-id".into());
     shell.on_run_event(
@@ -6003,6 +6004,32 @@ fn edit_status_prefix_does_not_hide_the_unified_diff() {
 }
 
 #[test]
+fn compact_edit_keeps_both_replacement_sides_with_long_paths() {
+    let theme = crate::tui::theme::test_theme();
+    let path = format!("/work/{}/pagination.py", "long-directory/".repeat(15));
+    let args = serde_json::json!({"path": path});
+    let panel = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("compact-replacement".into()), "edit".into(), args.to_string(),
+        summarize_tool("edit", &args),
+        format!("--- a/{path}\n+++ b/{path}\n@@ -1,5 +1,5 @@\n context\n context\n-start = page * size\n+start = (page - 1) * size\n context\n context\n"),
+        true, false, None, None,
+    )));
+    let renderer = theme.rich_renderer();
+    for width in [60, 80, 120] {
+        let rows = render_block(None, &panel, &theme, &renderer, &renderer, width, false);
+        let plain = strip_terminal_sequences(&rows.join("\n"));
+        assert!(plain.contains("-start = page * size"), "{width}: {plain}");
+        assert!(
+            plain.contains("+start = (page - 1) * size"),
+            "{width}: {plain}"
+        );
+        assert!(rows
+            .iter()
+            .all(|row| visible_width(row) <= usize::from(width)));
+    }
+}
+
+#[test]
 fn layered_write_diff_reports_one_truthful_remainder_per_disclosure_mode() {
     let theme = crate::tui::theme::test_theme();
     let renderer = theme.rich_renderer();
@@ -6028,7 +6055,7 @@ fn layered_write_diff_reports_one_truthful_remainder_per_disclosure_mode() {
     let collapsed = strip_terminal_sequences(
         &render_block(None, &block, &theme, &renderer, &renderer, 100, false).join("\n"),
     );
-    assert!(collapsed.contains("184 lines hidden"), "{collapsed:?}");
+    assert!(collapsed.contains("182 lines hidden"), "{collapsed:?}");
     assert!(!collapsed.contains("181 more lines"), "{collapsed:?}");
     assert_eq!(
         collapsed.matches("lines hidden").count(),
@@ -6295,6 +6322,33 @@ fn collapsed_activity_shimmer_repaints_only_the_status_style() {
         !after.contains("\x1b[48;"),
         "status shimmer must stay foreground-only"
     );
+}
+
+#[test]
+fn compaction_activity_remains_scheduled_without_provider_events() {
+    for width in [46, 80] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(width, 24);
+        shell.set_run_label("compacting");
+        let before = shell.state.borrow().rendered_transcript(width).join("\n");
+        {
+            let mut state = shell.state.borrow_mut();
+            assert!(renderer_runtime::status_shimmer_animating(&state));
+            assert!(state.has_active_status_shimmer());
+            state.advance_status_shimmer();
+        }
+        let after = shell.state.borrow().rendered_transcript(width).join("\n");
+        assert_eq!(
+            strip_terminal_sequences(&before),
+            strip_terminal_sequences(&after)
+        );
+        assert_ne!(
+            before, after,
+            "compaction style must advance independently of provider events"
+        );
+        shell.set_run_label("idle");
+        assert!(!shell.state.borrow().has_active_status_shimmer());
+    }
 }
 
 #[test]
@@ -8664,7 +8718,7 @@ fn final_tool_result_replaces_live_output_without_the_tui_byte_cap() {
 }
 
 #[test]
-fn failed_bash_output_is_available_in_expanded_rendering() {
+fn failed_bash_output_keeps_a_bounded_excerpt_before_expansion() {
     let theme = crate::tui::theme::test_theme();
     let args = serde_json::json!({"command": "failing-command"});
     let output = (1..=8)
@@ -8697,8 +8751,11 @@ fn failed_bash_output_is_available_in_expanded_rendering() {
     .collect::<Vec<_>>()
     .join("\n");
     assert!(!collapsed.contains("failed output line 1"), "{collapsed}");
-    assert!(!collapsed.contains("failed output line 8"), "{collapsed}");
-    assert!(collapsed.contains("failed output hidden"), "{collapsed}");
+    assert!(collapsed.contains("failed output line 8"), "{collapsed}");
+    assert!(
+        collapsed.contains("earlier visual rows hidden"),
+        "{collapsed}"
+    );
 
     let expanded = render_block(
         None,
@@ -11171,4 +11228,138 @@ fn styled_read_only_document_preserves_trusted_ansi_and_sanitizes_plain_document
         "plain document kept a raw escape: {lines:?}"
     );
     let _ = shell;
+}
+
+/// Exercises the real HTTP codec, core read tool, owner stream, terminal
+/// projection and disk reopen together; the model decision is deterministic.
+#[tokio::test]
+async fn actual_read_image_reaches_live_shell_and_reopened_session() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use ygg_agent::{
+        Agent, AgentConfig, CoreTools, EffectBroker, EffectPolicy, ExtensionHost, SandboxConfig,
+    };
+    use ygg_ai::{
+        AiClient, Auth, Capabilities, Endpoint, EndpointId, ModelLimits, ModelSpec, Protocol,
+        ReasoningConfig,
+    };
+    let server = MockServer::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            let chunk = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                    "index":0,"id":"image-read","type":"function",
+                    "function":{"name":"read","arguments":"{\"path\":\"pixel.png\"}"}
+                }]},"finish_reason":"tool_calls"}]})
+            } else {
+                serde_json::json!({"choices":[{"index":0,"delta":{"content":"accepted"},"finish_reason":"stop"}]})
+            };
+            ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {chunk}\n\ndata: [DONE]\n\n"))
+        }).mount(&server).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_path = sessions.path().join("image.jsonl");
+    let png: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4,
+        0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5,
+        1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    std::fs::write(workspace.path().join("pixel.png"), png).unwrap();
+    let model = Model {
+        spec: Arc::new(ModelSpec {
+            id: ModelId("image-fixture".into()),
+            endpoint: EndpointId("local".into()),
+            api_name: "image-fixture".into(),
+            display_name: None,
+            protocol: Protocol::OpenAiChat,
+            capabilities: Capabilities {
+                input_modalities: ModalitySet::none().with(ygg_ai::Modality::Image),
+                output_modalities: ModalitySet::none(),
+                tools: true,
+                parallel_tool_calls: true,
+                reasoning: None,
+                responses_lite: false,
+                agent_delegation: None,
+                structured_output: false,
+                deferred_tool_loading: false,
+            },
+            limits: ModelLimits {
+                context_window: 200_000,
+                max_output_tokens: 8192,
+            },
+            pricing: None,
+            cache: ygg_ai::CacheCompatibility::default(),
+        }),
+        endpoint: Arc::new(Endpoint {
+            id: EndpointId("local".into()),
+            base_url: server.uri().parse().unwrap(),
+            auth: Auth::None,
+            default_headers: http::HeaderMap::new(),
+            transport: ygg_ai::EndpointTransport::Http,
+            runtime: ygg_ai::RequestRuntime::default(),
+            timeout: Duration::from_secs(5),
+        }),
+    };
+    let mut extensions = ExtensionHost::new();
+    extensions.load(&CoreTools);
+    let mut agent = Agent::new(AgentConfig {
+        client: AiClient::new(),
+        model,
+        session: Session::create(&session_path).unwrap(),
+        system: "Synthetic image fixture".into(),
+        sandbox: SandboxConfig::new(workspace.path()),
+        effect_broker: EffectBroker::new(EffectPolicy::UnsafeHost),
+        extensions,
+        max_turns: Some(3),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ygg_ai::ReasoningMode::Standard,
+        cache_retention: ygg_ai::CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    agent.set_owner_tool_images_enabled(true);
+    let mut shell = InteractiveShell::test_shell();
+    let run_id = shell.begin_run("local");
+    let mut run = agent.prompt("read pixel.png").await.unwrap();
+    while let Some(event) = run.next().await {
+        shell.on_run_event(run_id, &event);
+    }
+    drop(run);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let images = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .filter_map(|block| match block {
+                TranscriptBlock::Tool(panel) => Some(panel.images.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>()
+    };
+    let live = images(&shell);
+    assert_eq!(live.len(), 1);
+    assert!(matches!(&live[0], ToolResultImage::Ready { .. }));
+    assert!(live[0].id().is_some());
+    drop(agent);
+    let reopened = Session::open(&session_path).unwrap();
+    let mut resumed = InteractiveShell::test_shell();
+    resumed.hydrate(&reopened).unwrap();
+    assert_eq!(images(&resumed), live);
+    for width in [46, 80] {
+        for shell in [&mut shell, &mut resumed] {
+            shell.set_size(width, 24);
+            shell.set_show_images(false);
+            let text = render_shell(&shell.state.borrow(), width).join("\n");
+            assert!(!text.contains("iVBOR"));
+            assert!(!text.contains("137, 80, 78, 71"));
+            assert!(!text.contains("\x1b_G"));
+            assert!(!text.contains("\x1b]1337;File="));
+        }
+    }
 }

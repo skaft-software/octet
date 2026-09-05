@@ -191,18 +191,6 @@ pub(super) fn render_compact_bash_output(
     let compact = compact_bash_output(panel);
     let ellipsis = if theme.unicode() { "…" } else { "..." };
     let loss_details = capture_loss_details(&compact);
-    if panel.is_error && !expanded {
-        let hidden = vec![fit_line(
-            &format!(
-                "{output_indent}{}",
-                subdued_text(theme, "(failed output hidden; ctrl+o to expand)")
-            ),
-            width,
-        )];
-        return bounded_tail_rows(hidden, COMPACT_EXEC_OUTPUT_ROWS, false, |_| {
-            unreachable!("short failure placeholder never needs omission metadata")
-        });
-    }
     let mut output_rows = Vec::new();
     for output_line in compact.lines {
         output_rows.extend(wrap_hanging(

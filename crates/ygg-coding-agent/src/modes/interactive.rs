@@ -665,6 +665,10 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
     Ok(())
 }
 
+/// Drive only cancellation-safe, locally owned futures here (never a detached
+/// lifecycle worker). Dropping the future stops local work, not remote billing
+/// or effects that completed before cancellation. Animation remains owned by
+/// the renderer thread; input does not need a periodic redraw loop.
 async fn await_with_ctrl_c<F, S>(
     future: F,
     shell: &mut InteractiveShell,
@@ -679,24 +683,110 @@ where
     loop {
         tokio::select! {
             biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                shell.request_close();
+                return None;
+            }
             event = input.next(), if input_open => match event {
-                Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
+                Some(Ok(event)) => {
+                    if handle_cancellable_wait_input(shell, event) {
+                        return None;
+                    }
+                }
+                Some(Err(error)) => {
+                    shell.error(format!("terminal input failed: {error}"));
                     shell.request_close();
                     return None;
                 }
-                Some(Ok(Event::Key(key)))
-                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                        && key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    return None;
-                }
-                Some(Ok(_)) => {}
-                Some(Err(_)) | None => input_open = false,
+                None => input_open = false,
             },
             output = &mut future => return Some(output),
         }
     }
+}
+
+fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> bool {
+    if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
+        shell.request_close();
+        return true;
+    }
+    if let Event::Resize(columns, rows) = event {
+        shell.set_size(columns, rows);
+        shell.render();
+        return false;
+    }
+    if shell.has_overlay() {
+        match shell.overlay_input(&event) {
+            OverlayInputResult::Consumed => {}
+            OverlayInputResult::Closed => shell.clear_error(),
+            OverlayInputResult::Legacy => shell.close_overlay(),
+        }
+        shell.render();
+        return false;
+    }
+    let pending = shell.pending();
+    match keymap::translate_with_popup(Some(event), true, &pending, shell.slash_popup_open()) {
+        InputAction::Abort => return true,
+        InputAction::Closed => {
+            shell.request_close();
+            return true;
+        }
+        InputAction::ClearEditor => shell.clear_editor(),
+        InputAction::Edit(action) => shell.apply_edit(action),
+        InputAction::ToggleDisclosure => shell.toggle_disclosure(),
+        InputAction::ShowCompactionSummary => shell.show_compaction_summary(),
+        InputAction::Scroll(direction) => shell.scroll(direction),
+        InputAction::ScrollLines(direction) => shell.scroll_lines(direction),
+        InputAction::JumpToTail => shell.jump_to_tail(),
+        InputAction::SlashMenu(action) => shell.slash_menu(action),
+        InputAction::CompleteSlashCommand => shell.complete_slash_command(),
+        InputAction::CompletePath => shell.complete_path(),
+        InputAction::Steer(_) | InputAction::Submit(_) | InputAction::Command(_) => {
+            // This operation has no RunControl owner. Keep the complete draft
+            // rather than pretending Enter delivered it or discarding it.
+            shell.notice("operation in progress · draft kept for the next prompt");
+        }
+        InputAction::Close => shell.clear_error(),
+        _ => return false,
+    }
+    shell.render();
+    false
+}
+
+/// Manual and queued compaction share the same input owner and settlement path.
+async fn compact_interactively<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    force: bool,
+) where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    if let Some(message) = cost_limit_message(app) {
+        shell.error(message);
+        return;
+    }
+    shell.set_run_label("compacting…");
+    shell.render();
+    let original_keep = app.config.compaction.keep_recent_tokens;
+    if force {
+        app.config.compaction.keep_recent_tokens = 1;
+    }
+    let result = await_with_ctrl_c(attempt_compaction(app), shell, input).await;
+    app.config.compaction.keep_recent_tokens = original_keep;
+    // Clear the transient activity on every result before publishing the one
+    // settled frame, including errors and cancellation of a held-open response.
+    shell.set_run_label("idle");
+    match result {
+        Some(Ok(outcome)) => report_compaction(shell, &outcome, app.agent.session()),
+        Some(Err(error)) => shell.error(format!("compaction failed: {error}")),
+        None => shell.notice("compaction cancelled · completed work is retained"),
+    }
+    if let Some(message) = cost_limit_message(app) {
+        shell.error(message);
+    }
+    update_status(shell, app);
+    shell.render();
 }
 
 const LIFECYCLE_SHUTDOWN_GRACE: Duration = Duration::from_millis(1400);
@@ -1106,8 +1196,8 @@ fn confirmation_notice(tool_name: Option<&str>, confirmed: bool) -> String {
 }
 
 /// Drive one active frozen-Agent run. Control sends are queued locally, and
-/// input polling pauses while a bounded send waits so a full control channel
-/// can never starve the run stream that drains it.
+/// their bounded sends are polled alongside input and the run stream. Channel
+/// admission is not a delivery acknowledgement; only SteeringDelivered is.
 #[allow(clippy::too_many_arguments)]
 pub async fn drive_active_run<S>(
     run: &mut Run<'_>,
@@ -1337,7 +1427,12 @@ where
                         shell.render();
                     }
 
-                    InputAction::Command(_) => {
+                    InputAction::Command(text) => {
+                        if aborting && matches!(commands::parse(&text), Command::Answer(_)) {
+                            shell.notice("run is settling · answer request kept in the draft");
+                            shell.render();
+                            continue;
+                        }
                         let command = commands::parse(&shell.drain_editor());
                         let was_quit = matches!(command, Command::Quit);
                         if let Command::Answer(instruction) = &command {
@@ -2200,7 +2295,7 @@ async fn extension_management_menu(
             input,
             OrdinarySurfaceMetadata::with_purpose(
                 "Manage extensions",
-                "Select a bundle to inspect or manage its activation",
+                "Enter enables/disables; enabled web search opens provider setup",
             ),
             items,
             descriptions,
@@ -3214,7 +3309,10 @@ async fn apply_pending_actions(
     pending_actions: &mut VecDeque<PendingIdleAction>,
     goal_deadline: &mut Option<Instant>,
 ) -> anyhow::Result<App> {
-    while let Some(action) = pending_actions.pop_front() {
+    while !shell.close_requested() {
+        let Some(action) = pending_actions.pop_front() else {
+            break;
+        };
         match action {
             PendingIdleAction::Login(provider) => match validate_provider(provider.as_deref()) {
                 Ok("codex") => login_codex(&mut app, shell).await?,
@@ -3297,12 +3395,7 @@ async fn apply_pending_actions(
                 app = clone_session(app, shell, input).await?;
             }
             PendingIdleAction::Compact => {
-                shell.set_run_label("compacting…");
-                shell.render();
-                let outcome = attempt_compaction(&mut app).await?;
-                report_compaction(shell, &outcome, app.agent.session());
-                update_status(shell, &app);
-                shell.set_run_label("idle");
+                compact_interactively(&mut app, shell, input, false).await;
             }
             PendingIdleAction::AutoCompact(setting) => {
                 configure_auto_compaction(&mut app, shell, setting)?;
@@ -3892,28 +3985,7 @@ async fn run_idle_command(
             ));
         }
         Command::Compact => {
-            if let Some(message) = cost_limit_message(&app) {
-                shell.error(message);
-            } else {
-                shell.set_run_label("compacting…");
-                shell.render();
-                let original_keep = app.config.compaction.keep_recent_tokens;
-                app.config.compaction.keep_recent_tokens = 1;
-                let result = await_with_ctrl_c(attempt_compaction(&mut app), shell, input).await;
-                app.config.compaction.keep_recent_tokens = original_keep;
-                match result {
-                    Some(Ok(outcome)) => {
-                        report_compaction(shell, &outcome, app.agent.session());
-                    }
-                    Some(Err(error)) => shell.error(format!("compaction failed: {error}")),
-                    None => shell.notice("compaction cancelled"),
-                }
-                if let Some(message) = cost_limit_message(&app) {
-                    shell.error(message);
-                }
-                update_status(shell, &app);
-                shell.set_run_label("idle");
-            }
+            compact_interactively(&mut app, shell, input, true).await;
         }
         Command::AutoCompact(setting) => {
             configure_auto_compaction(&mut app, shell, setting)?;
@@ -5507,6 +5579,7 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                 // Keep extension context in the replayable model message, but
                 // persist the exact user-facing draft separately for title and
                 // transcript reconstruction.
+                app.agent.set_owner_tool_images_enabled(true);
                 app.agent
                     .set_prompt_display_text(Some(composed.transcript_text.clone()));
                 // Capacity checks and autonomous compaction live inside the
@@ -6067,6 +6140,38 @@ mod tests {
         assert!(shell.close_requested());
     }
 
+    #[tokio::test]
+    async fn cancellable_wait_preserves_input_and_disclosure_before_escape() {
+        use crossterm::event::KeyEvent;
+
+        let mut input = tokio_stream::iter([
+            Ok(Event::Resize(46, 8)),
+            Ok(Event::Paste("draft during wait".into())),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+        ]);
+        let mut shell = InteractiveShell::test_shell();
+        let was_verbose = shell.verbose_tools();
+        // This budget bounds input handling, not the provider's timeout.
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            await_with_ctrl_c(std::future::pending::<()>(), &mut shell, &mut input),
+        )
+        .await
+        .expect("Escape must interrupt a held-open operation within 250 ms");
+        assert!(result.is_none());
+        assert_eq!(shell.pending(), "draft during wait");
+        assert_ne!(shell.verbose_tools(), was_verbose);
+        assert!(!shell.close_requested());
+    }
+
     #[test]
     fn startup_picker_close_is_a_graceful_exit_but_other_errors_survive() {
         let mut shell = InteractiveShell::test_shell();
@@ -6338,9 +6443,6 @@ mod tests {
     ) -> (wiremock::MockServer, tempfile::TempDir, ygg_agent::Agent) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        use ygg_agent::{
-            Agent, AgentConfig, CoreTools, EffectBroker, ExtensionHost, SandboxConfig, Session,
-        };
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -6354,6 +6456,18 @@ mod tests {
             .mount(&server)
             .await;
 
+        let (workspace, agent) =
+            scripted_agent_for_route(scripted_model(&server.uri()), ygg_ai::AiClient::new());
+        (server, workspace, agent)
+    }
+
+    fn scripted_agent_for_route(
+        model: ygg_ai::Model,
+        client: ygg_ai::AiClient,
+    ) -> (tempfile::TempDir, ygg_agent::Agent) {
+        use ygg_agent::{
+            Agent, AgentConfig, CoreTools, EffectBroker, ExtensionHost, SandboxConfig, Session,
+        };
         let workspace = tempfile::tempdir().unwrap();
         let session_path = workspace.path().join("session.jsonl");
         let mut extensions = ExtensionHost::new();
@@ -6362,8 +6476,8 @@ mod tests {
         sandbox.allow_edit = true;
         sandbox.allow_process = true;
         let agent = Agent::new(AgentConfig {
-            client: ygg_ai::AiClient::new(),
-            model: scripted_model(&server.uri()),
+            client,
+            model,
             session: Session::create(&session_path).unwrap(),
             system: "test".into(),
             sandbox,
@@ -6376,11 +6490,421 @@ mod tests {
             session_id: None,
         })
         .unwrap();
-        (server, workspace, agent)
+        (workspace, agent)
     }
 
     async fn scripted_agent() -> (wiremock::MockServer, tempfile::TempDir, ygg_agent::Agent) {
         scripted_agent_with_delay(Duration::ZERO).await
+    }
+
+    // A real loopback HTTP response held after headers, independently of tokens.
+    // No prompts or response bytes are written to diagnostics.
+    struct HeldApi {
+        uri: String,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for HeldApi {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl HeldApi {
+        async fn start(
+            body: String,
+        ) -> (
+            Self,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<bool>,
+        ) {
+            use std::sync::atomic::Ordering;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let uri = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = requests.clone();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut started_tx = Some(started_tx);
+                let mut release_rx = Some(release_rx);
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let header_end = loop {
+                        let mut bytes = [0; 1024];
+                        let n = socket.read(&mut bytes).await.unwrap();
+                        assert!(n > 0);
+                        request.extend_from_slice(&bytes[..n]);
+                        assert!(request.len() < 128 * 1024, "bounded fixture request");
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break end + 4;
+                        }
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    assert!(length < 128 * 1024);
+                    while request.len() < header_end + length {
+                        let mut bytes = [0; 1024];
+                        let n = socket.read(&mut bytes).await.unwrap();
+                        assert!(n > 0);
+                        request.extend_from_slice(&bytes[..n]);
+                    }
+                    let attempt = counted.fetch_add(1, Ordering::SeqCst);
+                    if attempt != 0 {
+                        // Bound an existing recovery policy without ever replaying
+                        // the fixture's successful result on an unexpected POST.
+                        socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+                        continue;
+                    }
+                    let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    socket.write_all(headers.as_bytes()).await.unwrap();
+                    let _ = started_tx.take().unwrap().send(());
+                    if let Ok(complete) = release_rx.take().unwrap().await {
+                        let response = if complete {
+                            body.as_bytes()
+                        } else {
+                            &body.as_bytes()[..1]
+                        };
+                        let _ = socket.write_all(response).await;
+                    }
+                }
+            });
+            (
+                Self {
+                    uri,
+                    requests,
+                    task,
+                },
+                started_rx,
+                release_tx,
+            )
+        }
+    }
+
+    /// Acknowledges only on the poll after the event's handler returned. This
+    /// proves input handling while the API gate is still held, not after reply.
+    struct ProbedInput {
+        input: tokio_stream::wrappers::ReceiverStream<std::io::Result<Event>>,
+        remaining: usize,
+        handled: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl Stream for ProbedInput {
+        type Item = std::io::Result<Event>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            if self.remaining == 0 {
+                if let Some(handled) = self.handled.take() {
+                    let _ = handled.send(());
+                }
+            }
+            let event = Pin::new(&mut self.input).poll_next(context);
+            if matches!(event, std::task::Poll::Ready(Some(_))) {
+                self.remaining = self.remaining.saturating_sub(1);
+            }
+            event
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum HeldOutcome {
+        Success,
+        Timeout,
+        TransportFailure,
+        Cancel,
+    }
+
+    fn seed_compaction_session(agent: &mut ygg_agent::Agent) {
+        for index in 0..5 {
+            agent
+                .session_mut()
+                .append(ygg_agent::EntryValue::Message(ygg_ai::Message::User(
+                    ygg_ai::UserMessage {
+                        content: vec![ygg_ai::UserPart::Text(format!("fixture user {index}"))],
+                    },
+                )))
+                .unwrap();
+            agent
+                .session_mut()
+                .append(ygg_agent::EntryValue::Message(ygg_ai::Message::Assistant(
+                    ygg_ai::AssistantMessage {
+                        content: vec![ygg_ai::AssistantPart::Text(format!(
+                            "fixture assistant {index}"
+                        ))],
+                        model: ModelId("scripted".into()),
+                        protocol: ygg_ai::Protocol::AnthropicMessages,
+                    },
+                )))
+                .unwrap();
+        }
+        // Retain a user boundary, so this fixture exercises one summary
+        // request rather than the separate split-turn-prefix summary request.
+        agent
+            .session_mut()
+            .append(ygg_agent::EntryValue::Message(ygg_ai::Message::User(
+                ygg_ai::UserMessage {
+                    content: vec![ygg_ai::UserPart::Text("retained fixture user".into())],
+                },
+            )))
+            .unwrap();
+    }
+
+    async fn held_api_input(
+        started: tokio::sync::oneshot::Receiver<()>,
+        sender: tokio::sync::mpsc::Sender<std::io::Result<Event>>,
+        handled: tokio::sync::oneshot::Receiver<()>,
+        release: tokio::sync::oneshot::Sender<bool>,
+        outcome: HeldOutcome,
+        columns: u16,
+    ) {
+        use crossterm::event::KeyEvent;
+        tokio::time::timeout(Duration::from_secs(2), started)
+            .await
+            .unwrap()
+            .unwrap();
+        sender.send(Ok(Event::Resize(columns, 8))).await.unwrap();
+        sender
+            .send(Ok(Event::Paste("draft while API waits".into())))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL,
+            ))))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(250), handled)
+            .await
+            .expect("input handling budget while response is held: 250 ms")
+            .unwrap();
+        match outcome {
+            HeldOutcome::Success => {
+                release.send(true).unwrap();
+            }
+            HeldOutcome::TransportFailure => {
+                release.send(false).unwrap();
+            }
+            HeldOutcome::Cancel => {
+                sender
+                    .send(Ok(Event::Key(KeyEvent::new(
+                        KeyCode::Esc,
+                        KeyModifiers::NONE,
+                    ))))
+                    .await
+                    .unwrap();
+                // Keep both gates alive until the driven operation has settled.
+                std::future::pending::<()>().await;
+            }
+            HeldOutcome::Timeout => std::future::pending::<()>().await,
+        }
+        // An input EOF would itself abort an ordinary run, masking its result.
+        std::future::pending::<()>().await;
+    }
+
+    #[tokio::test]
+    async fn held_open_manual_compaction_keeps_input_live_and_settles_all_outcomes() {
+        for outcome in [
+            HeldOutcome::Success,
+            HeldOutcome::Timeout,
+            HeldOutcome::TransportFailure,
+            HeldOutcome::Cancel,
+        ] {
+            for columns in [46, 80] {
+                let (server, started, release) = HeldApi::start(text_turn()).await;
+                let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
+                // complete() drives the real streaming path even for a local
+                // compaction summary. Only this fixture changes stream limits.
+                app.client = ygg_ai::AiClient::new()
+                    .with_stream_timeouts(Duration::from_millis(750), Duration::from_secs(2));
+                app.agent
+                    .set_compaction_model(Some(scripted_model(&server.uri)));
+                seed_compaction_session(&mut app.agent);
+                let force = columns == 46;
+                let original_keep = if force { 99 } else { 1 };
+                app.config.compaction.keep_recent_tokens = original_keep;
+                let before = app.agent.session().entries().len();
+                let mut shell = InteractiveShell::test_shell();
+                let was_verbose = shell.verbose_tools();
+                let (sender, receiver) = tokio::sync::mpsc::channel(8);
+                let (handled_tx, handled_rx) = tokio::sync::oneshot::channel();
+                let mut input = ProbedInput {
+                    input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                    remaining: 3,
+                    handled: Some(handled_tx),
+                };
+                let stimulus =
+                    held_api_input(started, sender, handled_rx, release, outcome, columns);
+                tokio::pin!(stimulus);
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    tokio::select! {
+                        result = compact_interactively(&mut app, &mut shell, &mut input, force) => result,
+                        _ = &mut stimulus => unreachable!(),
+                    }
+                }).await.expect("held compaction must settle");
+                let snapshot = shell.debug_snapshot();
+                match outcome {
+                    HeldOutcome::Success => {
+                        assert!(snapshot.contains("Context compacted"), "{snapshot}")
+                    }
+                    HeldOutcome::Timeout | HeldOutcome::TransportFailure => {
+                        assert!(snapshot.contains("compaction skipped"), "{snapshot}")
+                    }
+                    HeldOutcome::Cancel => {
+                        assert!(snapshot.contains("compaction cancelled"), "{snapshot}")
+                    }
+                }
+                assert_eq!(app.config.compaction.keep_recent_tokens, original_keep);
+                assert_eq!(shell.pending(), "draft while API waits");
+                assert_ne!(shell.verbose_tools(), was_verbose);
+                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+                if !matches!(outcome, HeldOutcome::Success) {
+                    assert_eq!(
+                        app.agent.session().entries().len(),
+                        before,
+                        "unsettled compaction must not append a summary"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn held_open_model_request_keeps_input_live_and_settles_once() {
+        for outcome in [
+            HeldOutcome::Success,
+            HeldOutcome::Timeout,
+            HeldOutcome::TransportFailure,
+            HeldOutcome::Cancel,
+        ] {
+            let (server, started, release) = HeldApi::start(text_turn()).await;
+            let client = ygg_ai::AiClient::new()
+                .with_stream_timeouts(Duration::from_millis(750), Duration::from_secs(2));
+            let (_workspace, mut agent) =
+                scripted_agent_for_route(scripted_model(&server.uri), client);
+            let mut shell = InteractiveShell::test_shell();
+            let was_verbose = shell.verbose_tools();
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let (sender, receiver) = tokio::sync::mpsc::channel(8);
+            let (handled_tx, handled_rx) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: 3,
+                handled: Some(handled_tx),
+            };
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut made_tool_call = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let stimulus = held_api_input(started, sender, handled_rx, release, outcome, 80);
+            tokio::pin!(stimulus);
+            let ended = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    result = drive_active_run(&mut run, &control, &mut shell, &mut input,
+                        &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call) => result.unwrap(),
+                    _ = &mut stimulus => unreachable!(),
+                }
+            }).await.expect("held model request must settle");
+            assert!(run.next().await.is_none(), "exactly one terminal event");
+            drop(run);
+            match outcome {
+                HeldOutcome::Success => assert_eq!(ended, HostRunOutcome::Completed),
+                HeldOutcome::Cancel => assert_eq!(ended, HostRunOutcome::Aborted),
+                HeldOutcome::Timeout | HeldOutcome::TransportFailure => {
+                    assert!(matches!(ended, HostRunOutcome::Failed(_)))
+                }
+            }
+            assert_eq!(shell.pending(), "draft while API waits");
+            assert_ne!(shell.verbose_tools(), was_verbose);
+            assert_eq!(agent.session().checkpoints().len(), 1);
+            if !matches!(outcome, HeldOutcome::TransportFailure) {
+                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+            }
+            assert!(!quit);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_retains_answer_draft_and_ordered_undelivered_steering() {
+        use crossterm::event::KeyEvent;
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_secs(2)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let events = [
+            Event::Paste("first queued".into()),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("second queued".into()),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Paste("/answer preserve this instruction".into()),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Repeated close/submit keys must not duplicate or drain the draft.
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+        ];
+        let mut input =
+            tokio_stream::iter(events.into_iter().map(Ok)).chain(futures_util::stream::pending());
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut ticker = tokio::time::interval(Duration::from_millis(16));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(1),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut false,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(run);
+        assert_eq!(ended, HostRunOutcome::Aborted);
+        assert_eq!(
+            shell.pending(),
+            "first queued\n\nsecond queued\n\n/answer preserve this instruction"
+        );
+        assert!(!shell.debug_snapshot().contains("Steering:"));
+        assert_eq!(agent.session().checkpoints().len(), 1);
+        assert_eq!(
+            agent.session().context().unwrap().len(),
+            1,
+            "undelivered input is not durable or replayed"
+        );
     }
 
     struct EndsThenPanics(bool);

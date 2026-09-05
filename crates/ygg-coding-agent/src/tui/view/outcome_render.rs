@@ -87,6 +87,15 @@ fn outcome_line(outcome: &RunOutcome, tokens_per_second: Option<f64>, theme: &Yg
     }
 }
 
+pub(super) fn warning_detail(warnings: usize) -> String {
+    let calls = if warnings == 1 {
+        "tool call failed"
+    } else {
+        "tool calls failed"
+    };
+    format!("{warnings} {calls} during this run; inspect their results above.")
+}
+
 pub(super) fn bounded_outcome_detail(raw: &str) -> String {
     let mut safe = sanitize_for_terminal(raw);
     if safe.len() <= MAX_OUTCOME_DETAIL_BYTES {
@@ -110,12 +119,15 @@ pub(super) fn render_outcome(outcome: &OutcomeBlock, theme: &YggTheme, width: u1
     let detail = match &outcome.outcome {
         // Inference diagnostics are credential-redacted at the request boundary.
         // Bound and terminal-sanitize them again at this presentation boundary.
-        RunOutcome::Failed { reason, .. } => Some(("error", reason.as_str())),
-        RunOutcome::NeedsInput { prompt } => Some(("warning", prompt.as_str())),
+        RunOutcome::Failed { reason, .. } => Some(("error", reason.clone())),
+        RunOutcome::NeedsInput { prompt } => Some(("warning", prompt.clone())),
+        RunOutcome::CompletedWithWarnings { warnings, .. } => {
+            Some(("warning", warning_detail(*warnings)))
+        }
         _ => None,
     };
     if let Some((role, detail)) = detail {
-        let safe = bounded_outcome_detail(detail);
+        let safe = bounded_outcome_detail(&detail);
         for source_line in safe.split('\n') {
             if source_line.is_empty() {
                 lines.push(String::new());
@@ -229,7 +241,7 @@ mod tests {
                 outcome,
                 Some(104.0),
             ))),
-            "completed with warnings · 25m31s · 104 tok/s"
+            "completed with warnings · 25m31s · 104 tok/s\n13 tool calls failed during this run; inspect their results above."
         );
     }
 
