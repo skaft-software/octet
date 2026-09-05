@@ -12646,7 +12646,7 @@ mod tests {
             })
         );
         let mut aliased = stored_pull_request(&second, 124, PullRequestState::Merged);
-        aliased.url = "https://GITHUB.com/SKAFT-SOFTWARE/OCTET/pull/124".into();
+        aliased.url = "https://GITHUB.com/SKAFT-SOFTWARE/YGG/pull/124".into();
         assert!(store.replace(&second, Some(aliased)).is_err());
         let mut port_aliased = stored_pull_request(&second, 124, PullRequestState::Merged);
         port_aliased.url = "https://github.com:443/skaft-software/ygg/pull/124".into();
@@ -12719,7 +12719,7 @@ mod tests {
         let first_record = stored_pull_request(&first, 124, PullRequestState::Ready);
         let mut second_record = first_record.clone();
         second_record.session_id = second.as_str().to_owned();
-        second_record.url = "https://GITHUB.com/SKAFT-SOFTWARE/OCTET/pull/124".into();
+        second_record.url = "https://GITHUB.com/SKAFT-SOFTWARE/YGG/pull/124".into();
         let duplicate_catalog = StoredPullRequestCatalog {
             version: PULL_REQUEST_STORE_VERSION,
             records: BTreeMap::from([
@@ -12893,7 +12893,7 @@ mod tests {
                 &session_id,
                 PullRequestObservation::Closed {
                     number: 124,
-                    url: "https://GITHUB.com:443/SKAFT-SOFTWARE/OCTET/pull/124".into(),
+                    url: "https://GITHUB.com:443/SKAFT-SOFTWARE/YGG/pull/124".into(),
                 },
                 37,
             )
