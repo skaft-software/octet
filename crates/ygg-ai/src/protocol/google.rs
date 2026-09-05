@@ -97,6 +97,7 @@ pub(crate) fn build_request(
 fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<Value>, AiError> {
     let mut contents = Vec::new();
     let mut tool_names = HashMap::<String, String>::new();
+    let mut pending_calls = Vec::new();
 
     for message in &req.messages {
         match message {
@@ -129,12 +130,14 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                 continue;
                             };
                             parts.push(function_response_part(name, &id, result));
+                            pending_calls.retain(|pending| pending != &id);
                         }
                     }
                 }
                 push_content(&mut contents, "user", parts);
             }
             Message::Assistant(assistant) => {
+                flush_missing_function_responses(&mut contents, &mut pending_calls, &tool_names);
                 let same_google_model = assistant.protocol == Protocol::GoogleGenerativeAi
                     && assistant.model == model.spec.id;
                 let mut pending_signature = None;
@@ -174,6 +177,7 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                             }
                             let id = crate::protocol::normalize_tool_call_id(&call.id.0);
                             tool_names.insert(id.clone(), call.name.clone());
+                            pending_calls.push(id.clone());
                             parts.push(function_call_part(call.name.clone(), id, args, signature));
                         }
                         AssistantPart::Media(_) => {
@@ -188,7 +192,32 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
         }
     }
 
+    flush_missing_function_responses(&mut contents, &mut pending_calls, &tool_names);
     Ok(contents)
+}
+
+// Strict validation rejects missing results before encoding. Lossy historical
+// replay must still pair every call, in original call order, before continuing.
+fn flush_missing_function_responses(
+    contents: &mut Vec<Value>,
+    pending: &mut Vec<String>,
+    names: &HashMap<String, String>,
+) {
+    let parts = pending
+        .drain(..)
+        .map(|id| {
+            let result = crate::types::ToolResult {
+                tool_call_id: ToolCallId(id.clone()),
+                content: vec![ToolResultPart::Text(
+                    "Tool execution result was not supplied by the caller.".to_owned(),
+                )],
+                is_error: true,
+                added_tool_names: None,
+            };
+            function_response_part(&names[&id], &id, &result)
+        })
+        .collect();
+    push_content(contents, "user", parts);
 }
 
 fn google_inline_image_part(image: &crate::types::ImageMedia) -> Option<Value> {
