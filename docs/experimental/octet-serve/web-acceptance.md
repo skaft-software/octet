@@ -126,7 +126,8 @@ inspection evidence.
 - Generated server assets exactly match the tested frontend source.
 - Focused Rust and web tests pass before full workspace tests.
 - The configured-provider process test uses only a disposable loopback fixture
-  and an allowlisted child environment. Credentialed provider checks remain
-  separately approved but are temporarily optional for stable packaging, as
-  described in [configured-provider acceptance](provider-acceptance.md).
+  and an allowlisted child environment. Credentialed provider checks require
+  separate approval. The packaging workflow defaults and historical v0.4.0
+  waiver in [configured-provider acceptance](provider-acceptance.md) do not
+  waive the [octet 0.7.0 release gates](../../releases/v0.7.0.md).
 - The main checkout remains untouched.

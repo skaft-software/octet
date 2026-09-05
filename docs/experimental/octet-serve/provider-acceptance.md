@@ -14,8 +14,9 @@ client. Release acceptance therefore has two separate layers:
 
 The two layers must remain separate. Pull-request CI must not inherit developer
 or repository provider credentials, and credentialed results must not upload raw
-provider traffic, prompts, or logs as artifacts. The credentialed layer is
-temporarily advisory and does not block stable packaging by default.
+provider traffic, prompts, or logs as artifacts. Credentialed checks do not
+block packaging by default; that workflow default is not acceptance of the
+[octet 0.7.0 release gates](../../releases/v0.7.0.md).
 
 ## Supported provider matrix
 
@@ -89,8 +90,8 @@ loopback-only and credential-free.
 
 The protected `Stable provider acceptance` workflow remains available for
 maintainers who want live-provider evidence. Both stable release workflows
-expose a `require_provider_acceptance` input, which defaults to `false` while the
-credentialed gate is temporarily waived. With the default, release packaging
+expose a `require_provider_acceptance` input, which defaults to `false`. That
+packaging default does not waive octet 0.7.0 release qualification. With the default, release packaging
 does not read provider secrets or require an acceptance run. Setting the input
 to `true` restores fail-closed exact-SHA and protected-approval enforcement for
 that workflow run.

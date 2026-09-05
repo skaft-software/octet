@@ -22,7 +22,8 @@ The package contains:
 - `HostService` / `SessionDriver` adapter traits for the real octet application.
 
 It does **not** contain a TUI, web layout, provider client, Agent, authenticated
-LAN pairing, upload/content route, or a second session format. The
+LAN pairing or a second session format. Bounded authenticated attachment and
+content routes are implemented. The
 feature-gated first-party adapter in `octet-coding-agent` owns one existing
 `App` inside each driver, translates real `AgentEvent` values into
 `TimestampedEvent`, and hydrates committed `SessionItem` values from octet's
@@ -43,7 +44,7 @@ server shutdown stops every retained shell.
 
 ## Core adapter requirements
 
-The eventual octet adapter must:
+The feature-gated octet adapter must:
 
 1. Create or open exactly one `App`/`Agent`/`Session` per driver.
 2. Keep at most one active `Run` inside that driver.

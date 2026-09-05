@@ -142,8 +142,10 @@ target support is not evidence that all platform acceptance gates have passed.
 
 ## Explicit exclusions
 
-The first web release does not include skills, MCP, plugins, extension
-management, child agents, LSP, scheduling, an interactive terminal, TUI
+The first web release does not include MCP management, a plugin or extension
+catalog and lifecycle UI, child-agent runtime trees, LSP, scheduling, TUI
 synchronization, WAN access, multi-host replication, or a hosted account
-service. Missing capabilities do not appear as empty navigation or dashboard
-sections.
+service. Host-admitted skills, prompt templates, and enabled extension commands
+are available through the composer; a bounded local PTY is available when host
+authority permits process execution. Missing capabilities do not appear as
+empty navigation or dashboard sections.

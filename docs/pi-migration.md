@@ -144,8 +144,10 @@ directory beside the extension root and leaves octet's enable/trust policy intac
 Review its records before manually restoring it.
 
 The first-party bridge distribution `0.7.0` targets exactly Pi `0.84.4` and Node 22.19 or newer. Its
-live Pi protocol remains API `0.2`: API `0.3` currently has no available
-lifecycle-event or dynamic-command surface for this bridge. Publication also
+live Pi protocol defaults to API `0.2`. Explicit `--api-version 0.3` installation
+selects the constrained provider bridge described in the compatibility ledger;
+its provider coverage is fixture evidence, not real-runtime parity. API `0.3`
+currently has no lifecycle-event or dynamic-command surface for this bridge. Publication also
 writes a canonical `pi-runtime-evidence.json` sidecar using the generated API
 `0.3` canonical JSON helper. That small, static selection/evidence seam is for
 the future runtime manager; it is **not** a claim that Pi lifecycle behavior has
@@ -162,7 +164,8 @@ package was run. The separate full gate accepts only local integrity-verified
 tarballs, a clean pinned Pi checkout, a fresh allowlisted environment, and Linux
 network isolation.
 
-It supports Pi tools, transformed result details/error/usage, live tool catalogs,
+The default API `0.2` bridge supports Pi tools, transformed result
+details/error/usage, live tool catalogs,
 notifications, confirmations, text input, basic lifecycle/context events, and
 local Pi event-bus behavior. On a octet host negotiating `runtime_commands`, Pi's
 initial command catalog is exposed under its native slash names; the generated
