@@ -102,7 +102,7 @@ fn comparison_metadata_maps_reject_literal_and_escape_equivalent_duplicates_befo
 
     let escaped = compare_report_with_metadata(
         r#""octet": "0.6.7",
-      "y\u0067g": {"wrong": "duplicate values are not decoded"}"#,
+      "o\u0063tet": {"wrong": "duplicate values are not decoded"}"#,
         r#""cpu": "Apple M4""#,
     );
     assert_error_contains(
