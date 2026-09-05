@@ -1,7 +1,11 @@
 /// <reference types="vite/client" />
+/// <reference types="node" />
 
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import bundledMark from "../assets/octet-glyph.svg?raw";
 import { TuiSplashLogo } from "./TuiSplashLogo";
 import {
   renderTuiSplashFrame,
@@ -14,29 +18,45 @@ afterEach(() => {
 });
 
 describe("TUI startup splash", () => {
-  it("uses the TUI reveal, settle, and diagonal shimmer sequence", () => {
-    const start = renderTuiSplashFrame(0, "#cc785c");
-    const reveal = renderTuiSplashFrame(0.4, "#cc785c");
-    const shimmer = renderTuiSplashFrame(1.45, "#cc785c");
-    const settled = renderTuiSplashFrame(
-      TUI_SPLASH_DURATION_SECONDS,
-      "#cc785c",
-    );
-    const visible = (frame: typeof start) =>
-      frame.dark.filter((cell) => cell.color !== null).length;
-
-    expect(visible(start)).toBe(0);
-    expect(visible(reveal)).toBeGreaterThan(0);
-    expect(visible(reveal)).toBeLessThan(visible(settled));
-    expect(shimmer.dark.map((cell) => cell.color)).not.toEqual(
-      settled.dark.map((cell) => cell.color),
-    );
-    expect(
-      settled.dark.some((cell) => /[\u2801-\u28ff]/u.test(cell.glyph)),
-    ).toBe(true);
+  it("pins the bundled symbol to the approved native master", () => {
+    const canonicalMark = readFileSync(resolve("../../docs/assets/octet/marks/mark-gradient.svg"), "utf8");
+    expect(bundledMark).toBe(canonicalMark);
+    const page = new DOMParser().parseFromString(readFileSync(resolve("index.html"), "utf8"), "text/html");
+    const favicon = page.querySelector('link[rel="icon"]')!.getAttribute("href")!;
+    expect(decodeURIComponent(favicon.replace("data:image/svg+xml,", ""))).toBe(canonicalMark);
+    expect(page.title).toBe("octet");
+    const svg = new DOMParser().parseFromString(bundledMark, "image/svg+xml");
+    const columns = [...svg.querySelectorAll("[data-bit]")];
+    expect(columns).toHaveLength(8);
+    expect(columns.map((column) => column.getAttribute("data-value")).join("")).toBe("01101111");
   });
 
-  it("keeps the braille geometry stable while adapting its colors by model", () => {
+  it("cancels its finite animation on unmount", () => {
+    vi.spyOn(window, "requestAnimationFrame").mockReturnValue(17);
+    const cancel = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    const { unmount } = render(<TuiSplashLogo modelAccent="#cc785c" />);
+    unmount();
+    expect(cancel).toHaveBeenCalledWith(17);
+  });
+
+  it("renders the complete 01101111 byte immediately and only shimmers color", () => {
+    const frames = [0, 0.4, 1.45, TUI_SPLASH_DURATION_SECONDS].map((time) =>
+      renderTuiSplashFrame(time, "#cc785c"),
+    );
+    for (const frame of frames) {
+      expect(frame.light).toHaveLength(16);
+      expect(frame.dark).toHaveLength(16);
+      expect(frame.dark.slice(0, 8).map((cell) => cell.glyph).join("")).toBe(" ██ ████");
+      expect(frame.dark.slice(8).map((cell) => cell.glyph).join("")).toBe("████████");
+      expect(frame.dark.filter((cell) => cell.color !== null)).toHaveLength(14);
+      expect(frame.light.map((cell) => cell.glyph)).toEqual(frame.dark.map((cell) => cell.glyph));
+    }
+    expect(frames[2]!.dark.map((cell) => cell.color)).not.toEqual(
+      frames[3]!.dark.map((cell) => cell.color),
+    );
+  });
+
+  it("keeps the byte geometry stable while adapting its colors by model", () => {
     const openAi = renderTuiSplashFrame(
       TUI_SPLASH_DURATION_SECONDS,
       "#1f1f1f",

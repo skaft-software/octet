@@ -322,7 +322,7 @@ function DocumentPreview({ output }: { output: OutputRef }) {
   return (
     <div className="document-preview">
       <article>
-        <span className="document-kicker">ygg output</span>
+        <span className="document-kicker">octet output</span>
         <div className="document-content">
           {(output.content ?? "This output is ready to inspect.")
             .split("\n")
@@ -392,7 +392,7 @@ function ResourceContent({
         if (!response.ok) {
           const message =
             response.status === 401
-              ? "Reconnect to ygg to inspect this resource."
+              ? "Reconnect to octet to inspect this resource."
               : response.status === 404
                 ? "This resource is not part of the selected task."
                 : response.status === 410
@@ -564,7 +564,7 @@ function SourceInspector({
       <section className="source-excerpt">
         <span>Why it appears here</span>
         <p>
-          ygg consulted this source while working in the selected session. It is
+          octet consulted this source while working in the selected session. It is
           shown here from structured tool evidence, not inferred from the final
           response.
         </p>

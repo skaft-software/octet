@@ -1734,12 +1734,12 @@ export class FixtureTransport implements YggTransport {
           itemId: assistantId,
           field: "content",
           delta:
-            "The session is connected, the request is grounded, and I’m ready to continue with the real ygg runtime.",
+            "The session is connected, the request is grounded, and I’m ready to continue with the simulated octet fixture runtime.",
         });
       });
       this.later(2_650, () => {
         const content =
-          "I’ve got it. The session is connected, the request is grounded, and I’m ready to continue with the real ygg runtime.";
+          "I’ve got it. The session is connected, the request is grounded, and I’m ready to continue with the simulated octet fixture runtime.";
         this.emit({
           type: "item.committed",
           sessionId: command.sessionId,

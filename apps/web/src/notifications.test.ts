@@ -82,7 +82,7 @@ describe("attention notification manager", () => {
     expect(manager.observe(summary(), environment)).toBe(true);
     expect(manager.observe(summary(), environment)).toBe(false);
     expect(show).toHaveBeenCalledWith(
-      "ygg finished",
+      "octet finished",
       expect.objectContaining({
         body: "Review the release is ready to review.",
         tag: "ygg-session-session-one",

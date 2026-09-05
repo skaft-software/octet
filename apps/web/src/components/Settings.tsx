@@ -98,10 +98,10 @@ export function SettingsView({
   return (
     <main className="utility-view" aria-labelledby="settings-title">
       <header className="utility-header">
-        <span>ygg preferences</span>
+        <span>octet preferences</span>
         <h1 id="settings-title">Settings</h1>
         <p>
-          Preferences live on this device and never require a ygg account.
+          Preferences live on this device and never require a octet account.
         </p>
       </header>
 
@@ -111,7 +111,7 @@ export function SettingsView({
           <div>
             <h2 id="type-title">Interface type</h2>
             <p>
-              Local ships with ygg for legible, playful DIY work; alternatives
+              Local ships with octet for legible, playful DIY work; alternatives
               use fonts installed on this device.
             </p>
           </div>

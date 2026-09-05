@@ -44,7 +44,7 @@ import {
   TerminalPanel,
 } from "./components/TerminalPanel";
 import { UsagePage } from "./pages/UsagePage";
-import { YggGlyph } from "./components/YggGlyph";
+import { OctetGlyph } from "./components/OctetGlyph";
 import type {
   AttachmentRef,
   AuthorityProfile,
@@ -218,10 +218,10 @@ function ConnectionBanner({
       <RefreshCw className="spin" aria-hidden="true" />
       <span>
         {connection === "reconnecting"
-          ? "Connection interrupted. Reconnecting to ygg…"
-          : "Connecting to local ygg…"}
+          ? "Connection interrupted. Reconnecting to octet…"
+          : "Connecting to local octet…"}
       </span>
-      <small>Your current task remains visible while ygg reconnects.</small>
+      <small>Your current task remains visible while octet reconnects.</small>
     </div>
   );
 }
@@ -250,9 +250,9 @@ export function SessionSelectionErrorBanner({
 function LoadingState() {
   return (
     <div className="app-loading" role="status" aria-live="polite">
-      <YggGlyph />
+      <OctetGlyph />
       <span className="loading-pulse" aria-hidden="true" />
-      <strong>Connecting to ygg</strong>
+      <strong>Connecting to octet</strong>
       <p>Preparing your workspace.</p>
     </div>
   );
@@ -270,7 +270,7 @@ function ErrorState({
       <div className="error-mark">
         <X aria-hidden="true" />
       </div>
-      <h1>ygg could not connect</h1>
+      <h1>octet could not connect</h1>
       <p>{message}</p>
       {onRetry ? <small>Retrying automatically in the background.</small> : null}
       <button
@@ -624,7 +624,7 @@ function BranchHistorySheet({
                         ? "Your message"
                         : entry.kind === "compaction"
                           ? "Context checkpoint"
-                          : "ygg response"}
+                          : "octet response"}
                       {current ? " · Current" : ""}
                     </small>
                   </div>
@@ -640,7 +640,7 @@ function BranchHistorySheet({
                           setError(
                             reason instanceof Error
                               ? reason.message
-                              : "ygg could not switch checkpoints.",
+                              : "octet could not switch checkpoints.",
                           );
                         });
                     }}

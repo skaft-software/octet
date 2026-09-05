@@ -71,6 +71,7 @@ export function TuiSplashLogo({
         return (
           <span
             className="tui-splash-cell"
+            data-glyph={lightCell.glyph}
             key={index}
             style={
               {
@@ -78,9 +79,7 @@ export function TuiSplashLogo({
                 "--tui-splash-dark": darkCell.color ?? "transparent",
               } as CSSProperties
             }
-          >
-            {lightCell.glyph}
-          </span>
+          />
         );
       })}
     </span>

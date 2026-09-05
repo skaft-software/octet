@@ -142,7 +142,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const composer = screen.getByRole("textbox", { name: "Message ygg" });
+    const composer = screen.getByRole("textbox", { name: "Message octet" });
     await user.type(composer, "/goal ship the release");
     await user.keyboard("{Enter}");
 
@@ -214,7 +214,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const composer = screen.getByLabelText("Message ygg");
+    const composer = screen.getByLabelText("Message octet");
     await user.type(composer, "Please inspect @RDM");
     expect(
       await screen.findByRole("option", { name: /README\.md.*docs\/README\.md/i }),
@@ -260,7 +260,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText("Message ygg"), "/workspace/src @RDM");
+    await user.type(screen.getByLabelText("Message octet"), "/workspace/src @RDM");
 
     expect(
       await screen.findByRole("option", { name: /README\.md.*docs\/README\.md/i }),
@@ -290,7 +290,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const composer = screen.getByLabelText("Message ygg");
+    const composer = screen.getByLabelText("Message octet");
     await user.type(composer, "@");
     expect(
       await screen.findByRole("listbox", { name: "Trusted project files" }),
@@ -343,7 +343,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const composer = screen.getByLabelText("Message ygg");
+    const composer = screen.getByLabelText("Message octet");
     await user.type(composer, "/");
     expect(
       await screen.findByRole("option", { name: /\/compact/ }),
@@ -427,7 +427,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const composer = screen.getByLabelText("Message ygg");
+    const composer = screen.getByLabelText("Message octet");
     await user.type(composer, "/compact ");
     expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
     await user.keyboard("{Enter}");
@@ -598,7 +598,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    expect(screen.queryByRole("textbox", { name: "Message ygg" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Message octet" })).toBeNull();
     expect(screen.getByText(/Read-only delegated session/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Return to parent" }));
     expect(returnToParent).toHaveBeenCalledTimes(1);
@@ -784,7 +784,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Message ygg")).toHaveValue(
+    expect(screen.getByLabelText("Message octet")).toHaveValue(
       "Resume this exact draft",
     );
     expect(screen.getByText("notes.md")).toBeVisible();
@@ -827,7 +827,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "Stop ygg" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop octet" })).toBeNull();
     expect(
       container.querySelectorAll(".composer-actions .submit-button"),
     ).toHaveLength(1);
@@ -861,7 +861,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const composer = screen.getByLabelText("Message ygg");
+    const composer = screen.getByLabelText("Message octet");
     await user.type(composer, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
@@ -891,7 +891,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText("Message ygg"), "Retry safely");
+    await user.type(screen.getByLabelText("Message octet"), "Retry safely");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText("Connection interrupted")).toBeVisible();
     const firstKey = onSubmit.mock.calls[0]?.[3];
@@ -900,7 +900,7 @@ describe("conversation composer", () => {
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
     expect(onSubmit.mock.calls[1]?.[3]).toBe(firstKey);
-    expect(screen.getByLabelText("Message ygg")).toHaveValue("");
+    expect(screen.getByLabelText("Message octet")).toHaveValue("");
   });
 
   it("starts a fresh slash invocation after cancelling a failed retry", async () => {
@@ -923,7 +923,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const composer = screen.getByLabelText("Message ygg");
+    const composer = screen.getByLabelText("Message octet");
     await user.type(composer, "/compact ");
     await user.keyboard("{Enter}");
     expect(await screen.findByText("Connection interrupted")).toBeVisible();
@@ -955,7 +955,7 @@ describe("conversation composer", () => {
       />,
     );
 
-    const stop = screen.getByRole("button", { name: "Stop ygg" });
+    const stop = screen.getByRole("button", { name: "Stop octet" });
     expect(stop).toBeVisible();
     expect(
       container.querySelectorAll(".composer-actions .submit-button"),
@@ -967,13 +967,13 @@ describe("conversation composer", () => {
     expect(onInterrupt).toHaveBeenCalledOnce();
 
     const delivery = screen.getByRole("button", {
-      name: "While ygg is working: Steer now",
+      name: "While octet is working: Steer now",
     });
     expect(
       screen.queryByRole("combobox", { name: "Active run delivery" }),
     ).toBeNull();
-    await user.type(screen.getByLabelText("Message ygg"), "Steer this");
-    expect(screen.queryByRole("button", { name: "Stop ygg" })).toBeNull();
+    await user.type(screen.getByLabelText("Message octet"), "Steer this");
+    expect(screen.queryByRole("button", { name: "Stop octet" })).toBeNull();
     expect(
       container.querySelectorAll(".composer-actions .submit-button"),
     ).toHaveLength(1);
@@ -989,27 +989,27 @@ describe("conversation composer", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByLabelText("Message ygg")).toHaveValue(""),
+      expect(screen.getByLabelText("Message octet")).toHaveValue(""),
     );
-    expect(screen.getByRole("button", { name: "Stop ygg" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Stop octet" })).toBeVisible();
     await user.click(delivery);
     expect(
-      screen.getByRole("menu", { name: "While ygg is working" }),
+      screen.getByRole("menu", { name: "While octet is working" }),
     ).toBeVisible();
     const followUp = screen.getByRole("menuitemradio", { name: /Follow up/ });
     expect(followUp).toBeVisible();
     await user.click(followUp);
     await waitFor(() => {
       expect(delivery).toHaveAccessibleName(
-        "While ygg is working: Follow up",
+        "While octet is working: Follow up",
       );
       expect(
-        screen.queryByRole("menu", { name: "While ygg is working" }),
+        screen.queryByRole("menu", { name: "While octet is working" }),
       ).toBeNull();
       expect(delivery).toHaveFocus();
     });
 
-    await user.type(screen.getByLabelText("Message ygg"), "Then summarize");
+    await user.type(screen.getByLabelText("Message octet"), "Then summarize");
     await user.click(
       await screen.findByRole("button", { name: "Queue follow-up" }),
     );
@@ -1025,7 +1025,7 @@ describe("conversation composer", () => {
     await user.click(delivery);
     await user.keyboard("{Escape}");
     expect(
-      screen.queryByRole("menu", { name: "While ygg is working" }),
+      screen.queryByRole("menu", { name: "While octet is working" }),
     ).toBeNull();
     await waitFor(() => expect(delivery).toHaveFocus());
   });
@@ -1053,7 +1053,7 @@ describe("conversation composer", () => {
     expect(screen.queryByRole("combobox", { name: "Authority" })).toBeNull();
     await user.click(authority);
     expect(screen.getByRole("menu", { name: "Authority" })).toBeVisible();
-    await user.click(screen.getByLabelText("Message ygg"));
+    await user.click(screen.getByLabelText("Message octet"));
     expect(screen.queryByRole("menu", { name: "Authority" })).toBeNull();
     await user.click(authority);
     await user.click(screen.getByRole("menuitemradio", { name: /Workspace/ }));
@@ -2381,7 +2381,7 @@ describe("conversation composer", () => {
     expect(
       container.querySelectorAll(".composer-actions .submit-button"),
     ).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: "Stop ygg" }));
+    await user.click(screen.getByRole("button", { name: "Stop octet" }));
     expect(onInterrupt).toHaveBeenCalledOnce();
 
     await user.click(retry);

@@ -1251,7 +1251,7 @@ export class YggStore {
       this.publish({
         ...this.state,
         connecting: false,
-        error: error instanceof Error ? error.message : "ygg could not connect.",
+        error: error instanceof Error ? error.message : "octet could not connect.",
       });
     }
   }
@@ -1297,7 +1297,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected this slash command.",
+        "The octet host rejected this slash command.",
       );
     }
   }
@@ -1327,7 +1327,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected this extension action.",
+        "The octet host rejected this extension action.",
       );
     }
   }
@@ -1735,7 +1735,7 @@ export class YggStore {
       projectFileIds: projectFiles.map((file) => file.id),
     });
     if (!ack.accepted) {
-      throw rejectedCommandError(ack, "The ygg host rejected this message.");
+      throw rejectedCommandError(ack, "The octet host rejected this message.");
     }
   }
 
@@ -1929,7 +1929,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected this branch checkout.",
+        "The octet host rejected this branch checkout.",
       );
     }
   }
@@ -1956,7 +1956,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected this edited turn.",
+        "The octet host rejected this edited turn.",
       );
     }
   }
@@ -1978,7 +1978,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected this response retry.",
+        "The octet host rejected this response retry.",
       );
     }
   }
@@ -1997,10 +1997,10 @@ export class YggStore {
       if (!ack.accepted) {
         throw rejectedCommandError(
           ack,
-          "The ygg host rejected this conversation fork.",
+          "The octet host rejected this conversation fork.",
         );
       }
-      throw new Error("The ygg host did not identify the forked task.");
+      throw new Error("The octet host did not identify the forked task.");
     }
     await this.installCreatedSession(ack.createdSessionId, bootstrap);
   }
@@ -2018,7 +2018,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected this task lifecycle change.",
+        "The octet host rejected this task lifecycle change.",
       );
     }
     await this.initialize();
@@ -2038,7 +2038,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected permanent deletion.",
+        "The octet host rejected permanent deletion.",
       );
     }
     await this.initialize();
@@ -2099,7 +2099,7 @@ export class YggStore {
     if (!ack.accepted) {
       throw rejectedCommandError(
         ack,
-        "The ygg host rejected this project change.",
+        "The octet host rejected this project change.",
       );
     }
     await this.refreshProjectCatalog();

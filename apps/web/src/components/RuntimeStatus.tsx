@@ -542,7 +542,7 @@ function unavailableCopy(policy: UnavailablePolicy): ReactNode {
       <em>
         {policy.consequence === "featureBlocked"
           ? "Feature is blocked while enforcement is unavailable."
-          : "Host behavior is unknown; ygg cannot attest to enforcement."}
+          : "Host behavior is unknown; octet cannot attest to enforcement."}
       </em>
     </>
   );
@@ -771,7 +771,7 @@ export function RuntimeStatus({
         <span>Host observations</span>
         <h1 id={`${id}-title`}>Runtime status</h1>
         <p>
-          Path-free, bounded runtime facts from the connected ygg host. Status
+          Path-free, bounded runtime facts from the connected octet host. Status
           does not imply a producer or control that the host did not publish.
         </p>
         {error ? (

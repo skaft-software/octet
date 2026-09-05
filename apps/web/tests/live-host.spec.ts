@@ -67,7 +67,7 @@ function sessionIdFromUrl(url: string): string {
 }
 
 async function sendPrompt(page: Page, prompt: string): Promise<void> {
-  const composer = page.getByLabel("Message ygg");
+  const composer = page.getByLabel("Message octet");
   await expect(composer).toBeVisible();
   await composer.fill(prompt);
   const send = page.getByRole("button", { name: "Send message" });
@@ -79,7 +79,7 @@ async function sendPrompt(page: Page, prompt: string): Promise<void> {
 async function expectDone(page: Page, reply: string): Promise<void> {
   await expect(page.getByText(reply, { exact: true })).toBeVisible();
   await expect(page.locator(".header-status")).toHaveText("Done");
-  await expect(page.getByRole("button", { name: "Stop ygg" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop octet" })).toHaveCount(0);
 }
 
 async function completePrompt(
@@ -180,7 +180,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
       expect(bootstrapBody).toContain('"sessionBranches":true');
       expect(bootstrapBody).toContain('"sessionExport":true');
 
-      await expect(page.getByLabel("Message ygg")).toBeVisible();
+      await expect(page.getByLabel("Message octet")).toBeVisible();
       await expect(
         page.getByText("Demo data · responses and actions are simulated", {
           exact: true,
@@ -228,7 +228,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
         }),
       ).toBeVisible();
       await expect(page.getByText(STREAM_PARTIAL, { exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "Stop ygg" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Stop octet" })).toBeVisible();
 
       host.provider.release(STREAM_PROMPT);
       await expectDone(page, STREAM_REPLY);
@@ -298,10 +298,10 @@ test("runs the authenticated production host lifecycle end to end", async ({
       expectDeterministicRequest(request);
       await expect(page.getByText(ABORT_PARTIAL, { exact: true })).toBeVisible();
 
-      await page.getByRole("button", { name: "Stop ygg" }).click();
+      await page.getByRole("button", { name: "Stop octet" }).click();
       await host.provider.waitForAbort(ABORT_PROMPT);
       await expect(page.locator(".header-status")).toHaveText("Stopped");
-      await expect(page.getByRole("button", { name: "Stop ygg" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Stop octet" })).toHaveCount(0);
 
       const snapshot = await sessionSnapshot(page, origin, sessionId);
       expect(snapshot.liveState).toBe("stopped");

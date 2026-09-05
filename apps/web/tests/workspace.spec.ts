@@ -65,6 +65,40 @@ test.beforeEach(async ({ page }) => {
   ).toBeVisible();
 });
 
+test("octet byte identity stays exact, compact and input-ready in both schemes", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.reload();
+    await expect(page).toHaveTitle("octet");
+    const logo = page.locator(".tui-splash-logo");
+    await expect(logo).toHaveAttribute("data-animation", "settled");
+    const cells = await logo.locator(".tui-splash-cell").evaluateAll((elements) =>
+      elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { glyph: element.getAttribute("data-glyph"), x: rect.x, y: rect.y,
+          width: rect.width, height: rect.height, background: getComputedStyle(element).backgroundColor };
+      }),
+    );
+    expect(cells).toHaveLength(16);
+    expect(cells.slice(0, 8).map((cell) => cell.glyph).join("")).toBe(" ██ ████");
+    expect(cells.slice(8).map((cell) => cell.glyph).join("")).toBe("████████");
+    for (let column = 0; column < 8; column += 1) {
+      const top = cells[column]!;
+      const bottom = cells[column + 8]!;
+      expect(bottom.x).toBeCloseTo(top.x, 2);
+      expect(bottom.y).toBeCloseTo(top.y + top.height, 2);
+      expect(top.height).toBeCloseTo(top.width * 2, 1);
+      if (column > 0) expect(top.x).toBeCloseTo(cells[column - 1]!.x + top.width, 2);
+      expect(top.background === "rgba(0, 0, 0, 0)").toBe(column === 0 || column === 3);
+    }
+    const composer = page.getByLabel("Message octet");
+    await expect(composer).toBeEditable();
+    await composer.fill("Review the fixture project");
+    await expect(composer).toHaveValue("Review the fixture project");
+  }
+});
+
 test("runs at the locked acceptance viewport", async ({ page }, testInfo) => {
   const expected = viewportByProject[testInfo.project.name];
   expect(expected, `unexpected project ${testInfo.project.name}`).toBeDefined();
@@ -179,7 +213,7 @@ test("uses the command center to triage exceptions and restore focus", async ({
   await expect(page).toHaveURL(
     /\/session\/session-attention\?transport=fixture$/,
   );
-  await expect(page.getByLabel("Message ygg")).toBeVisible();
+  await expect(page.getByLabel("Message octet")).toBeVisible();
 
   await page.evaluate(() =>
     window.localStorage.setItem("ygg.ui.terminal.open", "true"),
@@ -214,7 +248,7 @@ test("opens in a fresh, quiet session with the standard composer", async ({
   await expect(
     page.getByRole("button", { name: "New task", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".brand-row .ygg-glyph")).toHaveCount(0);
+  await expect(page.locator(".brand-row .octet-glyph")).toHaveCount(0);
   await expect(page.locator(".local-identity")).toHaveCount(0);
   await expect(page.getByText("Connected to local ygg")).toHaveCount(0);
   await expect(
@@ -228,7 +262,7 @@ test("opens in a fresh, quiet session with the standard composer", async ({
   await expect(
     page.getByRole("region", { name: "Research notes", exact: true }),
   ).toBeVisible();
-  await expect(page.getByLabel("Message ygg")).toBeVisible();
+  await expect(page.getByLabel("Message octet")).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -720,19 +754,19 @@ test("shows typed work and a conditional activity rail", async ({ page }) => {
         .evaluate((edge) => getComputedStyle(edge).animationName),
     )
     .toBe("composer-ring-chase");
-  await expect(page.getByRole("button", { name: "Stop ygg" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop octet" })).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Steer active run" }),
   ).toHaveCount(0);
   await expect(page.locator(".composer-actions .submit-button")).toHaveCount(1);
-  await page.getByLabel("Message ygg").fill("Focus on the keyboard flow");
-  await expect(page.getByRole("button", { name: "Stop ygg" })).toHaveCount(0);
+  await page.getByLabel("Message octet").fill("Focus on the keyboard flow");
+  await expect(page.getByRole("button", { name: "Stop octet" })).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Steer active run" }),
   ).toBeVisible();
   await expect(page.locator(".composer-actions .submit-button")).toHaveCount(1);
-  await page.getByLabel("Message ygg").fill("");
-  await expect(page.getByRole("button", { name: "Stop ygg" })).toBeVisible();
+  await page.getByLabel("Message octet").fill("");
+  await expect(page.getByRole("button", { name: "Stop octet" })).toBeVisible();
   await ensureActivityOpen(page);
   await expect(
     page.getByText("Verifying keyboard and touch behavior"),
@@ -754,7 +788,7 @@ test("matches the settled desktop workbench shell", async ({
   await selectSession(page, "Review release readiness");
   await ensureActivityOpen(page);
   await expect(releasePulseArtifact(page)).toBeVisible();
-  await expect(page.getByLabel("Message ygg")).toHaveAttribute(
+  await expect(page.getByLabel("Message octet")).toHaveAttribute(
     "placeholder",
     "Reply…",
   );
@@ -869,7 +903,7 @@ test("@isolated-performance does not pull a scrolled-away performance transcript
     top: element.scrollTop,
     maximum: element.scrollHeight - element.clientHeight,
   }));
-  await page.getByLabel("Message ygg").fill("Stream 60 fixture deltas");
+  await page.getByLabel("Message octet").fill("Stream 60 fixture deltas");
   await page.evaluate(() => {
     const probe = {
       frameTimestamps: [] as number[],
@@ -1091,7 +1125,7 @@ test("matches the settled 1,000-item performance viewport", async ({
   const conversation = page.getByRole("region", { name: "Conversation" });
   const transcript = conversation.locator(".transcript");
   await expect(transcript).toHaveAttribute("data-item-count", "1000");
-  await expect(page.getByLabel("Message ygg")).toHaveAttribute(
+  await expect(page.getByLabel("Message octet")).toHaveAttribute(
     "placeholder",
     "Steer the active run…",
   );
@@ -1441,7 +1475,7 @@ test("preserves core flows at a 200-percent equivalent reflow", async ({
 
   await selectSession(page, "Prepare signed macOS build");
   await expect(page.getByText("Your approval is needed")).toBeVisible();
-  await expect(page.getByLabel("Message ygg")).toBeVisible();
+  await expect(page.getByLabel("Message octet")).toBeVisible();
 
   await selectSession(page, "Review release readiness");
   await expect(
