@@ -674,6 +674,199 @@ pub(crate) mod tests {
         (directory, app)
     }
 
+    #[tokio::test]
+    async fn local_compaction_preserves_encrypted_tail_across_responses_resume() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn output(id: &str, text: &str) -> Vec<serde_json::Value> {
+            vec![
+                serde_json::json!({
+                    "type": "reasoning", "id": format!("rs_{id}"),
+                    "encrypted_content": format!("encrypted-{id}"), "summary": [],
+                    "future_reasoning_field": {"preserved": [1, 2, 3]}
+                }),
+                serde_json::json!({
+                    "type": "message", "id": format!("msg_{id}"), "role": "assistant",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                    "phase": "final_answer", "future_message_field": true
+                }),
+            ]
+        }
+
+        fn turn(id: &str, text: &str) -> String {
+            [
+                serde_json::json!({"type": "response.created", "response": {"id": id}}),
+                serde_json::json!({
+                    "type": "response.output_text.delta", "output_index": 1,
+                    "content_index": 0, "delta": text
+                }),
+                serde_json::json!({
+                    "type": "response.output_text.done", "output_index": 1, "content_index": 0
+                }),
+                serde_json::json!({
+                    "type": "response.completed", "response": {
+                        "id": id, "output": output(id, text),
+                        "usage": {"input_tokens": 5, "output_tokens": 2}
+                    }
+                }),
+            ]
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect()
+        }
+
+        let server = MockServer::start().await;
+        let bodies = [
+            turn("prefix", "old completed answer"),
+            turn("tail", "retained completed answer"),
+            turn("summary", "LOCAL SUMMARY OF PREFIX"),
+            turn("resumed", "continued after reopen"),
+        ];
+        let next = AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(move |_: &wiremock::Request| {
+                bodies.get(next.fetch_add(1, Ordering::SeqCst)).map_or_else(
+                    || ResponseTemplate::new(400),
+                    |body| {
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(body.clone())
+                    },
+                )
+            })
+            .expect(4)
+            .mount(&server)
+            .await;
+
+        let (directory, mut app) = app_for_estimate();
+        assert_eq!(app.config.compaction, CompactionPolicy::default());
+        assert_eq!(
+            app.config.compaction.mode,
+            crate::config::CompactionMode::Local
+        );
+        let mut model = app.model.clone();
+        Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+        let endpoint = Arc::make_mut(&mut model.endpoint);
+        endpoint.base_url = format!("{}/", server.uri()).parse().unwrap();
+        endpoint.auth = ygg_ai::Auth::None;
+        endpoint.default_headers.clear();
+        endpoint.transport = ygg_ai::EndpointTransport::Http;
+        endpoint.runtime = ygg_ai::RequestRuntime::default();
+        let client = app.client.clone();
+        let agent_for_session = |session| {
+            ygg_agent::Agent::new(ygg_agent::AgentConfig {
+                client: client.clone(),
+                model: model.clone(),
+                session,
+                system: "system".into(),
+                sandbox: ygg_agent::SandboxConfig::new(directory.path()),
+                effect_broker: ygg_agent::EffectBroker::new(ygg_agent::EffectPolicy::Controlled),
+                extensions: ygg_agent::ExtensionHost::new(),
+                max_turns: None,
+                reasoning: ReasoningConfig::Off,
+                reasoning_mode: ygg_ai::ReasoningMode::Standard,
+                cache_retention: ygg_ai::CacheRetention::Short,
+                session_id: None,
+            })
+            .unwrap()
+        };
+        let session_path = directory.path().join("local-responses.jsonl");
+        app.agent = agent_for_session(Session::create(&session_path).unwrap());
+        app.model = model.clone();
+        app.agent.complete("prefix user request").await.unwrap();
+        // Keep the default 20K retention policy. Make the final real user turn
+        // cross that token walk so compaction cannot select an assistant-only
+        // split boundary and accidentally exercise a different contract.
+        let retained_prompt = format!(
+            "retained user request {}",
+            "r".repeat((app.config.compaction.keep_recent_tokens * 4) as usize)
+        );
+        app.agent.complete(retained_prompt.as_str()).await.unwrap();
+        let first_kept = choose_first_kept(
+            app.agent.session(),
+            app.config.compaction.keep_recent_tokens,
+        )
+        .unwrap();
+        assert!(matches!(
+            &app.agent.session().entry(&first_kept).unwrap().value,
+            EntryValue::Message(Message::User(user))
+                if matches!(user.content.as_slice(), [UserPart::Text(text)] if text == &retained_prompt)
+        ));
+
+        assert_eq!(
+            attempt_compaction(&mut app).await.unwrap(),
+            CompactionOutcome::Compacted { elided: 2 }
+        );
+        let head = app.agent.session().head().unwrap();
+        assert!(matches!(
+            &app.agent.session().entry(&head).unwrap().value,
+            EntryValue::Compaction { first_kept: boundary, .. } if boundary == &first_kept
+        ));
+        let encode = |session: &Session| {
+            let replay = session
+                .responses_replay_items(&model.endpoint.id, &model.spec.id)
+                .unwrap()
+                .expect("every retained assistant needs an authoritative sidecar");
+            ygg_ai::responses::encode_responses_replay(&model, Some("system"), &replay)
+        };
+        let before_reopen = encode(app.agent.session());
+        let input = serde_json::to_value(&before_reopen).unwrap();
+        let items = input.as_array().unwrap();
+        assert_eq!(items.len(), 5); // system, local summary, user, two opaque tail items
+        assert!(items[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("LOCAL SUMMARY OF PREFIX"));
+        assert_eq!(items[2]["content"][0]["text"], retained_prompt);
+        assert_eq!(&items[3..], output("tail", "retained completed answer"));
+        assert!(!input.to_string().contains("encrypted-prefix"));
+        assert!(!input.to_string().contains("encrypted-summary"));
+        drop(app);
+
+        let reopened = Session::open(&session_path).unwrap();
+        assert_eq!(encode(&reopened), before_reopen);
+        for (endpoint, model_id) in [
+            (
+                ygg_ai::EndpointId("other-endpoint".into()),
+                model.spec.id.clone(),
+            ),
+            (model.endpoint.id.clone(), ModelId("other-model".into())),
+        ] {
+            assert!(matches!(
+                reopened.responses_replay_items(&endpoint, &model_id),
+                Err(ygg_agent::SessionError::ResponsesRouteMismatch { .. })
+            ));
+        }
+        let mut resumed = agent_for_session(reopened);
+        assert_eq!(
+            resumed.complete("after disk reopen").await.unwrap().text,
+            "continued after reopen"
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 4);
+        let summary_request: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert!(summary_request["input"]
+            .to_string()
+            .contains("prefix user request"));
+        assert!(!summary_request["input"]
+            .to_string()
+            .contains("retained user request"));
+        let resumed_request: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
+        let sent = resumed_request["input"].as_array().unwrap();
+        assert_eq!(sent.len(), items.len() + 1);
+        assert_eq!(&sent[..items.len()], items.as_slice());
+        assert_eq!(
+            sent.last().unwrap()["content"][0]["text"],
+            "after disk reopen"
+        );
+        assert_eq!(resumed_request["store"], false);
+        assert!(resumed_request.get("previous_response_id").is_none());
+    }
+
     fn user_media(text: &str) -> EntryValue {
         EntryValue::Message(Message::User(UserMessage {
             content: vec![
