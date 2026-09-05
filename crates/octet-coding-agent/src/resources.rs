@@ -1672,10 +1672,10 @@ Environment:
 
         let dynamic_bytes = prompt_path(root.path()).len() + prompt_path(&nested).len();
         let scaffold_bytes = prompt.len() - dynamic_bytes;
-        assert_eq!(scaffold_bytes, 3_031, "reviewed stable prompt byte budget");
+        assert_eq!(scaffold_bytes, 3_033, "reviewed stable prompt byte budget");
         assert_eq!(
             scaffold_bytes.div_ceil(4),
-            758,
+            759,
             "estimated stable token budget"
         );
     }
