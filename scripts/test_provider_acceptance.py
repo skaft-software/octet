@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 
 SCRIPT = pathlib.Path(__file__).with_name("provider-acceptance.py")
@@ -506,6 +511,133 @@ class ToolPolicyValidationTests(unittest.TestCase):
         assert isinstance(policy, dict)
         policy["policy"] = copy.deepcopy(accepted_policy)
         self.assert_rejected(events)
+
+
+class ReleaseProviderPolicyTests(unittest.TestCase):
+    """Exercise the actual inline release gate without GitHub or provider access."""
+
+    workflows = ("release-octet.yml", "release-serve.yml")
+    source_sha = "a" * 40
+
+    def workflow(self, name: str) -> str:
+        return (SCRIPT.parent.parent / ".github" / "workflows" / name).read_text()
+
+    def run_gate(
+        self,
+        name: str,
+        selected: str | None,
+        *,
+        evidence_sha: str = source_sha,
+        evidence_run: str = "456",
+        approvals: str = "1",
+        allow_queries: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str]:
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is required for release workflow regression tests")
+        lines = self.workflow(name).splitlines(keepends=True)
+        condition = 'if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]; then'
+        starts = [index for index, line in enumerate(lines) if line.strip() == condition]
+        self.assertEqual(1, len(starts))
+        start = starts[0]
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        end = next(
+            index for index in range(start + 1, len(lines))
+            if lines[index] == " " * indent + "fi\n"
+        )
+        gate = textwrap.dedent("".join(lines[start:end + 1]))
+        fake_github = r"""
+set -euo pipefail
+gh() {
+  printf '%s\n' "$*" >> "$GH_CALLS"
+  [[ "$ALLOW_QUERIES" == true ]] || return 97
+  case "$*" in
+    *actions/workflows/provider-acceptance.yml*) printf '123\n' ;;
+    *actions/workflows/123/runs*) printf '%s\n' "$EVIDENCE_RUN" ;;
+    *actions/runs/456/approvals*) printf '%s\n' "$APPROVALS" ;;
+    *actions/runs/456*) printf '%s\n' "$EVIDENCE_SHA" ;;
+    *) return 98 ;;
+  esac
+}
+source_commit="$SOURCE_SHA"
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            calls = root / "github-calls"
+            summary = root / "summary"
+            # No ambient provider credentials, GitHub token, or user config.
+            environment = {
+                "PATH": os.defpath,
+                "HOME": str(root),
+                "GITHUB_REPOSITORY": "skaft-software/ygg",
+                "GITHUB_STEP_SUMMARY": str(summary),
+                "GH_CALLS": str(calls),
+                "SOURCE_SHA": self.source_sha,
+                "ALLOW_QUERIES": "true" if allow_queries else "false",
+                "EVIDENCE_SHA": evidence_sha,
+                "EVIDENCE_RUN": evidence_run,
+                "APPROVALS": approvals,
+            }
+            if selected is not None:
+                environment["INPUT_REQUIRE_PROVIDER_ACCEPTANCE"] = selected
+            result = subprocess.run(
+                [bash, "-c", fake_github + gate],
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            return (
+                result,
+                calls.read_text() if calls.exists() else "",
+                summary.read_text() if summary.exists() else "",
+            )
+
+    def test_live_acceptance_is_optional_by_default(self) -> None:
+        for name in self.workflows:
+            with self.subTest(workflow=name):
+                self.assertRegex(
+                    self.workflow(name),
+                    r"require_provider_acceptance:\n +description: [^\n]+\n"
+                    r" +required: false\n +default: false\n +type: boolean",
+                )
+
+    def test_default_release_needs_no_live_credentials_or_evidence(self) -> None:
+        for name in self.workflows:
+            for selected in (None, "", "false"):
+                with self.subTest(workflow=name, selected=selected):
+                    result, calls, summary = self.run_gate(name, selected)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual("", calls)
+                    self.assertIn("**NOT RUN**", summary)
+                    self.assertIn(self.source_sha, summary)
+                    self.assertNotIn("PASS", summary)
+                    self.assertNotIn("WAIVED", summary)
+
+    def test_opt_in_accepts_approved_exact_sha_evidence(self) -> None:
+        for name in self.workflows:
+            with self.subTest(workflow=name):
+                result, calls, summary = self.run_gate(name, "true", allow_queries=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(4, len(calls.splitlines()))
+                self.assertIn(f"head_sha={self.source_sha}", calls)
+                self.assertIn("using protected provider acceptance run 456", result.stdout)
+                self.assertNotIn("NOT RUN", summary)
+
+    def test_opt_in_rejects_missing_mismatched_or_unapproved_evidence(self) -> None:
+        for name in self.workflows:
+            for evidence in (
+                {"evidence_run": ""},
+                {"evidence_sha": "b" * 40},
+                {"approvals": "0"},
+            ):
+                with self.subTest(workflow=name, evidence=evidence):
+                    result, calls, _summary = self.run_gate(
+                        name, "true", allow_queries=True, **evidence
+                    )
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertNotEqual("", calls)
+
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       require_provider_acceptance:
-        description: Require approved live-provider acceptance for this release
+        description: Opt in to requiring approved live-provider acceptance (optional)
         required: false
         default: false
         type: boolean
@@ -167,12 +167,12 @@ jobs:
             fi
             echo "using protected provider acceptance run $evidence_run for $source_commit"
           else
-            echo "::warning title=Live-provider acceptance waived::Serve release packaging is proceeding without credentialed provider/audio acceptance for $source_commit"
+            echo "Live provider/audio acceptance: NOT RUN (optional) for $source_commit"
             {
               echo "## Release acceptance"
               echo
               echo "- Candidate: \`$source_commit\`"
-              echo "- Live provider/audio acceptance: **WAIVED**"
+              echo "- Live provider/audio acceptance: **NOT RUN** (optional; not required for release)"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
