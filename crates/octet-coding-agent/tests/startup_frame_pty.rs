@@ -1532,23 +1532,36 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                 // Shift+Tab updates a local setting, appends a note and restarts
                 // model-colour animation. No provider/model request or resize.
                 for step in 0..2 {
+                    let redraw_start = octet.pty.output.len();
                     octet.pty.write_input(b"\x1b[Z");
-                    octet.pty.drain_for(Duration::from_millis(350));
-                    check_welcome_frames(
-                        &octet,
-                        &mut parser,
-                        &mut consumed,
-                        columns,
-                        &format!("{label}-setting{step}"),
-                    );
-                    assert!(
-                        parser
-                            .screen()
-                            .contents()
-                            .contains("thinking changed to off"),
-                        "{label}\n{}",
-                        parser.screen().contents()
-                    );
+                    // Reconfiguration is asynchronous, and a differential
+                    // frame can retain an unchanged notice without emitting
+                    // its text again. Await a new complete composed frame,
+                    // checking every intervening frame rather than sleeping.
+                    let deadline = Instant::now() + STARTUP_TIMEOUT;
+                    loop {
+                        octet.pty.read_available();
+                        check_welcome_frames(
+                            &octet,
+                            &mut parser,
+                            &mut consumed,
+                            columns,
+                            &format!("{label}-setting{step}"),
+                        );
+                        let screen = parser.screen().contents();
+                        if consumed > redraw_start && screen.contains("thinking changed to off") {
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "{label}-setting{step}: thinking notice timed out\n{screen}"
+                        );
+                        assert!(
+                            octet.child.try_wait().unwrap().is_none(),
+                            "{label}-setting{step}: fixture binary exited"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
                 }
                 octet.pty.drain_for(Duration::from_millis(2300));
                 check_welcome_frames(

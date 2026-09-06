@@ -843,7 +843,7 @@ pub(crate) fn build_request(
                     | OpenAiChatReasoningMode::Together { effort: false }
             )
         );
-    let reasoning_effort = if emits_effort && !(deepseek_thinking && !enabled) {
+    let reasoning_effort = if emits_effort && (!deepseek_thinking || enabled) {
         wire.clone()
     } else {
         None

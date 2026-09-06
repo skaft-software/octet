@@ -61,6 +61,7 @@ class ReleaseTests(unittest.TestCase):
             "fixtures/regressions/stale-installed-worker-failure.json",
             "release-smoke.py",
             "README.md",
+            "REFERENCE.md",
             "CHANGELOG.md",
             "LICENSE",
         )
@@ -205,10 +206,25 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(report["subagents"]["duplicate_findings"], 1)
         self.assertIn("one_duplicate_finding", report["failure_classes"])
 
-    def test_readme_documents_trust_inheritance_limits_and_generic_host_boundary(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    def test_guides_document_trust_inheritance_limits_and_generic_host_boundary(self):
+        readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+        reference = " ".join((ROOT / "REFERENCE.md").read_text(encoding="utf-8").split())
         for required in (
-            "Explicitly enable and trust",
+            "separately enable and trust it",
+            "--enable-extension octet-subagents --trust-extension octet-subagents",
+            "Enabling never grants trust",
+            "shared filesystem is **not isolation**",
+            "REFERENCE.md#safety-model",
+            "REFERENCE.md#kernel-boundary",
+            "REFERENCE.md#install-enable-and-trust",
+            "REFERENCE.md#lifecycle-and-restart-behavior",
+            "REFERENCE.md#tui-and-serve-presentation",
+            "REFERENCE.md#release-smoke-recipe",
+            "/subagents",
+        ):
+            self.assertIn(required, readme)
+        for required in (
+            "Enable and trust it explicitly",
             "shared cwd/filesystem is **not isolation**",
             "There is no dedicated writer profile in V1",
             "host-owned `agent_sessions` service",
@@ -219,7 +235,7 @@ class ReleaseTests(unittest.TestCase):
             "complete process-host rebuild creates a new service boundary",
             "release-smoke.py",
         ):
-            self.assertIn(required, readme)
+            self.assertIn(required, reference)
         catalog = (ROOT.parent / "release-catalog.txt").read_text(encoding="utf-8").splitlines()
         self.assertIn("octet-subagents", catalog)
 
