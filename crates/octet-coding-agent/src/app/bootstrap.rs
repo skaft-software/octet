@@ -858,6 +858,12 @@ fn decode_reasoning_metadata(entry: &serde_json::Value) -> anyhow::Result<Discov
             field.is_boolean() || field.is_object(),
             "malformed reasoning metadata"
         );
+        if let Some(supported) = field.get("supported") {
+            anyhow::ensure!(
+                supported.is_boolean(),
+                "malformed reasoning supported assertion"
+            );
+        }
         if let Some(supported) = metadata_capability_flag(field) {
             result.supported = Some(supported);
             result.source = Source::Explicit;
@@ -957,7 +963,13 @@ fn decode_reasoning_metadata(entry: &serde_json::Value) -> anyhow::Result<Discov
         let has_effort = choices
             .iter()
             .any(|v| matches!(v, ReasoningConfig::Effort(_)));
-        let inferred = if has_effort {
+        let inferred = if result.control == Some(ReasoningControl::AlwaysOn) {
+            anyhow::ensure!(
+                choices.iter().all(|choice| *choice == ReasoningConfig::On),
+                "always-on reasoning requires only On choices"
+            );
+            ReasoningControl::AlwaysOn
+        } else if has_effort {
             ReasoningControl::Effort
         } else {
             ReasoningControl::Toggle
@@ -5508,3 +5520,99 @@ mod bounded_env_tests {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reasoning_ingress_review_tests {
+    use super::*;
+    use octet_ai::types::ReasoningMetadataSource as Source;
+
+    #[test]
+    fn reasoning_ingress_always_on_preserves_decode_and_applied_semantics() {
+        let entry = serde_json::json!({"reasoning": {
+            "supported": true, "control": "always_on",
+            "values": ["default"], "default": "default"
+        }});
+        let decoded = decode_reasoning_metadata(&entry).unwrap();
+        assert_eq!(decoded.source, Source::Explicit);
+        assert_eq!(decoded.supported, Some(true));
+        assert_eq!(decoded.control, Some(ReasoningControl::AlwaysOn));
+        assert_eq!(
+            decoded.options.unwrap().choices(),
+            vec![ReasoningConfig::On]
+        );
+        let mut model = crate::auth::custom::CustomModel::default();
+        apply_discovered_reasoning(&entry, &mut model).unwrap();
+        assert_eq!(model.reasoning_source, Some(Source::Explicit));
+        assert!(model.reasoning);
+        assert!(!model.reasoning_configurable);
+        assert_eq!(model.reasoning_values, ["default"]);
+        assert_eq!(model.reasoning_default, "default");
+        let capability = custom_reasoning_capability(&model).unwrap();
+        assert_eq!(capability.control, ReasoningControl::AlwaysOn);
+        assert_eq!(capability.choices(), vec![ReasoningConfig::On]);
+        assert!(!capability.supports(&ReasoningConfig::Off));
+        assert!(!capability.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)));
+        for values in [
+            serde_json::json!(["none"]),
+            serde_json::json!(["none", "default"]),
+            serde_json::json!(["high"]),
+            serde_json::json!(["default", "high"]),
+        ] {
+            let invalid = serde_json::json!({"reasoning": {
+                "supported": true, "control": "always_on", "values": values
+            }});
+            assert!(decode_reasoning_metadata(&invalid).is_err());
+            assert!(apply_discovered_reasoning(&invalid, &mut model).is_err());
+            assert!(model.reasoning);
+            assert!(!model.reasoning_configurable);
+            assert_eq!(model.reasoning_values, ["default"]);
+        }
+    }
+
+    #[test]
+    fn reasoning_ingress_rejects_malformed_nested_supported_assertions() {
+        for supported in [
+            serde_json::json!("false"),
+            serde_json::json!("true"),
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let assertion = serde_json::json!({
+                "supported": supported, "values": ["low", "high"], "default": "high"
+            });
+            for entry in [
+                serde_json::json!({"reasoning": assertion}),
+                serde_json::json!({"capabilities": {"reasoning": assertion}}),
+                serde_json::json!({"provider": {"reasoning": assertion}}),
+                serde_json::json!({"top_provider": {"capabilities": {"reasoning": assertion}}}),
+            ] {
+                assert!(decode_reasoning_metadata(&entry).is_err());
+                let mut model = crate::auth::custom::CustomModel::default();
+                let before = serde_json::to_value(&model).unwrap();
+                assert!(apply_discovered_reasoning(&entry, &mut model).is_err());
+                assert_eq!(serde_json::to_value(&model).unwrap(), before);
+            }
+            // An explicit false still short-circuits all competing metadata.
+            let disabled = serde_json::json!({"reasoning": false,
+                "provider": {"reasoning": assertion}});
+            let decoded = decode_reasoning_metadata(&disabled).unwrap();
+            assert_eq!(decoded.source, Source::Explicit);
+            assert_eq!(decoded.supported, Some(false));
+        }
+        assert_eq!(
+            decode_reasoning_metadata(&serde_json::json!({}))
+                .unwrap()
+                .source,
+            Source::Absent
+        );
+        assert_eq!(
+            decode_reasoning_metadata(&serde_json::json!({"reasoning": null}))
+                .unwrap()
+                .source,
+            Source::Unknown
+        );
+    }
+}
