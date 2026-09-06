@@ -1579,6 +1579,19 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                         synchronized_frame_end_containing(&bytes[resize_start..], b"\x1b[2J")
                             .is_some()
                     });
+                    // Old-width frames may already be queued when the PTY
+                    // resizes. Replay them, but apply the new geometry contract
+                    // from the first complete clearing redraw, not to those
+                    // in-flight frames. Every subsequent frame is still checked.
+                    let resize_end = resize_start
+                        + synchronized_frame_end_containing(
+                            &octet.pty.output[resize_start..],
+                            b"\x1b[2J",
+                        )
+                        .unwrap();
+                    parser.process(&octet.pty.output[consumed..resize_end]);
+                    consumed = resize_end;
+                    assert_single_welcome(&parser, 80, &format!("{label}-resize-first"));
                 }
                 octet.pty.drain_for(Duration::from_millis(100));
                 check_welcome_frames(
