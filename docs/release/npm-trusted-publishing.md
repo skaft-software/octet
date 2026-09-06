@@ -1,9 +1,10 @@
 # npm trusted publishing
 
-**octet 0.7.0 is unpublished and not release-qualified.** Use the
-[local checkout build](../../README.md#install). This maintainer reference
-describes source packaging, not registry ownership or package availability. The
-source/release/OIDC repository remains `skaft-software/ygg`.
+**The octet npm channel is not published yet.** Native GitHub releases and npm
+publication are independent; see [installation](../installation.md) for the
+native installer and source build. This maintainer reference describes packaging,
+not completed registry publication. The source/release/OIDC repository remains
+`skaft-software/ygg`.
 
 The source contract defines four immutable packages:
 

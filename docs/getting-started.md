@@ -15,7 +15,7 @@ Do not change anything.
 
 ## Before you start
 
-1. [Build from source](installation.md#build-from-a-checkout). octet 0.7.0 is unpublished; use the full path to your built binary in place of `octet` in examples.
+1. [Install octet](installation.md). If building from source, use the full path to your built binary in place of `octet` in examples.
 2. [Configure a cloud or local provider](providers.md). For Anthropic, set `ANTHROPIC_API_KEY`; for a first local model, interactive setup offers LM Studio or an explicitly selected OpenAI-compatible endpoint.
 3. Work in an appropriate OS isolation boundary. **Full access is the default** when `--safe-mode` is absent. Safe mode asks before file changes and every shell call, but is not a sandbox and does not start executable extensions.
 

@@ -10,7 +10,7 @@ Devices and LAN-client capabilities remain false. This graphical transport
 specification is not extension API 0.3 or native-host protocol 1.
 
 Work tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).
-No LAN or signed native delivery is qualified for unpublished octet 0.7.0.
+No LAN or signed native delivery is qualified for octet 0.7.0.
 
 ## Product invariant
 

@@ -10,8 +10,8 @@ This starts a headless host for the launch workspace and opens its local web
 client. `--port 0` requests an available port. Add `--no-open` to skip opening the
 browser; `--web-root <directory>` selects a development asset directory.
 
-**octet 0.7.0 is unpublished and not release-qualified.** These instructions
-describe the experimental source snapshot, not an available signed download.
+These instructions describe the experimental source snapshot; they do not
+assert release qualification or signed-download availability.
 Live-provider, media, recovery, and capture qualification remain deferred.
 
 <a id="product-contract"></a>

@@ -10,7 +10,7 @@ operations below do not upgrade legacy methods or SDKs.
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
 First-party source SDK/extension distributions are version `0.7.0`; independent
-examples keep their own versions. octet 0.7.0 is unpublished.
+examples keep their own versions.
 
 The [legacy protocol reference](PROTOCOL-REFERENCE.md) retains complete API
 `0.1`/`0.2` method, request/response, type, and lifecycle detail. Process

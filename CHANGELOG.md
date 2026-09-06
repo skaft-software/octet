@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-06
+
 ### Added
 
 - Added repository documentation, usage examples, and the octet Brand Kit.
@@ -809,6 +811,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Every bundled theme retains its authored palette, while the compiled default follows the selected model lab and resets cleanly after theme switches.
 - Batched tool results retain independent bounded output allowances so a large early result cannot starve later calls in the same turn.
 
+[0.7.0]: https://github.com/skaft-software/ygg/releases/tag/v0.7.0
 [0.6.7]: https://github.com/skaft-software/ygg/releases/tag/v0.6.7
 [0.6.6]: https://github.com/skaft-software/ygg/releases/tag/v0.6.6
 [0.6.5]: https://github.com/skaft-software/ygg/releases/tag/v0.6.5

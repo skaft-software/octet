@@ -37,7 +37,7 @@ From a checkout, install both binaries:
 cargo install --locked --path crates/octet-coding-agent --bins
 ```
 
-This is a source installation; octet 0.7.0 is unpublished. Cargo installs embed
+This is a source installation. Cargo installs embed
 text documentation in the binaries. On first use, octet materializes it under
 `${CARGO_HOME:-$HOME/.cargo}/share/octet`; the managed copy is refreshed when the
 Cargo-channel `octet update` installs a newer release.

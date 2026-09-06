@@ -21,14 +21,21 @@ they do not refresh the catalog over the network. Continue with
 
 ## Binary availability
 
-**octet 0.7.0 is unpublished and not release-qualified.** There is no verified
-current octet binary download or public extension bundle here. Proposed
-curl, Git-Cargo, npm, and Homebrew channels remain publication/platform gated;
-Bun is unqualified. Do not substitute those proposed commands for the released
-website's Ygg v0.6.7 installation instructions before a separate promotion.
+The version-pinned [v0.7.0 release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0)
+is the source for signed native archives and the installer. Native targets are
+macOS Apple silicon/Intel and GNU/Linux x86-64. If release assets are still
+being prepared, use the checkout build above rather than an older Ygg installer.
 
-The repository's release location remains
-[GitHub Releases](https://github.com/skaft-software/ygg/releases).
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/skaft-software/ygg/releases/download/v0.7.0/install-octet.sh | sh
+octet --version
+```
+
+Install octet afresh; `ygg update` is not an octet upgrade path. Existing Ygg
+installations and data remain untouched. npm is not published yet; Homebrew,
+crates.io and SDK registry publication are separate channels. Bun is unqualified.
+See [distribution channels](distribution.md) for their exact boundaries.
 [Historical Ygg instructions](reference/historical-installation.md) describe
 older releases, not a way to install or migrate to octet.
 
