@@ -61,7 +61,7 @@ MAX_BRAVE_API_KEY_BYTES = 1024
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_SEARCH_KEY_URL = "https://api.search.brave.com/app/keys"
 OPEN_PORTS = frozenset((80, 443))
-USER_AGENT = "octet-web-search/0.2 (+https://github.com/skaft-software/ygg)"
+USER_AGENT = "octet-web-search/0.2 (+https://github.com/skaft-software/octet)"
 TRACKING_QUERY_NAMES = frozenset(
     (
         "fbclid",

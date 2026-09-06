@@ -13,8 +13,8 @@ exclude = ["extensions/octet-serve"]
 version = "0.7.0"
 edition = "2021"
 authors = ["Skaft Software"]
-repository = "https://github.com/skaft-software/ygg"
-homepage = "https://skaft.org/octet"
+repository = "https://github.com/skaft-software/octet"
+homepage = "https://octet.skaft.org/"
 rust-version = "1.86"
 license = "MIT"
 

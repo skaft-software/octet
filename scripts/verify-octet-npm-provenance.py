@@ -212,7 +212,7 @@ def verify_manifest(
 ) -> None:
     expected_identity = {
         "schema": "octet.npm.release.v1",
-        "repository": "skaft-software/ygg",
+        "repository": "skaft-software/octet",
         "tag": f"v{version}",
         "version": version,
         "source_commit": source_commit,

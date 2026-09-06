@@ -2,7 +2,7 @@
 
 ## Report a vulnerability
 
-Please use [GitHub private vulnerability reporting](https://github.com/skaft-software/ygg/security/advisories/new),
+Please use [GitHub private vulnerability reporting](https://github.com/skaft-software/octet/security/advisories/new),
 not a public issue. Include the affected version or commit, platform, impact,
 and steps to reproduce. If the form is unavailable, contact the repository
 owners privately through the GitHub organization.

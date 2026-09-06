@@ -3,8 +3,9 @@
 **The octet npm channel is not published yet.** Native GitHub releases and npm
 publication are independent; see [installation](../installation.md) for the
 native installer and source build. This maintainer reference describes packaging,
-not completed registry publication. The source/release/OIDC repository remains
-`skaft-software/ygg`.
+not completed registry publication. The source/release repository is now
+`skaft-software/octet`; configure future OIDC publishers for that identity.
+The already-published native v0.7.0 signatures retain `skaft-software/ygg`.
 
 The source contract defines four immutable packages:
 
@@ -12,8 +13,8 @@ The source contract defines four immutable packages:
 - `@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`, and
   `@skaft/octet-linux-x64-gnu`: the native runtime and packaged docs.
 
-The npm scope is `@skaft`. This does not rename the GitHub source/release
-repository (`skaft-software/ygg`) or the Rust CLI crate (`octet-coding-agent`).
+The npm scope remains `@skaft`. The GitHub repository rename does not change
+these package names or the Rust CLI crate (`octet-coding-agent`).
 
 All four versions must equal the canonical `vX.Y.Z` release tag's version. The
 launcher has no npm lifecycle hook. It resolves only the installed optional

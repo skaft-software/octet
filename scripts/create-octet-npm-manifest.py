@@ -14,7 +14,9 @@ import stat
 import sys
 from typing import Any, Mapping, Sequence
 
-REPOSITORY = "skaft-software/ygg"
+from octet_release_identity import CANONICAL_REPOSITORY, release_repository
+
+REPOSITORY = CANONICAL_REPOSITORY
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 PACKAGES = (
@@ -86,9 +88,10 @@ def read_release_metadata(
         fail(f"release metadata is not valid JSON: {error}")
     if not isinstance(value, dict):
         fail("release metadata must be a JSON object")
+    identity_repository = release_repository(version, source_commit, workflow_commit)
     expected = {
         "schema": "octet.release.metadata.v1",
-        "repository": REPOSITORY,
+        "repository": identity_repository,
         "tag": tag,
         "version": version,
         "source_commit": source_commit,
@@ -106,7 +109,7 @@ def read_release_metadata(
             fail(f"release metadata field {key} does not match the candidate")
     workflow_ref = value.get("workflow_ref")
     if not isinstance(workflow_ref, str) or not workflow_ref.startswith(
-        f"{REPOSITORY}/.github/workflows/release-octet.yml@"
+        f"{identity_repository}/.github/workflows/release-octet.yml@"
     ):
         fail("release metadata workflow ref is not canonical")
     checksum_manifest = value.get("checksum_manifest")
@@ -153,7 +156,7 @@ def read_release_metadata(
             r"[0-9a-f]{64}", asset["sha256"]
         ) is None:
             fail(f"release metadata asset digest is malformed: {name}")
-        if asset.get("url") != f"https://github.com/{REPOSITORY}/releases/download/{tag}/{name}":
+        if asset.get("url") != f"https://github.com/{identity_repository}/releases/download/{tag}/{name}":
             fail(f"release metadata asset URL is malformed: {name}")
         seen_assets.add(name)
     if seen_assets != set(expected_assets):

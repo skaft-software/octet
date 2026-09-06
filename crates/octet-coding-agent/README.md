@@ -13,7 +13,7 @@ then inspect or reload them without rebuilding the binary. See the
 [theme status](../../docs/themes.md), [session tools](../../docs/sessions.md), and
 [examples](../../examples/README.md).
 
-See the [workspace README](https://github.com/skaft-software/ygg#readme) for
+See the [workspace README](https://github.com/skaft-software/octet#readme) for
 installation, provider setup, safety defaults, and release status.
 
 ## Inline tool images

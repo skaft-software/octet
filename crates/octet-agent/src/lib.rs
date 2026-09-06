@@ -10,7 +10,7 @@
 //! and emits [`AgentEvent`]s to the caller. Only `octet-ai`'s public canonical
 //! types are used; provider wire formats never leak into this crate.
 //!
-//! See the [agent design](https://github.com/skaft-software/ygg/blob/main/docs/design/octet-agent.md)
+//! See the [agent design](https://github.com/skaft-software/octet/blob/main/docs/design/octet-agent.md)
 //! for the normative design.
 //!
 //! # Example

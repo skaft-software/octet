@@ -19,7 +19,7 @@ PLATFORM_PACKAGES = {
     "octet-darwin-x64": ("@skaft/octet-darwin-x64", "darwin", "x64"),
     "octet-linux-x64-gnu": ("@skaft/octet-linux-x64-gnu", "linux", "x64"),
 }
-REPOSITORY = "https://github.com/skaft-software/ygg"
+REPOSITORY = "https://github.com/skaft-software/octet"
 SECRET_SCANNER_VERSION = "octet-npm-secret-rules-v1"
 MAX_LAUNCHER_BYTES = 1 * 1024 * 1024
 MAX_LAUNCHER_ENTRIES = 16

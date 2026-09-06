@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repository="skaft-software/ygg"
+repository="skaft-software/octet"
 version="0.7.0"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
@@ -235,14 +235,21 @@ verified_archive_sha256() {
     validate_release_source_commit
     install_pinned_cosign
 
+    # The published v0.7.0 checksum signature predates the repository rename.
+    # Download from the current repository without changing historical trust.
+    signing_repository="$repository"
+    case "$version:$release_source_commit" in
+        0.7.0:6dcde0620314c554b11719b0bc97835b104f0e47)
+            signing_repository="skaft-software/ygg" ;;
+    esac
     identity_version=$(printf '%s' "$version" | sed 's/\./\\./g')
-    identity="^https://github\\.com/skaft-software/ygg/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
+    identity="^https://github\\.com/${signing_repository}/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
     python3 - \
         "$checksums" \
         "$bundle" \
         "$cosign_path" \
         "$identity" \
-        "$repository" \
+        "$signing_repository" \
         "$release_source_commit" \
         "$archive_name" <<'PY'
 import os

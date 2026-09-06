@@ -6,14 +6,14 @@
 
 ## Install native binaries
 
-The [v0.7.0 release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0)
+The [v0.7.0 release](https://github.com/skaft-software/octet/releases/tag/v0.7.0)
 provides signed native archives and the version-pinned installer for macOS
 Apple silicon/Intel and GNU/Linux x86-64. Public installation is verified on
 all three targets.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/ygg/releases/download/v0.7.0/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.7.0/install-octet.sh | sh
 octet --version
 ```
 
@@ -23,6 +23,12 @@ crates.io and SDK registry publication are separate channels. Bun is unqualified
 See [distribution channels](distribution.md) for their exact boundaries.
 [Historical Ygg instructions](reference/historical-installation.md) describe
 older releases, not a way to install or migrate to octet.
+
+The repository is now `skaft-software/octet`; existing v0.7.0 signatures and
+assets are unchanged. For source installation, use a checkout or the Git-tag
+Cargo command in [distribution](distribution.md). The immutable v0.7.0
+installer's `--from-source` mode expects the old repository archive directory
+name and is not supported after the rename; its default native mode is unchanged.
 
 ## Build from a checkout
 

@@ -3,7 +3,7 @@
   "version": "__VERSION__",
   "description": "Native octet coding agent launcher",
   "license": "MIT",
-  "repository": "https://github.com/skaft-software/ygg",
+  "repository": "https://github.com/skaft-software/octet",
   "files": [
     "README.md",
     "LICENSE",

@@ -22,7 +22,7 @@ pub(super) const PACKAGE_ID: &str = "octet-serve";
 const PACKAGE_MANIFEST: &str = "package.toml";
 const INSTALL_RECORD: &str = "install.json";
 const ENTRYPOINT: &str = "bin/octet-serve-runtime";
-const RELEASE_REPOSITORY: &str = "https://github.com/skaft-software/ygg";
+const RELEASE_REPOSITORY: &str = "https://github.com/skaft-software/octet";
 pub(super) const MAX_CHECKSUM_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 pub(super) const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn official_downloads_only_trust_github_https_hosts() {
         for accepted in [
-            "https://github.com/skaft-software/ygg/releases/download/v0.5.0/SHA256SUMS",
+            "https://github.com/skaft-software/octet/releases/download/v0.5.0/SHA256SUMS",
             "https://release-assets.githubusercontent.com/github-production-release-asset/file?token=signed",
         ] {
             assert!(is_trusted_release_url(
@@ -1422,9 +1422,9 @@ mod tests {
         }
 
         for rejected in [
-            "http://github.com/skaft-software/ygg/releases/download/file",
+            "http://github.com/skaft-software/octet/releases/download/file",
             "https://github.com.example.com/file",
-            "https://raw.githubusercontent.com/skaft-software/ygg/main/file",
+            "https://raw.githubusercontent.com/skaft-software/octet/main/file",
             "https://github.com:8443/file",
         ] {
             assert!(!is_trusted_release_url(
