@@ -12,10 +12,9 @@ pairs with, copies, discovers, or launches a normal Chrome/Chromium profile.
 
 Bundle installation only copies inert files. It does **not** run Python, install Playwright, download a browser, create a profile, or start this extension.
 
-**Publication gate:** octet `0.7.0` bundles are unpublished. The catalog command
-below is conditional on a separately published exact-version bundle, not a
-currently available download. For unpublished use, select a reviewed checkout
-as in the [guide](README.md#start-from-a-reviewed-checkout), or a locally built archive.
+With [octet 0.7.0 installed](../../docs/installation.md), use the signed public
+bundle below. A reviewed checkout or locally built archive remains an alternative;
+see the [guide](README.md#install-the-bundle).
 
 ```console
 octet extension install octet-browse

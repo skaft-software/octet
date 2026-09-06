@@ -2,10 +2,10 @@
 
 # Serve implementation reference
 
-Maintainer reference for the experimental source snapshot. For practical local
-use, read the [Serve guide](README.md). Feature statements below are
-source-attributed, not final-source verification or octet 0.7.0 qualification.
-Provider/reasoning work outside this snapshot still needs reconciliation.
+Maintainer reference for experimental Serve. For installation and practical local
+use, read the [Serve guide](README.md). Feature statements below describe the
+implementation; they do not replace per-feature acceptance evidence. Current
+publication checks are recorded in the [0.7.0 release verification](../../releases/v0.7.0.md#release-verification).
 
 The [validation record](#validation-evidence) and
 [historical checklist](p0-p1-delivery.md) retain their original Ygg-era scope.
@@ -14,10 +14,11 @@ Current work tracking is on the [Project](https://github.com/orgs/skaft-software
 
 ## Bottom line
 
-The snapshot describes a real-session local web prototype, not a finished coding
-workbench. Live-provider, media, recovery, and capture qualification remain
-deferred, and no signed octet 0.7.0 Serve artifact is asserted here.
-LAN pairing and native applications are specification-only.
+Serve is a real-session experimental local web interface. Signed 0.7.0 packages
+and public installation are verified. Live-provider/native-audio checks are
+optional and **NOT RUN**; package smoke does not establish complete media,
+recovery, or capture acceptance. LAN pairing and native applications remain
+specification-only.
 
 ## Current status at a glance
 
@@ -179,9 +180,8 @@ octet serve
   --web-root <directory>
 ```
 
-Catalog installation and update require separately verified publication; this
-listing does not assert availability. There is no implemented `--lan`, `--demo`,
-or `--local-only` switch. The shortest direct source launch is:
+Catalog installation and update are available for the published 0.7.0 package.
+There is no implemented `--lan`, `--demo`, or `--local-only` switch. The shortest direct source launch is:
 
 ```console
 cargo run --features serve -- serve

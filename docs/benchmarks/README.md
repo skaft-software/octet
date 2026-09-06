@@ -121,8 +121,8 @@ concurrency for every harness.
 
 Use these manual checks for installation, session resume, and cancellation:
 
-1. Build the unpublished checkout in isolation; use pinned release instructions
-   only after publication and platform acceptance are separately verified.
+1. Install the [version-pinned native release](../installation.md) into a fresh
+   user directory, or build the checkout in isolation.
 2. Configure either a local OpenAI-compatible endpoint or a cloud provider.
 3. Run `octet --help`, start one session, and complete a small repository task.
 4. Exit, resume with `octet --continue`, and complete a second task.

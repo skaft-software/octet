@@ -15,10 +15,9 @@ git clone https://github.com/skaft-software/ygg.git octet
 cd octet
 ```
 
-The Cargo commands below require a checkout containing the unpublished octet
-source. If starting from a public clone, first select an available octet source
-revision supplied by a maintainer. Do not assume the public default branch
-contains this candidate.
+The public default branch contains the current octet source. Use the `v0.7.0`
+tag to reproduce that release, or work from the default branch when contributing.
+The Cargo commands below run from the repository root.
 
 ```sh
 cargo check --workspace --all-targets --all-features --locked
@@ -99,8 +98,9 @@ configured compatible endpoint is available. Stable Serve releases must pass the
 disposable configured-provider matrix in ordinary CI. Maintainers may also run
 the separately approved credentialed checks in
 [configured-provider acceptance](docs/experimental/octet-serve/provider-acceptance.md)
-against the immutable release SHA. That live check is temporarily optional; the
-release workflow records an explicit waiver when it is not selected.
+against the immutable release SHA. Live checks are optional; release qualification
+does not require live credentials. An unselected check is recorded as **NOT RUN**,
+not a pass or waiver.
 
 ## Identity and documentation
 

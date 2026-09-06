@@ -16,8 +16,8 @@ or shutdown. Do not infer a complete extension runtime from generated bindings.
 
 The source package distribution version is `0.7.0`, independent of extension
 API `0.3`. The package name does not assert npm publication or registry
-availability; octet 0.7.0 is unpublished. Generated declarations/runtime have no
-registry dependencies.
+availability; native octet publication does not publish this SDK to npm.
+Generated declarations/runtime have no registry dependencies.
 
 See [current extension authoring](../../docs/extensions.md) and the
 [generated API reference](../../docs/extensions/API-0.3-REFERENCE.md) for exact

@@ -2,8 +2,8 @@
 
 octet 0.7.0 uses signed native assets on the
 [version-pinned GitHub release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0).
-See [installation](installation.md) for the installer and a source-build fallback
-while assets are being prepared. npm is not published yet; Homebrew, crates.io
+See [installation](installation.md) for the verified native installer or a
+source build. npm is not published yet; Homebrew, crates.io
 and SDK registry publication are separate. Source/release URLs and OIDC checks
 remain bound to `skaft-software/ygg`; website deployment does not rename them.
 
@@ -25,7 +25,7 @@ availability or change independent API and schema versions.
 | Product, SDK and first-party extension distribution versions | `0.7.0`; installed compatibility `requires_octet = "=0.7.0"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release/OIDC repository | `skaft-software/ygg`, unchanged |
-| Website source identity | `https://skaft.org/octet`, proposed branding only, not publication verification |
+| Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
 Current extension authoring targets API 0.3. The four bundled executable-extension
 manifests still declare 0.2; the Python `Extension` runtime remains a legacy
@@ -55,7 +55,7 @@ Cargo installation builds the exact canonical tag (Rust 1.86+ and ripgrep):
 cargo install --locked --git https://github.com/skaft-software/ygg --tag v0.7.0 --bins octet-coding-agent
 ```
 
-The tag must exist before using this command. `cargo install octet` and
+The public `v0.7.0` tag pins this source build. `cargo install octet` and
 registry-based `cargo install octet-coding-agent` are not the supported Cargo path.
 
 The npm channel remains unpublished pending functional first-package bootstrap,
@@ -118,9 +118,9 @@ release alias.
 
 ## Other channels
 
-The version-pinned shell installer and no-lifecycle npm launcher have source
-support for macOS arm64/x64 and GNU/Linux x64. These are target contracts, not
-hosted-acceptance or publication claims. See the
+The version-pinned shell installer is published and public-install verified on
+macOS arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
+platforms but remains unavailable through npm. See the
 [npm release contract](release/npm-trusted-publishing.md) for platform-first
 publication and provenance checks. Bun is unqualified.
 

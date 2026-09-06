@@ -1,18 +1,24 @@
 # Experimental `octet serve`
 
-Run the graphical client from a source checkout:
+With [octet 0.7.0 installed](../../installation.md), install the signed public
+Serve package and start the graphical client:
 
 ```console
-cargo run --features serve -- serve --port 0
+octet extension install octet-serve
+octet serve --port 0
 ```
+
+For development from a source checkout, use
+`cargo run --features serve -- serve --port 0`.
 
 This starts a headless host for the launch workspace and opens its local web
 client. `--port 0` requests an available port. Add `--no-open` to skip opening the
 browser; `--web-root <directory>` selects a development asset directory.
 
-These instructions describe the experimental source snapshot; they do not
-assert release qualification or signed-download availability.
-Live-provider, media, recovery, and capture qualification remain deferred.
+Signed packages and public installation are verified for 0.7.0; see the
+[release verification](../../releases/v0.7.0.md#release-verification). Serve remains
+experimental. Live-provider/native-audio checks are optional and **NOT RUN**;
+package smoke does not qualify every media, recovery, or visual journey.
 
 <a id="product-contract"></a>
 
@@ -83,7 +89,14 @@ qualification.
 
 ## Install or update a package
 
-With a locally qualified matching octet `0.7.0` build and Serve archive:
+With octet `0.7.0`, install or update the signed public package:
+
+```console
+octet extension install octet-serve
+octet extension update octet-serve
+```
+
+For a reviewed matching local archive instead:
 
 ```console
 octet extension install --path octet-serve-0.7.0-TARGET.tar.gz
@@ -92,15 +105,8 @@ octet serve
 ```
 
 Local archive installation does not need GitHub network access. The package
-requires exactly `=0.7.0`; declared targets are GNU/Linux x86_64 and macOS
-x86_64/arm64, not Linux musl. Target declarations are not platform acceptance.
-
-Only after separate publication verification:
-
-```console
-octet extension install octet-serve
-octet extension update octet-serve
-```
+requires exactly `=0.7.0`; published targets are GNU/Linux x86_64 and macOS
+x86_64/arm64, not Linux musl.
 
 Update reinstalls the package matching the running octet version; it is not an
 independent upgrade to a different runtime version.

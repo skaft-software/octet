@@ -17,15 +17,14 @@ not a sandbox.
 
 ## Install and opt in
 
-**Publication gate:** octet `0.7.0` bundles are unpublished. This catalog command
-requires a separately published exact-version bundle; it is not a currently
-available download:
+With [octet 0.7.0 installed](../../docs/installation.md), install the signed
+public bundle:
 
 ```console
 octet extension install octet-web-search
 ```
 
-For unpublished use, select a reviewed local checkout without installation:
+For local development, select a reviewed local checkout without installation:
 
 ```console
 octet --extension-dir ./extensions \

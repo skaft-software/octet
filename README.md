@@ -21,10 +21,10 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/skaft-software/ygg/releases/download/v0.7.0/install-octet.sh | sh
 ```
 
-Use the signed assets on the [v0.7.0 release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0);
-if assets are still being prepared, use the source build below. See
+octet 0.7.0 is released with signed native assets. See
 [installation](docs/installation.md) for prerequisites and channel availability.
-Install octet afresh: `ygg update` is not an octet upgrade path.
+Install afresh: older installations and data remain separate; no automatic
+migration is performed.
 
 **From source:** on macOS or GNU/Linux, install Rust 1.86+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep), then run from this checkout:

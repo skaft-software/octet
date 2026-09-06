@@ -140,16 +140,15 @@ below does not override this warning.
 The release bundle includes the dependency-free Python extension SDK under
 `vendor/`; startup never runs `pip`, a browser download, or install code.
 
-**Publication gate:** octet `0.7.0` bundles are unpublished. These catalog commands
-require a separately published exact-version bundle; they do not identify a
-currently available download:
+With [octet 0.7.0 installed](../../docs/installation.md), install the signed
+public bundle, then separately enable and trust it:
 
 ```console
 octet extension install octet-mcp
 octet --enable-extension octet-mcp --trust-extension octet-mcp
 ```
 
-For unpublished use, select a reviewed checkout explicitly without installation:
+For local development, select a reviewed checkout explicitly without installation:
 
 ```console
 octet --extension-dir ./extensions \
@@ -168,10 +167,10 @@ and edit it deliberately:
 
 ```console
 mkdir -p ~/.octet
-cp extensions/octet-mcp/config.example.json ~/.octet/mcp.json
+cp ~/.octet/extensions/octet-mcp/config.example.json ~/.octet/mcp.json
 chmod 600 ~/.octet/mcp.json
 $EDITOR ~/.octet/mcp.json
-extensions/octet-mcp/octet-mcp --config ~/.octet/mcp.json --check-config
+~/.octet/extensions/octet-mcp/octet-mcp --config ~/.octet/mcp.json --check-config
 ```
 
 If the file enables a Streamable HTTP server, add
