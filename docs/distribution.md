@@ -9,10 +9,9 @@ verified cutover.
 
 ## Package identities
 
-These are source identities in the frozen documentation draft
-`30df0ae36309cc00e160`, not published packages or final provider/migration source.
-The `0.7.0` distribution version does not establish registry availability or
-change independent API and schema versions.
+These are the current source package identities, not claims of published
+packages. The `0.7.0` distribution version does not establish registry
+availability or change independent API and schema versions.
 
 | Surface | 0.7.0 source identity |
 | --- | --- |
@@ -35,6 +34,32 @@ Renaming first-party wire fields such as `octet_version` does not renumber APIs
 or preserve old-name aliases. Historical releases, measurements, upstream
 copyrights, Pi pins, independent example versions and mismatch fixtures retain
 their original scope.
+
+## Channel selection
+
+The release workflows do not publish every source package automatically:
+
+| Channel | Release path | Publication boundary |
+| --- | --- | --- |
+| Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets; verify public installation after upload. |
+| npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft-software/octet*` packages, platform-first. Requires verified registry ownership and trusted publishers for all four packages; disabled by default. |
+| Cargo installation | Build the canonical Git tag | No crates.io publication required; the public tag and its complete source must exist. |
+| crates.io | Not provided by the current workflows | Do not advertise registry installation. Publishing the CLI/dependency graph and verifying registry ownership is separate work. |
+| Homebrew | `homebrew-formula.yml` | Separate signed-asset handoff and protected tap pull request; not automatic with the binary release. |
+| Serve | `release-serve.yml` | Separate exact-version application package and installation checks. |
+| Python/TypeScript SDK registries | Not provided by the CLI release workflow | Source SDKs/generated bindings are not automatically published to PyPI or npm by the four-package CLI job. |
+
+After the exact tag and npm packages have been published and verified, the
+version-pinned installation commands are:
+
+```sh
+cargo install --locked --git https://github.com/skaft-software/ygg --tag v0.7.0 --bins octet-coding-agent
+npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/octet@0.7.0
+```
+
+These are **future published-channel commands**, not evidence that either remote
+channel is available now. `cargo install octet` and registry-based
+`cargo install octet-coding-agent` are not this release's supported Cargo path.
 
 ## Homebrew
 
