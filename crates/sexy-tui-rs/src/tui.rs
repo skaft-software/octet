@@ -2,6 +2,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
+use crate::images::{ImageAnchor, ImageProtocol};
 use crate::scrollback::reset_and_replay;
 use crate::terminal::{key_to_string, Terminal, TerminalInput};
 use crate::utils::visible_width;
@@ -13,6 +14,9 @@ pub const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
 /// Whether a rendered row carries a Kitty graphics placement.
 pub(crate) fn is_image_line(line: &str) -> bool {
     line.contains("\x1b_G")
+        || ImageAnchor::parse_all(line)
+            .iter()
+            .any(|anchor| anchor.protocol() == ImageProtocol::Kitty)
 }
 
 /// Kitty graphics protocol escape that deletes every placed image. Destructive
@@ -67,16 +71,29 @@ fn parse_kitty_image_headers(line: &str) -> Vec<KittyImageHeader> {
 }
 
 fn extract_kitty_image_ids(line: &str) -> Vec<u32> {
-    parse_kitty_image_headers(line)
+    let mut ids = parse_kitty_image_headers(line)
         .into_iter()
         .flat_map(|header| header.ids)
-        .collect()
+        .collect::<Vec<_>>();
+    ids.extend(
+        ImageAnchor::parse_all(line)
+            .into_iter()
+            .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
+            .map(|anchor| anchor.id().get()),
+    );
+    ids
 }
 
 fn extract_kitty_image_rows(line: &str) -> usize {
     parse_kitty_image_headers(line)
         .into_iter()
         .map(|header| header.rows)
+        .chain(
+            ImageAnchor::parse_all(line)
+                .into_iter()
+                .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
+                .map(|anchor| usize::from(anchor.layout().rows())),
+        )
         .max()
         .unwrap_or(1)
 }
@@ -624,7 +641,7 @@ impl<'a> TUI<'a> {
     /// `20be4b18d4c57487f8993d2762bace129f0cf7c6`.
     /// Keep this control flow structurally aligned with
     /// `packages/tui/src/tui.ts`; named upstream cases live in
-    /// `tests/pi_tui_render.rs`. Ygg-specific native-scrollback policy belongs
+    /// `tests/pi_tui_render.rs`. octet-specific native-scrollback policy belongs
     /// only to the explicit `inline_scrollback` compatibility path below.
     fn render_pi_frame(&mut self) {
         let width_u16 = self.terminal.columns();
@@ -1408,7 +1425,7 @@ impl<'a> TUI<'a> {
         self.begin_synchronized_output();
 
         // A terminal reflows the old grid and saved lines before delivering
-        // its resize event. Rebuilding Ygg-owned history below avoids trying to
+        // its resize event. Rebuilding octet-owned history below avoids trying to
         // repair terminal-dependent physical rows after that reflow.
         if self.capabilities.plain {
             self.write_plain_changes(&new_lines, first_changed_hint, previous_len);
@@ -3708,16 +3725,16 @@ mod tests {
         );
         let (terminal, _, _, _, _, writes) = recording_terminal(size.clone(), capabilities);
         let mut tui = TUI::new(Box::new(terminal));
-        tui.set_window_title("ygg · model\x07\x1b · thinking");
+        tui.set_window_title("octet · model\x07\x1b · thinking");
         assert_eq!(
             writes.borrow().join(""),
-            "\x1b]2;ygg · model · thinking\x07"
+            "\x1b]2;octet · model · thinking\x07"
         );
 
         let (terminal, _, _, _, _, writes) =
             recording_terminal(size, crate::capabilities::TerminalCapabilities::plain());
         let mut plain = TUI::new(Box::new(terminal));
-        plain.set_window_title("ygg");
+        plain.set_window_title("octet");
         assert!(writes.borrow().is_empty());
     }
 

@@ -14,7 +14,7 @@ const fixtureSentinels = [
   "Refine onboarding preview",
   "Unknown fixture session",
   "Demo data · responses and actions are simulated",
-  "ygg release pulse",
+  "octet release pulse",
 ];
 
 async function listTextAssets(directory) {

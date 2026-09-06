@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep macOS awake while Ygg is processing a prompt."""
+"""Keep macOS awake while octet is processing a prompt."""
 
 import os
 from pathlib import Path
@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 
-from ygg_extension import Extension
+from octet_extension import Extension
 
 
 CAFFEINATE = Path("/usr/bin/caffeinate")

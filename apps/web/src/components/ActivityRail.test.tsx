@@ -100,7 +100,7 @@ describe("activity rail", () => {
     session.outputs[0]!.handle = "resource-handle-1";
     session.extensionPresentations = [
       {
-        extension: "ygg-subagents",
+        extension: "octet-subagents",
         extensionInstanceId: "instance-subagents",
         generation: 3,
         snapshot: {
@@ -248,7 +248,7 @@ describe("activity rail", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop worker" }));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith(
-        "ygg-subagents",
+        "octet-subagents",
         "instance-subagents",
         3,
         4,
@@ -284,7 +284,7 @@ describe("activity rail", () => {
     const session = structuredClone(fixtureSessions["session-live"]!);
     session.extensionPresentations = [
       {
-        extension: "ygg-browse",
+        extension: "octet-browse",
         extensionInstanceId: "instance-browse",
         generation: 1,
         snapshot: {
@@ -324,7 +324,7 @@ describe("activity rail", () => {
     );
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith(
-        "ygg-browse",
+        "octet-browse",
         "instance-browse",
         1,
         1,

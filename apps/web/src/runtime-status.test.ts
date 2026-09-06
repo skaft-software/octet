@@ -22,7 +22,7 @@ function emptySnapshot(): Record<string, unknown> {
 describe("projectRuntimeSnapshot", () => {
   it("strictly denies unknown fields at every decoded object boundary", () => {
     expect(() =>
-      projectRuntimeSnapshot({ ...emptySnapshot(), privatePath: "/tmp/ygg" }),
+      projectRuntimeSnapshot({ ...emptySnapshot(), privatePath: "/tmp/octet" }),
     ).toThrow(/runtimeSnapshot\.privatePath: unknown field/);
 
     const nested = emptySnapshot();

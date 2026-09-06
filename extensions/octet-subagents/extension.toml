@@ -1,0 +1,23 @@
+name = "octet-subagents"
+version = "0.7.0"
+api_version = "0.2"
+requires_octet = "=0.7.0"
+description = "Claude Code-like background workers over host-owned octet agent sessions, with per-spawn mutation grants and continue/resume"
+
+[entrypoint]
+command = "octet-subagents"
+
+[capabilities]
+# The extension process itself does not read the workspace, launch processes, or
+# use the network. Child permissions are inherited and enforced by octet's
+# agent_sessions service; this declaration does not pretend the shared cwd is an
+# isolation boundary.
+filesystem = "none"
+process = false
+network = false
+
+[contributes]
+tools = ["subagent_spawn", "subagent_status", "subagent_wait", "subagent_stop", "subagent_continue"]
+commands = ["subagents"]
+ui = ["status"]
+presentation = true

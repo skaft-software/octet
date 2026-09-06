@@ -27,7 +27,7 @@ export interface DraftStorage {
 }
 
 function draftKey(hostId: string, sessionId: string): string {
-  return `ygg.draft.v${DRAFT_VERSION}.${encodeURIComponent(hostId)}.${encodeURIComponent(sessionId)}`;
+  return `octet.draft.v${DRAFT_VERSION}.${encodeURIComponent(hostId)}.${encodeURIComponent(sessionId)}`;
 }
 
 function validBoundedString(

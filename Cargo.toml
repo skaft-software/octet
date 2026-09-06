@@ -2,18 +2,19 @@
 resolver = "2"
 members = [
     "crates/sexy-tui-rs",
-    "crates/ygg-ai",
-    "crates/ygg-agent",
-    "crates/ygg-coding-agent",
+    "crates/octet-ai",
+    "crates/octet-agent",
+    "crates/octet-coding-agent",
+    "crates/octet-migrate-types",
 ]
-exclude = ["extensions/ygg-serve"]
+exclude = ["extensions/octet-serve"]
 
 [workspace.package]
-version = "0.6.7"
+version = "0.7.0"
 edition = "2021"
 authors = ["Skaft Software"]
 repository = "https://github.com/skaft-software/ygg"
-homepage = "https://skaft.org/ygg"
+homepage = "https://skaft.org/octet"
 rust-version = "1.86"
 license = "MIT"
 
@@ -40,8 +41,23 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
+[profile.ci-test]
+# CI does not benefit from keeping incremental state between clean runners.
+# Limited debug info retains useful backtraces without test-profile-sized DWARF.
+inherits = "test"
+debug = "limited"
+incremental = false
+
+[profile.profiling]
+# Keep release-like optimization while retaining symbols and full debug data for
+# profilers. `off`, unlike `false`, also disables local ThinLTO.
+inherits = "release"
+debug = "full"
+lto = "off"
+strip = "none"
+
 # Keep the audited lopdf 0.42.0 parser compatible with the Rust 1.86 MSRV.
 # Upstream 0.42.0 declares 1.85 but uses let-chain syntax stabilized later;
 # this local patch only rewrites that syntax and does not change parser logic.
 [patch.crates-io]
-lopdf = { path = "extensions/ygg-serve/vendor/lopdf" }
+lopdf = { path = "extensions/octet-serve/vendor/lopdf" }

@@ -56,7 +56,7 @@ describe("fleet command center", () => {
 
     const rows = screen.getAllByRole("button", { name: /^Open task/ });
     expect(rows[0]).toHaveAccessibleName(
-      "Open task Prepare signed macOS build, Needs you, ygg",
+      "Open task Prepare signed macOS build, Needs you, octet",
     );
 
     fireEvent.click(
@@ -64,12 +64,12 @@ describe("fleet command center", () => {
     );
     expect(
       screen.getByRole("button", {
-        name: "Open task Prepare signed macOS build, Needs you, ygg",
+        name: "Open task Prepare signed macOS build, Needs you, octet",
       }),
     ).toBeVisible();
     expect(
       screen.queryByRole("button", {
-        name: "Open task Refine onboarding preview, Working, ygg",
+        name: "Open task Refine onboarding preview, Working, octet",
       }),
     ).toBeNull();
 
@@ -135,7 +135,7 @@ describe("fleet command center", () => {
     const rows = screen.getAllByRole("button", { name: /^Open task/ });
     expect(rows).toHaveLength(500);
     expect(rows[0]).toHaveAccessibleName(
-      "Open task Critical fleet exception, Failed, ygg",
+      "Open task Critical fleet exception, Failed, octet",
     );
 
     fireEvent.change(

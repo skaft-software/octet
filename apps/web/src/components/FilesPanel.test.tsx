@@ -45,7 +45,7 @@ function renderFilesPanel(
 
 | Name | Value |
 | --- | --- |
-| Ygg | Serve |
+| octet | Serve |
 
 \`\`\`ts
 const answer = 42;

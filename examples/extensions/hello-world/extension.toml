@@ -1,7 +1,7 @@
 name = "hello-world"
 version = "0.1.0"
 api_version = "0.1"
-description = "A tiny language-neutral Ygg extension example"
+description = "A tiny language-neutral octet extension example"
 
 [entrypoint]
 command = "extension.py"

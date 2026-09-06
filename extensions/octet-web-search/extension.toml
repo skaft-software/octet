@@ -1,0 +1,22 @@
+name = "octet-web-search"
+version = "0.7.0"
+api_version = "0.2"
+requires_octet = "=0.7.0"
+description = "Selectable Brave Search or SearXNG web search with bounded public-page retrieval and stable citations"
+
+[entrypoint]
+command = "extension.py"
+
+[capabilities]
+# The runtime manages ~/.config/octet/octet-web-search.json and an owner-private
+# Brave API key under ~/.octet/credentials; both fixed user paths are outside the
+# active workspace.
+filesystem = "unrestricted"
+process = false
+network = true
+
+[contributes]
+tools = ["web_search", "web_fetch", "web_find"]
+commands = ["web-search"]
+ui = ["status"]
+presentation = true

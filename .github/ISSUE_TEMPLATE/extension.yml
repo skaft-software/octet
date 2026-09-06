@@ -14,8 +14,8 @@ body:
           required: true
   - type: input
     attributes:
-      label: Ygg and extension versions
-      placeholder: ygg 0.6.5; ygg-mcp 0.6.5; API 0.2
+      label: octet and extension versions
+      placeholder: octet 0.7.0; octet-mcp 0.7.0; API 0.2
     validations:
       required: true
   - type: input

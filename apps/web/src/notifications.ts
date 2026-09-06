@@ -37,7 +37,7 @@ interface PersistedTransitions {
 }
 
 function storageKey(hostId: string): string {
-  return `ygg.notifications.v${NOTIFICATION_VERSION}.${encodeURIComponent(hostId)}`;
+  return `octet.notifications.v${NOTIFICATION_VERSION}.${encodeURIComponent(hostId)}`;
 }
 
 function transitionKey(summary: SessionSummary): string {
@@ -67,17 +67,17 @@ function notificationCopy(summary: SessionSummary): {
   switch (summary.status) {
     case "needs_attention":
       return {
-        title: "ygg needs your attention",
+        title: "octet needs your attention",
         body: `${taskTitle} is waiting for approval or input.`,
       };
     case "failed":
       return {
-        title: "ygg task failed",
+        title: "octet task failed",
         body: `${taskTitle} needs review.`,
       };
     case "done":
       return {
-        title: "ygg finished",
+        title: "octet finished",
         body: `${taskTitle} is ready to review.`,
       };
     default:
@@ -146,7 +146,7 @@ export class AttentionNotificationManager {
 
     const notification = this.adapter.show(copy.title, {
       body: copy.body,
-      tag: `ygg-session-${summary.id}`,
+      tag: `octet-session-${summary.id}`,
       silent: false,
     });
     notification.setOnClick(() => {

@@ -1,0 +1,1923 @@
+//! Canonical, provider-independent conversation and request/response types.
+
+use crate::error::DecodeError;
+use crate::pricing::Pricing;
+use crate::CompatibilityMode;
+use serde::{Deserialize, Serialize};
+
+/// Newtype representing an endpoint identifier.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct EndpointId(pub String);
+
+/// Newtype representing a model identifier.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ModelId(pub String);
+
+/// Newtype representing a tool call identifier.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ToolCallId(pub String);
+
+/// Supported prompt-cache retention policies.
+///
+/// `Short` is the default and matches pi's provider defaults. `None` disables
+/// all explicit cache controls and cache-affinity identifiers for a request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheRetention {
+    /// Disable prompt caching controls for this request.
+    None,
+    /// Provider default short-lived cache retention.
+    #[default]
+    Short,
+    /// Request the provider's long-lived retention where supported.
+    Long,
+}
+
+/// Cache compatibility knobs for provider/model variants.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCompatibility {
+    /// Whether long retention is supported by this model/endpoint.
+    #[serde(default = "default_true")]
+    pub supports_long_retention: bool,
+    /// Whether Responses-style `session_id` cache affinity is supported.
+    #[serde(default = "default_true")]
+    pub send_session_id_header: bool,
+    /// Whether Chat/Anthropic-compatible session-affinity headers are supported.
+    #[serde(default)]
+    pub send_session_affinity_headers: bool,
+    /// Provider-specific session-affinity header convention. When omitted,
+    /// codecs retain their protocol's historical default behavior.
+    #[serde(default)]
+    pub session_affinity_format: Option<SessionAffinityFormat>,
+    /// Optional Anthropic-style cache-control convention on Chat payloads.
+    #[serde(default)]
+    pub cache_control_format: Option<CacheControlFormat>,
+    /// Whether Anthropic-style cache markers are accepted on tool definitions.
+    #[serde(default = "default_true")]
+    pub supports_cache_control_on_tools: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for CacheCompatibility {
+    fn default() -> Self {
+        Self {
+            supports_long_retention: true,
+            send_session_id_header: true,
+            send_session_affinity_headers: false,
+            session_affinity_format: None,
+            cache_control_format: None,
+            supports_cache_control_on_tools: true,
+        }
+    }
+}
+
+/// Cache-control wire convention used by an OpenAI-compatible endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheControlFormat {
+    /// Anthropic `cache_control: { type: "ephemeral", ttl?: "1h" }`.
+    Anthropic,
+}
+
+/// Provider-specific headers used to keep a prompt-cache session routed
+/// consistently across requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAffinityFormat {
+    /// `session_id`, `x-client-request-id`, and `x-session-affinity`.
+    OpenAi,
+    /// `x-client-request-id` and `x-session-affinity`, without `session_id`.
+    OpenAiNoSession,
+    /// OpenRouter's `x-session-id` header.
+    OpenRouter,
+    /// Codex's `session-id` and `x-client-request-id` headers.
+    Codex,
+    /// Mistral's `x-affinity` header.
+    Mistral,
+}
+
+/// Supported wire protocols.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    /// OpenAI Responses protocol.
+    OpenAiResponses,
+    /// OpenAI Chat Completions protocol.
+    OpenAiChat,
+    /// Anthropic Messages protocol.
+    AnthropicMessages,
+    /// Amazon Bedrock Converse/ConverseStream protocol.
+    BedrockConverse,
+    /// Google Generative AI / Vertex `generateContent` protocol.
+    GoogleGenerativeAi,
+}
+
+/// Preferred transport for streaming provider responses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointTransport {
+    /// Use the provider's ordinary HTTP/SSE transport.
+    #[default]
+    Http,
+    /// Prefer WebSocket when the protocol implements it, with HTTP/SSE as a
+    /// compatibility fallback.
+    WebSocketPreferred,
+}
+
+/// Per-endpoint request-runtime behavior that is independent of the wire codec.
+///
+/// A provider declaration selects an existing [`Protocol`] codec and may opt
+/// into transport behavior documented by that endpoint. This keeps provider
+/// identity out of the request loop: a new provider using an existing API
+/// family needs data, not a client branch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestRuntime {
+    /// Encoding applied to a complete request body before it is sent.
+    #[serde(default)]
+    pub body_encoding: RequestBodyEncoding,
+    /// Responses-family behavior selected by the endpoint declaration.
+    #[serde(default)]
+    pub responses_profile: ResponsesRuntimeProfile,
+    /// Chat-Completions-family behavior selected by the endpoint declaration.
+    #[serde(default)]
+    pub openai_chat_profile: OpenAiChatRuntimeProfile,
+    /// Opt into octet's OpenAI-compatible cold-start lifecycle extension.
+    ///
+    /// When enabled on a streaming OpenAI Chat HTTP/SSE request, octet advertises
+    /// support with `x-octet-lifecycle: 1` and accepts the documented response
+    /// header and SSE comment updates. Endpoints that do not explicitly enable
+    /// this keep the ordinary OpenAI-compatible request and response behavior.
+    #[serde(default)]
+    pub lifecycle_feedback: bool,
+}
+
+/// Endpoint behavior for an existing OpenAI Chat Completions codec.
+///
+/// This is endpoint data rather than a provider identity. Mistral's chat
+/// endpoint retains the OpenAI Chat transport and stream envelope while using
+/// a few documented request and content conventions of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiChatRuntimeProfile {
+    /// Public OpenAI Chat Completions behavior.
+    #[default]
+    Default,
+    /// Mistral Chat Completions compatibility behavior.
+    Mistral,
+}
+
+/// Endpoint behavior for an existing OpenAI Responses codec.
+///
+/// This is intentionally endpoint data rather than a provider identifier: a
+/// provider using the standard Responses codec can select a documented runtime
+/// profile without adding a branch to the codec or client loop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesRuntimeProfile {
+    /// Public OpenAI Responses behavior.
+    #[default]
+    Default,
+    /// ChatGPT Codex subscription behavior over the existing Responses codec.
+    Codex,
+}
+
+impl ResponsesRuntimeProfile {
+    /// Whether WebSocket requests require the private Responses beta marker.
+    pub const fn sends_websocket_beta_header(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
+    /// Whether Responses text should request the profile's low verbosity.
+    pub const fn uses_low_verbosity(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
+    /// Whether this endpoint accepts the richer compact request envelope.
+    pub const fn supports_rich_compact_schema(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
+    /// Whether the endpoint rejects `max_output_tokens` outright.
+    pub const fn omits_max_output_tokens(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+}
+
+/// Content encoding supported by an endpoint's request runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestBodyEncoding {
+    /// Send the codec-produced body without a content encoding.
+    #[default]
+    Identity,
+    /// Compress the codec-produced body with Zstandard and set
+    /// `Content-Encoding: zstd`.
+    Zstd,
+}
+
+/// Endpoint configuration for connecting to a provider.
+#[derive(Clone)]
+pub struct Endpoint {
+    /// Unique endpoint identifier.
+    pub id: EndpointId,
+    /// Versioned base URL of the endpoint (must end with trailing slash).
+    pub base_url: url::Url,
+    /// Auth method for the endpoint.
+    pub auth: crate::auth::Auth,
+    /// Default headers to apply to requests.
+    pub default_headers: http::HeaderMap,
+    /// Preferred response transport.
+    pub transport: EndpointTransport,
+    /// Endpoint-specific request runtime selected by the provider declaration.
+    pub runtime: RequestRuntime,
+    /// Maximum time to send a request and receive response headers. Streaming
+    /// body idle and overall deadlines are owned by [`crate::AiClient`].
+    pub timeout: std::time::Duration,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("id", &self.id)
+            .field("base_url", &self.base_url)
+            .field("auth", &self.auth)
+            .field("default_headers", &"<redacted>")
+            .field("transport", &self.transport)
+            .field("runtime", &self.runtime)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+/// Model capabilities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// Supported modalities for model input.
+    pub input_modalities: ModalitySet,
+    /// Supported modalities for model output.
+    pub output_modalities: ModalitySet,
+    /// Whether the model supports tools.
+    pub tools: bool,
+    /// Whether the model supports parallel tool calling.
+    pub parallel_tool_calls: bool,
+    /// Model reasoning capability options, if supported.
+    pub reasoning: Option<ReasoningCapability>,
+    /// Whether this Responses route uses the compact Codex request envelope.
+    /// In that envelope instructions and tool definitions are carried as input
+    /// items rather than top-level request fields.
+    #[serde(default)]
+    pub responses_lite: bool,
+    /// Host-side agent collaboration protocol supported by this model.
+    #[serde(default)]
+    pub agent_delegation: Option<AgentDelegation>,
+    /// Whether the model supports structured outputs (JSON schema / mode).
+    pub structured_output: bool,
+    /// Whether the provider loads tool schemas dynamically after a
+    /// `added_tool_names` announcement on a tool result. When false, every
+    /// registered tool's schema is sent with every request.
+    #[serde(default)]
+    pub deferred_tool_loading: bool,
+}
+
+/// Compact set over a small closed modality universe.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModalitySet {
+    bits: u8,
+}
+
+impl ModalitySet {
+    /// Creates an empty modality set.
+    pub const fn none() -> Self {
+        Self { bits: 0 }
+    }
+
+    /// Returns a new set containing the given modality.
+    pub fn with(self, m: Modality) -> Self {
+        let bit = match m {
+            Modality::Image => 1 << 0,
+            Modality::Audio => 1 << 1,
+        };
+        Self {
+            bits: self.bits | bit,
+        }
+    }
+
+    /// Returns a new set without the given modality.
+    pub fn without(self, m: Modality) -> Self {
+        let bit = match m {
+            Modality::Image => 1 << 0,
+            Modality::Audio => 1 << 1,
+        };
+        Self {
+            bits: self.bits & !bit,
+        }
+    }
+
+    /// Returns whether this set contains the given modality.
+    pub fn contains(self, m: Modality) -> bool {
+        let bit = match m {
+            Modality::Image => 1 << 0,
+            Modality::Audio => 1 << 1,
+        };
+        (self.bits & bit) != 0
+    }
+
+    pub(crate) fn is_valid(self) -> bool {
+        self.bits & !0b11 == 0
+    }
+}
+
+/// Supported modalities (besides Text which is always implied).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Modality {
+    /// Image input/output.
+    Image,
+    /// Audio input/output.
+    Audio,
+}
+
+/// Host-side collaboration protocol advertised for a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDelegation {
+    /// Codex-style task collaboration with named agents, messaging, waiting,
+    /// interruption, and bounded nested spawning.
+    V2,
+}
+
+/// Model reasoning capabilities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningCapability {
+    /// Exact endpoint-supported selectors. Absence retains the legacy range
+    /// contract; a present list is authoritative, including whether Off exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<ReasoningOptions>,
+    /// How the request selects reasoning effort.
+    pub control: ReasoningControl,
+    /// Whether the model streams reasoning/summary text.
+    pub exposes_text: bool,
+    /// Whether the model preserves reasoning/thinking signatures or state for continuation.
+    pub preserves_state: bool,
+    /// Budget maps from portable effort to token budgets, required iff control is TokenBudget.
+    pub effort_budgets: Option<ReasoningEffortBudgets>,
+    /// OpenAI Chat-Completions-specific reasoning behavior.
+    #[serde(default)]
+    pub openai_chat_mode: OpenAiChatReasoningMode,
+    /// Lowest reasoning effort this model meaningfully distinguishes.
+    /// Product selection omits lower tiers or normalizes persisted choices to
+    /// this floor. Explicit core requests outside the supported set fail.
+    /// Defaults to `Minimal` so models that support the full portable range
+    /// work without catalog changes.
+    #[serde(default = "default_min_effort")]
+    pub min_effort: ReasoningEffort,
+    /// Highest reasoning effort this model accepts. Explicit core requests
+    /// outside the supported set fail before transport. Product pickers normalize.
+    /// Defaults to `High` so models predating `xhigh`/`max` never advertise them.
+    #[serde(default = "default_max_effort")]
+    pub max_effort: ReasoningEffort,
+}
+
+/// Provenance of newly discovered reasoning metadata. Historical manual
+/// entries omit this field; absence never authorizes rewriting their intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMetadataSource {
+    /// Inventory contained no reasoning facts.
+    Absent,
+    /// Capability was mentioned but no usable control contract was supplied.
+    Unknown,
+    /// Inventory explicitly supplied a positive or negative assertion.
+    Explicit,
+}
+
+/// Exact selectors from a model/endpoint contract, not a universal effort enum.
+/// Wire spelling and provider default survive discovery, caches, and selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningOptions {
+    /// Bounded, unique portable selectors in provider order. `default` means
+    /// parameter-free On for the existing custom none/default contract only.
+    pub values: Vec<String>,
+    /// Exact advertised default, if any; it must occur in `values`.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+impl ReasoningConfig {
+    /// Decode a supported selector without conflating Off with Minimal.
+    pub fn from_provider_value(value: &str) -> Option<Self> {
+        Some(match value.to_ascii_lowercase().as_str() {
+            "none" | "off" | "disabled" | "false" => Self::Off,
+            "default" | "on" | "enabled" | "true" => Self::On,
+            "minimal" | "min" => Self::Effort(ReasoningEffort::Minimal),
+            "low" => Self::Effort(ReasoningEffort::Low),
+            "medium" | "med" => Self::Effort(ReasoningEffort::Medium),
+            "high" => Self::Effort(ReasoningEffort::High),
+            "xhigh" | "x-high" | "extra_high" => Self::Effort(ReasoningEffort::Xhigh),
+            "max" => Self::Effort(ReasoningEffort::Max),
+            "ultra" => Self::Effort(ReasoningEffort::Ultra),
+            _ => return None,
+        })
+    }
+
+    /// Canonical spelling for legacy effort contracts.
+    pub fn provider_value(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Off => "none",
+            Self::On => "default",
+            Self::Effort(ReasoningEffort::Minimal) => "minimal",
+            Self::Effort(ReasoningEffort::Low) => "low",
+            Self::Effort(ReasoningEffort::Medium) => "medium",
+            Self::Effort(ReasoningEffort::High) => "high",
+            Self::Effort(ReasoningEffort::Xhigh) => "xhigh",
+            Self::Effort(ReasoningEffort::Max) => "max",
+            Self::Effort(ReasoningEffort::Ultra) => "ultra",
+            Self::Budget(_) => return None,
+        })
+    }
+}
+
+impl ReasoningOptions {
+    /// Validate bounded exact choices. Unknown, duplicate semantic values and
+    /// dangling defaults are malformed, not permission to use a guessed range.
+    pub fn is_valid(&self) -> bool {
+        let choices = self.choices();
+        !self.values.is_empty()
+            && self.values.len() <= 9
+            && choices.len() == self.values.len()
+            && choices
+                .iter()
+                .enumerate()
+                .all(|(i, c)| !choices[..i].contains(c))
+            && self
+                .default
+                .as_ref()
+                .is_none_or(|v| self.values.contains(v))
+    }
+
+    /// Portable selections in the advertised order.
+    pub fn choices(&self) -> Vec<ReasoningConfig> {
+        self.values
+            .iter()
+            .filter_map(|v| ReasoningConfig::from_provider_value(v))
+            .collect()
+    }
+
+    /// Exact wire spelling of a supported selection.
+    pub fn value(&self, selection: &ReasoningConfig) -> Option<&str> {
+        self.values
+            .iter()
+            .find(|v| ReasoningConfig::from_provider_value(v).as_ref() == Some(selection))
+            .map(String::as_str)
+    }
+}
+
+impl ReasoningCapability {
+    fn exact_values(&self) -> Option<(&[String], Option<&str>)> {
+        if let Some(options) = &self.options {
+            return Some((&options.values, options.default.as_deref()));
+        }
+        match &self.openai_chat_mode {
+            OpenAiChatReasoningMode::ProviderValues {
+                values, default, ..
+            } => Some((values, default.as_deref())),
+            _ => None,
+        }
+    }
+
+    /// One shared choice set for product selection and strict core validation.
+    pub fn choices(&self) -> Vec<ReasoningConfig> {
+        if self.control == ReasoningControl::AlwaysOn {
+            return vec![ReasoningConfig::On];
+        }
+        if let Some((values, _)) = self.exact_values() {
+            return values
+                .iter()
+                .filter_map(|v| ReasoningConfig::from_provider_value(v))
+                .collect();
+        }
+        if self.control == ReasoningControl::Toggle {
+            return vec![ReasoningConfig::Off, ReasoningConfig::On];
+        }
+        let mut choices = vec![ReasoningConfig::Off];
+        choices.extend(
+            [
+                ReasoningEffort::Minimal,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh,
+                ReasoningEffort::Max,
+                ReasoningEffort::Ultra,
+            ]
+            .into_iter()
+            .filter(|e| *e >= self.min_effort && *e <= self.max_effort)
+            .map(ReasoningConfig::Effort),
+        );
+        choices
+    }
+
+    /// Whether this exact selection can be represented. Budget limits are
+    /// checked separately against the request's output allowance.
+    pub fn supports(&self, selection: &ReasoningConfig) -> bool {
+        if matches!(selection, ReasoningConfig::Budget(_)) {
+            return self.control == ReasoningControl::TokenBudget;
+        }
+        self.choices().contains(selection)
+    }
+
+    /// Endpoint default, otherwise the lowest supported enabled selection.
+    pub fn default_selection(&self) -> Option<ReasoningConfig> {
+        self.exact_values()
+            .and_then(|(_, default)| default.and_then(ReasoningConfig::from_provider_value))
+            .or_else(|| {
+                self.choices()
+                    .into_iter()
+                    .find(|c| *c != ReasoningConfig::Off)
+            })
+            .or_else(|| self.choices().into_iter().next())
+    }
+
+    /// Exact wire value. `default` deliberately remains visible to the encoder,
+    /// which decides whether its typed profile represents On by omission.
+    pub fn wire_value(&self, selection: &ReasoningConfig) -> Option<String> {
+        if let Some((values, _)) = self.exact_values() {
+            return values
+                .iter()
+                .find(|v| ReasoningConfig::from_provider_value(v).as_ref() == Some(selection))
+                .cloned();
+        }
+        selection.provider_value().map(str::to_owned)
+    }
+
+    /// Resolve a portable effort to this model's explicitly configured budget.
+    pub fn budget(&self, effort: ReasoningEffort) -> Option<u64> {
+        let b = self.effort_budgets?;
+        Some(match effort {
+            ReasoningEffort::Minimal => b.minimal,
+            ReasoningEffort::Low => b.low,
+            ReasoningEffort::Medium => b.medium,
+            ReasoningEffort::High => b.high,
+            ReasoningEffort::Xhigh => b.xhigh,
+            ReasoningEffort::Max | ReasoningEffort::Ultra => b.max,
+        })
+    }
+}
+
+/// Default floor for [`ReasoningCapability::min_effort`] when unspecified.
+fn default_min_effort() -> ReasoningEffort {
+    ReasoningEffort::Minimal
+}
+
+/// Default ceiling for [`ReasoningCapability::max_effort`] when unspecified.
+fn default_max_effort() -> ReasoningEffort {
+    ReasoningEffort::High
+}
+
+/// Provider extension used by an OpenAI Chat Completions reasoning model.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiChatReasoningMode {
+    /// Standard OpenAI-compatible `reasoning_effort` behavior.
+    #[default]
+    Standard,
+    /// DeepSeek's explicit `thinking` toggle and `reasoning_content` replay.
+    DeepSeekThinking,
+    /// DeepSeek thinking toggle without an independently advertised effort field.
+    DeepSeekToggle,
+    /// Cerebras effort/system-role contract and assistant `reasoning` replay.
+    Cerebras,
+    /// Qwen's top-level boolean control (not a chat-template option).
+    QwenEnableThinking,
+    /// Explicit local-server chat-template control, never inferred from a name.
+    QwenChatTemplate {
+        /// Retain reasoning on subsequent turns in servers supporting this option.
+        preserve_thinking: bool,
+    },
+    /// Together's nested boolean control with separately advertised effort.
+    Together {
+        /// Whether the endpoint also supports `reasoning_effort`.
+        effort: bool,
+    },
+    /// OpenRouter's provider-neutral reasoning object (`reasoning.effort`).
+    OpenRouter,
+    /// Reasoning effort is supported, but the system instruction must remain a
+    /// `system` message rather than OpenAI's `developer` role. This is used by
+    /// OpenAI-compatible servers whose chat template rejects `developer`, such
+    /// as Qwen3.5 served by vLLM.
+    SystemMessage,
+    /// Provider-advertised `reasoning_effort` values. This preserves exact
+    /// gateway strings while exposing their semantic choices to clients.
+    ProviderValues {
+        /// Accepted wire values in provider order.
+        values: Vec<String>,
+        /// Provider default, when advertised.
+        default: Option<String>,
+        /// Keep instructions in the broadly compatible `system` role.
+        system_message: bool,
+    },
+}
+
+/// Selection control mechanism for reasoning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningControl {
+    /// Control via effort tags (Minimal, Low, Medium, High).
+    Effort,
+    /// Reasoning is always enabled by the provider and accepts no control parameter.
+    AlwaysOn,
+    /// Binary off/on control.
+    Toggle,
+    /// Control via explicit token budget.
+    TokenBudget,
+}
+
+/// Maps portable effort levels to token budgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningEffortBudgets {
+    /// Minimal effort token budget.
+    pub minimal: u64,
+    /// Low effort token budget.
+    pub low: u64,
+    /// Medium effort token budget.
+    pub medium: u64,
+    /// High effort token budget.
+    pub high: u64,
+    /// Extra-high effort token budget.
+    pub xhigh: u64,
+    /// Maximum effort token budget.
+    pub max: u64,
+}
+
+/// Model limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelLimits {
+    /// Context window size in tokens.
+    pub context_window: u64,
+    /// Maximum allowed output tokens.
+    pub max_output_tokens: u64,
+}
+
+/// Complete description of a model.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelSpec {
+    /// Model identifier.
+    pub id: ModelId,
+    /// Endpoint identifier.
+    pub endpoint: EndpointId,
+    /// Wire-level API model name.
+    pub api_name: String,
+    /// Optional stable human-facing name supplied by configuration or registry.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Protocol used to communicate with this model.
+    pub protocol: Protocol,
+    /// Capabilities of this model.
+    pub capabilities: Capabilities,
+    /// Model context/output token limits.
+    pub limits: ModelLimits,
+    /// Pricing rates for this model.
+    pub pricing: Option<Pricing>,
+    /// Prompt-cache compatibility settings for this model/endpoint.
+    #[serde(default)]
+    pub cache: CacheCompatibility,
+}
+
+/// Multimodal data structure.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Media {
+    /// Image content.
+    Image(ImageMedia),
+    /// Audio content.
+    Audio(AudioMedia),
+}
+
+impl Media {
+    /// Creates an image media from a URL.
+    pub fn image_url(url: url::Url, media_type: Option<mime::Mime>) -> Self {
+        Self::Image(ImageMedia {
+            source: ImageSource::Url(url),
+            media_type,
+            detail: None,
+        })
+    }
+
+    /// Creates an image media from inline bytes.
+    pub fn image_bytes(data: bytes::Bytes, media_type: mime::Mime) -> Self {
+        Self::Image(ImageMedia {
+            source: ImageSource::Inline(data),
+            media_type: Some(media_type),
+            detail: None,
+        })
+    }
+
+    /// Creates an audio media from inline bytes (input).
+    pub fn audio_bytes(data: bytes::Bytes, format: AudioFormat) -> Self {
+        Self::Audio(AudioMedia {
+            payload: AudioPayload::Inline(data),
+            format,
+            transcript: None,
+        })
+    }
+
+    /// Creates an audio media from a provider reference (reuse).
+    pub fn audio_ref(reference: ProviderMediaRef, format: AudioFormat) -> Self {
+        Self::Audio(AudioMedia {
+            payload: AudioPayload::ProviderRef(reference),
+            format,
+            transcript: None,
+        })
+    }
+}
+
+/// Image media container.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageMedia {
+    /// Source of the image.
+    pub source: ImageSource,
+    /// MIME type of the image.
+    #[serde(default, with = "optional_mime")]
+    pub media_type: Option<mime::Mime>,
+    /// Quality/detail hint.
+    pub detail: Option<ImageDetail>,
+}
+
+/// Source of an image.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ImageSource {
+    /// Publicly accessible URL.
+    Url(url::Url),
+    /// Inline binary data.
+    Inline(#[serde(with = "base64_bytes")] bytes::Bytes),
+    /// Replayed reference to provider-hosted media.
+    ProviderRef(ProviderMediaRef),
+}
+
+/// Detail hints for image processing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageDetail {
+    /// Automatic selection based on image size.
+    Auto,
+    /// Process at low resolution.
+    Low,
+    /// Process at high resolution.
+    High,
+}
+
+/// Audio media container.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioMedia {
+    /// Payload containing the audio data or reference.
+    pub payload: AudioPayload,
+    /// Audio coding format.
+    pub format: AudioFormat,
+    /// Optional transcription text. Exists only on audio.
+    pub transcript: Option<String>,
+}
+
+/// Audio payload variants.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AudioPayload {
+    /// Inline raw audio bytes.
+    Inline(#[serde(with = "base64_bytes")] bytes::Bytes),
+    /// Opaque reference to provider-hosted audio.
+    ProviderRef(ProviderMediaRef),
+    /// Completed audio output containing both bytes and a reusable reference.
+    InlineWithProviderRef {
+        /// Audio binary data.
+        #[serde(with = "base64_bytes")]
+        data: bytes::Bytes,
+        /// Reusable provider-hosted reference.
+        reference: ProviderMediaRef,
+    },
+}
+
+/// Supported audio formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioFormat {
+    /// Waveform Audio File Format.
+    Wav,
+    /// Advanced Audio Coding.
+    Aac,
+    /// MPEG-1 Audio Layer III.
+    Mp3,
+    /// Free Lossless Audio Codec.
+    Flac,
+    /// Opus codec.
+    Opus,
+    /// Raw 16-bit linear PCM.
+    Pcm16,
+}
+
+/// How generated audio is delivered by a model route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioOutputDelivery {
+    /// One complete clip after the provider response body has finished.
+    Completed,
+    /// Incremental audio chunks while generation is still in progress.
+    Streaming,
+}
+
+/// Route-effective audio formats and output delivery behavior.
+///
+/// This combines a model's advertised modality bits with the selected wire
+/// protocol's implemented codec support. Applications should use this instead
+/// of interpreting the raw audio modality bit alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioCapabilities {
+    /// Accepted inline input formats.
+    pub input_formats: &'static [AudioFormat],
+    /// Requestable generated-audio formats.
+    pub output_formats: &'static [AudioFormat],
+    /// Delivery behavior when generated audio is supported.
+    pub output_delivery: Option<AudioOutputDelivery>,
+}
+
+const OPENAI_CHAT_AUDIO_INPUT_FORMATS: &[AudioFormat] = &[AudioFormat::Wav, AudioFormat::Mp3];
+const OPENAI_CHAT_AUDIO_OUTPUT_FORMATS: &[AudioFormat] = &[
+    AudioFormat::Wav,
+    AudioFormat::Aac,
+    AudioFormat::Mp3,
+    AudioFormat::Flac,
+    AudioFormat::Opus,
+    AudioFormat::Pcm16,
+];
+
+impl ModelSpec {
+    /// Returns route-effective audio capabilities, or `None` when neither audio
+    /// input nor generated audio is available through the selected protocol.
+    pub fn audio_capabilities(&self) -> Option<AudioCapabilities> {
+        if self.protocol != Protocol::OpenAiChat {
+            return None;
+        }
+
+        let input_formats = if self.capabilities.input_modalities.contains(Modality::Audio) {
+            OPENAI_CHAT_AUDIO_INPUT_FORMATS
+        } else {
+            &[]
+        };
+        let output_formats = if self
+            .capabilities
+            .output_modalities
+            .contains(Modality::Audio)
+        {
+            OPENAI_CHAT_AUDIO_OUTPUT_FORMATS
+        } else {
+            &[]
+        };
+        if input_formats.is_empty() && output_formats.is_empty() {
+            return None;
+        }
+        Some(AudioCapabilities {
+            input_formats,
+            output_formats,
+            output_delivery: (!output_formats.is_empty()).then_some(AudioOutputDelivery::Completed),
+        })
+    }
+
+    /// Returns whether this route accepts the given inline audio input format.
+    pub fn supports_audio_input(&self, format: AudioFormat) -> bool {
+        self.audio_capabilities()
+            .is_some_and(|capabilities| capabilities.input_formats.contains(&format))
+    }
+
+    /// Returns whether this route can generate the requested audio format.
+    pub fn supports_audio_output(&self, format: AudioFormat) -> bool {
+        self.audio_capabilities()
+            .is_some_and(|capabilities| capabilities.output_formats.contains(&format))
+    }
+
+    /// Returns the input modalities usable through both the model and selected
+    /// protocol implementation.
+    pub fn effective_input_modalities(&self) -> ModalitySet {
+        if self
+            .audio_capabilities()
+            .is_some_and(|capabilities| !capabilities.input_formats.is_empty())
+        {
+            self.capabilities.input_modalities
+        } else {
+            self.capabilities.input_modalities.without(Modality::Audio)
+        }
+    }
+
+    /// Returns the output modalities usable through both the model and selected
+    /// protocol implementation.
+    pub fn effective_output_modalities(&self) -> ModalitySet {
+        if self
+            .audio_capabilities()
+            .is_some_and(|capabilities| !capabilities.output_formats.is_empty())
+        {
+            self.capabilities.output_modalities
+        } else {
+            self.capabilities.output_modalities.without(Modality::Audio)
+        }
+    }
+}
+
+/// Reference to a file/media resource stored on the provider's servers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderMediaRef {
+    /// Protocol used to create this reference.
+    pub protocol: Protocol,
+    /// Provider-specific file/media identifier.
+    pub id: String,
+    /// Expiration time of the reference, if applicable.
+    pub expires_at: Option<std::time::SystemTime>,
+}
+
+/// A conversation turn.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Message {
+    /// Turn by the user (input).
+    User(UserMessage),
+    /// Turn by the assistant (output).
+    Assistant(AssistantMessage),
+}
+
+/// Turn authored by the user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserMessage {
+    /// Content blocks comprising this turn.
+    pub content: Vec<UserPart>,
+}
+
+/// Turn authored by the assistant.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssistantMessage {
+    /// Content blocks comprising this turn.
+    pub content: Vec<AssistantPart>,
+    /// The model that produced this message.
+    pub model: ModelId,
+    /// The protocol used to communicate with the model.
+    pub protocol: Protocol,
+}
+
+/// Part of a user message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum UserPart {
+    /// Plain text string.
+    Text(String),
+    /// Multimodal media object (image/audio).
+    Media(Media),
+    /// Outcome of a tool execution.
+    ToolResult(ToolResult),
+}
+
+/// Part of an assistant message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AssistantPart {
+    /// Plain text string.
+    Text(String),
+    /// Intermediate reasoning text and state.
+    Reasoning(ReasoningPart),
+    /// Opaque metadata for the immediately following assistant part.
+    ///
+    /// This is retained only by a matching provider/model codec. It has no
+    /// visible content and must not be moved across assistant parts during
+    /// replay.
+    ProviderMetadata(ProviderPartMetadata),
+    /// Request to execute a tool.
+    ToolCall(ToolCall),
+    /// Generated output media (e.g. spoken audio).
+    Media(Media),
+}
+
+/// Opaque provider metadata associated with the next assistant part.
+///
+/// The metadata marker is intentionally a distinct canonical part rather than
+/// a property of text or tool calls: providers can attach continuation data to
+/// several unrelated wire part kinds, and preserving its position is required
+/// for replay.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum ProviderPartMetadata {
+    /// Google Gemini/Vertex opaque thought signature for the following part.
+    GoogleThoughtSignature {
+        /// Base64-encoded provider continuation value.
+        signature: String,
+    },
+}
+
+impl std::fmt::Debug for ProviderPartMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GoogleThoughtSignature { .. } => formatter
+                .debug_struct("GoogleThoughtSignature")
+                .field("signature", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+/// Execution outcome of a tool call.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// Matching tool call identifier.
+    pub tool_call_id: ToolCallId,
+    /// Output data blocks.
+    pub content: Vec<ToolResultPart>,
+    /// Whether the tool execution resulted in a terminal error.
+    pub is_error: bool,
+    /// Names from the registry that became available as a consequence of this
+    /// tool execution (for example an extension or MCP server that registers
+    /// additional tools on first use). Providers capable of deferred tool
+    /// loading treat these names as load points: once announced, those tool
+    /// schemas are excluded from the static request schema set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_tool_names: Option<Vec<String>>,
+}
+
+/// Part of a tool result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ToolResultPart {
+    /// Plain text outcome.
+    Text(String),
+    /// Multimodal media generated by the tool.
+    Media(Media),
+}
+
+/// Recoverable validation failure retained with a completed tool call.
+///
+/// This marker is assigned only after the provider arguments have been parsed
+/// and normalized. It tells an agent to persist a paired error result instead
+/// of invoking the tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallArgumentError {
+    /// The normalized argument object does not satisfy the request's exact
+    /// tool-parameter schema.
+    SchemaMismatch,
+}
+
+/// Result of validating one normalized argument object against a tool snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolArgumentValidation {
+    /// The named tool exists and its schema accepts the arguments.
+    Valid,
+    /// The named tool exists but its schema rejects the arguments.
+    SchemaMismatch,
+    /// The named tool is absent from the snapshot, so no schema was available
+    /// to validate. The caller can retain the call for normal unknown-tool
+    /// recovery.
+    UnknownTool,
+}
+
+/// Call to a tool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Unique call identifier.
+    pub id: ToolCallId,
+    /// Name of the tool to invoke.
+    pub name: String,
+    /// Raw JSON arguments string.
+    pub arguments_json: String,
+    /// Recoverable validation failure found while assembling this completed
+    /// call. The canonical id and normalized arguments remain intact so a
+    /// durable error result can still be paired with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_error: Option<ToolCallArgumentError>,
+}
+
+impl ToolCall {
+    /// Parses the raw JSON arguments as a JSON object, returning a decode error if not an object.
+    pub fn arguments_value(&self) -> Result<serde_json::Value, DecodeError> {
+        crate::json_repair::parse_json_value(&self.arguments_json).and_then(|value| {
+            if value.is_object() {
+                Ok(value)
+            } else {
+                Err(DecodeError::Json(
+                    "Arguments must be a JSON object".to_string(),
+                ))
+            }
+        })
+    }
+}
+
+/// Reasoning component of an assistant's output.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReasoningPart {
+    /// Human-visible summary or step-by-step reasoning.
+    pub text: Option<String>,
+    /// Opaque continuation metadata for replaying context.
+    pub state: Option<ReasoningState>,
+}
+
+/// Opaque reasoning continuation state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReasoningState {
+    /// Producing protocol.
+    pub protocol: Protocol,
+    /// Model identifier.
+    pub model: ModelId,
+    /// Protocol-specific continuation variant.
+    pub kind: ReasoningStateKind,
+}
+
+/// Protocol-specific reasoning metadata shapes.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum ReasoningStateKind {
+    /// Anthropic `thinking` signature, including Bedrock reasoningText.
+    AnthropicSignature {
+        /// Opaque signature value.
+        signature: String,
+    },
+    /// Anthropic `redacted_thinking` or base64 Bedrock redactedContent block.
+    AnthropicRedacted {
+        /// Opaque redacted data.
+        data: String,
+    },
+    /// OpenAI Responses reasoning continuation.
+    OpenAiReasoning {
+        /// Opaque item ID.
+        item_id: Option<String>,
+        /// Opaque encrypted reasoning block.
+        encrypted_content: Option<String>,
+    },
+}
+
+// Opaque replay state must survive serialization unchanged, but it is not
+// diagnostic content. This also protects Debug on enclosing Response/messages.
+impl std::fmt::Debug for ReasoningStateKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AnthropicSignature { .. } => formatter
+                .debug_struct("AnthropicSignature")
+                .field("signature", &"[REDACTED]")
+                .finish(),
+            Self::AnthropicRedacted { .. } => formatter
+                .debug_struct("AnthropicRedacted")
+                .field("data", &"[REDACTED]")
+                .finish(),
+            Self::OpenAiReasoning { .. } => formatter
+                .debug_struct("OpenAiReasoning")
+                .field("item_id", &"[REDACTED]")
+                .field("encrypted_content", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+/// Inline media bytes serialize as base64 strings. serde_json renders raw
+/// bytes as a number array (~3-4x the payload size), which bloats session
+/// files and anything else that serializes messages. Deserialization also
+/// accepts the legacy number-array form so older session files stay readable.
+mod base64_bytes {
+    use base64::prelude::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(data: &bytes::Bytes, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&base64::display::Base64Display::new(data, &BASE64_STANDARD))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<bytes::Bytes, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = bytes::Bytes;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a base64 string or a byte array")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                BASE64_STANDARD
+                    .decode(value)
+                    .map(bytes::Bytes::from)
+                    .map_err(serde::de::Error::custom)
+            }
+
+            fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(bytes::Bytes::copy_from_slice(value))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut data = Vec::with_capacity(seq.size_hint().unwrap_or_default());
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    data.push(byte);
+                }
+                Ok(bytes::Bytes::from(data))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+mod optional_mime {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use std::str::FromStr;
+
+    pub fn serialize<S>(mime: &Option<mime::Mime>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match mime {
+            Some(ref m) => serializer.serialize_some(m.as_ref()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<mime::Mime>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt_str: Option<String> = Option::deserialize(deserializer)?;
+        match opt_str {
+            Some(s) => mime::Mime::from_str(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Provider-independent request envelope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Request {
+    /// Optional developer/system prompt.
+    pub system: Option<String>,
+    /// Message history leading up to this turn.
+    pub messages: Vec<Message>,
+    /// Tool definitions available to the model.
+    pub tools: Vec<ToolDef>,
+    /// Tool calling constraint settings.
+    pub tool_choice: ToolChoice,
+    /// Optional limit on the number of generated tokens.
+    pub max_output_tokens: Option<u64>,
+    /// Optional temperature parameter.
+    pub temperature: Option<f32>,
+    /// Custom stop sequences.
+    pub stop: Vec<String>,
+    /// Reasoning effort or budget configuration.
+    pub reasoning: ReasoningConfig,
+    /// Reasoning execution mode. Pro mode is independently capability-gated.
+    #[serde(default)]
+    pub reasoning_mode: ReasoningMode,
+    /// OpenAI Responses-specific raw replay and continuation options.
+    #[serde(default)]
+    pub responses: Option<crate::responses::ResponsesOptions>,
+    /// Requested formatting for model response (text or JSON).
+    #[serde(default)]
+    pub output_format: OutputFormat,
+    /// Requested output modalities.
+    pub output_modalities: OutputModalities,
+    /// Compatibility mode for handling unsupported features.
+    #[serde(default)]
+    pub compatibility: CompatibilityMode,
+    /// Prompt-cache retention preference; defaults to pi-compatible short retention.
+    #[serde(default)]
+    pub cache_retention: CacheRetention,
+    /// Stable session identifier used for provider cache affinity.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// Tool definition.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolDef {
+    /// Name of the tool.
+    pub name: String,
+    /// Description of what the tool does.
+    pub description: String,
+    /// JSON schema describing expected parameters.
+    pub parameters: serde_json::Value,
+}
+
+/// Tool invocation constraint settings.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// Let the model decide whether to call a tool.
+    #[default]
+    Auto,
+    /// Force the model to call at least one tool.
+    Required,
+    /// Prevent the model from calling any tools.
+    None,
+    /// Force the model to call the specified tool.
+    Named(String),
+}
+
+/// Reasoning settings.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ReasoningConfig {
+    /// Reasoning capability turned off.
+    #[default]
+    Off,
+    /// Binary reasoning capability turned on.
+    On,
+    /// Control reasoning via high-level effort presets.
+    Effort(ReasoningEffort),
+    /// Control reasoning via explicit token budget.
+    Budget(u64),
+}
+
+/// Legacy reasoning execution mode retained only for loading older clients and
+/// persisted sessions. New callers should select a [`ReasoningEffort`].
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    /// Ordinary effort-based execution.
+    #[default]
+    Standard,
+    /// Historical Codex Pro selection. Product layers migrate this to
+    /// [`ReasoningEffort::Ultra`] when the selected model advertises complete
+    /// V2 delegation support; protocol codecs never serialize a mode field.
+    Pro,
+}
+
+/// High-level reasoning effort presets.
+///
+/// Variant declaration order is the semantic ordering (`Minimal` < … < `Ultra`);
+/// the derived `Ord` is used to clamp a requested effort down to a model's
+/// highest supported tier.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Minimal reasoning effort.
+    Minimal,
+    /// Low reasoning effort.
+    Low,
+    /// Medium reasoning effort.
+    Medium,
+    /// High reasoning effort.
+    High,
+    /// Extra-high reasoning effort (between `High` and `Max`).
+    Xhigh,
+    /// Maximum ordinary reasoning effort.
+    Max,
+    /// Highest Codex reasoning tier. The coding product may pair this effort
+    /// with extension-owned task delegation only when the observing
+    /// `octet-subagents` surface is active.
+    Ultra,
+}
+
+/// Requested output modalities.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "options", rename_all = "snake_case")]
+pub enum OutputModalities {
+    /// Text output only.
+    #[default]
+    Text,
+    /// Text and audio output with options.
+    TextAndAudio(AudioOutputOptions),
+}
+
+/// Audio generation configuration options.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AudioOutputOptions {
+    /// Format of the output audio file.
+    pub format: AudioFormat,
+    /// Voice selection parameters.
+    pub voice: AudioVoice,
+}
+
+/// Voice settings.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum AudioVoice {
+    /// Standard named voice.
+    Named(String),
+    /// Opaque custom voice reference.
+    ProviderRef(String),
+}
+
+/// Requested formatting of the model output.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "options", rename_all = "snake_case")]
+pub enum OutputFormat {
+    /// Unconstrained text output.
+    #[default]
+    Text,
+    /// Output a JSON object (unconstrained schema).
+    JsonObject,
+    /// Output adhering strictly to the provided JSON Schema.
+    JsonSchema(JsonSchemaFormat),
+}
+
+/// Format configuration for JSON Schema enforcement.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JsonSchemaFormat {
+    /// Schema identifier (1-64 ASCII letters, digits, `_` or `-`).
+    pub name: String,
+    /// Optional schema description.
+    pub description: Option<String>,
+    /// JSON Schema object.
+    pub schema: serde_json::Value,
+    /// Whether schema adherence is strictly enforced.
+    pub strict: bool,
+}
+
+/// Token billing counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Prompt tokens billed at standard rate (excluding hits).
+    pub input_tokens: u64,
+    /// Prompt tokens read from context cache.
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written to context cache.
+    pub cache_write_tokens: u64,
+    /// Prompt tokens written to cache with 1h TTL (subset of cache_write_tokens).
+    pub cache_write_1h_tokens: u64,
+    /// Generated output tokens.
+    pub output_tokens: u64,
+    /// Output tokens consumed for reasoning (subset of output_tokens).
+    pub reasoning_tokens: u64,
+    /// Total tokens processed.
+    pub total_tokens: u64,
+}
+
+/// Successful generation outcome.
+#[derive(Clone, Debug)]
+pub struct Response {
+    /// Generated assistant message.
+    pub message: AssistantMessage,
+    /// Termination reason for output generation.
+    pub stop_reason: StopReason,
+    /// Token billing counters.
+    pub usage: Usage,
+    /// Calculated cost of the request, if pricing was configured.
+    pub cost: Option<crate::pricing::Cost>,
+    /// Provider-assigned response identifier.
+    pub response_id: Option<String>,
+    /// Complete opaque Responses output, when the provider supplied an
+    /// authoritative terminal output snapshot.
+    pub responses_output: Option<crate::responses::ResponsesOutput>,
+    /// Lossy mode diagnostics. Empty in Strict mode.
+    pub diagnostics: Vec<crate::error::Diagnostic>,
+}
+
+/// Termination reason for output generation.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopReason {
+    /// Natural completion (stop token / sequence).
+    EndTurn,
+    /// Token budget / maximum limit exceeded.
+    MaxTokens,
+    /// Model requested tool execution.
+    ToolUse,
+    /// Reached a custom stop sequence.
+    StopSequence,
+    /// Model output blocked/refused.
+    Refusal,
+    /// Claude-style turn pause.
+    PauseTurn,
+    /// Other custom/unknown reason.
+    Other(String),
+}
+
+impl StopReason {
+    /// Canonical lowercase wire name, matching the `serde::Serialize` form used
+    /// by session usage records and public failure diagnostics.
+    pub fn as_canonical(&self) -> &str {
+        match self {
+            StopReason::EndTurn => "end_turn",
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::ToolUse => "tool_use",
+            StopReason::StopSequence => "stop_sequence",
+            StopReason::Refusal => "refusal",
+            StopReason::PauseTurn => "pause_turn",
+            StopReason::Other(s) => s,
+        }
+    }
+}
+
+impl serde::Serialize for StopReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_canonical())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StopReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "end_turn" | "stop" => Ok(StopReason::EndTurn),
+            "max_tokens" | "length" => Ok(StopReason::MaxTokens),
+            "tool_use" | "tool_calls" => Ok(StopReason::ToolUse),
+            "stop_sequence" => Ok(StopReason::StopSequence),
+            "refusal" | "content_filter" => Ok(StopReason::Refusal),
+            "pause_turn" => Ok(StopReason::PauseTurn),
+            _ => Ok(StopReason::Other(s)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pricing::TokenRate;
+    use std::time::SystemTime;
+
+    #[test]
+    fn inline_media_bytes_serialize_as_base64_strings() {
+        let payload = bytes::Bytes::from(vec![137u8, 80, 78, 71, 13, 10]);
+        let image = Media::image_bytes(payload.clone(), mime::IMAGE_PNG);
+        let json = serde_json::to_string(&image).unwrap();
+        assert!(
+            json.contains("\"iVBORw0K\""),
+            "inline image bytes must serialize as a base64 string, got: {json}"
+        );
+
+        let audio = Media::audio_bytes(payload.clone(), AudioFormat::Wav);
+        let json = serde_json::to_string(&audio).unwrap();
+        assert!(
+            json.contains("\"iVBORw0K\""),
+            "inline audio bytes must serialize as a base64 string, got: {json}"
+        );
+
+        let both = AudioPayload::InlineWithProviderRef {
+            data: payload,
+            reference: ProviderMediaRef {
+                protocol: Protocol::OpenAiResponses,
+                id: "ref".into(),
+                expires_at: None,
+            },
+        };
+        let json = serde_json::to_string(&both).unwrap();
+        assert!(
+            json.contains("\"iVBORw0K\""),
+            "inline-with-ref bytes must serialize as a base64 string, got: {json}"
+        );
+    }
+
+    #[test]
+    fn inline_media_base64_round_trips() {
+        let payload = bytes::Bytes::from(vec![0u8, 255, 128, 7]);
+        let image = Media::image_bytes(payload.clone(), mime::IMAGE_PNG);
+        let json = serde_json::to_string(&image).unwrap();
+        let back: Media = serde_json::from_str(&json).unwrap();
+        match back {
+            Media::Image(image) => match image.source {
+                ImageSource::Inline(data) => assert_eq!(data, payload),
+                other => panic!("expected inline source, got {other:?}"),
+            },
+            other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_media_accepts_legacy_number_array_form() {
+        // Sessions written before the base64 representation stored inline
+        // bytes as serde_json's default number array. They must stay readable.
+        let legacy = r#"{"Image":{"source":{"Inline":[137,80,78,71]},"media_type":"image/png","detail":null}}"#;
+        let media: Media = serde_json::from_str(legacy).unwrap();
+        match media {
+            Media::Image(image) => match image.source {
+                ImageSource::Inline(data) => {
+                    assert_eq!(data, bytes::Bytes::from(vec![137u8, 80, 78, 71]))
+                }
+                other => panic!("expected inline source, got {other:?}"),
+            },
+            other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_media_json_overhead_is_base64_sized() {
+        let payload = bytes::Bytes::from(vec![42u8; 100 * 1024]);
+        let image = Media::image_bytes(payload, mime::IMAGE_PNG);
+        let json = serde_json::to_vec(&image).unwrap();
+        // base64 is ~1.34x the raw size; the old number-array form was ~4x.
+        assert!(
+            json.len() < 100 * 1024 * 3 / 2,
+            "serialized inline image is {} bytes for 102400 raw bytes",
+            json.len()
+        );
+    }
+
+    #[test]
+    fn test_modality_set_algebra() {
+        let empty = ModalitySet::none();
+        assert!(!empty.contains(Modality::Image));
+        assert!(!empty.contains(Modality::Audio));
+
+        let with_image = empty.with(Modality::Image);
+        assert!(with_image.contains(Modality::Image));
+        assert!(!with_image.contains(Modality::Audio));
+
+        let with_both = with_image.with(Modality::Audio);
+        assert!(with_both.contains(Modality::Image));
+        assert!(with_both.contains(Modality::Audio));
+    }
+
+    #[test]
+    fn test_model_spec_serde_round_trip() {
+        let spec = ModelSpec {
+            id: ModelId("test-model".to_string()),
+            endpoint: EndpointId("test-endpoint".to_string()),
+            api_name: "gpt-4o-mini".to_string(),
+            display_name: None,
+            protocol: Protocol::OpenAiChat,
+            capabilities: Capabilities {
+                input_modalities: ModalitySet::none().with(Modality::Image),
+                output_modalities: ModalitySet::none(),
+                tools: true,
+                parallel_tool_calls: true,
+                reasoning: Some(ReasoningCapability {
+                    options: None,
+                    control: ReasoningControl::Effort,
+                    exposes_text: true,
+                    preserves_state: false,
+                    effort_budgets: None,
+                    openai_chat_mode: OpenAiChatReasoningMode::Standard,
+                    min_effort: ReasoningEffort::Minimal,
+                    max_effort: ReasoningEffort::High,
+                }),
+                responses_lite: false,
+                agent_delegation: None,
+                structured_output: true,
+                deferred_tool_loading: false,
+            },
+            limits: ModelLimits {
+                context_window: 128000,
+                max_output_tokens: 4096,
+            },
+            pricing: Some(Pricing {
+                input: TokenRate(15),
+                output: TokenRate(60),
+                cache_read: TokenRate(7),
+                cache_write_5m: TokenRate(15),
+                cache_write_1h: None,
+                reasoning: None,
+                tiers: vec![],
+            }),
+            cache: CacheCompatibility::default(),
+        };
+
+        let serialized = serde_json::to_string(&spec).unwrap();
+        let deserialized: ModelSpec = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(spec.id, deserialized.id);
+        assert_eq!(spec.protocol, deserialized.protocol);
+        assert_eq!(
+            spec.capabilities.reasoning.unwrap().control,
+            ReasoningControl::Effort
+        );
+    }
+
+    #[test]
+    fn test_message_serde_round_trip() {
+        let now = SystemTime::now();
+
+        // 1. User message with text, inline image, and URL image
+        let user_msg = Message::User(UserMessage {
+            content: vec![
+                UserPart::Text("Hello".to_string()),
+                UserPart::Media(Media::image_bytes(
+                    bytes::Bytes::from("fake_png"),
+                    "image/png".parse().unwrap(),
+                )),
+                UserPart::Media(Media::image_url(
+                    url::Url::parse("https://example.com/img.jpg").unwrap(),
+                    None,
+                )),
+            ],
+        });
+
+        let serialized = serde_json::to_string(&user_msg).unwrap();
+        let _deserialized: Message = serde_json::from_str(&serialized).unwrap();
+
+        // 2. User message with AudioPayload variants
+        let audio_inline = Message::User(UserMessage {
+            content: vec![UserPart::Media(Media::audio_bytes(
+                bytes::Bytes::from("fake_wav"),
+                AudioFormat::Wav,
+            ))],
+        });
+        let serialized = serde_json::to_string(&audio_inline).unwrap();
+        let _deserialized: Message = serde_json::from_str(&serialized).unwrap();
+
+        let ref_msg = Message::User(UserMessage {
+            content: vec![UserPart::Media(Media::audio_ref(
+                ProviderMediaRef {
+                    protocol: Protocol::OpenAiChat,
+                    id: "ref_123".to_string(),
+                    expires_at: Some(now),
+                },
+                AudioFormat::Mp3,
+            ))],
+        });
+        let serialized = serde_json::to_string(&ref_msg).unwrap();
+        let _deserialized: Message = serde_json::from_str(&serialized).unwrap();
+
+        // 3. Assistant message with completed audio + transcript (InlineWithProviderRef)
+        let assistant_msg = Message::Assistant(AssistantMessage {
+            content: vec![
+                AssistantPart::Text("Here is your speech".to_string()),
+                AssistantPart::Media(Media::Audio(AudioMedia {
+                    payload: AudioPayload::InlineWithProviderRef {
+                        data: bytes::Bytes::from("speech_bytes"),
+                        reference: ProviderMediaRef {
+                            protocol: Protocol::OpenAiChat,
+                            id: "audio_id_456".to_string(),
+                            expires_at: Some(now),
+                        },
+                    },
+                    format: AudioFormat::Wav,
+                    transcript: Some("Here is your speech".to_string()),
+                })),
+            ],
+            model: ModelId("gpt-4o-audio".to_string()),
+            protocol: Protocol::OpenAiChat,
+        });
+        let serialized = serde_json::to_string(&assistant_msg).unwrap();
+        let deserialized: Message = serde_json::from_str(&serialized).unwrap();
+        if let Message::Assistant(msg) = deserialized {
+            assert_eq!(msg.model, ModelId("gpt-4o-audio".to_string()));
+            assert_eq!(msg.protocol, Protocol::OpenAiChat);
+        } else {
+            panic!("Expected assistant message");
+        }
+
+        // 4. Assistant message with reasoning state variants
+        let reasoning_msg = Message::Assistant(AssistantMessage {
+            content: vec![AssistantPart::Reasoning(ReasoningPart {
+                text: Some("Let's think...".to_string()),
+                state: Some(ReasoningState {
+                    protocol: Protocol::AnthropicMessages,
+                    model: ModelId("claude-3-5".to_string()),
+                    kind: ReasoningStateKind::AnthropicSignature {
+                        signature: "sig_abc".to_string(),
+                    },
+                }),
+            })],
+            model: ModelId("claude-3-5".to_string()),
+            protocol: Protocol::AnthropicMessages,
+        });
+        let serialized = serde_json::to_string(&reasoning_msg).unwrap();
+        let _deserialized: Message = serde_json::from_str(&serialized).unwrap();
+    }
+
+    #[test]
+    fn test_tool_call_arguments_value() {
+        let tc = ToolCall {
+            id: ToolCallId("call_1".to_string()),
+            name: "grep".to_string(),
+            arguments_json: r#"{"pattern": "test"}"#.to_string(),
+            argument_error: None,
+        };
+        let parsed = tc.arguments_value().unwrap();
+        assert_eq!(parsed["pattern"], "test");
+
+        let tc_invalid = ToolCall {
+            id: ToolCallId("call_2".to_string()),
+            name: "grep".to_string(),
+            arguments_json: r#""just a string""#.to_string(),
+            argument_error: None,
+        };
+        assert!(tc_invalid.arguments_value().is_err());
+    }
+
+    #[test]
+    fn test_request_serde_round_trip() {
+        let req = Request {
+            system: Some("sys".to_string()),
+            messages: vec![],
+            tools: vec![ToolDef {
+                name: "tool".to_string(),
+                description: "desc".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(10),
+            temperature: Some(0.7),
+            stop: vec!["\n".to_string()],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        };
+        let serialized = serde_json::to_string(&req).unwrap();
+        let deserialized: Request = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(req.system, deserialized.system);
+        assert_eq!(req.stop, deserialized.stop);
+    }
+
+    #[test]
+    fn test_usage_default() {
+        let usage = Usage::default();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
+        assert_eq!(usage.cache_write_1h_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.reasoning_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_stop_reason_custom_serde() {
+        let stop = StopReason::EndTurn;
+        let ser = serde_json::to_string(&stop).unwrap();
+        assert_eq!(ser, "\"end_turn\"");
+
+        let de: StopReason = serde_json::from_str("\"stop\"").unwrap();
+        assert_eq!(de, StopReason::EndTurn);
+
+        let de_other: StopReason = serde_json::from_str("\"something_else\"").unwrap();
+        assert_eq!(de_other, StopReason::Other("something_else".to_string()));
+    }
+
+    #[test]
+    fn test_stop_reason_as_canonical_matches_serde_form() {
+        assert_eq!(StopReason::EndTurn.as_canonical(), "end_turn");
+        assert_eq!(StopReason::MaxTokens.as_canonical(), "max_tokens");
+        assert_eq!(StopReason::ToolUse.as_canonical(), "tool_use");
+        assert_eq!(StopReason::StopSequence.as_canonical(), "stop_sequence");
+        assert_eq!(StopReason::Refusal.as_canonical(), "refusal");
+        assert_eq!(StopReason::PauseTurn.as_canonical(), "pause_turn");
+        assert_eq!(
+            StopReason::Other("network_error".to_string()).as_canonical(),
+            "network_error"
+        );
+        for stop in [
+            StopReason::EndTurn,
+            StopReason::MaxTokens,
+            StopReason::ToolUse,
+            StopReason::StopSequence,
+            StopReason::Refusal,
+            StopReason::PauseTurn,
+            StopReason::Other("network_error".to_string()),
+        ] {
+            let serialized = serde_json::to_string(&stop).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", stop.as_canonical()));
+        }
+    }
+    #[test]
+    fn opaque_reasoning_debug_redacts_without_changing_serialized_replay() {
+        for kind in [
+            ReasoningStateKind::AnthropicSignature {
+                signature: "OPAQUE_SIGNATURE".into(),
+            },
+            ReasoningStateKind::AnthropicRedacted {
+                data: "OPAQUE_REDACTED".into(),
+            },
+            ReasoningStateKind::OpenAiReasoning {
+                item_id: Some("OPAQUE_ID".into()),
+                encrypted_content: Some("OPAQUE_ENCRYPTED".into()),
+            },
+        ] {
+            let state = ReasoningState {
+                protocol: Protocol::BedrockConverse,
+                model: ModelId("fixture".into()),
+                kind,
+            };
+            assert!(!format!("{state:?}").contains("OPAQUE_"));
+            let encoded = serde_json::to_string(&state).unwrap();
+            assert!(encoded.contains("OPAQUE_"));
+            let decoded: ReasoningState = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+        }
+    }
+    #[test]
+    fn review_regression_google_metadata_debug_is_opaque_but_replay_is_exact() {
+        let metadata = ProviderPartMetadata::GoogleThoughtSignature {
+            signature: "SYNTHETIC_OPAQUE_MARKER".into(),
+        };
+        assert!(!format!("{metadata:?}").contains("SYNTHETIC_OPAQUE_MARKER"));
+        let message = AssistantMessage {
+            model: ModelId("fixture".into()),
+            protocol: Protocol::GoogleGenerativeAi,
+            content: vec![
+                AssistantPart::ProviderMetadata(metadata),
+                AssistantPart::Text("answer".into()),
+            ],
+        };
+        assert!(!format!("{message:?}").contains("SYNTHETIC_OPAQUE_MARKER"));
+        let encoded = serde_json::to_string(&message).unwrap();
+        assert!(encoded.contains("SYNTHETIC_OPAQUE_MARKER"));
+        let replay: AssistantMessage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(serde_json::to_string(&replay).unwrap(), encoded);
+    }
+}

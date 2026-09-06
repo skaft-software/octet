@@ -67,7 +67,7 @@ function sessionIdFromUrl(url: string): string {
 }
 
 async function sendPrompt(page: Page, prompt: string): Promise<void> {
-  const composer = page.getByLabel("Message ygg");
+  const composer = page.getByLabel("Message octet");
   await expect(composer).toBeVisible();
   await composer.fill(prompt);
   const send = page.getByRole("button", { name: "Send message" });
@@ -79,7 +79,7 @@ async function sendPrompt(page: Page, prompt: string): Promise<void> {
 async function expectDone(page: Page, reply: string): Promise<void> {
   await expect(page.getByText(reply, { exact: true })).toBeVisible();
   await expect(page.locator(".header-status")).toHaveText("Done");
-  await expect(page.getByRole("button", { name: "Stop ygg" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop octet" })).toHaveCount(0);
 }
 
 async function completePrompt(
@@ -127,7 +127,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
   const expectedBundleHash = (
     await readFile(
       new URL(
-        "../../../extensions/ygg-serve/web/bundle.sha256",
+        "../../../extensions/octet-serve/web/bundle.sha256",
         import.meta.url,
       ),
       "utf8",
@@ -169,7 +169,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
         `${origin}/?transport=fixture`,
       );
       expect(documentResponse?.status()).toBe(200);
-      expect(documentResponse?.headers()["x-ygg-web-bundle"]).toBe(
+      expect(documentResponse?.headers()["x-octet-web-bundle"]).toBe(
         expectedBundleHash,
       );
 
@@ -180,7 +180,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
       expect(bootstrapBody).toContain('"sessionBranches":true');
       expect(bootstrapBody).toContain('"sessionExport":true');
 
-      await expect(page.getByLabel("Message ygg")).toBeVisible();
+      await expect(page.getByLabel("Message octet")).toBeVisible();
       await expect(
         page.getByText("Demo data · responses and actions are simulated", {
           exact: true,
@@ -228,7 +228,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
         }),
       ).toBeVisible();
       await expect(page.getByText(STREAM_PARTIAL, { exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "Stop ygg" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Stop octet" })).toBeVisible();
 
       host.provider.release(STREAM_PROMPT);
       await expectDone(page, STREAM_REPLY);
@@ -298,10 +298,10 @@ test("runs the authenticated production host lifecycle end to end", async ({
       expectDeterministicRequest(request);
       await expect(page.getByText(ABORT_PARTIAL, { exact: true })).toBeVisible();
 
-      await page.getByRole("button", { name: "Stop ygg" }).click();
+      await page.getByRole("button", { name: "Stop octet" }).click();
       await host.provider.waitForAbort(ABORT_PROMPT);
       await expect(page.locator(".header-status")).toHaveText("Stopped");
-      await expect(page.getByRole("button", { name: "Stop ygg" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Stop octet" })).toHaveCount(0);
 
       const snapshot = await sessionSnapshot(page, origin, sessionId);
       expect(snapshot.liveState).toBe("stopped");
@@ -454,7 +454,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
       const exportedText = await exported.text();
       expect(headers["content-type"]).toBe("application/json; charset=utf-8");
       expect(headers["content-disposition"]).toBe(
-        `attachment; filename="ygg-session-${sessionId}.json"`,
+        `attachment; filename="octet-session-${sessionId}.json"`,
       );
       expect(headers["cache-control"]).toBe("no-store");
       expect(headers["x-content-type-options"]).toBe("nosniff");
@@ -465,7 +465,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
       );
 
       const exportedJson = JSON.parse(exportedText) as Record<string, unknown>;
-      expect(exportedJson.format).toBe("ygg-session-export");
+      expect(exportedJson.format).toBe("octet-session-export");
       expect(exportedJson.redacted).toBe(true);
       expect(exportedJson.redaction_count).toEqual(expect.any(Number));
       expect(exportedJson.redaction_count).not.toBe(0);
@@ -515,7 +515,7 @@ test("runs the authenticated production host lifecycle end to end", async ({
         `${origin}/session/${encodeURIComponent(sessionId)}`,
       );
       expect(documentResponse?.status()).toBe(200);
-      expect(documentResponse?.headers()["x-ygg-web-bundle"]).toBe(
+      expect(documentResponse?.headers()["x-octet-web-bundle"]).toBe(
         expectedBundleHash,
       );
       expect((await bootstrapResponse).status()).toBe(200);

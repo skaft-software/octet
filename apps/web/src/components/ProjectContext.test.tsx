@@ -9,7 +9,7 @@ import { ProjectContext } from "./ProjectContext";
 const refreshedAtUnixMs = Date.UTC(2026, 6, 27, 14, 30, 15);
 
 const snapshot: RepositoryContextSnapshot = {
-  projectId: "prj_ygg",
+  projectId: "prj_octet",
   trust: "verified",
   repository: {
     source: "gitStatusPorcelainV2",
@@ -119,7 +119,7 @@ describe("project context", () => {
     expect(
       within(repository!).getByText("2026-07-27 14:30:15 UTC"),
     ).toHaveAttribute("datetime", "2026-07-27T14:30:15.000Z");
-    expect(screen.queryByText("prj_ygg")).toBeNull();
+    expect(screen.queryByText("prj_octet")).toBeNull();
   });
 
   it("renders root-first AGENTS.md metadata, bounded content, and safe errors", async () => {

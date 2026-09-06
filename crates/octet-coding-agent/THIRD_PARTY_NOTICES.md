@@ -1,0 +1,14 @@
+# Third-Party Notices
+
+This crate is part of octet. octet uses architectural concepts and terminal
+interaction patterns from [Pi](https://github.com/earendil-works/pi), Copyright
+(c) 2025 Mario Zechner, licensed under the MIT License.
+
+The Terminus 2 agent also informed octet's design. No benchmark evaluation
+data was used to develop octet. Benchmark results are used only for comparisons
+after benchmarking. [Terminal-Bench](https://github.com/harbor-framework/terminal-bench)
+is licensed under the Apache License 2.0.
+
+The complete retained upstream license texts and project-level attribution are
+available in octet's
+[third-party notices](https://github.com/skaft-software/ygg/blob/main/THIRD_PARTY_NOTICES.md).

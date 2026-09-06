@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ygg LSP extension: read-only semantic code intelligence over the LSP.
+"""octet LSP extension: read-only semantic code intelligence over the LSP.
 
 Design notes (see issue #23):
 - Text-first: every tool result is a typed, bounded dict; when no server is
@@ -25,14 +25,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
-ROOT = Path(os.environ.get("YGG_EXTENSION_DIR", Path(__file__).resolve().parent)).resolve()
+ROOT = Path(os.environ.get("OCTET_EXTENSION_DIR", Path(__file__).resolve().parent)).resolve()
 sys.path.insert(0, str(ROOT / "vendor"))
 sys.path.insert(0, str(ROOT))
 
-from ygg_extension import Extension  # noqa: E402
+from octet_extension import Extension  # noqa: E402
 
 # --- Configuration ---------------------------------------------------------
-# Keyed by file suffix. Servers are never downloaded or installed by Ygg; a
+# Keyed by file suffix. Servers are never downloaded or installed by octet; a
 # missing binary surfaces as a typed unavailable result.
 DEFAULT_SERVERS: Dict[str, List[str]] = {
     ".rs": ["rust-analyzer"],
@@ -396,7 +396,7 @@ def _format_diagnostics(diagnostics: List[dict], path: Path) -> List[str]:
     return lines
 
 
-# --- Ygg tool ----------------------------------------------------------------
+# --- octet tool ----------------------------------------------------------------
 
 ext = Extension()
 

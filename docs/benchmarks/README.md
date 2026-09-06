@@ -1,32 +1,39 @@
-# Benchmarking Ygg
+# Benchmarking octet
 
 This directory contains reproducibility evidence. A result is publishable only
 when its losses, environment, binary identity, raw outputs, and any adjudication
 exclusions are retained.
 
-Current artifacts include the compact canonical Terminal-Bench 2.1
-[evidence package](tb21-v0.6.2/README.md), the frozen
-control fingerprint ([baseline-v0.6.2.md](baseline-v0.6.2.md)), the reconciled
-failure report
-([failure-report-v0.6.2-2026-08-28.md](failure-report-v0.6.2-2026-08-28.md)),
-the complete token-efficiency audit
-([token-efficiency-v0.6.2-2026-08-28.md](token-efficiency-v0.6.2-2026-08-28.md)),
-the scoped coding-agent
-[runtime-footprint comparison](runtime-footprint-2026-08-29.md), and the opt-in
-beta protocol ([beta-protocol.md](beta-protocol.md)).
+The current methods below cover [optional telemetry](#optional-agent-telemetry),
+[systems measurements](#systems-measurements), and [usability checks](#usability-checks).
+The [Pi runtime fixture](#pi-runtime-fixture-evidence) is hold-only, not a published
+performance result. For planning, see the [project](https://github.com/orgs/skaft-software/projects/5).
+
+## Historical results
+
+These are historical Ygg artifacts, not octet 0.7.0 results:
+
+- [Terminal-Bench 2.1 evidence package](tb21-v0.6.2/README.md)
+- [Frozen v0.6.2 control fingerprint](baseline-v0.6.2.md)
+- [Reconciled failure report](failure-report-v0.6.2-2026-08-28.md)
+- [Complete token-efficiency audit](token-efficiency-v0.6.2-2026-08-28.md)
+- [Scoped runtime-footprint comparison](runtime-footprint-2026-08-29.md)
+
+The pinned [Harbor adapter](../../evaluation/harbor/README.md) reproduces historical
+Ygg 0.6.2 only. It is not an octet 0.7.0 evaluation adapter or campaign.
 
 ## Optional agent telemetry
 
 Enable telemetry explicitly; normal sessions do not create it:
 
 ```console
-ygg --telemetry ./artifacts/run.jsonl --model <model> "<task>"
+octet --telemetry ./artifacts/run.jsonl --model <model> "<task>"
 ```
 
 `--telemetry` also accepts a relative path, resolved from the invocation
-directory. `YGG_TELEMETRY` and `telemetry = "..."` in `~/.ygg/config.toml`
+directory. `OCTET_TELEMETRY` and `telemetry = "..."` in `~/.octet/config.toml`
 are equivalent configuration layers. The file is created with owner-only
-permissions and contains bounded JSONL records under `ygg.telemetry.v1`.
+permissions and contains bounded JSONL records under `octet.telemetry.v1`.
 
 Telemetry records:
 
@@ -39,6 +46,12 @@ Telemetry records:
 - `tool_started` and `tool_finished` — tool name, hashed arguments, elapsed and
   result sizes, repeated-call count, status, known built-in state changes, and
   a conservative no-progress streak. Arguments and results are not retained.
+- `tool_policy_decision` — hashed tool-call identity, allowed/denied effect
+  admission, stable denial code when denied, and effective capability/limit
+  values with their source layers. Raw command arguments, workspace paths, and
+  shell paths are not retained; shell resolution is only the non-correlating
+  `configured`, `system_bash`, `path_bash`, `sh_fallback`, or `unavailable`
+  selection label.
 - `compaction_started` and `compaction_finished` — reason and durable outcome.
 - `candidate_rejected`, `steering_delivered`, `follow_up_delivered`, and
   `delegation_updated` — control-flow accounting.
@@ -48,7 +61,7 @@ Usage semantics are explicit: `uncached_input_tokens` is the provider's
 standard-rate input bucket. `cache_read_tokens` and `cache_write_tokens` are
 disjoint additions; `cache_write_1h_tokens` is a subset of cache writes.
 `provider_input_tokens` is the three disjoint prompt buckets' sum.
-`reasoning_tokens` is a subset of output. `total_tokens` is Ygg's canonical
+`reasoning_tokens` is a subset of output. `total_tokens` is octet's canonical
 normalized sum, not a promise that an overlapping or omitted provider wire
 `total_tokens` was preserved. Records with usage include `usage_scope`:
 `request`, `operation`, or `run_cumulative`; never sum cumulative snapshots.
@@ -57,29 +70,34 @@ Telemetry is an observer, not a wire capture. It does not currently expose
 provider request IDs, exact response-header timing for compaction/gate calls,
 or raw context bodies. Those limitations must be stated in reports.
 
+Do not ask users to enable telemetry for a report. If they volunteer diagnostics,
+`octet --telemetry ./octet-telemetry.jsonl` produces a redacted operational trace;
+they should inspect it before sharing. See [voluntary diagnostics](#voluntary-diagnostics)
+for the sharing boundary.
+
 ## Systems measurements
 
 `scripts/bench-systems.py` uses only the Python standard library and real OS
 process measurements. It reports medians and p95s over repeated runs, best
 available RSS/PSS, CPU samples, direct-process concurrency totals, and parsed
-Ygg telemetry:
+octet telemetry:
 
 ```console
 python3 scripts/bench-systems.py \
-  --binary ./target/release/ygg \
+  --binary ./target/release/octet \
   --repetitions 9 \
-  --command sessions='./target/release/ygg --offline sessions list' \
-  --output ./artifacts/systems/ygg.json
+  --command sessions='./target/release/octet --offline sessions list' \
+  --output ./artifacts/systems/octet.json
 ```
 
 For a long-lived process, provide an explicit command whose stdin remains open:
 
 ```console
 python3 scripts/bench-systems.py \
-  --idle-command idle='./target/release/ygg --plain --model <local-model>' \
+  --idle-command idle='./target/release/octet --plain --model <local-model>' \
   --concurrency 1,2,4 \
   --repetitions 9 \
-  --output ./artifacts/systems/ygg-idle.json
+  --output ./artifacts/systems/octet-idle.json
 ```
 
 The runner never invokes command strings through a shell. Use `env`, a wrapper
@@ -99,6 +117,47 @@ Those cases require a harness-specific driver and should be supplied with
 same task, endpoint, model weights, context limit, timeout, hardware, and
 concurrency for every harness.
 
+## Usability checks
+
+Use these manual checks for installation, session resume, and cancellation:
+
+1. Build the unpublished checkout in isolation; use pinned release instructions
+   only after publication and platform acceptance are separately verified.
+2. Configure either a local OpenAI-compatible endpoint or a cloud provider.
+3. Run `octet --help`, start one session, and complete a small repository task.
+4. Exit, resume with `octet --continue`, and complete a second task.
+5. Cancel one intentionally long-running operation and regain the prompt.
+6. Inspect `/status` (or the equivalent status command) and report the active
+   model, endpoint class, and context information.
+
+### Usability reports
+
+Collect voluntary reports through an issue template, interview, or exported local
+form. Record:
+
+- OS, CPU/RAM/GPU, octet version, and install method;
+- provider class (`local`, `remote`, or `subscription`), not credentials;
+- installation and first-task completion: success/failure, minutes, and whether
+  author assistance was needed;
+- resume/cancel behavior: pass/fail; and
+- crashes, hangs, provider configuration failures, and abandoned tasks.
+
+Report the numerator, denominator, exclusions, and reason categories. Do not hide
+an unresolved crash or data-loss issue in an average, or turn a small usability
+sample into a superiority claim. Follow the [diagnostic sharing rules](#voluntary-diagnostics).
+
+## Pi runtime fixture evidence
+
+[`scripts/bench-pi-runtime.py`](../../scripts/bench-pi-runtime.py) is the
+checked-in, stdlib-only driver for Pi aggregate lifecycle evidence. It runs no
+network/provider/model request, inherits no credentials, uses a temporary home,
+and writes bounded raw resource samples plus a checksum. It measures fixture
+representations of no-extension, legacy-eager, lazy activation, shared-workspace,
+and ordered-Pi-aggregate paths; it is intentionally hold-only until a real API
+0.3 runtime-manager adapter is available. See [Pi runtime evidence
+harness](pi-runtime-evidence.md) for invocation, exact candidate/fixture identity,
+Linux/macOS limits, separate inference/GPU attribution, and publication rules.
+
 ## Publication boundary
 
 Raw campaign homes and first-pass captures remain owner-only. Before committing
@@ -109,6 +168,20 @@ than redacting them in place. Keep methodology-relevant hardware, versions,
 digests, argument flags, environment keys, and numeric samples. Record exactly
 what was sanitized, state whether any measurements changed, and recompute public
 artifact checksums after sanitation.
+
+### Voluntary diagnostics
+
+A voluntarily shared diagnostic bundle may contain version/build identity,
+platform, provider kind, configuration keys with values removed, sanitized
+startup diagnostics, and explicitly selected telemetry. Exclude credentials,
+authorization headers, raw prompts, tool arguments/results, and workspace paths
+where possible. Never request API keys, raw prompts, private repositories,
+unredacted session files, or mandatory background telemetry.
+
+Session content must be excluded unless the user deliberately redacts and
+approves it for private support. That exception does not relax the public
+evidence-package exclusions above. Diagnostic sharing and any export convenience
+are optional, not prerequisites for using octet.
 
 ## Failure taxonomy
 
@@ -133,7 +206,7 @@ benchmark adjudication.
 
 Before starting a full campaign, record:
 
-1. Ygg version, commit, binary hash, compiler and OS image.
+1. octet version, commit, binary hash, compiler and OS image.
 2. Harbor version/commit, exact dataset revision, task count, attempts, timeout,
    concurrency, and retry policy.
 3. Model identifier and weight digest, provider/server version and endpoint
@@ -151,7 +224,7 @@ inputs changed between control and candidate.
 ## Same-model harness shootout
 
 Use one immutable endpoint and one task manifest. For each harness, collect:
-accuracy, success/hour, wall time per success, model requests, Ygg/tool calls or
+accuracy, success/hour, wall time per success, model requests, octet/tool calls or
 the closest equivalent, provider input/output/cache buckets, retries, timeouts,
 agent RSS/PSS, and crashes. Publish raw per-trial records and a table that
 separates runtime overhead, UI latency, agentic efficiency, and successful-task

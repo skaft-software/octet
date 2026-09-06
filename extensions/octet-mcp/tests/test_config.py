@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+from octet_mcp.config import ConfigError, STREAMABLE_HTTP_GATE_ERROR, load_config
+from octet_mcp.runtime import build_runtime
+
+from .helpers import ROOT
+
+
+class ConfigTests(unittest.TestCase):
+    def write_json(self, path: Path, value) -> bytes:
+        data = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o600)
+        return data
+
+    def test_missing_default_is_inert_empty_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.json"
+            with mock.patch("octet_mcp.config.default_config_path", return_value=missing):
+                config = load_config()
+        self.assertEqual(config.servers, ())
+        self.assertEqual(config.source, missing)
+
+    def test_example_is_strict_and_disabled_until_user_edits_it(self):
+        config = load_config(ROOT / "config.example.json")
+        self.assertEqual(len(config.servers), 2)
+        self.assertFalse(config.servers[0].enabled)
+        self.assertEqual(config.servers[0].command, "/absolute/path/to/an-installed-mcp-server")
+        self.assertEqual(config.servers[1].transport, "streamable-http")
+        self.assertFalse(config.servers[1].enabled)
+
+    def test_streamable_http_configuration_is_explicit_and_rejects_unsafe_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            base = {
+                "version": 1,
+                "servers": {
+                    "remote": {
+                        "transport": "streamable-http",
+                        "label": "Reviewed remote",
+                        "url": "http://127.0.0.1:9876/mcp",
+                        "auth": {"type": "bearer", "credential": "reviewed_mcp"},
+                    }
+                },
+            }
+            self.write_json(path, base)
+            with self.assertRaisesRegex(ConfigError, "process owner"):
+                load_config(path)
+            self.write_json(
+                path,
+                {**base, "experimentalStreamableHttpMcp": True},
+            )
+            with self.assertRaises(ConfigError):
+                load_config(path)
+            self.write_json(path, base)
+            config = load_config(path, experimental_streamable_http_mcp=True)
+            remote = config.servers[0]
+            self.assertEqual(remote.transport, "streamable-http")
+            self.assertEqual(remote.url, "http://127.0.0.1:9876/mcp")
+            self.assertEqual(remote.auth.credential, "reviewed_mcp")
+            self.assertEqual(remote.command, "")
+            self.assertEqual(remote.args, ())
+            self.assertEqual(remote.environment, {})
+            self.assertNotIn("reviewed_mcp", repr(remote))
+
+            invalid_descriptors = [
+                {**base["servers"]["remote"], "command": "not-allowed"},
+                {**base["servers"]["remote"], "url": "http://localhost:9876/mcp"},
+                {**base["servers"]["remote"], "url": "https://user:pass@example.com/mcp"},
+                {**base["servers"]["remote"], "url": "https://example.com/mcp?token=no"},
+                {**base["servers"]["remote"], "url": "https://example.com/mcp#"},
+                {**base["servers"]["remote"], "url": "https://example.com/has space"},
+                {**base["servers"]["remote"], "headers": {"Authorization": "no"}},
+                {**base["servers"]["remote"], "auth": None},
+                {
+                    **base["servers"]["remote"],
+                    "auth": {"type": "bearer", "credential": "literal token"},
+                },
+            ]
+            for descriptor in invalid_descriptors:
+                self.write_json(path, {"version": 1, "servers": {"remote": descriptor}})
+                with self.assertRaises(ConfigError):
+                    load_config(path, experimental_streamable_http_mcp=True)
+
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {
+                        "wix": {
+                            "transport": "streamable-http",
+                            "url": "https://mcp.wix.com/mcp",
+                        }
+                    },
+                },
+            )
+            self.assertEqual(
+                load_config(path, experimental_streamable_http_mcp=True).servers[0].url,
+                "https://mcp.wix.com/mcp",
+            )
+
+    def test_remote_gate_is_visible_to_the_product_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {
+                        "remote": {
+                            "transport": "streamable-http",
+                            "url": "https://mcp.example.invalid/mcp",
+                        }
+                    },
+                },
+            )
+            _, manager = build_runtime(config_path=path)
+        self.addCleanup(manager.shutdown)
+        self.assertEqual(manager.config.servers, ())
+        self.assertEqual(
+            manager.config_error,
+            {
+                "code": "experimental_streamable_http_mcp_required",
+                "summary": STREAMABLE_HTTP_GATE_ERROR,
+            },
+        )
+        self.assertIsNone(manager._executor)
+
+    def test_unknown_duplicate_and_oversized_configuration_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unknown = root / "unknown.json"
+            self.write_json(unknown, {"version": 1, "servers": {}, "surprise": True})
+            with self.assertRaises(ConfigError):
+                load_config(unknown)
+
+            duplicate = root / "duplicate.json"
+            duplicate.write_text('{"version":1,"servers":{},"servers":{}}', encoding="utf-8")
+            duplicate.chmod(0o600)
+            with self.assertRaises(ConfigError):
+                load_config(duplicate)
+
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b" " * (256 * 1024 + 1))
+            oversized.chmod(0o600)
+            with self.assertRaises(ConfigError):
+                load_config(oversized)
+
+    def test_trusted_project_remote_requires_the_process_owner_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            project = workspace / ".octet" / "mcp.json"
+            project_bytes = self.write_json(
+                project,
+                {
+                    "version": 1,
+                    "servers": {
+                        "project-remote": {
+                            "transport": "streamable-http",
+                            "url": "https://mcp.example.invalid/mcp",
+                        }
+                    },
+                },
+            )
+            user = root / "user.json"
+            self.write_json(
+                user,
+                {
+                    "version": 1,
+                    "servers": {},
+                    "trustedProjects": [
+                        {
+                            "path": str(project),
+                            "sha256": hashlib.sha256(project_bytes).hexdigest(),
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ConfigError, "process owner"):
+                load_config(user, workspace=workspace)
+            config = load_config(
+                user,
+                workspace=workspace,
+                experimental_streamable_http_mcp=True,
+            )
+            self.assertEqual(config.servers[0].id, "project-remote")
+
+    def test_project_configuration_requires_workspace_containment_and_exact_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            project = workspace / ".octet" / "mcp.json"
+            project_bytes = self.write_json(
+                project,
+                {
+                    "version": 1,
+                    "servers": {
+                        "project-fixture": {
+                            "command": "fixture-server",
+                            "args": [],
+                            "env": {},
+                        }
+                    },
+                },
+            )
+            user = root / "user.json"
+            self.write_json(
+                user,
+                {
+                    "version": 1,
+                    "servers": {},
+                    "trustedProjects": [
+                        {
+                            "path": str(project),
+                            "sha256": hashlib.sha256(project_bytes).hexdigest(),
+                        }
+                    ],
+                },
+            )
+            config = load_config(user, workspace=workspace)
+            self.assertEqual(config.servers[0].scope, "project")
+
+            project.write_text('{"version":1,"servers":{}}', encoding="utf-8")
+            project.chmod(0o600)
+            with self.assertRaises(ConfigError):
+                load_config(user, workspace=workspace)
+
+            outside = root / "outside.json"
+            outside_bytes = self.write_json(outside, {"version": 1, "servers": {}})
+            self.write_json(
+                user,
+                {
+                    "version": 1,
+                    "servers": {},
+                    "trustedProjects": [
+                        {
+                            "path": str(outside),
+                            "sha256": hashlib.sha256(outside_bytes).hexdigest(),
+                        }
+                    ],
+                },
+            )
+            with self.assertRaises(ConfigError):
+                load_config(user, workspace=workspace)
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires no-follow file opens")
+    def test_configuration_swap_to_symlink_at_open_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "config.json"
+            outside = root / "outside.json"
+            self.write_json(path, {"version": 1, "servers": {}})
+            self.write_json(
+                outside,
+                {
+                    "version": 1,
+                    "servers": {"escaped": {"command": "outside-server"}},
+                },
+            )
+            canonical_path = path.parent.resolve(strict=True) / path.name
+            real_lstat = Path.lstat
+            real_open = os.open
+            swapped = False
+
+            def swap_to_link():
+                nonlocal swapped
+                if swapped:
+                    return
+                swapped = True
+                path.unlink()
+                path.symlink_to(outside)
+
+            def racing_lstat(candidate, *args, **kwargs):
+                metadata = real_lstat(candidate, *args, **kwargs)
+                if Path(candidate) == path:
+                    swap_to_link()
+                return metadata
+
+            def racing_open(candidate, flags, mode=0o777, *, dir_fd=None):
+                if dir_fd is None and Path(candidate) in {path, canonical_path}:
+                    swap_to_link()
+                return real_open(candidate, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(Path, "lstat", racing_lstat), mock.patch(
+                "octet_mcp.config.os.open", side_effect=racing_open
+            ):
+                with self.assertRaises(ConfigError):
+                    load_config(path)
+            self.assertTrue(swapped)
+
+    def test_linked_workspace_octet_directory_cannot_escape_project_containment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            outside = root / "outside-octet"
+            outside.mkdir()
+            project = outside / "mcp.json"
+            project_bytes = self.write_json(
+                project,
+                {
+                    "version": 1,
+                    "servers": {
+                        "escaped": {
+                            "command": "fixture-server",
+                            "cwd": "outside-cwd",
+                        }
+                    },
+                },
+            )
+            try:
+                (workspace / ".octet").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable")
+            user = root / "user.json"
+            self.write_json(
+                user,
+                {
+                    "version": 1,
+                    "servers": {},
+                    "trustedProjects": [
+                        {
+                            "path": str(workspace / ".octet" / "mcp.json"),
+                            "sha256": hashlib.sha256(project_bytes).hexdigest(),
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(user, workspace=workspace)
+
+    def test_launch_environment_is_explicit_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {
+                        "fixture": {
+                            "command": "server",
+                            "env": {"TOKEN": "sensitive"},
+                        }
+                    },
+                },
+            )
+            config = load_config(path)
+            self.assertEqual(config.servers[0].environment["TOKEN"], "sensitive")
+            self.assertNotIn("sensitive", repr(config.servers[0]))
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "requires POSIX file ownership")
+    def test_explicit_environment_requires_private_config_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {
+                        "fixture": {
+                            "command": "server",
+                            "env": {"TOKEN": "sensitive"},
+                        }
+                    },
+                },
+            )
+            path.chmod(0o644)
+            with self.assertRaisesRegex(ConfigError, "must not be accessible"):
+                load_config(path)
+
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {"fixture": {"command": "server", "env": {}}},
+                },
+            )
+            path.chmod(0o644)
+            self.assertEqual(len(load_config(path).servers), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

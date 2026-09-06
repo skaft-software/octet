@@ -74,6 +74,7 @@ import type {
   TrustedFileSearchResult,
 } from "../protocol";
 import { GoalBadge } from "./GoalBadge";
+import { TuiSplashLogo } from "./TuiSplashLogo";
 import {
   ConversationBranchDialog,
   type ConversationBranchAction,
@@ -180,7 +181,7 @@ function classifySubmissionFailure(error: unknown): SubmissionFailure {
   const message =
     error instanceof Error
       ? error.message
-      : "ygg could not send this message.";
+      : "octet could not send this message.";
   if (error instanceof CommandRejectedError) {
     if (
       error.code === "staleGeneration" ||
@@ -1077,7 +1078,7 @@ function UserInputCard({
       setError(
         reason instanceof Error
           ? reason.message
-          : "ygg could not send this answer.",
+          : "octet could not send this answer.",
       );
     } finally {
       setSubmitting(false);
@@ -1095,7 +1096,7 @@ function UserInputCard({
       </span>
       <div>
         <span className="user-input-eyebrow">
-          {item.resolved ? "Answer sent" : "ygg needs private input"}
+          {item.resolved ? "Answer sent" : "octet needs private input"}
         </span>
         <h3>{item.prompt}</h3>
         {item.resolved ? (
@@ -1218,7 +1219,7 @@ function AssistantMessage({
         <div className="message-copy">
           <LoaderCircle
             className="spin assistant-waiting"
-            aria-label="ygg is responding"
+            aria-label="octet is responding"
           />
         </div>
       )}
@@ -2053,11 +2054,16 @@ const WorkGroup = memo(function WorkGroup({
 
 function EmptySession({
   attachments,
+  modelAccent,
 }: {
   attachments: boolean;
+  modelAccent: string;
 }) {
   return (
     <div className="empty-session">
+      <div className="empty-session-mark">
+        <TuiSplashLogo modelAccent={modelAccent} />
+      </div>
       <span className="empty-session-eyebrow">New workspace task</span>
       <h1>What should we work on?</h1>
       <p>
@@ -4277,7 +4283,7 @@ function Composer({
                 : "Describe a change…"
           }
           rows={1}
-          aria-label="Message ygg"
+          aria-label="Message octet"
           aria-describedby={submitError ? "composer-send-error" : undefined}
           aria-expanded={Boolean(activeCompletion)}
           aria-haspopup={activeCompletion ? "listbox" : undefined}
@@ -4393,7 +4399,7 @@ function Composer({
             />
             {isWorking ? (
               <ComposerMenu
-                label="While ygg is working"
+                label="While octet is working"
                 className="delivery-menu"
                 value={activeDelivery}
                 icon={
@@ -4462,7 +4468,7 @@ function Composer({
               }
               aria-label={
                 submitActionIsStop
-                  ? "Stop ygg"
+                  ? "Stop octet"
                   : isWorking
                     ? activeDelivery === "steer"
                       ? "Steer active run"
@@ -4692,6 +4698,11 @@ export function Conversation({
   const selectedModel = bootstrap.models.find(
     (model) => model.id === session.modelId,
   );
+  const providerKey =
+    `${selectedModel?.provider ?? ""} ${selectedModel?.id ?? ""}`.toLowerCase();
+  const modelAccent =
+    providerAccents.find(([provider]) => providerKey.includes(provider))?.[1] ??
+    "#16876d";
   const conversationBranching =
     !readOnly &&
     bootstrap.capabilities.conversationBranching &&
@@ -4821,6 +4832,7 @@ export function Conversation({
         >
           {session.items.length === 0 ? (
             <EmptySession
+              modelAccent={modelAccent}
               key={session.sessionId}
               attachments={
                 bootstrap.capabilities.attachments &&

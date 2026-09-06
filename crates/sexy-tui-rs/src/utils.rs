@@ -35,7 +35,7 @@ pub fn extract_ansi_code(text: &str, position: usize) -> Option<AnsiCode<'_>> {
                 length: end - position,
             })
         }
-        b']' | b'_' => {
+        b']' | b'_' | b'P' | b'^' => {
             let mut cursor = position + 2;
             while cursor < text.len() {
                 if text.as_bytes()[cursor] == 0x07 {
@@ -164,7 +164,7 @@ pub fn terminal_tokens(text: &str) -> Vec<TerminalToken<'_>> {
 /// Remove terminal controls for untrusted/plain-text projections.
 ///
 /// Pi's compositor intentionally recognizes only the sequences it emits.
-/// Sanitization is a separate Rust/Ygg compatibility layer and therefore also
+/// Sanitization is a separate Rust/octet compatibility layer and therefore also
 /// consumes generic ECMA-48 CSI, charset designators, and their C1 forms.
 pub fn strip_terminal_sequences(text: &str) -> String {
     let bytes = text.as_bytes();

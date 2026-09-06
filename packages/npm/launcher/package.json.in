@@ -1,7 +1,7 @@
 {
-  "name": "@skaft-software/ygg",
+  "name": "@skaft-software/octet",
   "version": "__VERSION__",
-  "description": "Native Ygg coding agent launcher",
+  "description": "Native octet coding agent launcher",
   "license": "MIT",
   "repository": "https://github.com/skaft-software/ygg",
   "files": [
@@ -11,12 +11,12 @@
     "lib/"
   ],
   "bin": {
-    "ygg": "bin/ygg",
-    "ygg-host": "bin/ygg-host"
+    "octet": "bin/octet",
+    "octet-host": "bin/octet-host"
   },
   "optionalDependencies": {
-    "@skaft-software/ygg-darwin-arm64": "__VERSION__",
-    "@skaft-software/ygg-darwin-x64": "__VERSION__",
-    "@skaft-software/ygg-linux-x64-gnu": "__VERSION__"
+    "@skaft-software/octet-darwin-arm64": "__VERSION__",
+    "@skaft-software/octet-darwin-x64": "__VERSION__",
+    "@skaft-software/octet-linux-x64-gnu": "__VERSION__"
   }
 }

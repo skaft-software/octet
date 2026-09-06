@@ -1,4 +1,4 @@
-description = "Implement a task using deterministic Ygg context variables"
+description = "Implement a task using deterministic octet context variables"
 argument_hint = "<task>"
 prompt = """
 Implement this task in {{workspace}}:

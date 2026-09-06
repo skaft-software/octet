@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh Ygg's checked-in models.dev pricing and display-name snapshots.
+"""Refresh octet's checked-in models.dev pricing and display-name snapshots.
 
 This is an explicit maintainer operation. Normal builds never run this script
 or contact the network.
@@ -14,8 +14,8 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 API_URL = "https://models.dev/api.json"
-DEFAULT_OUTPUT = Path("crates/ygg-ai/models/models-dev-pricing.json")
-DEFAULT_NAMES_OUTPUT = Path("crates/ygg-ai/models/models-dev-names.json")
+DEFAULT_OUTPUT = Path("crates/octet-ai/models/models-dev-pricing.json")
+DEFAULT_NAMES_OUTPUT = Path("crates/octet-ai/models/models-dev-names.json")
 
 # Provider catalogs can retain aliases that their own APIs reject. Keep these
 # exclusions beside the refresh boundary so stale upstream data cannot make a
@@ -54,7 +54,7 @@ NAME_SOURCES = {
     "zhipuai",
 }
 
-# Ygg's endpoint ids do not all use models.dev's provider ids. Keep this small
+# octet's endpoint ids do not all use models.dev's provider ids. Keep this small
 # route-identity mapping here; model names and rates come entirely from the
 # downloaded catalog.
 PROVIDER_SOURCES = {
@@ -114,7 +114,7 @@ def names_snapshot(catalog: dict[str, object]) -> dict[str, str]:
 
 def snapshot(catalog: dict[str, object]) -> dict[str, dict[str, int | None]]:
     output: dict[str, dict[str, int | None]] = {}
-    for ygg_provider, source_provider in sorted(PROVIDER_SOURCES.items()):
+    for octet_provider, source_provider in sorted(PROVIDER_SOURCES.items()):
         provider = catalog.get(source_provider)
         if not isinstance(provider, dict):
             continue
@@ -131,7 +131,7 @@ def snapshot(catalog: dict[str, object]) -> dict[str, dict[str, int | None]]:
             cost = model.get("cost")
             if not isinstance(cost, dict) or "input" not in cost or "output" not in cost:
                 continue
-            output[f"{ygg_provider}/{model_id}".lower()] = {
+            output[f"{octet_provider}/{model_id}".lower()] = {
                 "cache_read": microdollars(cost.get("cache_read")),
                 "cache_write_5m": microdollars(cost.get("cache_write")),
                 "input": microdollars(cost["input"]),
@@ -161,7 +161,7 @@ def main() -> None:
     else:
         request = Request(
             API_URL,
-            headers={"Accept": "application/json", "User-Agent": "ygg-model-refresh/1"},
+            headers={"Accept": "application/json", "User-Agent": "octet-model-refresh/1"},
         )
         with urlopen(request, timeout=30) as response:  # noqa: S310 - explicit maintainer tool
             catalog = json.load(response)
@@ -171,7 +171,7 @@ def main() -> None:
     result = snapshot(catalog)
     names = names_snapshot(catalog)
     if not result:
-        raise SystemExit("models.dev api.json contained no Ygg provider pricing")
+        raise SystemExit("models.dev api.json contained no octet provider pricing")
     if not names:
         raise SystemExit("models.dev api.json contained no model names")
     args.output.parent.mkdir(parents=True, exist_ok=True)

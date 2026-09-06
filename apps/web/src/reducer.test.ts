@@ -106,7 +106,7 @@ describe("reduceSessionEvent", () => {
   it("atomically replaces extension presentation state", () => {
     const presentations = [
       {
-        extension: "ygg-subagents",
+        extension: "octet-subagents",
         extensionInstanceId: "instance-subagents",
         generation: 2,
         resourceOwner: "owner-1",

@@ -1,6 +1,6 @@
 # Configuration diagnostics
 
-Ygg configuration is compatibility-first: unknown TOML keys are visible, but
+octet configuration is compatibility-first: unknown TOML keys are visible, but
 they do not make an otherwise usable configuration fail unless strict mode is
 explicitly enabled.
 
@@ -9,10 +9,10 @@ explicitly enabled.
 Diagnostics retain the source that introduced a key:
 
 - **global** — the user-level configuration file; and
-- **project** — `<workspace>/.ygg/config.toml`, loaded only after
+- **project** — `<workspace>/.octet/config.toml`, loaded only after
   `--workspace-trusted` grants project trust.
 
-A missing home directory disables global configuration. Ygg never substitutes
+A missing home directory disables global configuration. octet never substitutes
 the invocation directory as user scope, because that would let an untrusted
 project provide user-trust configuration.
 
@@ -25,6 +25,26 @@ Normal value precedence remains:
 
 Diagnostics are collected from each loaded TOML layer before values are merged,
 so an overridden typo is still reported with its original source.
+
+### Effect-policy selection
+
+`effect_policy` selects the host-owned effect-admission profile. Its canonical
+values are `controlled_bash_approval`, `controlled`, and `unsafe_host`, ordered
+from most to least restrictive. The coding product defaults to `unsafe_host`;
+`--safe-mode` instead selects `controlled_bash_approval` and cannot be combined
+with `--effect-policy`.
+
+Set the profile in global or trusted project TOML as `effect_policy = "…"`, in
+the environment as `OCTET_EFFECT_POLICY`, or on the command line with
+`--effect-policy`. Environment and CLI layers use ordinary precedence and may
+replace a prior profile. A trusted project may only retain or tighten the global
+profile; it cannot relax one. Invalid values fail with a bounded generic
+message that does not repeat the supplied value.
+
+The secret-safe effective-policy snapshot records the final profile as
+`{ value, source }`. The source is `default`, `config`, `environment`, `cli`, or
+`host_request`; this source identifies the layer that selected the parent
+policy, not a delegated child's inheritance relationship.
 
 ## Unknown keys
 
@@ -41,7 +61,7 @@ sorted, and deduplicated per source. A diagnostic contains:
 Example:
 
 ```text
-warning: project config /repo/.ygg/config.toml:8:1: unknown configuration key "compaction.keep_recent_turn"; did you mean "compaction.keep_recent_tokens"?
+warning: project config /repo/.octet/config.toml:8:1: unknown configuration key "compaction.keep_recent_turn"; did you mean "compaction.keep_recent_tokens"?
 ```
 
 Known compatibility aliases are part of the schema and do not warn. These
@@ -51,7 +71,7 @@ at the same enforcement boundary.
 
 Malformed TOML, invalid UTF-8, unsafe files, oversized files, and invalid values
 are not unknown-key compatibility cases. They continue to fail immediately.
-Configuration files are bounded regular files read through Ygg's secure file
+Configuration files are bounded regular files read through octet's secure file
 helper.
 
 ## Strict mode
@@ -61,7 +81,7 @@ Unknown keys become fatal only when strict mode is opted into through one of:
 ```text
 --strict-config
 strict_config = true
-YGG_STRICT_CONFIG=true
+OCTET_STRICT_CONFIG=true
 ```
 
 Strictness is resolved after global, trusted-project, and environment layers are
@@ -76,7 +96,7 @@ strict configuration rejected unknown keys:
 
 Without strict mode, the same diagnostics are warnings and recognized settings
 continue to load. This is intentional for forward and backward compatibility:
-upgrading or downgrading one Ygg binary does not silently hide a typo, but a
+upgrading or downgrading one octet binary does not silently hide a typo, but a
 newer key does not disable an older binary by default.
 
 ## Adding a setting

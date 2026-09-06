@@ -33,7 +33,7 @@ Port order:
 2. `tui`, including frame, focus, overlay, cursor, shrink and resize state
 3. editor/input, autocomplete and widgets
 4. terminal image and Markdown compatibility
-5. Rust rich rendering and Ygg native-scrollback extensions
+5. Rust rich rendering and octet native-scrollback extensions
 
 ## Current status
 

@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "scope": "Compact historical evidence; not an octet 0.7.0 measurement or full trajectory archive.",
+  "repository_source_commit": "da77e56927c465427c613c90b5676b3160bb76ac",
+  "codex_source_url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/67f1daf5b331fd10f5e8bc05bfc626aac26eeb39/leaderboard/submissions/2026-07-10-gpt-5-6-sol-max-codex.json",
+  "codex_source_sha256": "62d1a44f1d05654833cf1770c9f2ead98dde9d47e6e431511b83964f5a525c0c",
+  "missing": [
+    "Claude Code comparison",
+    "octet 0.7.0 benchmark",
+    "full Ygg raw task trajectories and judge responses (privacy/redistribution review pending)",
+    "Codex per-trial trajectories",
+    "RAM during Terminal-Bench tasks",
+    "matched provider snapshots and common official adjudication"
+  ],
+  "files": [
+    {
+      "path": "docs/assets/evidence/codex-tb21-submission.json",
+      "bytes": 27498,
+      "sha256": "62d1a44f1d05654833cf1770c9f2ead98dde9d47e6e431511b83964f5a525c0c"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/SHA256SUMS",
+      "bytes": 1674,
+      "sha256": "9d661494576d2fed303c82677787de4dd3d2988b2db2bcacf3d206b99b90fe1a"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/codex-concurrency-1.json",
+      "bytes": 61019,
+      "sha256": "87dc7f673529fbd78ee9cdd6789ccbaa60fe71b9a90e05e92667539e519fca32"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/codex-concurrency-2.json",
+      "bytes": 53888,
+      "sha256": "a1aef6cf721e0d04acedd1b41892408cc1eea47e7e82f49e90c47006148a6f32"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/codex-concurrency-4.json",
+      "bytes": 54971,
+      "sha256": "a2aef2a565976c0ae055d07897fdbc7933a05ef84d944191f17f0f73674dd328"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/codex-runtime.json",
+      "bytes": 52831,
+      "sha256": "1715aab0c898e7bb24c9e7839565546561fefe473319b5326c6dbd7db98883d9"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/manifest.json",
+      "bytes": 3853,
+      "sha256": "d6256625db45c3e792c69c19814fd7d70684dc2767303dc50318f8d8941ce7ab"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/opencode-concurrency-1.json",
+      "bytes": 61767,
+      "sha256": "3578f50dcef460de216b96567f3985e3dd9a597d63826f8fa210d02d8becee75"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/opencode-concurrency-2.json",
+      "bytes": 56592,
+      "sha256": "726c6b3671dceb9e7fdf955cc41af894c5d5eb403d40eef907b19a94e5acd765"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/opencode-concurrency-4.json",
+      "bytes": 57624,
+      "sha256": "f34ef10b3dedf9cd3658eb1fb0628f81ee5662ee1212767c556ff8f271763a8d"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/opencode-runtime.json",
+      "bytes": 54772,
+      "sha256": "68fedd1114e8ed971c3ecb12b6717c1bbaac7b1d58606b6088101be9a473ae86"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/pi-concurrency-1.json",
+      "bytes": 61112,
+      "sha256": "e869bc468cb1925add5189fc9351506963992c496ae85ffa970983626763340a"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/pi-concurrency-2.json",
+      "bytes": 54585,
+      "sha256": "ae43640dc73e728f73e6acaf29f5f4447d3a51d2d345dc864d44301768dd3c81"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/pi-concurrency-4.json",
+      "bytes": 55211,
+      "sha256": "b0709efb163292e89439b4d013c7f58e40f1fa1db53dbeb58dca5f1f202a5c2c"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/pi-runtime.json",
+      "bytes": 53337,
+      "sha256": "794ba932c9614be2363f5fe9c980ad7c2fe9fa61ad239ed5ffe946fabe4e22f2"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/summary.json",
+      "bytes": 10041,
+      "sha256": "daaea96ddbef84a2ee58dd4af54940098dc54ec78f3b1285ec670eeefe36d8fd"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-1.json",
+      "bytes": 60604,
+      "sha256": "af171a4148cb77ec8a0623e65ae30360ea62a08e0de26dfd257d6cc9e4f46019"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-2.json",
+      "bytes": 54174,
+      "sha256": "a393dc9ccf9e05cfdf63c6cffae4c6e048952331235dc25521552e93024c1554"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-4.json",
+      "bytes": 55248,
+      "sha256": "62dbd4bce3145782892ed7f55a7d3a38df7628dbdf1ae5dfa5fa66adc8b22c30"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/ygg-custom-provider.json",
+      "bytes": 521,
+      "sha256": "ac9cc1763467f5c212ad02aff7f8b24834ce35b95349134cc83edd0bb6eaa443"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29/ygg-runtime.json",
+      "bytes": 54844,
+      "sha256": "a399cc112a171e324f1cbcc75b57a59f8880b3d59f96d246e2e9abf62e93b0c8"
+    },
+    {
+      "path": "docs/benchmarks/runtime-footprint-2026-08-29.md",
+      "bytes": 9581,
+      "sha256": "a70e3c37a5d8794e212abaf0267e6a1e19c00472d6c8757cb3a6496731133b4a"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/README.md",
+      "bytes": 11886,
+      "sha256": "93227551200a937535fbc6077878ef1025d5c8d9594f3e20f73f08ecac169cdb"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/SHA256SUMS",
+      "bytes": 1449,
+      "sha256": "393f1d8be85a9c7c28e47b914c4280c4ffd19fa4cec1a155793b0df13adec5c7"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/audit-case-map.sanitized.json",
+      "bytes": 151051,
+      "sha256": "f7899956010518321aac880382c80d037eef136f7b019c702a18173bd9dc7dd2"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/audit-evidence-files.sha256",
+      "bytes": 189690,
+      "sha256": "58805c146f50880a4c38f22b6c293678b6e327d2daf0de29837b299e5186bc3f"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/audit-initial-summary.sanitized.json",
+      "bytes": 649,
+      "sha256": "5cf667c90b61754f45250cc671ed0512d19bcf11985d75d58b1b3b33c00994c8"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/audit-manifest.sanitized.json",
+      "bytes": 480,
+      "sha256": "3b84b90d3a6fdbc4586610126d2f53f2b0171cdba2285388ff7da5a46b3648a3"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/audit-metrics.json",
+      "bytes": 17459,
+      "sha256": "d44689a3cebe0c9efb2e84656b027ae92e56e0ffbee6ad6ee146ec09bcc054e0"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/audit-reproducibility.sanitized.json",
+      "bytes": 3874,
+      "sha256": "09c747a928eaa386961604f1f7c73130ae42bd76d3ed1e8856169101f424559d"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/contamination-audit.sanitized.json",
+      "bytes": 1715,
+      "sha256": "d8d67daa73f036d5518a42e4da6923d773a3b9d3dfb2c93c38803e1e57bc4fd0"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/harbor-config.sanitized.json",
+      "bytes": 959,
+      "sha256": "869805a677654775cba0f3c4ba1a2b02ebc0a75ef56d961b47bd94e3ca6a1adc"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/harbor-result.sanitized.json",
+      "bytes": 21804,
+      "sha256": "3b067446ab0f0ea574661f94ea16caf9f9497cbec8cb0df5d7eb833b12d9adec"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/manual-review.json",
+      "bytes": 5822,
+      "sha256": "72c892746b7e11c749ef561f07cf93890573ada58f8720068eccd1e158815a9e"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/evidence/rubric.txt",
+      "bytes": 3040,
+      "sha256": "dd2c66fe1cce772fbd2dd229df33684dd540b06b4b251743270db11096e340dd"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/manifest.json",
+      "bytes": 3744,
+      "sha256": "fbc483c384edf9d5b8cfcfe637d550942829dec5771c2169f45d1a5d7528ef74"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/run-full.sanitized.sh",
+      "bytes": 1782,
+      "sha256": "69349100ef280d6d2659abca50c6c93f2632b16644a98281b99f24e157aef293"
+    },
+    {
+      "path": "docs/benchmarks/tb21-v0.6.2/verify.py",
+      "bytes": 5777,
+      "sha256": "8f8f089945ea0611ce90858a4ff24e9b9df008dc62e2f2b51b34cdf79872c978"
+    },
+    {
+      "path": "docs/benchmarks/token-efficiency-v0.6.2-2026-08-28.md",
+      "bytes": 25441,
+      "sha256": "80aae24791c92f22dbd049acea990d9dd10eda274e9d1ade79bcab029e8329d0"
+    }
+  ]
+}

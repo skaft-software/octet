@@ -6,9 +6,9 @@
 /Cargo.toml @achuthanmukundan00
 /Cargo.lock @achuthanmukundan00
 /deny.toml @achuthanmukundan00
-/crates/ygg-ai/ @achuthanmukundan00
-/crates/ygg-agent/ @achuthanmukundan00
-/crates/ygg-coding-agent/ @achuthanmukundan00
+/crates/octet-ai/ @achuthanmukundan00
+/crates/octet-agent/ @achuthanmukundan00
+/crates/octet-coding-agent/ @achuthanmukundan00
 /crates/sexy-tui-rs/ @achuthanmukundan00
 /extensions/ @achuthanmukundan00
 /apps/web/ @achuthanmukundan00

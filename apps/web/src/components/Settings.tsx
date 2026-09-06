@@ -62,14 +62,14 @@ export function SettingsView({
   onNotificationsChange,
 }: SettingsViewProps) {
   const [fontStackId, setFontStackId] = useState(() => {
-    const stored = localStorage.getItem("ygg.ui.font");
+    const stored = localStorage.getItem("octet.ui.font");
     if (stored === "ibm-plex-mono") return "geist";
     return stored !== null && fontStacks.some((stack) => stack.id === stored)
       ? stored
       : "local";
   });
   const [uiSize, setUiSize] = useState(
-    () => Number(localStorage.getItem("ygg.ui.size") ?? "14"),
+    () => Number(localStorage.getItem("octet.ui.size") ?? "14"),
   );
   const [notificationPending, setNotificationPending] = useState(false);
   const [notificationMessage, setNotificationMessage] = useState<string | null>(
@@ -82,7 +82,7 @@ export function SettingsView({
       fontStacks[0];
     document.documentElement.style.setProperty("--ui-family", stack.ui);
     document.documentElement.style.setProperty("--mono-family", stack.mono);
-    localStorage.setItem("ygg.ui.font", stack.id);
+    localStorage.setItem("octet.ui.font", stack.id);
   }, [fontStackId]);
 
   useEffect(() => {
@@ -92,16 +92,16 @@ export function SettingsView({
     const root = document.documentElement;
     root.style.setProperty("--font-body", `${normalized}px`);
     root.style.setProperty("--font-meta", `${Math.max(11, normalized - 2)}px`);
-    localStorage.setItem("ygg.ui.size", String(normalized));
+    localStorage.setItem("octet.ui.size", String(normalized));
   }, [uiSize]);
 
   return (
     <main className="utility-view" aria-labelledby="settings-title">
       <header className="utility-header">
-        <span>ygg preferences</span>
+        <span>octet preferences</span>
         <h1 id="settings-title">Settings</h1>
         <p>
-          Preferences live on this device and never require a ygg account.
+          Preferences live on this device and never require a octet account.
         </p>
       </header>
 
@@ -111,7 +111,7 @@ export function SettingsView({
           <div>
             <h2 id="type-title">Interface type</h2>
             <p>
-              Local ships with ygg for legible, playful DIY work; alternatives
+              Local ships with octet for legible, playful DIY work; alternatives
               use fonts installed on this device.
             </p>
           </div>

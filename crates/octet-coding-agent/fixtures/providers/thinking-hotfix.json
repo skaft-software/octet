@@ -1,0 +1,7 @@
+{
+  "provenance": "Synthetic offline inventories, not live provider captures. Cerebras qwen-3.8-27b spelling/control facts: https://inference-docs.cerebras.ai/capabilities/reasoning, public documentation reviewed 2026-09-05. Local profiles are explicit synthetic server assertions, not Cerebras contracts.",
+  "cerebras_sparse": {"data": [{"id": "qwen-3.8-27b", "context_window": 32768, "max_output_tokens": 4096, "supported_parameters": ["tools"]}]},
+  "local_binary": {"data": [{"id": "qwen-3.8-27b", "capabilities": {"reasoning": {"supported": true, "control": "binary", "values": ["none", "default"], "default": "default"}}}]},
+  "local_template": {"data": [{"id": "qwen-3.8-27b", "display_name": "Lab model", "capabilities": {"reasoning": {"supported": true, "control": "binary", "profile": {"qwen_chat_template": {"preserve_thinking": true}}, "values": ["false", "true"], "default": "true"}}}]},
+  "codex_exact": {"models": [{"slug": "gpt-6-astra", "display_name": "GPT-6 Astra", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}, {"effort": "ultra"}], "default_reasoning_level": "low", "use_responses_lite": true, "multi_agent_version": "v2"}]}
+}

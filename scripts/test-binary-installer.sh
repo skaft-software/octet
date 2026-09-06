@@ -3,15 +3,15 @@ set -euo pipefail
 
 script_directory=$(cd "$(dirname "$0")" && pwd)
 source_installer="$script_directory/install.sh"
-work_directory=$(mktemp -d "${TMPDIR:-/tmp}/ygg-installer-test.XXXXXX")
+work_directory=$(mktemp -d "${TMPDIR:-/tmp}/octet-installer-test.XXXXXX")
 trap 'rm -rf "$work_directory"' EXIT
 assets="$work_directory/assets"
 fake_bin="$work_directory/fake-bin"
-installer="$work_directory/install-ygg.sh"
-version=0.6.7
+installer="$work_directory/install-octet.sh"
+version=0.7.0
 identity_version=${version//./\\.}
-expected_identity="^https://github\\.com/skaft-software/ygg/\\.github/workflows/release-ygg\\.yml@refs/tags/(v${identity_version}|ygg-binaries-v${identity_version})$"
-package="ygg-$version-aarch64-apple-darwin"
+expected_identity="^https://github\\.com/skaft-software/ygg/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
+package="octet-$version-aarch64-apple-darwin"
 archive_name="$package.tar.gz"
 release_commit=0123456789abcdef0123456789abcdef01234567
 mkdir -p "$assets" "$fake_bin"
@@ -27,12 +27,12 @@ sha256_file() {
 cat > "$fake_bin/cosign-template" <<'EOF'
 #!/bin/sh
 set -eu
-if [ "${YGG_TEST_BAD_SIGNATURE:-0}" = 1 ]; then
+if [ "${OCTET_TEST_BAD_SIGNATURE:-0}" = 1 ]; then
     exit 1
 fi
 [ "${1:-}" = verify-blob ] || exit 2
 shift
-identity=${YGG_TEST_EXPECTED_IDENTITY:?}
+identity=${OCTET_TEST_EXPECTED_IDENTITY:?}
 expected_sha=0123456789abcdef0123456789abcdef01234567
 saw_bundle=false
 saw_identity=false
@@ -62,7 +62,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --certificate-github-workflow-name)
-            [ "$2" = 'Ygg binary release' ] || exit 2
+            [ "$2" = 'octet binary release' ] || exit 2
             saw_name=true
             shift 2
             ;;
@@ -91,7 +91,7 @@ done
 [ "$saw_repository" = true ]
 [ "$saw_sha" = true ]
 [ -f "$blob" ]
-printf '%s\n' verified >> "$YGG_TEST_COSIGN_LOG"
+printf '%s\n' verified >> "$OCTET_TEST_COSIGN_LOG"
 EOF
 chmod 0755 "$fake_bin/cosign-template"
 
@@ -103,7 +103,7 @@ import sys
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 commit = sys.argv[3]
 digest = sys.argv[4]
-placeholder = 'release_source_commit="__YGG_RELEASE_SOURCE_COMMIT__"'
+placeholder = 'release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"'
 cosign = 'cosign_darwin_arm64_sha256="5cf948c2f4dfe59687bdd0b8523709067383e03982cc543475c8a7dc70e92a76"'
 if source.count(placeholder) != 1 or source.count(cosign) != 1:
     raise SystemExit("installer release placeholders changed unexpectedly")
@@ -118,7 +118,7 @@ make_archive() {
     rm -rf "$assets"
     mkdir -p "$assets"
     cp "$fake_bin/cosign-template" "$assets/cosign-darwin-arm64"
-    printf '%s\n' 'test sigstore bundle' > "$assets/YGG_SHA256SUMS.sigstore.json"
+    printf '%s\n' 'test sigstore bundle' > "$assets/OCTET_SHA256SUMS.sigstore.json"
     python3 - "$assets/$archive_name" "$package" "$variant" <<'PY'
 import gzip
 import io
@@ -132,24 +132,25 @@ variant = sys.argv[3]
 
 files = {
     "LICENSE": b"test license\n",
-    "README.md": b"# Ygg\n",
-    "ygg": b'''#!/bin/sh
+    "README.md": b"# octet\n",
+    "octet": b'''#!/bin/sh
 case "${1:-}" in
-    --version) printf '%s\\n' 'ygg 0.6.7' ;;
-    --help) printf '%s\\n' 'fake Ygg help' ;;
+    --version) printf '%s\\n' 'octet 0.7.0' ;;
+    --help) printf '%s\\n' 'fake octet help' ;;
     *) exit 0 ;;
 esac
 ''',
-    "ygg-host": b'''#!/bin/sh
+    "octet-host": b'''#!/bin/sh
 IFS= read -r request
 case "$request" in
     *'"request_id":"installer-probe"'*)
-        printf '%s\\n' '{"protocol_version":1,"request_id":"installer-probe","seq":1,"type":"hello","data":{"sdk_version":"0.6.7"}}'
+        printf '%s\\n' '{"protocol_version":1,"request_id":"installer-probe","seq":1,"type":"hello","data":{"sdk_version":"0.7.0"}}'
         ;;
     *) exit 2 ;;
 esac
 ''',
     "docs/index.md": b"# Docs\n",
+    "docs/current-reference.md": b"# octet current reference\n",
     "examples/README.md": b"# Example\n",
     "sdk/README.md": b"# SDK\n",
 }
@@ -188,8 +189,8 @@ with archive.open("wb") as raw:
             for directory in directories:
                 add_directory(output, directory)
             for name, data in files.items():
-                if variant == "link" and name == "ygg":
-                    info = tarfile.TarInfo(f"{package}/ygg")
+                if variant == "link" and name == "octet":
+                    info = tarfile.TarInfo(f"{package}/octet")
                     info.type = tarfile.SYMTYPE
                     info.linkname = "LICENSE"
                     output.addfile(info)
@@ -198,7 +199,7 @@ with archive.open("wb") as raw:
                         output,
                         f"{package}/{name}",
                         data,
-                        0o755 if name in {"ygg", "ygg-host"} else 0o644,
+                        0o755 if name in {"octet", "octet-host"} else 0o644,
                     )
             if variant == "duplicate":
                 add_file(output, f"{package}/README.md", b"duplicate\n")
@@ -234,11 +235,11 @@ if variant == "concatenated":
                 add_file(output, "second-archive", b"unexpected\n")
 PY
     {
-        printf '%064d  ./install-ygg.sh\n' 0
+        printf '%064d  ./install-octet.sh\n' 0
         printf '%s  ./%s\n' "$(sha256_file "$assets/$archive_name")" "$archive_name"
-        printf '%064d  ./ygg-0.6.7-x86_64-apple-darwin.tar.gz\n' 0
-        printf '%064d  ./ygg-0.6.7-x86_64-unknown-linux-gnu.tar.gz\n' 0
-    } > "$assets/YGG_SHA256SUMS"
+        printf '%064d  ./octet-0.7.0-x86_64-apple-darwin.tar.gz\n' 0
+        printf '%064d  ./octet-0.7.0-x86_64-unknown-linux-gnu.tar.gz\n' 0
+    } > "$assets/OCTET_SHA256SUMS"
 }
 
 cat > "$fake_bin/uname" <<'EOF'
@@ -287,19 +288,19 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 name=${url##*/}
-source="$YGG_TEST_ASSETS/$name"
-if [ "${YGG_TEST_HARDLINK_ARCHIVE:-0}" = 1 ] && [ "$name" = ygg-0.6.7-aarch64-apple-darwin.tar.gz ]; then
+source="$OCTET_TEST_ASSETS/$name"
+if [ "${OCTET_TEST_HARDLINK_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.0-aarch64-apple-darwin.tar.gz ]; then
     ln "$source" "$output"
 else
     cp "$source" "$output"
 fi
-if [ "${YGG_TEST_TAMPER_ARCHIVE:-0}" = 1 ] && [ "$name" = ygg-0.6.7-aarch64-apple-darwin.tar.gz ]; then
+if [ "${OCTET_TEST_TAMPER_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.0-aarch64-apple-darwin.tar.gz ]; then
     printf 'tampered' >> "$output"
 fi
-if [ "${YGG_TEST_TAMPER_COSIGN:-0}" = 1 ] && [ "$name" = cosign-darwin-arm64 ]; then
+if [ "${OCTET_TEST_TAMPER_COSIGN:-0}" = 1 ] && [ "$name" = cosign-darwin-arm64 ]; then
     printf 'tampered' >> "$output"
 fi
-host=${YGG_TEST_REDIRECT_HOST:-release-assets.githubusercontent.com}
+host=${OCTET_TEST_REDIRECT_HOST:-release-assets.githubusercontent.com}
 effective="https://$host/test/$name"
 printf 'HTTP/1.1 302 Found\r\nLocation: %s\r\n\r\nHTTP/1.1 200 OK\r\n\r\n' \
     "$effective" > "$headers"
@@ -315,11 +316,11 @@ run_installer() {
         HOME="$test_home" \
         SHELL=/bin/sh \
         PATH="$fake_bin:$PATH" \
-        YGG_INSTALL_DIR="$test_home/bin" \
-        YGG_NO_MODIFY_PATH=1 \
-        YGG_TEST_ASSETS="$assets" \
-        YGG_TEST_COSIGN_LOG="$work_directory/cosign.log" \
-        YGG_TEST_EXPECTED_IDENTITY="$expected_identity" \
+        OCTET_INSTALL_DIR="$test_home/bin" \
+        OCTET_NO_MODIFY_PATH=1 \
+        OCTET_TEST_ASSETS="$assets" \
+        OCTET_TEST_COSIGN_LOG="$work_directory/cosign.log" \
+        OCTET_TEST_EXPECTED_IDENTITY="$expected_identity" \
         "$@" \
         sh "$installer"
 }
@@ -335,74 +336,98 @@ expect_failure() {
         exit 1
     fi
     grep -F "$expected" "$work_directory/$label.err" >/dev/null
-    test ! -e "$test_home/bin/ygg"
+    test ! -e "$test_home/bin/octet"
 }
 
 make_archive valid
 positive_home="$work_directory/positive-home"
 run_installer "$positive_home" > "$work_directory/positive.out"
-test -x "$positive_home/bin/ygg"
-test -x "$positive_home/bin/ygg-host"
+test -x "$positive_home/bin/octet"
+test -x "$positive_home/bin/octet-host"
 printf '%s\n' '{"protocol_version":1,"request_id":"installer-probe","command":"hello"}' \
-    | "$positive_home/bin/ygg-host" \
-    | grep -F '"sdk_version":"0.6.7"' >/dev/null
-test "$("$positive_home/bin/ygg" --version)" = 'ygg 0.6.7'
-test -f "$positive_home/share/ygg/README.md"
-test -f "$positive_home/share/ygg/docs/index.md"
-test -f "$positive_home/share/ygg/examples/README.md"
-test -f "$positive_home/share/ygg/sdk/README.md"
-test "$(cat "$positive_home/share/ygg/.ygg-version")" = "$version"
+    | "$positive_home/bin/octet-host" \
+    | grep -F '"sdk_version":"0.7.0"' >/dev/null
+test "$("$positive_home/bin/octet" --version)" = 'octet 0.7.0'
+test -f "$positive_home/share/octet/README.md"
+test -f "$positive_home/share/octet/docs/index.md"
+test -f "$positive_home/share/octet/docs/current-reference.md"
+test ! -e "$positive_home/bin/ygg"
+test ! -e "$positive_home/bin/ygg-host"
+test -f "$positive_home/share/octet/examples/README.md"
+test -f "$positive_home/share/octet/sdk/README.md"
+test "$(cat "$positive_home/share/octet/.octet-version")" = "$version"
 grep -Fx verified "$work_directory/cosign.log" >/dev/null
 
 upgrade_home="$work_directory/upgrade-home"
 mkdir -p \
     "$upgrade_home/bin" \
-    "$upgrade_home/.ygg/sessions" \
-    "$upgrade_home/share/ygg/docs"
-cat > "$upgrade_home/bin/ygg" <<'EOF'
+    "$upgrade_home/.octet/sessions" \
+    "$upgrade_home/share/octet/docs"
+cat > "$upgrade_home/bin/octet" <<'EOF'
 #!/bin/sh
-printf '%s\n' 'ygg 0.4.0'
+printf '%s\n' 'octet 0.4.0'
 EOF
-cat > "$upgrade_home/bin/ygg-host" <<'EOF'
+cat > "$upgrade_home/bin/octet-host" <<'EOF'
 #!/bin/sh
-printf '%s\n' 'legacy ygg-host 0.4.0'
+printf '%s\n' 'legacy octet-host 0.4.0'
 EOF
-chmod 0755 "$upgrade_home/bin/ygg" "$upgrade_home/bin/ygg-host"
+chmod 0755 "$upgrade_home/bin/octet" "$upgrade_home/bin/octet-host"
 printf '%s\n' 'keep helper' > "$upgrade_home/bin/unrelated-helper"
-printf '%s\n' 'keep config' > "$upgrade_home/.ygg/config.toml"
-printf '%s\n' 'keep session' > "$upgrade_home/.ygg/sessions/session.jsonl"
-printf '%s\n' 'remove old docs' > "$upgrade_home/share/ygg/docs/old.md"
+printf '%s\n' 'keep config' > "$upgrade_home/.octet/config.toml"
+printf '%s\n' 'keep session' > "$upgrade_home/.octet/sessions/session.jsonl"
+printf '%s\n' 'remove old docs' > "$upgrade_home/share/octet/docs/old.md"
 run_installer "$upgrade_home" > "$work_directory/upgrade.out"
-test "$("$upgrade_home/bin/ygg" --version)" = 'ygg 0.6.7'
+test "$("$upgrade_home/bin/octet" --version)" = 'octet 0.7.0'
 printf '%s\n' '{"protocol_version":1,"request_id":"installer-probe","command":"hello"}' \
-    | "$upgrade_home/bin/ygg-host" \
-    | grep -F '"sdk_version":"0.6.7"' >/dev/null
+    | "$upgrade_home/bin/octet-host" \
+    | grep -F '"sdk_version":"0.7.0"' >/dev/null
 grep -Fx 'keep helper' "$upgrade_home/bin/unrelated-helper" >/dev/null
-grep -Fx 'keep config' "$upgrade_home/.ygg/config.toml" >/dev/null
-grep -Fx 'keep session' "$upgrade_home/.ygg/sessions/session.jsonl" >/dev/null
-test ! -e "$upgrade_home/share/ygg/docs/old.md"
-test -f "$upgrade_home/share/ygg/docs/index.md"
-test "$(cat "$upgrade_home/share/ygg/.ygg-version")" = "$version"
+grep -Fx 'keep config' "$upgrade_home/.octet/config.toml" >/dev/null
+grep -Fx 'keep session' "$upgrade_home/.octet/sessions/session.jsonl" >/dev/null
+test ! -e "$upgrade_home/share/octet/docs/old.md"
+test -f "$upgrade_home/share/octet/docs/index.md"
+test "$(cat "$upgrade_home/share/octet/.octet-version")" = "$version"
+
+# Clean-break installation must neither consume old environment overrides nor
+# touch an unrelated, populated earlier first-party installation/data tree.
+legacy_home="$work_directory/legacy-trap-home"
+mkdir -p "$legacy_home/bin" "$legacy_home/.ygg/sessions" "$legacy_home/share/ygg"
+printf '%s\n' 'untouched old binary' > "$legacy_home/bin/ygg"
+printf '%s\n' 'untouched old host' > "$legacy_home/bin/ygg-host"
+printf '%s\n' 'untouched old config' > "$legacy_home/.ygg/config.toml"
+printf '%s\n' 'untouched old session' > "$legacy_home/.ygg/sessions/session.jsonl"
+printf '%s\n' 'untouched old docs' > "$legacy_home/share/ygg/README.md"
+run_installer "$legacy_home" \
+    YGG_INSTALL_DIR="$work_directory/forbidden-old-bin" \
+    YGG_DATA_DIR="$work_directory/forbidden-old-docs" > "$work_directory/legacy-trap.out"
+test "$("$legacy_home/bin/octet" --version)" = 'octet 0.7.0'
+grep -Fx 'untouched old binary' "$legacy_home/bin/ygg" >/dev/null
+grep -Fx 'untouched old host' "$legacy_home/bin/ygg-host" >/dev/null
+grep -Fx 'untouched old config' "$legacy_home/.ygg/config.toml" >/dev/null
+grep -Fx 'untouched old session' "$legacy_home/.ygg/sessions/session.jsonl" >/dev/null
+grep -Fx 'untouched old docs' "$legacy_home/share/ygg/README.md" >/dev/null
+test ! -e "$work_directory/forbidden-old-bin"
+test ! -e "$work_directory/forbidden-old-docs"
 
 override_home="$work_directory/override-home"
 override_data="$work_directory/override-data"
-run_installer "$override_home" YGG_DATA_DIR="$override_data" > "$work_directory/override.out"
-test -x "$override_home/bin/ygg"
-test -x "$override_home/bin/ygg-host"
+run_installer "$override_home" OCTET_DATA_DIR="$override_data" > "$work_directory/override.out"
+test -x "$override_home/bin/octet"
+test -x "$override_home/bin/octet-host"
 test -f "$override_data/README.md"
 test -f "$override_data/docs/index.md"
 test -f "$override_data/examples/README.md"
 test -f "$override_data/sdk/README.md"
-test ! -e "$override_home/share/ygg"
+test ! -e "$override_home/share/octet"
 
-expect_failure untrusted 'redirected to an untrusted host' YGG_TEST_REDIRECT_HOST=example.com
-expect_failure signature 'release checksum provenance verification failed' YGG_TEST_BAD_SIGNATURE=1
-expect_failure cosign-tamper 'checksum mismatch for the pinned cosign verifier' YGG_TEST_TAMPER_COSIGN=1
-expect_failure archive-tamper 'checksum mismatch for release archive' YGG_TEST_TAMPER_ARCHIVE=1
-expect_failure hardlink 'downloaded archive is not a private regular file' YGG_TEST_HARDLINK_ARCHIVE=1
+expect_failure untrusted 'redirected to an untrusted host' OCTET_TEST_REDIRECT_HOST=example.com
+expect_failure signature 'release checksum provenance verification failed' OCTET_TEST_BAD_SIGNATURE=1
+expect_failure cosign-tamper 'checksum mismatch for the pinned cosign verifier' OCTET_TEST_TAMPER_COSIGN=1
+expect_failure archive-tamper 'checksum mismatch for release archive' OCTET_TEST_TAMPER_ARCHIVE=1
+expect_failure hardlink 'downloaded archive is not a private regular file' OCTET_TEST_HARDLINK_ARCHIVE=1
 
 printf '%s  ./%s\n' "$(sha256_file "$assets/$archive_name")" "$archive_name" \
-    >> "$assets/YGG_SHA256SUMS"
+    >> "$assets/OCTET_SHA256SUMS"
 expect_failure duplicate-checksum 'release checksum manifest contains duplicate entries'
 
 for case_spec in \

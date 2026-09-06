@@ -128,7 +128,7 @@ export function ConversationBranchDialog({
       setError(
         cause instanceof Error
           ? cause.message
-          : "ygg could not create this conversation branch.",
+          : "octet could not create this conversation branch.",
       );
     } finally {
       setSubmitting(false);

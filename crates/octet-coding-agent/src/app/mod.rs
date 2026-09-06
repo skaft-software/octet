@@ -1,0 +1,919 @@
+#![allow(missing_docs)]
+
+pub mod bootstrap;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use octet_agent::{Agent, DurableGoalStore, GoalDriver};
+use octet_ai::{
+    AgentDelegation, AiClient, Model, ModelCatalog, ModelId, ReasoningConfig, ReasoningControl,
+    ReasoningEffort, ReasoningMode,
+};
+
+use crate::config::Config;
+use crate::config::ThinkingLevel;
+use crate::extensions::SUBAGENTS_EXTENSION_NAME;
+use crate::prompts::PromptRegistry;
+use crate::session_store::SessionStore;
+
+/// Label suitable for status and durable provenance entries.
+pub fn reasoning_label(reasoning: &ReasoningConfig) -> String {
+    match reasoning {
+        ReasoningConfig::Off => "off".to_owned(),
+        ReasoningConfig::On => "on".to_owned(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Minimal) => "minimal".to_owned(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low) => "low".to_owned(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium) => "medium".to_owned(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High) => "high".to_owned(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh) => "xhigh".to_owned(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max) => "max".to_owned(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra) => "ultra".to_owned(),
+        ReasoningConfig::Budget(budget) => format!("budget={budget}"),
+    }
+}
+
+/// Whether the selected route can provide complete Ultra semantics. Ultra is
+/// more than a wire effort: it also requires the host-side V2 collaboration
+/// runtime advertised by model metadata.
+pub fn model_supports_ultra(model: &Model) -> bool {
+    model
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .is_some_and(|capability| {
+            capability.control == ReasoningControl::Effort
+                && capability.supports(&ReasoningConfig::Effort(ReasoningEffort::Ultra))
+        })
+        && model
+            .spec
+            .capabilities
+            .agent_delegation
+            .is_some_and(|version| {
+                version == AgentDelegation::V2 && octet_agent::delegation_runtime_supports(version)
+            })
+}
+
+/// Translate a portable thinking selection to the target model's advertised
+/// reasoning control mechanism.
+pub fn thinking_to_reasoning(
+    level: ThinkingLevel,
+    model: &Model,
+) -> anyhow::Result<ReasoningConfig> {
+    let Some(capability) = &model.spec.capabilities.reasoning else {
+        return Ok(ReasoningConfig::Off);
+    };
+    let requested = match level {
+        ThinkingLevel::Off => ReasoningConfig::Off,
+        ThinkingLevel::On => ReasoningConfig::On,
+        _ => ReasoningConfig::Effort(level.to_effort()),
+    };
+    let choices = capability
+        .choices()
+        .into_iter()
+        .filter(|c| {
+            *c != ReasoningConfig::Effort(ReasoningEffort::Ultra) || model_supports_ultra(model)
+        })
+        .collect::<Vec<_>>();
+    let selected = if choices.contains(&requested) {
+        requested
+    } else if let ReasoningConfig::Effort(effort) = requested {
+        choices
+            .iter()
+            .filter_map(|c| match c {
+                ReasoningConfig::Effort(e) if *e <= effort => Some(*e),
+                _ => None,
+            })
+            .max()
+            .map(ReasoningConfig::Effort)
+            .or_else(|| {
+                choices
+                    .iter()
+                    .find(|c| **c != ReasoningConfig::Off)
+                    .cloned()
+            })
+            .or_else(|| choices.first().cloned())
+            .ok_or_else(|| anyhow::anyhow!("{} has no usable reasoning choice", model.spec.id.0))?
+    } else {
+        capability
+            .default_selection()
+            .filter(|c| {
+                choices.contains(c)
+                    && (requested != ReasoningConfig::On || *c != ReasoningConfig::Off)
+            })
+            .or_else(|| {
+                choices
+                    .iter()
+                    .find(|c| **c != ReasoningConfig::Off)
+                    .cloned()
+            })
+            .or_else(|| choices.first().cloned())
+            .ok_or_else(|| anyhow::anyhow!("{} has no usable reasoning choice", model.spec.id.0))?
+    };
+    if let ReasoningConfig::Effort(effort) = selected {
+        if capability.control == ReasoningControl::TokenBudget {
+            return Ok(ReasoningConfig::Budget(
+                capability.budget(effort).ok_or_else(|| {
+                    anyhow::anyhow!("{} has no reasoning budgets", model.spec.id.0)
+                })?,
+            ));
+        }
+    }
+    Ok(selected)
+}
+
+/// Translate a thinking selection while enforcing the product's subagent
+/// observability boundary.
+pub fn thinking_to_reasoning_with_subagents(
+    level: ThinkingLevel,
+    model: &Model,
+    subagents_available: bool,
+) -> anyhow::Result<ReasoningConfig> {
+    let reasoning = thinking_to_reasoning(level, model)?;
+    if !subagents_available && reasoning == ReasoningConfig::Effort(ReasoningEffort::Ultra) {
+        let fallback = thinking_to_reasoning(ThinkingLevel::Max, model)?;
+        return Ok(
+            if fallback != ReasoningConfig::Effort(ReasoningEffort::Ultra) {
+                fallback
+            } else {
+                anyhow::bail!(
+                    "{} has no ordinary reasoning choice without subagents",
+                    model.spec.id.0
+                )
+            },
+        );
+    }
+    Ok(reasoning)
+}
+
+fn effort_level(effort: ReasoningEffort) -> ThinkingLevel {
+    match effort {
+        ReasoningEffort::Minimal => ThinkingLevel::Minimal,
+        ReasoningEffort::Low => ThinkingLevel::Low,
+        ReasoningEffort::Medium => ThinkingLevel::Medium,
+        ReasoningEffort::High => ThinkingLevel::High,
+        ReasoningEffort::Xhigh => ThinkingLevel::Xhigh,
+        ReasoningEffort::Max => ThinkingLevel::Max,
+        ReasoningEffort::Ultra => ThinkingLevel::Ultra,
+    }
+}
+
+/// Normalize a CLI/config reasoning selection against the resolved model.
+pub fn normalize_reasoning_for_model(
+    reasoning: &ReasoningConfig,
+    model: &Model,
+) -> anyhow::Result<ReasoningConfig> {
+    if model
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .is_some_and(|capability| capability.control == ReasoningControl::AlwaysOn)
+    {
+        return Ok(ReasoningConfig::On);
+    }
+    match reasoning {
+        ReasoningConfig::Off => thinking_to_reasoning(ThinkingLevel::Off, model),
+        ReasoningConfig::On => thinking_to_reasoning(ThinkingLevel::On, model),
+        ReasoningConfig::Effort(effort) => thinking_to_reasoning(effort_level(*effort), model),
+        ReasoningConfig::Budget(budget) => match &model.spec.capabilities.reasoning {
+            Some(capability) if capability.control == ReasoningControl::TokenBudget => {
+                if *budget < 1024 || *budget >= model.spec.limits.max_output_tokens {
+                    anyhow::bail!(
+                        "reasoning budget {budget} must be between 1024 and {} for {}",
+                        model.spec.limits.max_output_tokens.saturating_sub(1),
+                        model.spec.id.0
+                    );
+                }
+                Ok(ReasoningConfig::Budget(*budget))
+            }
+            Some(_) => anyhow::bail!(
+                "{} uses effort-based thinking; use --reasoning high/medium/low/minimal instead of budget={budget}",
+                model.spec.id.0
+            ),
+            None => {
+                // Model doesn't support thinking — fall back to Off.
+                Ok(ReasoningConfig::Off)
+            }
+        },
+    }
+}
+
+/// Migrate the obsolete Pro execution bit at the product boundary.
+///
+/// Persisted Pro selections become Ultra only when live metadata advertises
+/// both Ultra effort and V2 delegation. Otherwise the wire mode is removed and
+/// the independently selected effort is normalized normally.
+#[allow(dead_code)]
+pub fn normalize_reasoning_selection_for_model(
+    reasoning: &ReasoningConfig,
+    mode: ReasoningMode,
+    model: &Model,
+) -> anyhow::Result<(ReasoningConfig, ReasoningMode, Option<String>)> {
+    normalize_reasoning_selection_for_model_with_subagents(reasoning, mode, model, true)
+}
+
+/// Normalize reasoning while enforcing the product's subagent observability
+/// boundary. Ultra is not a safe standalone model tier: the active first-party
+/// subagents extension must provide the owner-bound observation surface before
+/// octet can select it.
+pub fn normalize_reasoning_selection_for_model_with_subagents(
+    reasoning: &ReasoningConfig,
+    mode: ReasoningMode,
+    model: &Model,
+    subagents_available: bool,
+) -> anyhow::Result<(ReasoningConfig, ReasoningMode, Option<String>)> {
+    let normalized = normalize_reasoning_for_model(reasoning, model)?;
+    if !subagents_available
+        && (normalized == ReasoningConfig::Effort(ReasoningEffort::Ultra)
+            || (mode == ReasoningMode::Pro && model_supports_ultra(model)))
+    {
+        let fallback =
+            normalize_reasoning_for_model(&ReasoningConfig::Effort(ReasoningEffort::Max), model)?;
+        let fallback = if fallback != ReasoningConfig::Effort(ReasoningEffort::Ultra) {
+            fallback
+        } else {
+            anyhow::bail!(
+                "{} has no ordinary reasoning choice without subagents",
+                model.spec.id.0
+            )
+        };
+        return Ok((
+            fallback,
+            ReasoningMode::Standard,
+            Some(format!(
+                "Ultra is disabled until the trusted {SUBAGENTS_EXTENSION_NAME} extension is active; using standard reasoning for {}",
+                model.spec.id.0
+            )),
+        ));
+    }
+    if mode == ReasoningMode::Standard {
+        let warning = (normalized != *reasoning).then(|| {
+            if *reasoning == ReasoningConfig::Off {
+                format!(
+                    "{} cannot honor reasoning=off; using advertised reasoning={}",
+                    model.spec.id.0,
+                    reasoning_label(&normalized)
+                )
+            } else {
+                format!(
+                    "{} does not support reasoning={}; using reasoning={}",
+                    model.spec.id.0,
+                    reasoning_label(reasoning),
+                    reasoning_label(&normalized)
+                )
+            }
+        });
+        return Ok((normalized, ReasoningMode::Standard, warning));
+    }
+
+    if model_supports_ultra(model) {
+        return Ok((
+            ReasoningConfig::Effort(ReasoningEffort::Ultra),
+            ReasoningMode::Standard,
+            Some(format!(
+                "legacy reasoning_mode=pro migrated to reasoning=ultra with V2 delegation for {}",
+                model.spec.id.0
+            )),
+        ));
+    }
+
+    Ok((
+        normalized.clone(),
+        ReasoningMode::Standard,
+        Some(format!(
+            "legacy reasoning_mode=pro is obsolete; {} does not advertise Ultra with V2 delegation, using standard mode with reasoning={}",
+            model.spec.id.0,
+            reasoning_label(&normalized)
+        )),
+    ))
+}
+
+/// Convert a current model-specific reasoning setting back to a portable level
+/// before switching models. Custom token budgets cannot be safely translated.
+pub fn level_from_reasoning(
+    reasoning: &ReasoningConfig,
+    model: &Model,
+) -> anyhow::Result<ThinkingLevel> {
+    match reasoning {
+        ReasoningConfig::Off
+            if model
+                .spec
+                .capabilities
+                .reasoning
+                .as_ref()
+                .is_some_and(|capability| capability.control == ReasoningControl::AlwaysOn) =>
+        {
+            Ok(ThinkingLevel::On)
+        }
+        ReasoningConfig::Off => Ok(ThinkingLevel::Off),
+        ReasoningConfig::On => Ok(ThinkingLevel::On),
+        ReasoningConfig::Effort(effort) => Ok(effort_level(*effort)),
+        ReasoningConfig::Budget(budget) => {
+            let Some(capability) = &model.spec.capabilities.reasoning else {
+                // Model doesn't support thinking — fall back to Off.
+                return Ok(ThinkingLevel::Off);
+            };
+            let Some(budgets) = capability.effort_budgets else {
+                anyhow::bail!("{} has no portable thinking budgets", model.spec.id.0);
+            };
+            match *budget {
+                value if value == budgets.minimal => Ok(ThinkingLevel::Minimal),
+                value if value == budgets.low => Ok(ThinkingLevel::Low),
+                value if value == budgets.medium => Ok(ThinkingLevel::Medium),
+                value if value == budgets.high => Ok(ThinkingLevel::High),
+                value if value == budgets.xhigh => Ok(ThinkingLevel::Xhigh),
+                value if value == budgets.max => Ok(ThinkingLevel::Max),
+                _ => anyhow::bail!(
+                    "budget={budget} cannot be translated while switching models; choose /thinking explicitly"
+                ),
+            }
+        }
+    }
+}
+
+fn supported_levels_for_model(model: &Model) -> Vec<ThinkingLevel> {
+    let Some(capability) = &model.spec.capabilities.reasoning else {
+        return vec![ThinkingLevel::Off];
+    };
+    capability
+        .choices()
+        .into_iter()
+        .filter_map(|choice| match choice {
+            ReasoningConfig::Off => Some(ThinkingLevel::Off),
+            ReasoningConfig::On => Some(ThinkingLevel::On),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra) if !model_supports_ultra(model) => None,
+            ReasoningConfig::Effort(effort) => Some(effort_level(effort)),
+            ReasoningConfig::Budget(_) => None,
+        })
+        .collect()
+}
+
+/// Returns the model's portable thinking levels after applying the product's
+/// subagent observability gate.
+pub fn supported_levels_with_subagents(
+    model: &Model,
+    subagents_available: bool,
+) -> Vec<ThinkingLevel> {
+    supported_levels_for_model(model)
+        .into_iter()
+        .filter(|level| *level != ThinkingLevel::Ultra || subagents_available)
+        .collect()
+}
+
+/// An Agent-owning runtime transition. These are valid only while idle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reconfig {
+    Model(ModelId),
+    Thinking(ReasoningConfig),
+    ThinkingMode {
+        mode: ReasoningMode,
+        reasoning: ReasoningConfig,
+    },
+    NewSession,
+    Resume(PathBuf),
+}
+
+/// Apply one consuming configuration transition at an idle boundary.
+pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
+    match reconfig {
+        Reconfig::Model(id) => {
+            let model = app.catalog.resolve(&id)?;
+            bootstrap::rebuild_app(app, Some(model), None, None, None)
+        }
+        Reconfig::Thinking(reasoning) => {
+            bootstrap::rebuild_app(app, None, Some(reasoning), None, None)
+        }
+        Reconfig::ThinkingMode { mode, reasoning } => {
+            bootstrap::rebuild_app(app, None, Some(reasoning), Some(mode), None)
+        }
+        Reconfig::NewSession => {
+            let path = app.sessions.new_path(&crate::modes::timestamp());
+            bootstrap::rebuild_app(
+                app,
+                None,
+                None,
+                None,
+                Some(bootstrap::SessionSelection::CreateNew(path)),
+            )
+        }
+        Reconfig::Resume(path) => bootstrap::rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(bootstrap::SessionSelection::OpenExisting(path)),
+        ),
+    }
+}
+
+/// Mode-agnostic application state. TUI state and themes stay outside this type.
+pub struct App {
+    pub agent: Agent,
+    pub model: Model,
+    pub client: AiClient,
+    pub config: Config,
+    pub catalog: ModelCatalog,
+    pub sessions: SessionStore,
+    pub reasoning: ReasoningConfig,
+    pub reasoning_mode: ReasoningMode,
+    pub system: String,
+    pub system_tokens: u64,
+    pub skills: Arc<dyn octet_agent::skills::SkillRegistry>,
+    pub prompts: Arc<PromptRegistry>,
+    pub executable_extensions: crate::extensions::ExecutableExtensions,
+    pub goal_store: Arc<DurableGoalStore>,
+    pub goal_driver: GoalDriver,
+    pub goal_session_id: String,
+}
+
+fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) -> bool {
+    let Ok(current) = catalog.resolve(&active.spec.id) else {
+        return false;
+    };
+    current.endpoint.id == active.endpoint.id
+        && current.spec.id == active.spec.id
+        && current.spec.endpoint == active.spec.endpoint
+        && current.spec.api_name == active.spec.api_name
+        && current.spec.display_name == active.spec.display_name
+        && current.spec.protocol == active.spec.protocol
+        && current.spec.capabilities == active.spec.capabilities
+        && current.spec.limits == active.spec.limits
+        && current.spec.pricing == active.spec.pricing
+        && current.spec.cache == active.spec.cache
+}
+
+impl App {
+    /// Whether this application has the owner-bound subagent observer needed
+    /// before Ultra may be selected or submitted.
+    pub fn subagents_available(&self) -> bool {
+        self.model.spec.capabilities.tools
+            && self
+                .agent
+                .registered_tool_names()
+                .iter()
+                .any(|name| name == "subagent_spawn")
+            && self.executable_extensions.has_agent_session_service()
+    }
+
+    /// Current provider-visible tool schema reserve, including live extension
+    /// catalog changes published after application bootstrap.
+    pub fn current_tool_schema_tokens(&self) -> u64 {
+        crate::app::bootstrap::tool_schema_reserve(&self.agent.registered_tool_definitions())
+    }
+
+    /// Synchronizes secret-free API 0.3 provider declarations at a product
+    /// catalog boundary after extension activity has been observed.
+    pub fn synchronize_extension_provider_catalog(&mut self) -> Vec<String> {
+        self.executable_extensions
+            .synchronize_provider_catalog(&mut self.catalog, &self.client)
+    }
+
+    /// Reconciles provider declarations at the request boundary and rejects a
+    /// model whose catalog route was withdrawn or replaced.
+    ///
+    /// Projection cleanup removes the old host-stream transport. Without this
+    /// fence, an `Agent` retaining that inert local endpoint could fall through
+    /// to its placeholder localhost HTTP URL after an extension mutation.
+    pub fn synchronize_extension_provider_catalog_for_request(
+        &mut self,
+    ) -> anyhow::Result<Vec<String>> {
+        let diagnostics = self.synchronize_extension_provider_catalog();
+        let _ = self.catalog.resolve(&self.model.spec.id).map_err(|_| {
+            anyhow::anyhow!(
+                "the active model {} is no longer available after an extension provider update; select a model before prompting",
+                self.model.spec.id.0
+            )
+        })?;
+        if !catalog_route_matches_active_model(&self.catalog, &self.model) {
+            anyhow::bail!(
+                "the active model {} route changed after an extension provider update; select it again before prompting",
+                self.model.spec.id.0
+            );
+        }
+        Ok(diagnostics)
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.executable_extensions
+            .clear_provider_catalog(&mut self.catalog, &self.client);
+        // The catalog is disposable: shutdown must never fail because this
+        // best-effort projection could not be refreshed.
+        let _ = self
+            .sessions
+            .refresh_catalog_for_open_session(self.agent.session());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use octet_ai::OpenAiChatReasoningMode;
+    use std::sync::Arc;
+
+    use super::*;
+    use octet_ai::{EndpointId, ReasoningCapability, ReasoningEffort, ReasoningEffortBudgets};
+
+    fn model_with(capability: Option<ReasoningCapability>) -> Model {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let base = catalog
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut spec = (*base.spec).clone();
+        spec.capabilities.reasoning = capability;
+        Model {
+            spec: Arc::new(spec),
+            endpoint: base.endpoint,
+        }
+    }
+
+    #[test]
+    fn active_model_route_fails_closed_when_catalog_withdraws_or_replaces_it() {
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let model = catalog
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        assert!(catalog_route_matches_active_model(&catalog, &model));
+
+        assert!(catalog.remove_model_if_endpoint(&model.spec.id, &model.endpoint.id));
+        assert!(!catalog_route_matches_active_model(&catalog, &model));
+
+        let mut endpoint = (*model.endpoint).clone();
+        endpoint.id = EndpointId("active-route-replacement".into());
+        catalog.register_endpoint(endpoint.clone()).unwrap();
+        let mut specification = (*model.spec).clone();
+        specification.endpoint = endpoint.id.clone();
+        catalog.register_model(specification).unwrap();
+        assert!(!catalog_route_matches_active_model(&catalog, &model));
+    }
+
+    #[test]
+    fn legacy_pro_migrates_only_when_ultra_and_v2_are_advertised() {
+        let unsupported = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: ReasoningEffort::Minimal,
+            max_effort: ReasoningEffort::Ultra,
+        }));
+        let (reasoning, mode, diagnostic) = normalize_reasoning_selection_for_model(
+            &ReasoningConfig::Effort(ReasoningEffort::Max),
+            ReasoningMode::Pro,
+            &unsupported,
+        )
+        .unwrap();
+        assert_eq!(reasoning, ReasoningConfig::Effort(ReasoningEffort::Max));
+        assert_eq!(mode, ReasoningMode::Standard);
+        assert!(diagnostic
+            .unwrap()
+            .contains("does not advertise Ultra with V2"));
+
+        let mut spec = (*unsupported.spec).clone();
+        spec.capabilities.agent_delegation = Some(AgentDelegation::V2);
+        let supported = Model {
+            spec: Arc::new(spec),
+            endpoint: unsupported.endpoint,
+        };
+        let (reasoning, mode, diagnostic) = normalize_reasoning_selection_for_model(
+            &ReasoningConfig::Effort(ReasoningEffort::Max),
+            ReasoningMode::Pro,
+            &supported,
+        )
+        .unwrap();
+        assert_eq!(reasoning, ReasoningConfig::Effort(ReasoningEffort::Ultra));
+        assert_eq!(mode, ReasoningMode::Standard);
+        assert!(diagnostic.unwrap().contains("migrated"));
+    }
+
+    #[test]
+    fn ultra_requires_the_observing_subagents_extension() {
+        let base = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: ReasoningEffort::Minimal,
+            max_effort: ReasoningEffort::Ultra,
+        }));
+        let mut spec = (*base.spec).clone();
+        spec.capabilities.agent_delegation = Some(AgentDelegation::V2);
+        let model = Model {
+            spec: Arc::new(spec),
+            endpoint: base.endpoint,
+        };
+        assert!(!supported_levels_with_subagents(&model, false).contains(&ThinkingLevel::Ultra));
+        assert!(supported_levels_with_subagents(&model, true).contains(&ThinkingLevel::Ultra));
+
+        let (reasoning, mode, diagnostic) = normalize_reasoning_selection_for_model_with_subagents(
+            &ReasoningConfig::Effort(ReasoningEffort::Ultra),
+            ReasoningMode::Standard,
+            &model,
+            false,
+        )
+        .unwrap();
+        assert_eq!(reasoning, ReasoningConfig::Effort(ReasoningEffort::Max));
+        assert_eq!(mode, ReasoningMode::Standard);
+        assert!(diagnostic.unwrap().contains("octet-subagents"));
+
+        let (reasoning, _, _) = normalize_reasoning_selection_for_model_with_subagents(
+            &ReasoningConfig::Effort(ReasoningEffort::Ultra),
+            ReasoningMode::Standard,
+            &model,
+            true,
+        )
+        .unwrap();
+        assert_eq!(reasoning, ReasoningConfig::Effort(ReasoningEffort::Ultra));
+    }
+    #[test]
+    fn ultra_floor_cannot_override_the_effective_runtime_ceiling() {
+        let model = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: ReasoningEffort::Ultra,
+            max_effort: ReasoningEffort::Ultra,
+        }));
+
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Ultra, &model).unwrap(),
+            ReasoningConfig::Off
+        );
+
+        let provider_values = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: OpenAiChatReasoningMode::ProviderValues {
+                values: vec!["ultra".into()],
+                default: Some("ultra".into()),
+                system_message: true,
+            },
+            min_effort: ReasoningEffort::Ultra,
+            max_effort: ReasoningEffort::Ultra,
+        }));
+        assert!(thinking_to_reasoning(ThinkingLevel::Ultra, &provider_values).is_err());
+    }
+
+    #[test]
+    fn maps_effort_and_token_budget_thinking() {
+        let effort = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: octet_ai::ReasoningEffort::Minimal,
+            max_effort: octet_ai::ReasoningEffort::Max,
+        }));
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::High, &effort).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::High)
+        );
+
+        let budget = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::TokenBudget,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: Some(ReasoningEffortBudgets {
+                minimal: 1024,
+                low: 2048,
+                medium: 4096,
+                high: 8192,
+                xhigh: 16384,
+                max: 32768,
+            }),
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: octet_ai::ReasoningEffort::Minimal,
+            max_effort: octet_ai::ReasoningEffort::Max,
+        }));
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::High, &budget).unwrap(),
+            ReasoningConfig::Budget(8192)
+        );
+        assert_eq!(
+            normalize_reasoning_for_model(&ReasoningConfig::Effort(ReasoningEffort::High), &budget)
+                .unwrap(),
+            ReasoningConfig::Budget(8192)
+        );
+        assert!(normalize_reasoning_for_model(&ReasoningConfig::Budget(2048), &effort).is_err());
+    }
+
+    fn effort_model(max_effort: ReasoningEffort) -> Model {
+        model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: ReasoningEffort::Minimal,
+            max_effort,
+        }))
+    }
+
+    #[test]
+    fn clamps_effort_to_model_ceiling() {
+        // A High-ceiling model clamps a Max request down to High.
+        let high = effort_model(ReasoningEffort::High);
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Max, &high).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::High)
+        );
+
+        // A Max-ceiling model passes Max and Xhigh through unchanged.
+        let max = effort_model(ReasoningEffort::Max);
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Max, &max).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Xhigh, &max).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::Xhigh)
+        );
+    }
+
+    #[test]
+    fn supported_levels_gate_on_ceiling() {
+        let high = effort_model(ReasoningEffort::High);
+        assert!(!supported_levels_with_subagents(&high, false).contains(&ThinkingLevel::Xhigh));
+        assert!(!supported_levels_with_subagents(&high, false).contains(&ThinkingLevel::Max));
+
+        let xhigh = effort_model(ReasoningEffort::Xhigh);
+        assert!(supported_levels_with_subagents(&xhigh, false).contains(&ThinkingLevel::Xhigh));
+        assert!(!supported_levels_with_subagents(&xhigh, false).contains(&ThinkingLevel::Max));
+
+        let max = effort_model(ReasoningEffort::Max);
+        assert!(supported_levels_with_subagents(&max, false).contains(&ThinkingLevel::Xhigh));
+        assert!(supported_levels_with_subagents(&max, false).contains(&ThinkingLevel::Max));
+    }
+
+    #[test]
+    fn supported_levels_respect_the_model_floor() {
+        let mut model = effort_model(ReasoningEffort::Max);
+        let mut spec = (*model.spec).clone();
+        spec.capabilities.reasoning.as_mut().unwrap().min_effort = ReasoningEffort::Medium;
+        model.spec = Arc::new(spec);
+
+        assert_eq!(
+            supported_levels_with_subagents(&model, false),
+            vec![
+                ThinkingLevel::Off,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::Xhigh,
+                ThinkingLevel::Max,
+            ]
+        );
+    }
+
+    #[test]
+    fn token_budget_maps_xhigh_and_max() {
+        let budget = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::TokenBudget,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: Some(ReasoningEffortBudgets {
+                minimal: 1024,
+                low: 2048,
+                medium: 4096,
+                high: 8192,
+                xhigh: 16384,
+                max: 32768,
+            }),
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: ReasoningEffort::Minimal,
+            max_effort: ReasoningEffort::Max,
+        }));
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Xhigh, &budget).unwrap(),
+            ReasoningConfig::Budget(16384)
+        );
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Max, &budget).unwrap(),
+            ReasoningConfig::Budget(32768)
+        );
+    }
+
+    #[test]
+    fn provider_reported_toggle_and_effort_values_are_exact() {
+        let toggle = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Toggle,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: None,
+            openai_chat_mode: OpenAiChatReasoningMode::ProviderValues {
+                values: vec!["none".into(), "default".into()],
+                default: Some("default".into()),
+                system_message: true,
+            },
+            min_effort: ReasoningEffort::Minimal,
+            max_effort: ReasoningEffort::High,
+        }));
+        assert_eq!(
+            supported_levels_with_subagents(&toggle, false),
+            vec![ThinkingLevel::Off, ThinkingLevel::On]
+        );
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::On, &toggle).unwrap(),
+            ReasoningConfig::On
+        );
+        assert_eq!(
+            normalize_reasoning_for_model(&ReasoningConfig::Effort(ReasoningEffort::High), &toggle)
+                .unwrap(),
+            ReasoningConfig::On
+        );
+
+        let levels = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: None,
+            openai_chat_mode: OpenAiChatReasoningMode::ProviderValues {
+                values: vec!["none".into(), "low".into(), "high".into()],
+                default: Some("low".into()),
+                system_message: true,
+            },
+            min_effort: ReasoningEffort::Low,
+            max_effort: ReasoningEffort::High,
+        }));
+        assert_eq!(
+            supported_levels_with_subagents(&levels, false),
+            vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
+        );
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Medium, &levels).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::Low)
+        );
+    }
+
+    #[test]
+    fn always_on_reasoning_exposes_only_on_and_normalizes_stale_off() {
+        let model = model_with(Some(ReasoningCapability {
+            options: None,
+            control: ReasoningControl::AlwaysOn,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: None,
+            openai_chat_mode: OpenAiChatReasoningMode::SystemMessage,
+            min_effort: ReasoningEffort::Minimal,
+            max_effort: ReasoningEffort::High,
+        }));
+        assert_eq!(
+            supported_levels_with_subagents(&model, false),
+            vec![ThinkingLevel::On]
+        );
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Off, &model).unwrap(),
+            ReasoningConfig::On
+        );
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::High, &model).unwrap(),
+            ReasoningConfig::On
+        );
+        assert_eq!(
+            normalize_reasoning_for_model(&ReasoningConfig::Off, &model).unwrap(),
+            ReasoningConfig::On
+        );
+        assert_eq!(
+            level_from_reasoning(&ReasoningConfig::Off, &model).unwrap(),
+            ThinkingLevel::On
+        );
+    }
+
+    #[test]
+    fn unsupported_model_allows_only_off() {
+        let model = model_with(None);
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::Off, &model).unwrap(),
+            ReasoningConfig::Off
+        );
+        // When a model lacks thinking support, all levels silently fall back
+        // to Off rather than crashing, so a stale persisted thinking config
+        // doesn't lock the user out after switching models.
+        assert_eq!(
+            thinking_to_reasoning(ThinkingLevel::High, &model).unwrap(),
+            ReasoningConfig::Off
+        );
+        assert_eq!(
+            supported_levels_with_subagents(&model, false),
+            vec![ThinkingLevel::Off]
+        );
+    }
+}

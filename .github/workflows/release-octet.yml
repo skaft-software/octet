@@ -1,0 +1,1452 @@
+name: octet binary release
+
+on:
+  push:
+    tags:
+      - "octet-binaries-v*"
+      - "octet-installer-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing canonical stable octet tag to package
+        required: true
+        type: string
+      require_provider_acceptance:
+        description: Require approved live-provider acceptance for this release
+        required: false
+        default: false
+        type: boolean
+      publish_npm:
+        description: Publish npm packages after trusted-publisher and provenance verification setup
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_OFFLINE: "false"
+  NPM_REGISTRY: https://registry.npmjs.org/
+
+jobs:
+  resolve:
+    name: Resolve canonical release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      source_commit: ${{ steps.release.outputs.source_commit }}
+      workflow_commit: ${{ steps.release.outputs.workflow_commit }}
+      core_workflow_commit: ${{ steps.release.outputs.core_workflow_commit }}
+      mode: ${{ steps.release.outputs.mode }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - id: release
+        name: Validate release tag and source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_REQUIRE_PROVIDER_ACCEPTANCE: ${{ inputs.require_provider_acceptance }}
+        run: |
+          set -euo pipefail
+          mode=binaries
+          if [[ -n "$INPUT_RELEASE_TAG" ]]; then
+            tag="$INPUT_RELEASE_TAG"
+          elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            case "$GITHUB_REF_NAME" in
+              octet-binaries-v*)
+                mode=binaries
+                tag=${GITHUB_REF_NAME#octet-binaries-}
+                ;;
+              octet-installer-v*)
+                mode=installer
+                tag=${GITHUB_REF_NAME#octet-installer-}
+                ;;
+              *)
+                echo "release tooling tags must start with octet-binaries- or octet-installer-" >&2
+                exit 1
+                ;;
+            esac
+          else
+            echo "release_tag is required when this workflow is not running for a tag" >&2
+            exit 1
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid canonical stable release tag: $tag" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            # Dispatching from a branch is allowed: the canonical tag is
+            # resolved explicitly via INPUT_RELEASE_TAG above, and source
+            # provenance is pinned to that tag's commit downstream.
+            : # no additional constraint beyond release_tag being provided
+          else
+            case "$mode" in
+              binaries) expected_workflow_tag="octet-binaries-$tag" ;;
+              installer) expected_workflow_tag="octet-installer-$tag" ;;
+              *)
+                echo "invalid release mode: $mode" >&2
+                exit 1
+                ;;
+            esac
+            if [[ "$GITHUB_EVENT_NAME" != push \
+              || "$GITHUB_REF_TYPE" != tag \
+              || "$GITHUB_REF_NAME" != "$expected_workflow_tag" ]]; then
+              echo "$mode release pushes must use $expected_workflow_tag" >&2
+              exit 1
+            fi
+          fi
+
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          source_commit=$(git rev-parse "$tag^{commit}")
+          workflow_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
+          if [[ "$workflow_commit" != "$source_commit" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" != push \
+              || "$GITHUB_REF_TYPE" != tag \
+              || "$GITHUB_REF_NAME" != "$expected_workflow_tag" ]]; then
+              echo "workflow ref $workflow_commit does not match canonical release source $source_commit" >&2
+              echo "tooling-only repairs must use the dedicated $expected_workflow_tag tag" >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$source_commit" "$workflow_commit"; then
+              echo "release tooling commit $workflow_commit does not descend from $source_commit" >&2
+              exit 1
+            fi
+            unexpected_paths=$(git diff --name-only "$source_commit" "$workflow_commit" \
+              | grep -Ev '^\.github/workflows/release-(octet|serve)\.yml$' || true)
+            if [[ -n "$unexpected_paths" ]]; then
+              echo "tooling-only repair changes non-release-workflow paths:" >&2
+              printf '%s\n' "$unexpected_paths" >&2
+              exit 1
+            fi
+            if git diff --quiet "$source_commit" "$workflow_commit" -- .github/workflows/release-octet.yml; then
+              echo "tooling-only repair does not change the octet release workflow" >&2
+              exit 1
+            fi
+            echo "using release tooling $workflow_commit with immutable source $source_commit"
+            {
+              echo "## Release tooling repair"
+              echo
+              echo "- Immutable source: \`$source_commit\`"
+              echo "- Release tooling: \`$workflow_commit\`"
+              echo "- Mode: \`$mode\`"
+              echo "- Trigger: \`$GITHUB_REF_NAME\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          core_workflow_commit=$workflow_commit
+          if [[ "$mode" == installer ]]; then
+            core_workflow_tag="octet-binaries-$tag"
+            git fetch --force origin "refs/tags/$core_workflow_tag:refs/tags/$core_workflow_tag"
+            core_workflow_commit=$(git rev-parse "$core_workflow_tag^{commit}")
+            if ! git merge-base --is-ancestor "$source_commit" "$core_workflow_commit"; then
+              echo "core release tooling $core_workflow_commit does not descend from $source_commit" >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$core_workflow_commit" "$workflow_commit"; then
+              echo "installer repair tooling $workflow_commit does not descend from core tooling $core_workflow_commit" >&2
+              exit 1
+            fi
+            core_unexpected_paths=$(git diff --name-only "$source_commit" "$core_workflow_commit" \
+              | grep -Ev '^\.github/workflows/release-(octet|serve)\.yml$' || true)
+            if [[ -n "$core_unexpected_paths" ]]; then
+              echo "core release tooling changes non-release-workflow paths:" >&2
+              printf '%s\n' "$core_unexpected_paths" >&2
+              exit 1
+            fi
+          fi
+          version=${tag#v}
+          cargo_version=$(git show "$source_commit:Cargo.toml" \
+            | awk -F '"' '/^version = / { print $2; exit }')
+          if [[ "$cargo_version" != "$version" ]]; then
+            echo "Cargo version $cargo_version does not match release tag $tag" >&2
+            exit 1
+          fi
+
+          if ! release_state=$(gh release view "$tag" \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
+            echo "canonical release $tag does not exist" >&2
+            exit 1
+          fi
+          IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
+          if [[ "$release_tag" != "$tag" ]]; then
+            echo "resolved release tag $release_tag does not match $tag" >&2
+            exit 1
+          fi
+          if [[ "$draft" != false ]]; then
+            echo "canonical release $tag is still a draft" >&2
+            exit 1
+          fi
+          if [[ "$prerelease" != false ]]; then
+            echo "canonical release $tag is marked as a prerelease" >&2
+            exit 1
+          fi
+
+          if [[ "$mode" == binaries ]]; then
+            if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]; then
+              environment_name=stable-release-provider-acceptance
+              workflow_id=$(gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/provider-acceptance.yml" \
+                --jq .id)
+              evidence_run=$(gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs" \
+                -f head_sha="$source_commit" \
+                -f event=workflow_dispatch \
+                -f status=success \
+                -f per_page=100 \
+                --jq '.workflow_runs | map(select(.event == "workflow_dispatch" and .conclusion == "success")) | sort_by(.run_started_at) | last | .id // empty')
+              if [[ ! "$evidence_run" =~ ^[0-9]+$ ]]; then
+                echo "no successful protected provider/audio acceptance run is bound to $source_commit" >&2
+                exit 1
+              fi
+              evidence_sha=$(gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$evidence_run" \
+                --jq .head_sha)
+              if [[ "$evidence_sha" != "$source_commit" ]]; then
+                echo "provider acceptance evidence is not bound to $source_commit" >&2
+                exit 1
+              fi
+              approval_count=$(gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$evidence_run/approvals" \
+                --jq '[.[] | select(.state == "approved") | .environments[]? | select(.name == "stable-release-provider-acceptance")] | length')
+              if [[ ! "$approval_count" =~ ^[0-9]+$ || "$approval_count" -lt 1 ]]; then
+                echo "provider acceptance run $evidence_run lacks a recorded $environment_name approval" >&2
+                exit 1
+              fi
+              echo "using protected provider acceptance run $evidence_run for $source_commit"
+            else
+              echo "::warning title=Live-provider acceptance waived::Release packaging is proceeding without credentialed provider/audio acceptance for $source_commit"
+              {
+                echo "## Release acceptance"
+                echo
+                echo "- Candidate: \`$source_commit\`"
+                echo "- Live provider/audio acceptance: **WAIVED**"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            {
+              echo "## Installer portability repair"
+              echo
+              echo "- Existing signed binary assets remain immutable."
+              echo "- Core signing workflow: \`$core_workflow_commit\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "source_commit=$source_commit"
+            echo "workflow_commit=$workflow_commit"
+            echo "core_workflow_commit=$core_workflow_commit"
+            echo "mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+
+  security:
+    name: Audit release dependencies
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: apps/web/.node-version
+      # Release audits and artifacts intentionally use clean dependency/build
+      # state. Pull-request or branch caches must never enter a privileged
+      # publish path.
+      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
+      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+      - run: cargo audit
+      - run: cargo audit --file extensions/octet-serve/Cargo.lock
+      - run: cargo deny check
+      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
+      - run: npm ci
+        working-directory: apps/web
+      - run: npm audit --audit-level=high
+        working-directory: apps/web
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [resolve, security]
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Check out immutable release source and tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          path: source
+          fetch-depth: 0
+      # Keep release optimization independent from the workspace's 1.86 MSRV.
+      # This immutable action revision installs Rust 1.97.1.
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
+        with:
+          targets: ${{ matrix.target }}
+      - name: Verify release Rust compiler
+        run: test "$(rustc --version | awk '{print $2}')" = "1.97.1"
+      # Build release artifacts from clean runner state. CI caches remain useful
+      # for unprivileged validation jobs, never for publishable binaries.
+      - name: Build optimized octet binaries
+        working-directory: source
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p octet-coding-agent --bins
+      - name: Verify standalone binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="source/target/${{ matrix.target }}/release/octet"
+          host_binary="source/target/${{ matrix.target }}/release/octet-host"
+          test -x "$binary"
+          test -x "$host_binary"
+          test "$("$binary" --version)" = "octet ${{ needs.resolve.outputs.version }}"
+          test_home="$RUNNER_TEMP/octet-binary-smoke-home"
+          mkdir -p "$test_home"
+          HOME="$test_home" "$binary" --help >/dev/null
+          HOME="$test_home" "$binary" extension --help >/dev/null
+          printf '%s\n' '{"protocol_version":1,"request_id":"release-smoke","command":"hello"}' \
+            | HOME="$test_home" "$host_binary" \
+            | grep -F '"type":"hello"' >/dev/null
+      - name: Package target-specific archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          source/scripts/package-octet-release.sh \
+            "${{ matrix.target }}" \
+            "$RUNNER_TEMP/octet-release" \
+            "${{ needs.resolve.outputs.tag }}" \
+            source
+          source/scripts/package-octet-release.sh \
+            "${{ matrix.target }}" \
+            "$RUNNER_TEMP/octet-release-reproducibility-check" \
+            "${{ needs.resolve.outputs.tag }}" \
+            source
+          archive="$RUNNER_TEMP/octet-release/octet-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz"
+          repeated_archive="$RUNNER_TEMP/octet-release-reproducibility-check/octet-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz"
+          test -f "$archive"
+          cmp "$archive" "$repeated_archive"
+          tar -tzf "$archive"
+          package="octet-${{ needs.resolve.outputs.version }}-${{ matrix.target }}"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          test -x "$RUNNER_TEMP/$package/octet-host"
+          if tar -tzf "$archive" | grep -E '(^|/)(\.DS_Store|__pycache__|research|plans|reports|superpowers)(/|$)'; then
+            echo "release archive contains a local-only asset" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: octet-core-${{ matrix.target }}
+          path: ${{ runner.temp }}/octet-release/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Sign and attach octet binaries
+    needs: [resolve, build]
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: ubuntu-24.04
+    # Human approval is required only when the immutable artifacts are ready to
+    # receive write/OIDC privileges, not while unprivileged validation runs.
+    environment: stable-release-publish
+    outputs:
+      release_tag: ${{ needs.resolve.outputs.tag }}
+      version: ${{ needs.resolve.outputs.version }}
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out immutable release source and tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: octet-core-*
+          path: release-assets
+          merge-multiple: true
+      - name: Add source-bound binary installer
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          python3 - "$SOURCE_COMMIT" "$WORKFLOW_COMMIT" scripts/install.sh release-assets/install-octet.sh <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          source_commit, workflow_commit, source_path, destination_path = sys.argv[1:5]
+          for name, commit in (
+              ("release source", source_commit),
+              ("release workflow", workflow_commit),
+          ):
+              if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+                  raise SystemExit(f"{name} commit is malformed")
+          source = pathlib.Path(source_path).read_text(encoding="utf-8")
+          placeholder = 'release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"'
+          if source.count(placeholder) != 1:
+              raise SystemExit("installer source-commit placeholder is missing or ambiguous")
+          generated = source.replace(
+              placeholder,
+              (
+                  f'release_source_commit="{source_commit}"\n'
+                  f'release_workflow_commit="{workflow_commit}"'
+              ),
+          )
+          signature_commit_argument = '        "$release_source_commit" \\\n'
+          if generated.count(signature_commit_argument) != 1:
+              raise SystemExit("installer signature-commit argument is missing or ambiguous")
+          generated = generated.replace(
+              signature_commit_argument,
+              '        "$release_workflow_commit" \\\n',
+          )
+          pathlib.Path(destination_path).write_text(generated, encoding="utf-8")
+          PY
+          chmod 0755 release-assets/install-octet.sh
+          if grep -F '__OCTET_RELEASE_SOURCE_COMMIT__' release-assets/install-octet.sh; then
+            echo "generated installer still contains its source-commit placeholder" >&2
+            exit 1
+          fi
+          grep -F "release_source_commit=\"$SOURCE_COMMIT\"" release-assets/install-octet.sh
+          grep -F "release_workflow_commit=\"$WORKFLOW_COMMIT\"" release-assets/install-octet.sh
+          release-assets/install-octet.sh --help | grep -F "Install octet ${{ needs.resolve.outputs.version }}."
+          ls -la release-assets/
+          ls -la release-assets/
+          test "$(find release-assets -maxdepth 1 -name 'octet-*.tar.gz' | wc -l | tr -d ' ')" = 3
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+      - name: Create checksums and keyless signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum ./*.tar.gz ./install-octet.sh | sort -k2 > OCTET_SHA256SUMS
+          for artifact in ./*.tar.gz ./install-octet.sh; do
+            cosign sign-blob \
+              --yes \
+              --bundle "${artifact}.sigstore.json" \
+              "$artifact"
+          done
+          cosign sign-blob \
+            --yes \
+            --bundle OCTET_SHA256SUMS.sigstore.json \
+            OCTET_SHA256SUMS
+          cat OCTET_SHA256SUMS
+      - name: Verify checksums and signatures
+        shell: bash
+        env:
+          COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check OCTET_SHA256SUMS
+          verify=(
+            --certificate-identity "$COSIGN_IDENTITY"
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"
+            --certificate-github-workflow-name "octet binary release"
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+          )
+          for artifact in ./*.tar.gz ./install-octet.sh; do
+            cosign verify-blob \
+              --bundle "${artifact}.sigstore.json" \
+              "${verify[@]}" \
+              "$artifact"
+          done
+          cosign verify-blob \
+            --bundle OCTET_SHA256SUMS.sigstore.json \
+            "${verify[@]}" \
+            OCTET_SHA256SUMS
+      - name: Create and verify immutable release metadata
+        shell: bash
+        env:
+          EXPECTED_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          python3 scripts/generate-octet-release-metadata.py \
+            "$VERSION" \
+            "$RELEASE_TAG" \
+            "$SOURCE_COMMIT" \
+            "$WORKFLOW_COMMIT" \
+            "$WORKFLOW_REF" \
+            "$WORKFLOW_REPOSITORY" \
+            release-assets/OCTET_SHA256SUMS \
+            release-assets/OCTET_RELEASE_METADATA.json
+          cosign sign-blob \
+            --yes \
+            --bundle release-assets/OCTET_RELEASE_METADATA.json.sigstore.json \
+            release-assets/OCTET_RELEASE_METADATA.json
+          cosign verify-blob \
+            --bundle release-assets/OCTET_RELEASE_METADATA.json.sigstore.json \
+            --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$EXPECTED_OIDC_ISSUER" \
+            --certificate-github-workflow-name "octet binary release" \
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY" \
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT" \
+            release-assets/OCTET_RELEASE_METADATA.json
+      - name: Attach assets to canonical release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_TAG: octet-binaries-${{ needs.resolve.outputs.tag }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          verify_release_refs() {
+            phase=$1
+            git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            if [[ "$(git rev-parse "$RELEASE_TAG^{commit}")" != "$SOURCE_COMMIT" ]]; then
+              echo "canonical tag moved while release artifacts were $phase" >&2
+              exit 1
+            fi
+            git fetch --force origin "refs/tags/$WORKFLOW_TAG:refs/tags/$WORKFLOW_TAG"
+            if [[ "$(git rev-parse "$WORKFLOW_TAG^{commit}")" != "$WORKFLOW_COMMIT" ]]; then
+              echo "release workflow tag moved while release artifacts were $phase" >&2
+              exit 1
+            fi
+          }
+          verify_release_refs building
+          if ! release_state=$(gh release view "$RELEASE_TAG" \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
+            echo "canonical release $RELEASE_TAG no longer exists" >&2
+            exit 1
+          fi
+          IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
+          if [[ "$release_tag" != "$RELEASE_TAG" || "$draft" != false || "$prerelease" != false ]]; then
+            echo "canonical release $RELEASE_TAG is no longer a published stable release" >&2
+            exit 1
+          fi
+          existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          uploads=()
+          for asset in release-assets/*; do
+            name=${asset##*/}
+            if existing_digest=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$existing_digests"); then
+              if [[ -z "$existing_digest" ]]; then
+                echo "existing release asset has no immutable digest: $name" >&2
+                exit 1
+              fi
+              local_digest=$(sha256sum "$asset" | awk '{print $1}')
+              if [[ "$existing_digest" != "sha256:$local_digest" ]]; then
+                echo "immutable release asset differs from the existing asset: $name" >&2
+                exit 1
+              fi
+              echo "verified existing immutable release asset: $name"
+            else
+              uploads+=("$asset")
+            fi
+          done
+          if ((${#uploads[@]})); then
+            gh release upload "$RELEASE_TAG" "${uploads[@]}"
+          else
+            echo "all release assets already match the immutable candidate"
+          fi
+          verify_release_refs publishing
+
+  verify-published:
+    name: Verify binary install on ${{ matrix.target }}
+    needs: [resolve, publish]
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Download and run published installer without Cargo
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          installer="$RUNNER_TEMP/install-octet.sh"
+          installer_url="https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/install-octet.sh"
+          for attempt in 1 2 3 4 5; do
+            if curl \
+              --proto '=https' \
+              --proto-redir '=https' \
+              --tlsv1.2 \
+              --location \
+              --fail \
+              --silent \
+              --show-error \
+              --output "$installer" \
+              "$installer_url"; then
+              break
+            fi
+            if [[ "$attempt" == 5 ]]; then
+              echo "published installer is not readable" >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
+
+          test_home="$RUNNER_TEMP/octet-binary-install-home"
+          install_directory="$test_home/bin"
+          fake_tools="$RUNNER_TEMP/no-cargo"
+          mkdir -p "$test_home" "$fake_tools"
+          cat > "$fake_tools/cargo" <<'EOF'
+          #!/bin/sh
+          echo "binary installer unexpectedly invoked Cargo" >&2
+          exit 99
+          EOF
+          chmod 0755 "$fake_tools/cargo"
+
+          installed=false
+          for attempt in 1 2 3 4 5; do
+            rm -f "$install_directory/octet" "$install_directory/octet-host"
+            if HOME="$test_home" \
+              OCTET_INSTALL_DIR="$install_directory" \
+              OCTET_NO_MODIFY_PATH=1 \
+              PATH="$fake_tools:$PATH" \
+              sh "$installer"; then
+              installed=true
+              break
+            fi
+            echo "published binary assets are not readable yet (attempt $attempt)" >&2
+            sleep $((attempt * 2))
+          done
+          if [[ "$installed" != true ]]; then
+            echo "could not install octet from published binary assets" >&2
+            exit 1
+          fi
+
+          binary="$install_directory/octet"
+          host_binary="$install_directory/octet-host"
+          test -x "$binary"
+          test -x "$host_binary"
+          test "$(HOME="$test_home" "$binary" --version)" = "octet $VERSION"
+          HOME="$test_home" "$binary" --help >/dev/null
+          printf '%s\n' '{"protocol_version":1,"request_id":"published-smoke","command":"hello"}' \
+            | HOME="$test_home" "$host_binary" \
+            | grep -F '"type":"hello"' >/dev/null
+          HOME="$test_home" "$binary" extension install octet-serve
+          HOME="$test_home" "$binary" extension list | grep -F "octet-serve"
+          HOME="$test_home" "$binary" extension remove octet-serve
+          test ! -e "$test_home/.octet/extensions/octet-serve"
+
+  package-npm:
+    name: Package verified npm artifacts
+    needs: [resolve, verify-published]
+    if: needs.resolve.outputs.mode == 'binaries' && inputs.publish_npm == true
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable release tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          path: source
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: source/apps/web/.node-version
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+      - name: Download and verify the settled immutable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" \
+            --dir release-assets \
+            --clobber \
+            --pattern 'install-octet.sh' \
+            --pattern 'install-octet.sh.sigstore.json' \
+            --pattern 'octet-*.tar.gz' \
+            --pattern 'octet-*.tar.gz.sigstore.json' \
+            --pattern 'OCTET_SHA256SUMS' \
+            --pattern 'OCTET_SHA256SUMS.sigstore.json' \
+            --pattern 'OCTET_RELEASE_METADATA.json' \
+            --pattern 'OCTET_RELEASE_METADATA.json.sigstore.json'
+          cd release-assets
+          sha256sum --check OCTET_SHA256SUMS
+          verify=(
+            --certificate-identity "https://github.com/$WORKFLOW_REF"
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-github-workflow-name "octet binary release"
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+          )
+          cosign verify-blob \
+            --bundle OCTET_SHA256SUMS.sigstore.json \
+            "${verify[@]}" \
+            OCTET_SHA256SUMS
+          cosign verify-blob \
+            --bundle OCTET_RELEASE_METADATA.json.sigstore.json \
+            "${verify[@]}" \
+            OCTET_RELEASE_METADATA.json
+          for artifact in ./*.tar.gz ./install-octet.sh; do
+            cosign verify-blob \
+              --bundle "${artifact}.sigstore.json" \
+              "${verify[@]}" \
+              "$artifact"
+          done
+          python3 ../source/scripts/generate-octet-release-metadata.py \
+            "$VERSION" \
+            "$RELEASE_TAG" \
+            "$SOURCE_COMMIT" \
+            "$WORKFLOW_COMMIT" \
+            "$WORKFLOW_REF" \
+            "$WORKFLOW_REPOSITORY" \
+            OCTET_SHA256SUMS \
+            "$RUNNER_TEMP/recomputed-release-metadata.json"
+          cmp OCTET_RELEASE_METADATA.json "$RUNNER_TEMP/recomputed-release-metadata.json"
+      - name: Build and validate npm tarballs from the verified assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          source_date_epoch=$(git -C source show -s --format=%ct "$SOURCE_COMMIT")
+          SOURCE_DATE_EPOCH="$source_date_epoch" source/scripts/package-octet-npm.sh \
+            "$VERSION" \
+            "$PWD/release-assets" \
+            "$RUNNER_TEMP/npm-assets" \
+            "$PWD/release-assets/OCTET_SHA256SUMS"
+          python3 source/scripts/create-octet-npm-manifest.py \
+            "$VERSION" \
+            "$TAG" \
+            "$SOURCE_COMMIT" \
+            "$WORKFLOW_COMMIT" \
+            "$PWD/release-assets/OCTET_RELEASE_METADATA.json" \
+            "$RUNNER_TEMP/npm-assets" \
+            "$RUNNER_TEMP/npm-assets/OCTET_NPM_MANIFEST.json" \
+            "$RUNNER_TEMP/npm-assets/OCTET_NPM_SHA256SUMS"
+          (cd "$RUNNER_TEMP/npm-assets" && sha256sum --check OCTET_NPM_SHA256SUMS)
+          python3 source/scripts/verify-octet-npm.py \
+            "$VERSION" \
+            "$RUNNER_TEMP/npm-assets" \
+            --json > "$RUNNER_TEMP/npm-verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: octet-npm
+          path: ${{ runner.temp }}/npm-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-npm:
+    name: Publish npm packages with trusted publishing
+    needs: [resolve, package-npm]
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: ubuntu-24.04
+    environment: stable-release-publish
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out immutable release tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          path: source
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: source/apps/web/.node-version
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+      - name: Install the pinned trusted-publishing npm CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_cli_integrity='sha512-Iy5vXZ55m8tIaSCz6bqQf9+W5XbPfoyURsgWLjOkFglqHTep6RDZqRj2sfYGeRyZvGu2HuJWm0lux0rxPQ29lQ=='
+          npm_cli_directory=$(mktemp -d "$RUNNER_TEMP/npm-cli.XXXXXX")
+          trap 'rm -rf "$npm_cli_directory"' EXIT
+          npm pack npm@11.5.1 --registry "$NPM_REGISTRY" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            --pack-destination "$npm_cli_directory" >/dev/null
+          npm_cli_archive="$npm_cli_directory/npm-11.5.1.tgz"
+          test -f "$npm_cli_archive"
+          actual_integrity=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "$npm_cli_archive")
+          test "$actual_integrity" = "$npm_cli_integrity"
+          npm install --global \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            "$npm_cli_archive"
+          test "$(npm --version)" = "11.5.1"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: octet-npm
+          path: npm-assets
+      - name: Revalidate package evidence before OIDC publication
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          (cd npm-assets && sha256sum --check OCTET_NPM_SHA256SUMS)
+          python3 source/scripts/verify-octet-npm.py "$VERSION" npm-assets --json > "$RUNNER_TEMP/npm-verification.json"
+          python3 - "$VERSION" "$TAG" "$SOURCE_COMMIT" "$WORKFLOW_COMMIT" npm-assets/OCTET_NPM_MANIFEST.json <<'PY'
+          import json
+          import re
+          import sys
+          version, tag, source_commit, workflow_commit, path = sys.argv[1:]
+          manifest = json.load(open(path, encoding="utf-8"))
+          expected = {
+              "schema": "octet.npm.release.v1",
+              "repository": "skaft-software/ygg",
+              "tag": tag,
+              "version": version,
+              "source_commit": source_commit,
+              "workflow_commit": workflow_commit,
+          }
+          if any(manifest.get(key) != value for key, value in expected.items()):
+              raise SystemExit("npm manifest identity does not match the immutable candidate")
+          if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None or re.fullmatch(r"[0-9a-f]{40}", workflow_commit) is None:
+              raise SystemExit("npm manifest commit identity is malformed")
+          if len(manifest.get("packages", [])) != 4:
+              raise SystemExit("npm manifest does not describe all four packages")
+          PY
+      - name: Preflight immutable npm versions
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          for descriptor in \
+            '@skaft-software/octet|octet-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz'; do
+            IFS='|' read -r package artifact <<< "$descriptor"
+            expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
+            if existing=$(npm view "$package@$VERSION" dist.integrity --json --registry "$NPM_REGISTRY" 2>/dev/null); then
+              existing=${existing#\"}
+              existing=${existing%\"}
+              if [[ "$existing" != "$expected" ]]; then
+                echo "immutable npm version exists with a different integrity: $package@$VERSION" >&2
+                exit 1
+              fi
+              echo "verified existing immutable package $package@$VERSION"
+            else
+              echo "package $package@$VERSION is not published yet"
+            fi
+          done
+      - name: Publish platform packages before the launcher with npm provenance
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          for descriptor in \
+            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft-software/octet|octet-'"$VERSION"'.tgz'; do
+            IFS='|' read -r package artifact <<< "$descriptor"
+            if npm view "$package@$VERSION" version --registry "$NPM_REGISTRY" >/dev/null 2>&1; then
+              echo "skipping already verified immutable package $package@$VERSION"
+              continue
+            fi
+            npm publish "npm-assets/$artifact" --registry "$NPM_REGISTRY" \
+              --access public \
+              --provenance \
+              --ignore-scripts \
+              --no-audit \
+              --no-fund
+          done
+      - name: Verify registry integrity and provenance
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for descriptor in \
+            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft-software/octet|octet-'"$VERSION"'.tgz'; do
+            IFS='|' read -r package artifact <<< "$descriptor"
+            expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
+            registry_metadata="$RUNNER_TEMP/npm-registry.json"
+            npm view "$package@$VERSION" --json --registry "$NPM_REGISTRY" > "$registry_metadata"
+          attestation_url=$(python3 - "$registry_metadata" "$package" "$VERSION" <<'PY'
+          import json
+          import sys
+          from urllib.parse import unquote, urlsplit
+          metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+          package, version = sys.argv[2:]
+          url = metadata.get("dist", {}).get("attestations", {}).get("url")
+          parsed = urlsplit(url) if isinstance(url, str) else None
+          if (
+              parsed is None
+              or parsed.scheme != "https"
+              or parsed.netloc != "registry.npmjs.org"
+              or parsed.query
+              or parsed.fragment
+              or unquote(parsed.path) != f"/-/npm/v1/attestations/{package}@{version}"
+          ):
+              raise SystemExit("registry returned a non-canonical npm attestation URL")
+          print(url)
+          PY
+          )
+            attestations="$RUNNER_TEMP/npm-attestations.json"
+            curl \
+              --proto '=https' \
+              --proto-redir '=https' \
+              --tlsv1.2 \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 30 \
+              --max-filesize 1048576 \
+              --output "$attestations" \
+              "$attestation_url"
+            python3 source/scripts/verify-octet-npm-provenance.py \
+              "$registry_metadata" \
+              "$attestations" \
+              npm-assets/OCTET_NPM_MANIFEST.json \
+              "$package" \
+              "$VERSION" \
+              "$expected" \
+              "https://github.com/$WORKFLOW_REPOSITORY" \
+              '.github/workflows/release-octet.yml' \
+              "$SOURCE_COMMIT" \
+              "$WORKFLOW_COMMIT"
+          done
+      - name: Sign and attach npm evidence to the canonical release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          verify=(
+            --certificate-identity "https://github.com/${{ github.workflow_ref }}"
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-github-workflow-name "octet binary release"
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+          )
+          for artifact in npm-assets/*.tgz; do
+            cosign sign-blob --yes --bundle "$artifact.sigstore.json" "$artifact"
+          done
+          cosign sign-blob --yes --bundle npm-assets/OCTET_NPM_SHA256SUMS.sigstore.json npm-assets/OCTET_NPM_SHA256SUMS
+          cosign sign-blob --yes --bundle npm-assets/OCTET_NPM_MANIFEST.json.sigstore.json npm-assets/OCTET_NPM_MANIFEST.json
+          cosign verify-blob --bundle npm-assets/OCTET_NPM_SHA256SUMS.sigstore.json "${verify[@]}" npm-assets/OCTET_NPM_SHA256SUMS
+          cosign verify-blob --bundle npm-assets/OCTET_NPM_MANIFEST.json.sigstore.json "${verify[@]}" npm-assets/OCTET_NPM_MANIFEST.json
+          existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          uploads=()
+          for asset in npm-assets/*.tgz npm-assets/*.sigstore.json npm-assets/OCTET_NPM_SHA256SUMS npm-assets/OCTET_NPM_MANIFEST.json; do
+            name=${asset##*/}
+            if existing_digest=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$existing_digests"); then
+              if [[ -z "$existing_digest" ]]; then
+                echo "existing release asset has no immutable digest: $name" >&2
+                exit 1
+              fi
+              local_digest=$(sha256sum "$asset" | awk '{print $1}')
+              if [[ "$existing_digest" != "sha256:$local_digest" ]]; then
+                echo "immutable release asset differs from the existing asset: $name" >&2
+                exit 1
+              fi
+              echo "verified existing immutable release asset: $name"
+            else
+              uploads+=("$asset")
+            fi
+          done
+          if ((${#uploads[@]})); then
+            gh release upload "$RELEASE_TAG" "${uploads[@]}"
+          else
+            echo "all npm evidence assets already match the immutable candidate"
+          fi
+
+  verify-npm-published:
+    name: Verify published npm provenance
+    needs: [resolve, publish-npm]
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out immutable verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: apps/web/.node-version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: octet-npm
+          path: npm-assets
+      - name: Verify public registry contents and provenance
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          (cd npm-assets && sha256sum --check OCTET_NPM_SHA256SUMS)
+          python3 scripts/verify-octet-npm.py "$VERSION" npm-assets --json > "$RUNNER_TEMP/npm-verification.json"
+          for descriptor in \
+            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft-software/octet|octet-'"$VERSION"'.tgz'; do
+            IFS='|' read -r package artifact <<< "$descriptor"
+            expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
+            registry_metadata="$RUNNER_TEMP/npm-registry.json"
+            npm view "$package@$VERSION" --json --registry "$NPM_REGISTRY" > "$registry_metadata"
+          attestation_url=$(python3 - "$registry_metadata" "$package" "$VERSION" <<'PY'
+          import json
+          import sys
+          from urllib.parse import unquote, urlsplit
+          metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+          package, version = sys.argv[2:]
+          url = metadata.get("dist", {}).get("attestations", {}).get("url")
+          parsed = urlsplit(url) if isinstance(url, str) else None
+          if (
+              parsed is None
+              or parsed.scheme != "https"
+              or parsed.netloc != "registry.npmjs.org"
+              or parsed.query
+              or parsed.fragment
+              or unquote(parsed.path) != f"/-/npm/v1/attestations/{package}@{version}"
+          ):
+              raise SystemExit("registry returned a non-canonical npm attestation URL")
+          print(url)
+          PY
+          )
+            attestations="$RUNNER_TEMP/npm-attestations.json"
+            curl \
+              --proto '=https' \
+              --proto-redir '=https' \
+              --tlsv1.2 \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 30 \
+              --max-filesize 1048576 \
+              --output "$attestations" \
+              "$attestation_url"
+            python3 scripts/verify-octet-npm-provenance.py \
+              "$registry_metadata" \
+              "$attestations" \
+              npm-assets/OCTET_NPM_MANIFEST.json \
+              "$package" \
+              "$VERSION" \
+              "$expected" \
+              "https://github.com/$WORKFLOW_REPOSITORY" \
+              '.github/workflows/release-octet.yml' \
+              "$SOURCE_COMMIT" \
+              "$WORKFLOW_COMMIT"
+          done
+
+  smoke-npm-published:
+    name: Smoke published npm package on ${{ matrix.target }}
+    needs: [resolve, verify-npm-published]
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: GNU/Linux x64
+          - os: macos-15-intel
+            target: macOS Intel
+          - os: macos-15
+            target: macOS Apple silicon
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.13.0
+      - name: Install the exact public launcher without lifecycle scripts
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/octet-npm-prefix"
+          mkdir -p "$prefix"
+          npm install --global --prefix "$prefix" --registry "$NPM_REGISTRY" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            "@skaft-software/octet@$VERSION"
+          PATH="$prefix/bin:$PATH"
+          export PATH
+          test "$(octet --version)" = "octet $VERSION"
+          octet --help >/dev/null
+          printf '%s\n' '{"protocol_version":1,"request_id":"npm-published-smoke","command":"hello"}' \
+            | octet-host \
+            | grep -F '"type":"hello"' >/dev/null
+          npm uninstall --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund @skaft-software/octet
+          test ! -e "$prefix/bin/octet"
+
+  publish-installer-repair:
+    name: Sign and attach portable octet installer
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'installer'
+    runs-on: ubuntu-24.04
+    environment: stable-release-publish
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          fetch-depth: 0
+      - name: Generate version-pinned portable installer
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          installer="release-assets/install-octet-$RELEASE_TAG.sh"
+          python3 - \
+            "$SOURCE_COMMIT" \
+            "$CORE_WORKFLOW_COMMIT" \
+            scripts/install.sh \
+            "$installer" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          source_commit, core_workflow_commit, source_path, destination_path = sys.argv[1:5]
+          for name, commit in (
+              ("release source", source_commit),
+              ("core release workflow", core_workflow_commit),
+          ):
+              if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+                  raise SystemExit(f"{name} commit is malformed")
+
+          generated = pathlib.Path(source_path).read_text(encoding="utf-8")
+          placeholder = 'release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"'
+          if generated.count(placeholder) != 1:
+              raise SystemExit("installer source-commit placeholder is missing or ambiguous")
+          generated = generated.replace(
+              placeholder,
+              (
+                  f'release_source_commit="{source_commit}"\n'
+                  f'release_workflow_commit="{core_workflow_commit}"'
+              ),
+          )
+
+          signature_commit_argument = '        "$release_source_commit" \\\n'
+          if generated.count(signature_commit_argument) != 1:
+              raise SystemExit("installer signature-commit argument is missing or ambiguous")
+          generated = generated.replace(
+              signature_commit_argument,
+              '        "$release_workflow_commit" \\\n',
+          )
+
+          portable = '''    bundle_reference = bundle_path
+              if not os.path.exists(manifest_reference):
+                  raise RuntimeError("descriptor-relative verification is unavailable")'''
+          if generated.count(portable) != 1:
+              raise SystemExit("installer does not contain the portable bundle-reference block")
+
+          pathlib.Path(destination_path).write_text(generated, encoding="utf-8")
+          PY
+          chmod 0755 "$installer"
+          if grep -F '__OCTET_RELEASE_SOURCE_COMMIT__' "$installer"; then
+            echo "generated installer still contains its source-commit placeholder" >&2
+            exit 1
+          fi
+          grep -F "release_source_commit=\"$SOURCE_COMMIT\"" "$installer"
+          grep -F "release_workflow_commit=\"$CORE_WORKFLOW_COMMIT\"" "$installer"
+          grep -F 'bundle_reference = bundle_path' "$installer"
+          if grep -F 'bundle_reference = f"/dev/fd/{bundle}"' "$installer"; then
+            echo "generated installer still passes the bundle through a shared Darwin descriptor" >&2
+            exit 1
+          fi
+          "$installer" --help | grep -F "Install octet ${{ needs.resolve.outputs.version }}."
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+      - name: Verify existing core release provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir upstream-assets
+          gh release download "$RELEASE_TAG" \
+            --dir upstream-assets \
+            --pattern OCTET_SHA256SUMS \
+            --pattern OCTET_SHA256SUMS.sigstore.json
+          core_identity="https://github.com/$WORKFLOW_REPOSITORY/.github/workflows/release-octet.yml@refs/tags/octet-binaries-$RELEASE_TAG"
+          cosign verify-blob \
+            --bundle upstream-assets/OCTET_SHA256SUMS.sigstore.json \
+            --certificate-identity "$core_identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-name "octet binary release" \
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY" \
+            --certificate-github-workflow-sha "$CORE_WORKFLOW_COMMIT" \
+            upstream-assets/OCTET_SHA256SUMS
+          gh release view "$RELEASE_TAG" --json assets > upstream-assets/release.json
+          python3 - \
+            upstream-assets/OCTET_SHA256SUMS \
+            upstream-assets/release.json \
+            "${{ needs.resolve.outputs.version }}" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          manifest_path, release_path, version = sys.argv[1:4]
+          expected = {
+              "install-octet.sh",
+              f"octet-{version}-aarch64-apple-darwin.tar.gz",
+              f"octet-{version}-x86_64-apple-darwin.tar.gz",
+              f"octet-{version}-x86_64-unknown-linux-gnu.tar.gz",
+          }
+          pattern = re.compile(r"^([0-9a-f]{64})  \./([A-Za-z0-9_.-]+)$")
+          entries = {}
+          for line in pathlib.Path(manifest_path).read_text(encoding="ascii").splitlines():
+              match = pattern.fullmatch(line)
+              if match is None or match.group(2) in entries:
+                  raise SystemExit("core checksum manifest is malformed")
+              entries[match.group(2)] = match.group(1)
+          if set(entries) != expected:
+              raise SystemExit("core checksum manifest has an unexpected asset set")
+
+          release = json.loads(pathlib.Path(release_path).read_text(encoding="utf-8"))
+          assets = {asset["name"]: asset for asset in release["assets"]}
+          required = expected | {"OCTET_SHA256SUMS", "OCTET_SHA256SUMS.sigstore.json"}
+          missing = required - set(assets)
+          if missing:
+              raise SystemExit(f"core release assets are missing: {sorted(missing)}")
+          for name, digest in entries.items():
+              if assets[name].get("digest") != f"sha256:{digest}":
+                  raise SystemExit(f"GitHub digest does not match signed manifest for {name}")
+          PY
+      - name: Sign and verify portable installer
+        shell: bash
+        env:
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          installer="release-assets/install-octet-$RELEASE_TAG.sh"
+          cosign sign-blob \
+            --yes \
+            --bundle "$installer.sigstore.json" \
+            "$installer"
+          cosign verify-blob \
+            --bundle "$installer.sigstore.json" \
+            --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-name "octet binary release" \
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY" \
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT" \
+            "$installer"
+          sha256sum "$installer" "$installer.sigstore.json"
+      - name: Attach portable installer to canonical release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          CORE_WORKFLOW_TAG: octet-binaries-${{ needs.resolve.outputs.tag }}
+          CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
+          INSTALLER_WORKFLOW_TAG: ${{ github.ref_name }}
+          INSTALLER_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          verify_release_refs() {
+            phase=$1
+            for ref_spec in \
+              "$RELEASE_TAG:$SOURCE_COMMIT" \
+              "$CORE_WORKFLOW_TAG:$CORE_WORKFLOW_COMMIT" \
+              "$INSTALLER_WORKFLOW_TAG:$INSTALLER_WORKFLOW_COMMIT"; do
+              tag_name=${ref_spec%%:*}
+              expected_commit=${ref_spec#*:}
+              git fetch --force origin "refs/tags/$tag_name:refs/tags/$tag_name"
+              if [[ "$(git rev-parse "$tag_name^{commit}")" != "$expected_commit" ]]; then
+                echo "release tag $tag_name moved while installer assets were $phase" >&2
+                exit 1
+              fi
+            done
+          }
+          verify_release_refs prepared
+          release_state=$(gh release view "$RELEASE_TAG" \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
+          IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
+          if [[ "$release_tag" != "$RELEASE_TAG" || "$draft" != false || "$prerelease" != false ]]; then
+            echo "canonical release $RELEASE_TAG is not a published stable release" >&2
+            exit 1
+          fi
+          existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          uploads=()
+          for asset in release-assets/*; do
+            name=${asset##*/}
+            if existing_digest=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$existing_digests"); then
+              if [[ -z "$existing_digest" ]]; then
+                echo "existing release asset has no immutable digest: $name" >&2
+                exit 1
+              fi
+              local_digest=$(sha256sum "$asset" | awk '{print $1}')
+              if [[ "$existing_digest" != "sha256:$local_digest" ]]; then
+                echo "immutable release asset differs from the existing asset: $name" >&2
+                exit 1
+              fi
+              echo "verified existing immutable release asset: $name"
+            else
+              uploads+=("$asset")
+            fi
+          done
+          if ((${#uploads[@]})); then
+            gh release upload "$RELEASE_TAG" "${uploads[@]}"
+          else
+            echo "all release assets already match the immutable candidate"
+          fi
+          verify_release_refs published
+
+  verify-installer-repair:
+    name: Verify portable installer on ${{ matrix.target }}
+    needs: [resolve, publish-installer-repair]
+    if: needs.resolve.outputs.mode == 'installer'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Download and run published portable installer without Cargo
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          installer="$RUNNER_TEMP/install-octet-$RELEASE_TAG.sh"
+          installer_url="https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/install-octet-$RELEASE_TAG.sh"
+          for attempt in 1 2 3 4 5; do
+            if curl \
+              --proto '=https' \
+              --proto-redir '=https' \
+              --tlsv1.2 \
+              --location \
+              --fail \
+              --silent \
+              --show-error \
+              --output "$installer" \
+              "$installer_url"; then
+              break
+            fi
+            if [[ "$attempt" == 5 ]]; then
+              echo "published portable installer is not readable" >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
+
+          test_home="$RUNNER_TEMP/octet-portable-install-home"
+          install_directory="$test_home/bin"
+          fake_tools="$RUNNER_TEMP/no-cargo"
+          mkdir -p "$test_home" "$fake_tools"
+          cat > "$fake_tools/cargo" <<'EOF'
+          #!/bin/sh
+          echo "binary installer unexpectedly invoked Cargo" >&2
+          exit 99
+          EOF
+          chmod 0755 "$fake_tools/cargo"
+
+          HOME="$test_home" \
+            OCTET_INSTALL_DIR="$install_directory" \
+            OCTET_NO_MODIFY_PATH=1 \
+            PATH="$fake_tools:$PATH" \
+            sh "$installer"
+
+          binary="$install_directory/octet"
+          host_binary="$install_directory/octet-host"
+          test -x "$binary"
+          test -x "$host_binary"
+          test "$(HOME="$test_home" "$binary" --version)" = "octet $VERSION"
+          HOME="$test_home" "$binary" --help >/dev/null
+          printf '%s\n' '{"protocol_version":1,"request_id":"portable-installer-smoke","command":"hello"}' \
+            | HOME="$test_home" "$host_binary" \
+            | grep -F "\"sdk_version\":\"$VERSION\"" >/dev/null
+          HOME="$test_home" "$binary" extension install octet-serve
+          HOME="$test_home" "$binary" extension list | grep -F "octet-serve"
+          HOME="$test_home" "$binary" extension remove octet-serve
+          test ! -e "$test_home/.octet/extensions/octet-serve"

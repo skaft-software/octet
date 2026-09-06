@@ -16,7 +16,7 @@ body:
       required: true
   - type: input
     attributes:
-      label: Ygg version or commit
+      label: octet version or commit
     validations:
       required: true
   - type: textarea

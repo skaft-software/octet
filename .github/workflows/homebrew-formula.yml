@@ -49,8 +49,8 @@ jobs:
         run: |
           set -euo pipefail
           release_tag=$INPUT_RELEASE_TAG
-          if [[ "$CURRENT_REF_TYPE" != tag || "$CURRENT_REF_NAME" != "ygg-binaries-$release_tag" ]]; then
-            echo "formula renders must run from ygg-binaries-$release_tag" >&2
+          if [[ "$CURRENT_REF_TYPE" != tag || "$CURRENT_REF_NAME" != "octet-binaries-$release_tag" ]]; then
+            echo "formula renders must run from octet-binaries-$release_tag" >&2
             exit 1
           fi
           workflow_tag=$CURRENT_REF_NAME
@@ -63,7 +63,7 @@ jobs:
             echo "release workflow commit is not a full lowercase SHA" >&2
             exit 1
           fi
-          workflow_ref="$WORKFLOW_REPOSITORY/.github/workflows/release-ygg.yml@refs/tags/$workflow_tag"
+          workflow_ref="$WORKFLOW_REPOSITORY/.github/workflows/release-octet.yml@refs/tags/$workflow_tag"
           {
             echo "release_tag=$release_tag"
             echo "version=${release_tag#v}"
@@ -91,40 +91,40 @@ jobs:
           gh release download "$RELEASE_TAG" \
             --dir release-assets \
             --clobber \
-            --pattern 'install-ygg.sh' \
-            --pattern 'install-ygg.sh.sigstore.json' \
-            --pattern 'ygg-*.tar.gz' \
-            --pattern 'ygg-*.tar.gz.sigstore.json' \
-            --pattern 'YGG_SHA256SUMS' \
-            --pattern 'YGG_SHA256SUMS.sigstore.json' \
-            --pattern 'YGG_RELEASE_METADATA.json' \
-            --pattern 'YGG_RELEASE_METADATA.json.sigstore.json'
+            --pattern 'install-octet.sh' \
+            --pattern 'install-octet.sh.sigstore.json' \
+            --pattern 'octet-*.tar.gz' \
+            --pattern 'octet-*.tar.gz.sigstore.json' \
+            --pattern 'OCTET_SHA256SUMS' \
+            --pattern 'OCTET_SHA256SUMS.sigstore.json' \
+            --pattern 'OCTET_RELEASE_METADATA.json' \
+            --pattern 'OCTET_RELEASE_METADATA.json.sigstore.json'
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           cd release-assets
-          sha256sum --check YGG_SHA256SUMS
+          sha256sum --check OCTET_SHA256SUMS
           verify=(
             --certificate-identity "https://github.com/$WORKFLOW_REF"
             --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"
-            --certificate-github-workflow-name "Ygg binary release"
+            --certificate-github-workflow-name "octet binary release"
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
           )
-          for artifact in ./*.tar.gz ./install-ygg.sh ./YGG_SHA256SUMS ./YGG_RELEASE_METADATA.json; do
+          for artifact in ./*.tar.gz ./install-octet.sh ./OCTET_SHA256SUMS ./OCTET_RELEASE_METADATA.json; do
             cosign verify-blob \
               --bundle "${artifact}.sigstore.json" \
               "${verify[@]}" \
               "$artifact"
           done
-          python3 ../scripts/generate-ygg-release-metadata.py \
+          python3 ../scripts/generate-octet-release-metadata.py \
             "${RELEASE_TAG#v}" \
             "$RELEASE_TAG" \
             "$(git rev-parse "$RELEASE_TAG^{commit}")" \
             "$WORKFLOW_COMMIT" \
             "$WORKFLOW_REF" \
             "$WORKFLOW_REPOSITORY" \
-            YGG_SHA256SUMS \
+            OCTET_SHA256SUMS \
             "$RUNNER_TEMP/recomputed-release-metadata.json"
-          cmp YGG_RELEASE_METADATA.json "$RUNNER_TEMP/recomputed-release-metadata.json"
+          cmp OCTET_RELEASE_METADATA.json "$RUNNER_TEMP/recomputed-release-metadata.json"
       - name: Render and validate Homebrew formula offline
         shell: bash
         env:
@@ -132,24 +132,24 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/generate-homebrew-formula.py \
-            release-assets/YGG_RELEASE_METADATA.json \
+            release-assets/OCTET_RELEASE_METADATA.json \
             --assets-dir release-assets \
-            --output "$RUNNER_TEMP/ygg.rb"
+            --output "$RUNNER_TEMP/octet.rb"
           scripts/test-homebrew-formula.sh
-          ruby -c "$RUNNER_TEMP/ygg.rb"
-          test "$(grep -c '^class Ygg < Formula$' "$RUNNER_TEMP/ygg.rb")" = 1
-          grep -F "# Release tag: $RELEASE_TAG" "$RUNNER_TEMP/ygg.rb"
-          grep -F 'depends_on :macos' "$RUNNER_TEMP/ygg.rb"
-          grep -F 'depends_on "ripgrep"' "$RUNNER_TEMP/ygg.rb"
-          if rg -n 'Cargo\.toml|api\.github\.com|releases/latest' "$RUNNER_TEMP/ygg.rb" scripts/generate-homebrew-formula.py; then
+          ruby -c "$RUNNER_TEMP/octet.rb"
+          test "$(grep -c '^class Octet < Formula$' "$RUNNER_TEMP/octet.rb")" = 1
+          grep -F "# Release tag: $RELEASE_TAG" "$RUNNER_TEMP/octet.rb"
+          grep -F 'depends_on :macos' "$RUNNER_TEMP/octet.rb"
+          grep -F 'depends_on "ripgrep"' "$RUNNER_TEMP/octet.rb"
+          if rg -n 'Cargo\.toml|api\.github\.com|releases/latest' "$RUNNER_TEMP/octet.rb" scripts/generate-homebrew-formula.py; then
             echo "Homebrew handoff contains a mutable release source" >&2
             exit 1
           fi
-          cp "$RUNNER_TEMP/ygg.rb" homebrew-ygg.rb
+          cp "$RUNNER_TEMP/octet.rb" homebrew-octet.rb
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: homebrew-formula
-          path: homebrew-ygg.rb
+          path: homebrew-octet.rb
           if-no-files-found: error
           retention-days: 14
 
@@ -173,7 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$TAP_REPOSITORY" = "skaft-software/homebrew-tap" || {
-            echo "tap_repository is not the authorized Ygg tap" >&2
+            echo "tap_repository is not the authorized octet tap" >&2
             exit 1
           }
       - name: Check out the authorized tap
@@ -197,12 +197,12 @@ jobs:
             echo "tap_repository must be an owner/name pair" >&2
             exit 1
           }
-          test -f formula-artifact/homebrew-ygg.rb
-          test ! -L formula-artifact/homebrew-ygg.rb
-          ruby -c formula-artifact/homebrew-ygg.rb
+          test -f formula-artifact/homebrew-octet.rb
+          test ! -L formula-artifact/homebrew-octet.rb
+          ruby -c formula-artifact/homebrew-octet.rb
           cd tap
           test "$(git config --get remote.origin.url)" != ""
-          formula_path=Formula/ygg.rb
+          formula_path=Formula/octet.rb
           if [[ -L Formula || ( -e Formula && ! -d Formula ) ]]; then
             echo "tap Formula path must be a real directory" >&2
             exit 1
@@ -216,13 +216,13 @@ jobs:
             echo "tap formula path must not be a symlink" >&2
             exit 1
           fi
-          branch="ygg/v$VERSION"
-          if [[ ! "$branch" =~ ^ygg/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          branch="octet/v$VERSION"
+          if [[ ! "$branch" =~ ^octet/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "computed tap branch is malformed" >&2
             exit 1
           fi
-          git config user.name "ygg-release[bot]"
-          git config user.email "ygg-release[bot]@users.noreply.github.com"
+          git config user.name "octet-release[bot]"
+          git config user.email "octet-release[bot]@users.noreply.github.com"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
             git switch -c "$branch" --track "origin/$branch"
@@ -235,13 +235,13 @@ jobs:
           fi
           # Copy only after selecting the review branch so reruns can update it
           # without switching over uncommitted formula content.
-          cp ../formula-artifact/homebrew-ygg.rb "$formula_path"
-          if git diff --quiet -- Formula/ygg.rb; then
+          cp ../formula-artifact/homebrew-octet.rb "$formula_path"
+          if git diff --quiet -- Formula/octet.rb; then
             echo "tap already contains the exact formula"
             exit 0
           fi
-          git add -- Formula/ygg.rb
-          git commit -m "Update Ygg formula to $RELEASE_TAG"
+          git add -- Formula/octet.rb
+          git commit -m "Update octet formula to $RELEASE_TAG"
           : "${HOMEBREW_TAP_TOKEN:?HOMEBREW_TAP_TOKEN is required}"
           # checkout intentionally leaves the fetch remote unauthenticated;
           # provide the scoped tap credential only for this push.
@@ -253,5 +253,5 @@ jobs:
             --repo "$TAP_REPOSITORY" \
             --base main \
             --head "$branch" \
-            --title "Update Ygg to $RELEASE_TAG" \
-            --body "Generated from the signed immutable Ygg release metadata for $RELEASE_TAG (workflow run $RUN_ID)."
+            --title "Update octet to $RELEASE_TAG" \
+            --body "Generated from the signed immutable octet release metadata for $RELEASE_TAG (workflow run $RUN_ID)."

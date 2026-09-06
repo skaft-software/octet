@@ -110,12 +110,12 @@ export function ProjectsView({
           <Folder />
         </span>
         <div>
-          <span>{onboarding ? "Before ygg can start" : "Local workspaces"}</span>
+          <span>{onboarding ? "Before octet can start" : "Local workspaces"}</span>
           <h1 id="projects-title">
             {onboarding ? "Choose what this host may trust" : "Projects"}
           </h1>
           <p>
-            Project trust allows ygg to load that folder&apos;s instructions,
+            Project trust allows octet to load that folder&apos;s instructions,
             skills, and extensions and to start coding-agent tasks there. Agent
             authority is configured separately for each task.
           </p>
@@ -128,7 +128,7 @@ export function ProjectsView({
           <div>
             <strong>No trusted project is available</strong>
             <p>
-              Review the folder label below, then grant trust explicitly. Ygg
+              Review the folder label below, then grant trust explicitly. octet
               will not load project-controlled configuration before that.
             </p>
           </div>
@@ -143,8 +143,8 @@ export function ProjectsView({
             </span>
             <div>
               <h2>No projects found. Open a folder to get started.</h2>
-              <p>Start ygg from the folder you want to add:</p>
-              <code>ygg --workspace /path/to/project serve</code>
+              <p>Start octet from the folder you want to add:</p>
+              <code>octet --workspace /path/to/project serve</code>
             </div>
           </div>
         ) : null}

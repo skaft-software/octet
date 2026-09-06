@@ -1,0 +1,453 @@
+{
+  "schema_version": 1,
+  "product": "octet",
+  "intended_product_version": "0.7.0",
+  "byte": {
+    "bits": "01101111",
+    "hex": "0x6f",
+    "character": "o",
+    "columns": 8,
+    "short_positions_one_based": [
+      1,
+      4
+    ],
+    "short_height_ratio": 0.5,
+    "contiguous": true,
+    "baseline_aligned": true,
+    "master_view_box": [
+      0,
+      0,
+      256,
+      128
+    ],
+    "column_width": 32
+  },
+  "public_gradient": [
+    "#4b8dff",
+    "#48adf5",
+    "#45ceeb",
+    "#49dcd9",
+    "#4fe2c3",
+    "#5ce9aa",
+    "#74f48a",
+    "#8dff6a"
+  ],
+  "provenance": {
+    "source_package": "octet-identity-20260904-02/octet-byte-brand-draft",
+    "identity_plan_sha256": "72d15a62d33b98b7cc48c8e6fd05d07a51e743ce287077facd18d5f72644acc2",
+    "source_readme_sha256": "95571456b49b799003599196e4e82c794f84815546d7ed12b23d9f15cb107884",
+    "import": "Assets copied byte-for-byte from approved native handoff; old draft-selection status superseded by founder approval.",
+    "provider_colors": "Historical compiled theme samples, not a live provider capability or runtime theme table.",
+    "rasterization": "Pinned original PNG/ICO exports; export.py reproduces packaging, not rasterization. No installed font dependency.",
+    "excluded": [
+      "concept social card",
+      "reference and construction previews",
+      "terminal glyph proofs",
+      "OpenRouter placement mockups",
+      "peer identities"
+    ]
+  },
+  "qualification": {
+    "actual_product_captures": false,
+    "live_terminal_matrix": false,
+    "renamed_binary_install": false
+  },
+  "assets": [
+    {
+      "path": "marks/badge-dark.png",
+      "role": "badge",
+      "bytes": 884,
+      "sha256": "806e02454641925fa5ba2847267696458b7de50a11ba7e2ac5bbad106646a60f"
+    },
+    {
+      "path": "marks/badge-dark.svg",
+      "role": "badge",
+      "bytes": 895,
+      "sha256": "722b9484844dcb65676e2e5af23fbfff2b7dc7cf1aa2147c068da9a967e9c6c8"
+    },
+    {
+      "path": "marks/badge-light.png",
+      "role": "badge",
+      "bytes": 879,
+      "sha256": "a44fbbaea565553449020de3734005342bca5f8899e30f29274ae5281a9bd337"
+    },
+    {
+      "path": "marks/badge-light.svg",
+      "role": "badge",
+      "bytes": 895,
+      "sha256": "28eeee213d796e0210c4d047ee754b936f4efc93b574dfee30c0f7e43dc37e55"
+    },
+    {
+      "path": "marks/favicon.ico",
+      "role": "favicon",
+      "bytes": 4743,
+      "sha256": "3ad06d4428d109a036a8aab0ed816320764aca80c08d350c60b3428ae87d41b9"
+    },
+    {
+      "path": "marks/icon-dark-1024.png",
+      "role": "icon",
+      "bytes": 5466,
+      "sha256": "32cb06ae7284a903f78a45eaf94736467d756d31882103e7e8880d608d33ef2d"
+    },
+    {
+      "path": "marks/icon-dark-128.png",
+      "role": "icon",
+      "bytes": 477,
+      "sha256": "f2bfbed1bf87e05cd153adce29dc059254803dea7cd30a11be274325937afa77"
+    },
+    {
+      "path": "marks/icon-dark-16.png",
+      "role": "icon",
+      "bytes": 176,
+      "sha256": "be1340d1c643592ef4f216fe2f0f1db3f77e47db0cf464dfa551d7903633d44c"
+    },
+    {
+      "path": "marks/icon-dark-24.png",
+      "role": "icon",
+      "bytes": 254,
+      "sha256": "21cfbdbd9a16cd09b7cb0b01740ed69e4cfaf2c97d9c8e8480fb30ff248c0e75"
+    },
+    {
+      "path": "marks/icon-dark-256.png",
+      "role": "icon",
+      "bytes": 884,
+      "sha256": "806e02454641925fa5ba2847267696458b7de50a11ba7e2ac5bbad106646a60f"
+    },
+    {
+      "path": "marks/icon-dark-32.png",
+      "role": "icon",
+      "bytes": 224,
+      "sha256": "60dd4737e56a9199feb925f2ae8aac5082268d085fc5be2c8f20b82fcbe73ed7"
+    },
+    {
+      "path": "marks/icon-dark-48.png",
+      "role": "icon",
+      "bytes": 292,
+      "sha256": "73209b483d4e1f0ce3c27e2be4b9018e0390fdc9a0c2a0fee95d8f563dd9ed80"
+    },
+    {
+      "path": "marks/icon-dark-512.png",
+      "role": "icon",
+      "bytes": 1997,
+      "sha256": "cfdb27097a46c8896ce66ef0a9aa9bc8990ab07fd0d70a19414ee07c65c0e1df"
+    },
+    {
+      "path": "marks/icon-dark-64.png",
+      "role": "icon",
+      "bytes": 272,
+      "sha256": "24cf3d754b3dbdc2672205ab95d872f9e38d5aec627b2b878ffdfb449ee56a30"
+    },
+    {
+      "path": "marks/icon-light-1024.png",
+      "role": "icon",
+      "bytes": 5461,
+      "sha256": "cc0a6799d86e618723ffb0f5416257d5a52a0ae9772a2574bd00e984e4380e9a"
+    },
+    {
+      "path": "marks/icon-light-128.png",
+      "role": "icon",
+      "bytes": 473,
+      "sha256": "a01fd74d3098e82b1ba1635c1c77331ffa16cff0d4c61273ad721f89116231cc"
+    },
+    {
+      "path": "marks/icon-light-16.png",
+      "role": "icon",
+      "bytes": 176,
+      "sha256": "6306fe22646bebfc88555cadb463b9d76102faebc582b5a3bf19d2677438b51b"
+    },
+    {
+      "path": "marks/icon-light-24.png",
+      "role": "icon",
+      "bytes": 260,
+      "sha256": "f8520f6729d9f8e757428b659e8a040d328f41310532b5e25ecd3416256b6609"
+    },
+    {
+      "path": "marks/icon-light-256.png",
+      "role": "icon",
+      "bytes": 879,
+      "sha256": "a44fbbaea565553449020de3734005342bca5f8899e30f29274ae5281a9bd337"
+    },
+    {
+      "path": "marks/icon-light-32.png",
+      "role": "icon",
+      "bytes": 226,
+      "sha256": "c5ad3114d729035fee1da80f3b062b2a755907e2ad96109786bc901a7a2e9a5b"
+    },
+    {
+      "path": "marks/icon-light-48.png",
+      "role": "icon",
+      "bytes": 294,
+      "sha256": "097a53538c5529a0f78060a73c45f3ac4d20fecc9709ffdf9a7e2370112cefc6"
+    },
+    {
+      "path": "marks/icon-light-512.png",
+      "role": "icon",
+      "bytes": 1993,
+      "sha256": "c452b1d26504800ce07f1b986ee253d28c1f65d32bb5bb8ffccba316f3fc174c"
+    },
+    {
+      "path": "marks/icon-light-64.png",
+      "role": "icon",
+      "bytes": 269,
+      "sha256": "f3638fb6d95873dd3b39a70a1112ce35aa8f3bae8669776f7dc34c9890e348e0"
+    },
+    {
+      "path": "marks/lockup-black-transparent.png",
+      "role": "lockup",
+      "bytes": 8400,
+      "sha256": "d3a9fa2232c2f180b822f505457bb8497e12fba3a6c941664b665b2dba728f95"
+    },
+    {
+      "path": "marks/lockup-black-transparent.svg",
+      "role": "lockup",
+      "bytes": 4667,
+      "sha256": "06e66ce39b91ad41b53741d7ce945c7ec3fa404f8a7cebc4dd67d35d8517ae8a"
+    },
+    {
+      "path": "marks/lockup-dark.png",
+      "role": "lockup",
+      "bytes": 9515,
+      "sha256": "73069b0b56c8924e5cbfaed0ed3107b34160ce53e5fc0b3f61552c0c0edba5ef"
+    },
+    {
+      "path": "marks/lockup-dark.svg",
+      "role": "lockup",
+      "bytes": 4715,
+      "sha256": "48620e5fd46e39b60df132a75e9f19b03925f4033cd9e2741d8c7061ae430fbf"
+    },
+    {
+      "path": "marks/lockup-light.png",
+      "role": "lockup",
+      "bytes": 9504,
+      "sha256": "e1029c42c6fa63b7356ed185888829fa7d6231601c5353b050b8177430909813"
+    },
+    {
+      "path": "marks/lockup-light.svg",
+      "role": "lockup",
+      "bytes": 4715,
+      "sha256": "439643540cdaf0122db6409ec438f461296e95197af412e91744153c7a1b0ce2"
+    },
+    {
+      "path": "marks/lockup-white-transparent.png",
+      "role": "lockup",
+      "bytes": 6449,
+      "sha256": "cdc1fd9d0fb8ee9b2e593a09b32acf3f86b3c4b40b8e388e3341624215d2b861"
+    },
+    {
+      "path": "marks/lockup-white-transparent.svg",
+      "role": "lockup",
+      "bytes": 4667,
+      "sha256": "27a49cf1620ea01ceeb0bd6995a99be3001058ca6a8555bf64365283ff6ba546"
+    },
+    {
+      "path": "marks/mark-alibaba-qwen-dark.png",
+      "role": "mark",
+      "bytes": 584,
+      "sha256": "122b4625c4034574b82cc5eebff45da766b00429da36e4a0078151d136f7faff"
+    },
+    {
+      "path": "marks/mark-alibaba-qwen-dark.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "1939f7f2ac2ea98b29deb8594e6a0f7b22bc284c23a9211976d22a1c70d0c794"
+    },
+    {
+      "path": "marks/mark-alibaba-qwen-light.png",
+      "role": "mark",
+      "bytes": 584,
+      "sha256": "6ecd94bd46db8961d4dc8677f8060de1c777b81310c0006283b1f6ee7f524e9c"
+    },
+    {
+      "path": "marks/mark-alibaba-qwen-light.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "1c5473f887b7d8956b9e743ac82763aed6fb9e1dc1c30e95734dcc91aa555646"
+    },
+    {
+      "path": "marks/mark-anthropic-dark.png",
+      "role": "mark",
+      "bytes": 581,
+      "sha256": "e7e63dd26981d969ac34c7e6cf934dfe2300bd16bf63b99c9d794d70a1738f24"
+    },
+    {
+      "path": "marks/mark-anthropic-dark.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "4123728778b0466e32c1d1903e250a25928f3bb38e9789ce3ec26dda3af2bca8"
+    },
+    {
+      "path": "marks/mark-anthropic-light.png",
+      "role": "mark",
+      "bytes": 578,
+      "sha256": "331f23656218c3510c6583ef0d89abc64ca94e498a958376fcafaaea18ead1ed"
+    },
+    {
+      "path": "marks/mark-anthropic-light.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "c4f5954ecfe27b37b97f7c7c4a61bd5637c041027386c0e8e4953baecbcd107c"
+    },
+    {
+      "path": "marks/mark-black.png",
+      "role": "mark",
+      "bytes": 514,
+      "sha256": "592496e85f96b2db4f50ff072175c87203c784ad1362986b463144091c2e9982"
+    },
+    {
+      "path": "marks/mark-black.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "8c1eb849c695a13e5ab8e44e36349762cf962dc0055b1555a0f48ffeb073d5de"
+    },
+    {
+      "path": "marks/mark-deepseek-dark.png",
+      "role": "mark",
+      "bytes": 581,
+      "sha256": "6fadadab5cb302f43ae762ea2a8cf92a653238685347fa51a41538bc329dc07a"
+    },
+    {
+      "path": "marks/mark-deepseek-dark.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "0a43c7b6553a2a6f34c66472332ce2de1c516d3c4c780b71d5158f1989c995ef"
+    },
+    {
+      "path": "marks/mark-deepseek-light.png",
+      "role": "mark",
+      "bytes": 582,
+      "sha256": "0bbe948c1ecddf5ed3df0d8b00ceedeed858cf791e128bd691f6610fbea94ddc"
+    },
+    {
+      "path": "marks/mark-deepseek-light.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "a31ab5789be78f7ad6fe7fe15b6bc70d1b506d5954d9d81ee8282694132fb811"
+    },
+    {
+      "path": "marks/mark-google-dark.png",
+      "role": "mark",
+      "bytes": 586,
+      "sha256": "e60623197220570ff008716c91d5fed944bad89819f64664ff511df1900ccd72"
+    },
+    {
+      "path": "marks/mark-google-dark.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "2fa9ba0544eeab745f129cc58e3f9d669a3f4a1d47dfcdb664e87a39b3941d79"
+    },
+    {
+      "path": "marks/mark-google-light.png",
+      "role": "mark",
+      "bytes": 581,
+      "sha256": "d1c8e3a4fd5d70d450d33f43e680246c5995466fade605e17b3848691d3e7b7e"
+    },
+    {
+      "path": "marks/mark-google-light.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "8baefb4cb01d8fbdf3513a68a1e4329c09fb75b941214d010a575bc7ad3f2bef"
+    },
+    {
+      "path": "marks/mark-gradient.png",
+      "role": "mark",
+      "bytes": 571,
+      "sha256": "2ca456e89b4e3f802dcc26a7d4111813350489368cbb6868b0a3d9680817993d"
+    },
+    {
+      "path": "marks/mark-gradient.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "c0cd21ff8660f4073da59b6ac3743a613b08aa3e45412d61eb3ee2d9d9e948e7"
+    },
+    {
+      "path": "marks/mark-mistral-dark.png",
+      "role": "mark",
+      "bytes": 582,
+      "sha256": "821dcd60920763afa5427a77459f681598abab5811e2efaecbabe9bcee5bca9d"
+    },
+    {
+      "path": "marks/mark-mistral-dark.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "2ec764c61eb34379fbf7fd0ec899ae42c2bd1c5853ed62d935395d99734f7f7f"
+    },
+    {
+      "path": "marks/mark-mistral-light.png",
+      "role": "mark",
+      "bytes": 584,
+      "sha256": "1239f52af2e7cdfad14c936728753de504e43948898095a6df45379fb3aa5058"
+    },
+    {
+      "path": "marks/mark-mistral-light.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "b9575aea6444628a266054ae198a661e37ff9f2525045750e240db5de64d3a5e"
+    },
+    {
+      "path": "marks/mark-openai-dark.png",
+      "role": "mark",
+      "bytes": 582,
+      "sha256": "8e5f5f2b8a81823c3214552551dd8bceb4aafdd87a3d82c4ac4732f586f19fb9"
+    },
+    {
+      "path": "marks/mark-openai-dark.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "ae2c22a88a32095ba06ad42f19eeaa3b1a9c89575eee8b8e94723212ae773412"
+    },
+    {
+      "path": "marks/mark-openai-light.png",
+      "role": "mark",
+      "bytes": 579,
+      "sha256": "be6ac179bbb2662e34b1892a64f0774c674e08b598d46264d7bfdead7597f702"
+    },
+    {
+      "path": "marks/mark-openai-light.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "0bc5c3fa6f9987e9482f3dd423ec72a8fc5b61cbd970e964e14e2793f7629319"
+    },
+    {
+      "path": "marks/mark-white.png",
+      "role": "mark",
+      "bytes": 506,
+      "sha256": "1bd21038c8b6515dcd4fbab96782d0e321ae6014dea9dee147197a79407f68a6"
+    },
+    {
+      "path": "marks/mark-white.svg",
+      "role": "mark",
+      "bytes": 844,
+      "sha256": "6e85b002e7d58d980d3afe1145056664b9fe165c8fcf7c3d01fac7b5ed851bd6"
+    },
+    {
+      "path": "marks/wordmark-black.png",
+      "role": "wordmark",
+      "bytes": 7900,
+      "sha256": "119b22f452874227c36fc3e444a424efb6a8cc6122c25283e9353a1e5785623e"
+    },
+    {
+      "path": "marks/wordmark-black.svg",
+      "role": "wordmark",
+      "bytes": 867,
+      "sha256": "db41f3a57cb5e009d40a71e03707ec469bd9884a73f670029238777599a84390"
+    },
+    {
+      "path": "marks/wordmark-white.png",
+      "role": "wordmark",
+      "bytes": 6457,
+      "sha256": "59b55f16cb55467a7e807310ce7ce66a2fbe5324369b29f66c58965675829abd"
+    },
+    {
+      "path": "marks/wordmark-white.svg",
+      "role": "wordmark",
+      "bytes": 867,
+      "sha256": "c3cf839b167fda0d890d580ebff34e731771bb63ce7c44cfefde7c6eb6524974"
+    },
+    {
+      "path": "palettes.json",
+      "role": "historical-provider-color-provenance",
+      "bytes": 2851,
+      "sha256": "77a25e60a39ad7d45f38ca339d00a02bfa3796766c4f3f81adee956fe0aaa4ff"
+    }
+  ]
+}

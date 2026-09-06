@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Read-only Git helpers for Ygg's executable-extension protocol."""
+"""Read-only Git helpers for octet's executable-extension protocol."""
 
 import os
 from pathlib import Path
 import subprocess
 
-from ygg_extension import Extension, RpcError
+from octet_extension import Extension, RpcError
 
 
 MAX_GIT_OUTPUT_BYTES = 256 * 1024
@@ -17,9 +17,9 @@ ext = Extension()
 
 
 def execution_workspace(context):
-    value = context.get("workspace") or os.environ.get("YGG_WORKSPACE")
+    value = context.get("workspace") or os.environ.get("OCTET_WORKSPACE")
     if not value:
-        raise ValueError("Ygg did not provide an active workspace")
+        raise ValueError("octet did not provide an active workspace")
     workspace = Path(value).resolve()
     if not workspace.is_dir():
         raise ValueError(f"workspace is not a directory: {workspace}")

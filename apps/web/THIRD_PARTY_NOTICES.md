@@ -2,7 +2,7 @@
 
 ## Local type system
 
-The ygg web interface bundles the compact variable WOFF2 builds of Local
+The octet web interface bundles the compact variable WOFF2 builds of Local
 Grotesk and Local Mono from Local Type System 0.53. The much larger Nerd Font
 terminal statics are not part of the browser bundle.
 

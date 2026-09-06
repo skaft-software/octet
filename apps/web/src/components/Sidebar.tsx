@@ -901,12 +901,12 @@ function SidebarView({
       <aside
         ref={sidebarRef}
         className={`sidebar ${open ? "is-open" : ""}`}
-        aria-label="ygg"
+        aria-label="octet"
         inert={!open || blocked}
       >
         <header className="sidebar-header">
           <div className="brand-row">
-            <strong>ygg</strong>
+            <strong>octet</strong>
           </div>
           <button className="icon-button sidebar-close" onClick={onClose}>
             <PanelLeftClose aria-hidden="true" />

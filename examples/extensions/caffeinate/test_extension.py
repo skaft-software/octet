@@ -49,7 +49,7 @@ class FakeProcess:
 
 
 def load_extension():
-    name = "ygg_caffeinate_example"
+    name = "octet_caffeinate_example"
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, EXTENSION_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -93,7 +93,7 @@ def notification(method, params):
 
 class CaffeinateTests(unittest.TestCase):
     def tearDown(self):
-        sys.modules.pop("ygg_caffeinate_example", None)
+        sys.modules.pop("octet_caffeinate_example", None)
 
     def test_start_is_idempotent_and_stop_releases_inhibitor(self):
         module = load_extension()

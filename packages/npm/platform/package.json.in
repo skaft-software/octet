@@ -1,7 +1,7 @@
 {
   "name": "__PACKAGE_NAME__",
   "version": "__VERSION__",
-  "description": "Native Ygg runtime for __TARGET__",
+  "description": "Native octet runtime for __TARGET__",
   "license": "MIT",
   "repository": "https://github.com/skaft-software/ygg",
   "os": ["__OS__"],
@@ -10,6 +10,6 @@
     "README.md",
     "LICENSE",
     "bin/",
-    "share/ygg/"
+    "share/octet/"
   ]
 }

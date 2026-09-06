@@ -606,7 +606,7 @@ function ProjectFilesWorkspace({
         })}
         {directory.tree.truncated ? (
           <p className="files-tree-status" role="status">
-            This folder has more files than ygg can safely list.
+            This folder has more files than octet can safely list.
           </p>
         ) : null}
         {directory.tree.gitStatusTruncated ? (

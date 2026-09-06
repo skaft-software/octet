@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Render a Homebrew formula from a verified immutable Ygg release record.
+"""Render a Homebrew formula from a verified immutable octet release record.
 
-The metadata file is produced by ``generate-ygg-release-metadata.py`` and is
+The metadata file is produced by ``generate-octet-release-metadata.py`` and is
 signed by the protected binary-release workflow before this command is called.
 This command is intentionally offline: it never reads the checkout for release
 identity, calls a release API, or discovers a version from the checkout.
@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 REPOSITORY = "skaft-software/ygg"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}"
-SCHEMA = "ygg.release.metadata.v1"
+SCHEMA = "octet.release.metadata.v1"
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
@@ -111,9 +111,9 @@ def require_digest(value: Any, label: str) -> str:
 
 def expected_asset_names(version: str) -> dict[str, tuple[str, str | None]]:
     return {
-        "install-ygg.sh": ("installer", None),
+        "install-octet.sh": ("installer", None),
         **{
-            f"ygg-{version}-{target}.tar.gz": ("binary", target)
+            f"octet-{version}-{target}.tar.gz": ("binary", target)
             for target, _ in (
                 ("aarch64-apple-darwin", "arm64"),
                 ("x86_64-apple-darwin", "x86_64"),
@@ -138,7 +138,7 @@ def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], 
     if set(value) != expected_top_level:
         fail("release metadata has unexpected or missing top-level fields")
     if value.get("schema") != SCHEMA or value.get("repository") != REPOSITORY:
-        fail("release metadata is not for the canonical Ygg repository")
+        fail("release metadata is not for the canonical octet repository")
 
     version = require_string(value, "version", "version")
     tag = require_string(value, "tag", "tag")
@@ -150,7 +150,7 @@ def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], 
             fail(f"release metadata {label} is malformed")
     workflow_ref = require_string(value, "workflow_ref", "workflow ref")
     expected_workflow_ref = (
-        f"{REPOSITORY}/.github/workflows/release-ygg.yml@refs/tags/ygg-binaries-v{version}"
+        f"{REPOSITORY}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v{version}"
     )
     if workflow_ref != expected_workflow_ref:
         fail("release metadata workflow ref is not the immutable binary release tag")
@@ -158,7 +158,7 @@ def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], 
     checksum_manifest = value["checksum_manifest"]
     if not isinstance(checksum_manifest, dict) or set(checksum_manifest) != {"name", "sha256"}:
         fail("release metadata checksum manifest is malformed")
-    if checksum_manifest.get("name") != "YGG_SHA256SUMS":
+    if checksum_manifest.get("name") != "OCTET_SHA256SUMS":
         fail("release metadata checksum manifest has the wrong name")
     checksum_digest = require_digest(checksum_manifest.get("sha256"), "checksum manifest")
 
@@ -214,7 +214,7 @@ def verify_local_assets(
     checksum_manifest_digest: str,
 ) -> None:
     real_directory(assets_directory, "local release asset directory")
-    manifest = assets_directory / "YGG_SHA256SUMS"
+    manifest = assets_directory / "OCTET_SHA256SUMS"
     if sha256(manifest) != checksum_manifest_digest:
         fail("local checksum manifest does not match release metadata")
     manifest_assets = parse_checksum_manifest(manifest, version)
@@ -236,15 +236,15 @@ def render_formula(
     checksum_manifest_digest: str,
     assets: Mapping[str, str],
 ) -> str:
-    arm_name = f"ygg-{version}-aarch64-apple-darwin.tar.gz"
-    intel_name = f"ygg-{version}-x86_64-apple-darwin.tar.gz"
-    return f'''# Generated from verified immutable Ygg release metadata.
+    arm_name = f"octet-{version}-aarch64-apple-darwin.tar.gz"
+    intel_name = f"octet-{version}-x86_64-apple-darwin.tar.gz"
+    return f'''# Generated from verified immutable octet release metadata.
 # Release tag: {tag}
 # Release source commit: {source_commit}
 # Release workflow commit: {workflow_commit}
 # Release workflow ref: {workflow_ref}
-# YGG_SHA256SUMS SHA-256: {checksum_manifest_digest}
-class Ygg < Formula
+# OCTET_SHA256SUMS SHA-256: {checksum_manifest_digest}
+class Octet < Formula
   desc "High-performance coding agent"
   homepage "{REPOSITORY_URL}"
   version "{version}"
@@ -262,14 +262,14 @@ class Ygg < Formula
   end
 
   def install
-    root = Dir["ygg-*/"].find {{ |candidate| File.executable?(File.join(candidate, "ygg")) }}
-    odie "Ygg release archive has no executable ygg binary" unless root
-    bin.install File.join(root, "ygg")
-    bin.install File.join(root, "ygg-host")
+    root = Dir["octet-*/"].find {{ |candidate| File.executable?(File.join(candidate, "octet")) }}
+    odie "octet release archive has no executable octet binary" unless root
+    bin.install File.join(root, "octet")
+    bin.install File.join(root, "octet-host")
   end
 
   test do
-    assert_match "ygg #{{version}}", shell_output("#{{bin}}/ygg --version")
+    assert_match "octet #{{version}}", shell_output("#{{bin}}/octet --version")
   end
 end
 '''

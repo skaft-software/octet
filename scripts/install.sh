@@ -2,11 +2,11 @@
 set -eu
 
 repository="skaft-software/ygg"
-version="0.6.7"
+version="0.7.0"
 tag="v$version"
-release_source_commit="__YGG_RELEASE_SOURCE_COMMIT__"
+release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"
-checksum_asset="YGG_SHA256SUMS"
+checksum_asset="OCTET_SHA256SUMS"
 checksum_bundle_asset="$checksum_asset.sigstore.json"
 cosign_version="3.1.3"
 cosign_linux_amd64_sha256="4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
@@ -16,19 +16,19 @@ mode="binary"
 
 usage() {
     cat <<EOF
-Install Ygg $version.
+Install octet $version.
 
 Usage:
-  install-ygg.sh
-  install-ygg.sh --from-source
+  install-octet.sh
+  install-octet.sh --from-source
 
 The default installation downloads the binary matching this machine. Use
 --from-source to build the pinned release with Cargo instead.
 
 Environment:
-  YGG_INSTALL_DIR     Binary directory (default: \$HOME/.local/bin)
-  YGG_DATA_DIR        Packaged docs directory (default: sibling share/ygg)
-  YGG_NO_MODIFY_PATH  Set to 1 to leave shell profiles unchanged
+  OCTET_INSTALL_DIR     Binary directory (default: \$HOME/.local/bin)
+  OCTET_DATA_DIR        Packaged docs directory (default: sibling share/octet)
+  OCTET_NO_MODIFY_PATH  Set to 1 to leave shell profiles unchanged
 EOF
 }
 
@@ -51,15 +51,15 @@ if [ "$#" -eq 1 ]; then
     esac
 fi
 
-if [ -z "${HOME:-}" ] && [ -z "${YGG_INSTALL_DIR:-}" ]; then
-    printf 'HOME is not set; provide an absolute YGG_INSTALL_DIR\n' >&2
+if [ -z "${HOME:-}" ] && [ -z "${OCTET_INSTALL_DIR:-}" ]; then
+    printf 'HOME is not set; provide an absolute OCTET_INSTALL_DIR\n' >&2
     exit 1
 fi
-install_directory=${YGG_INSTALL_DIR:-"$HOME/.local/bin"}
+install_directory=${OCTET_INSTALL_DIR:-"$HOME/.local/bin"}
 case "$install_directory" in
     /*) ;;
     *)
-        printf 'YGG_INSTALL_DIR must be an absolute path: %s\n' "$install_directory" >&2
+        printf 'OCTET_INSTALL_DIR must be an absolute path: %s\n' "$install_directory" >&2
         exit 1
         ;;
 esac
@@ -67,16 +67,16 @@ install_prefix=${install_directory%/*}
 if [ -z "$install_prefix" ]; then
     install_prefix=/
 fi
-data_directory=${YGG_DATA_DIR:-"$install_prefix/share/ygg"}
+data_directory=${OCTET_DATA_DIR:-"$install_prefix/share/octet"}
 case "$data_directory" in
     /*) ;;
     *)
-        printf 'YGG_DATA_DIR must be an absolute path: %s\n' "$data_directory" >&2
+        printf 'OCTET_DATA_DIR must be an absolute path: %s\n' "$data_directory" >&2
         exit 1
         ;;
 esac
 
-work_directory=$(mktemp -d "${TMPDIR:-/tmp}/ygg-install.XXXXXX")
+work_directory=$(mktemp -d "${TMPDIR:-/tmp}/octet-install.XXXXXX")
 chmod 0700 "$work_directory"
 install_temporary=
 assets_temporary=
@@ -130,7 +130,7 @@ download_release_file() {
         --output "$destination" \
         --write-out '%{url_effective}' \
         "$url"); then
-        printf 'could not download Ygg release asset\n' >&2
+        printf 'could not download octet release asset\n' >&2
         return 1
     fi
 
@@ -182,7 +182,7 @@ validate_release_source_commit() {
     case "$release_source_commit" in
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
         *)
-            printf 'installer is not bound to an immutable Ygg release commit\n' >&2
+            printf 'installer is not bound to an immutable octet release commit\n' >&2
             return 1
             ;;
     esac
@@ -236,7 +236,7 @@ verified_archive_sha256() {
     install_pinned_cosign
 
     identity_version=$(printf '%s' "$version" | sed 's/\./\\./g')
-    identity="^https://github\\.com/skaft-software/ygg/\\.github/workflows/release-ygg\\.yml@refs/tags/(v${identity_version}|ygg-binaries-v${identity_version})$"
+    identity="^https://github\\.com/skaft-software/ygg/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
     python3 - \
         "$checksums" \
         "$bundle" \
@@ -254,10 +254,10 @@ import sys
 manifest_path, bundle_path, cosign_path = sys.argv[1:4]
 identity, repository, source_commit, archive_name = sys.argv[4:8]
 expected_names = {
-    "install-ygg.sh",
-    "ygg-0.6.7-aarch64-apple-darwin.tar.gz",
-    "ygg-0.6.7-x86_64-apple-darwin.tar.gz",
-    "ygg-0.6.7-x86_64-unknown-linux-gnu.tar.gz",
+    "install-octet.sh",
+    "octet-0.7.0-aarch64-apple-darwin.tar.gz",
+    "octet-0.7.0-x86_64-apple-darwin.tar.gz",
+    "octet-0.7.0-x86_64-unknown-linux-gnu.tar.gz",
 }
 line_pattern = re.compile(r"^([0-9A-Fa-f]{64})  (?:\./)?([A-Za-z0-9_.-]+)$")
 
@@ -297,7 +297,7 @@ try:
         "--bundle", bundle_reference,
         "--certificate-identity-regexp", identity,
         "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
-        "--certificate-github-workflow-name", "Ygg binary release",
+        "--certificate-github-workflow-name", "octet binary release",
         "--certificate-github-workflow-repository", repository,
         "--certificate-github-workflow-sha", source_commit,
         manifest_reference,
@@ -433,7 +433,7 @@ def validate_layout(parts, member, kind):
     if kind == "source":
         return
     top = parts[1]
-    if top in {"LICENSE", "README.md", "ygg", "ygg-host"}:
+    if top in {"LICENSE", "README.md", "octet", "octet-host"}:
         if len(parts) != 2 or not member.isfile():
             fail("release archive has an unexpected layout")
     elif top in {"docs", "examples", "sdk"}:
@@ -541,8 +541,8 @@ def run():
             if kind == "release":
                 required.update({
                     f"{expected_root}/LICENSE": "file",
-                    f"{expected_root}/ygg": "file",
-                    f"{expected_root}/ygg-host": "file",
+                    f"{expected_root}/octet": "file",
+                    f"{expected_root}/octet-host": "file",
                 })
 
             with tarfile.open(fileobj=tar_bytes, mode="r|", bufsize=512) as packaged:
@@ -585,7 +585,7 @@ def run():
                         path_types[logical] = "directory"
                     else:
                         mode = 0o755 if kind == "release" and logical in {
-                            f"{expected_root}/ygg", f"{expected_root}/ygg-host"
+                            f"{expected_root}/octet", f"{expected_root}/octet-host"
                         } else 0o644
                         extract_member(packaged, member, destination, mode)
                         path_types[logical] = "file"
@@ -619,20 +619,20 @@ PY
 validate_release_binaries() {
     source_root=$1
     expected_version=$2
-    source_binary="$source_root/ygg"
-    source_host="$source_root/ygg-host"
+    source_binary="$source_root/octet"
+    source_host="$source_root/octet-host"
 
     for executable in "$source_binary" "$source_host"; do
         if [ ! -f "$executable" ] || [ -L "$executable" ]; then
-            printf 'Ygg release executable is not a regular file: %s\n' "$executable" >&2
+            printf 'octet release executable is not a regular file: %s\n' "$executable" >&2
             return 1
         fi
         chmod 0755 "$executable"
     done
 
     binary_version=$("$source_binary" --version)
-    if [ "$binary_version" != "ygg $expected_version" ]; then
-        printf 'Ygg binary version mismatch: %s\n' "$binary_version" >&2
+    if [ "$binary_version" != "octet $expected_version" ]; then
+        printf 'octet binary version mismatch: %s\n' "$binary_version" >&2
         return 1
     fi
 
@@ -644,7 +644,7 @@ validate_release_binaries() {
         || ! grep -F '"request_id":"installer-probe"' "$host_probe" >/dev/null 2>&1 \
         || ! grep -F '"type":"hello"' "$host_probe" >/dev/null 2>&1 \
         || ! grep -F "\"sdk_version\":\"$expected_version\"" "$host_probe" >/dev/null 2>&1; then
-        printf 'ygg-host did not return a valid protocol handshake\n' >&2
+        printf 'octet-host did not return a valid protocol handshake\n' >&2
         return 1
     fi
 }
@@ -660,7 +660,7 @@ install_executable() {
     destination="$install_directory/$name"
     if [ -L "$destination" ] \
         || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
-        printf 'Ygg destination is linked or not a regular file: %s\n' "$destination" >&2
+        printf 'octet destination is linked or not a regular file: %s\n' "$destination" >&2
         return 1
     fi
 
@@ -675,8 +675,8 @@ install_release_binaries() {
     source_root=$1
     expected_version=$2
     validate_release_binaries "$source_root" "$expected_version"
-    install_executable "$source_root/ygg" ygg
-    install_executable "$source_root/ygg-host" ygg-host
+    install_executable "$source_root/octet" octet
+    install_executable "$source_root/octet-host" octet-host
 }
 
 install_assets() {
@@ -685,7 +685,7 @@ install_assets() {
         || [ ! -d "$source_root/docs" ] || [ -L "$source_root/docs" ] \
         || [ ! -d "$source_root/examples" ] || [ -L "$source_root/examples" ] \
         || [ ! -d "$source_root/sdk" ] || [ -L "$source_root/sdk" ]; then
-        printf 'Ygg documentation assets are missing from the release package\n' >&2
+        printf 'octet documentation assets are missing from the release package\n' >&2
         return 1
     fi
 
@@ -694,22 +694,22 @@ install_assets() {
         data_parent=/
     fi
     mkdir -p "$data_parent"
-    assets_temporary=$(mktemp -d "$data_parent/.ygg-docs.XXXXXX")
+    assets_temporary=$(mktemp -d "$data_parent/.octet-docs.XXXXXX")
     cp "$source_root/README.md" "$assets_temporary/README.md"
     cp -R "$source_root/docs" "$assets_temporary/docs"
     cp -R "$source_root/examples" "$assets_temporary/examples"
     cp -R "$source_root/sdk" "$assets_temporary/sdk"
-    printf '%s\n' "$version" > "$assets_temporary/.ygg-version"
+    printf '%s\n' "$version" > "$assets_temporary/.octet-version"
 
     if { [ -e "$data_directory" ] || [ -L "$data_directory" ]; } \
         && [ ! -d "$data_directory" ]; then
-        printf 'Ygg documentation path is not a directory: %s\n' "$data_directory" >&2
+        printf 'octet documentation path is not a directory: %s\n' "$data_directory" >&2
         return 1
     fi
     previous_directory="$data_directory.previous.$$"
     if [ -e "$data_directory" ] || [ -L "$data_directory" ]; then
         if ! mv "$data_directory" "$previous_directory"; then
-            printf 'could not stage the existing Ygg documentation directory\n' >&2
+            printf 'could not stage the existing octet documentation directory\n' >&2
             return 1
         fi
     fi
@@ -717,7 +717,7 @@ install_assets() {
         if [ -e "$previous_directory" ]; then
             mv "$previous_directory" "$data_directory" || true
         fi
-        printf 'could not install Ygg documentation assets\n' >&2
+        printf 'could not install octet documentation assets\n' >&2
         return 1
     fi
     assets_temporary=
@@ -777,20 +777,20 @@ if [ "$mode" = "source" ]; then
         fi
     done
     validate_release_source_commit
-    printf 'Building Ygg %s from immutable source %s\n' "$tag" "$release_source_commit"
+    printf 'Building octet %s from immutable source %s\n' "$tag" "$release_source_commit"
     source_root="$work_directory/source-root"
     cargo install \
         --locked \
         --git "https://github.com/$repository" \
         --rev "$release_source_commit" \
-        --bin ygg \
-        --bin ygg-host \
+        --bin octet \
+        --bin octet-host \
         --root "$source_root" \
-        ygg-coding-agent
+        octet-coding-agent
 
-    source_archive="$work_directory/ygg-source.tar.gz"
+    source_archive="$work_directory/octet-source.tar.gz"
     source_extraction="$work_directory/source-extraction"
-    source_package="ygg-$release_source_commit"
+    source_package="${repository##*/}-$release_source_commit"
     download_release_file \
         "https://github.com/$repository/archive/$release_source_commit.tar.gz" \
         "$source_archive"
@@ -813,11 +813,11 @@ else
     done
 
     target=$(resolve_target)
-    archive_name="ygg-$version-$target.tar.gz"
+    archive_name="octet-$version-$target.tar.gz"
     archive="$work_directory/$archive_name"
     checksums="$work_directory/$checksum_asset"
     checksum_bundle="$work_directory/$checksum_bundle_asset"
-    printf 'Downloading Ygg %s for %s\n' "$version" "$target"
+    printf 'Downloading octet %s for %s\n' "$version" "$target"
     download_release_file "$release_base/$checksum_asset" "$checksums"
     bounded_file "$checksums" 1048576
     download_release_file "$release_base/$checksum_bundle_asset" "$checksum_bundle"
@@ -831,7 +831,7 @@ else
 
     download_release_file "$release_base/$archive_name" "$archive"
     bounded_file "$archive" 134217728
-    package="ygg-$version-$target"
+    package="octet-$version-$target"
     extraction="$work_directory/extracted"
     mkdir -m 0700 "$extraction"
     extract_validated_archive \
@@ -848,7 +848,7 @@ path_present=false
 case ":${PATH:-}:" in
     *":$install_directory:"*) path_present=true ;;
 esac
-if [ "$path_present" = false ] && [ "${YGG_NO_MODIFY_PATH:-0}" != "1" ]; then
+if [ "$path_present" = false ] && [ "${OCTET_NO_MODIFY_PATH:-0}" != "1" ]; then
     profile=
     path_line=
     if [ "$install_directory" = "${HOME:-}/.local/bin" ]; then
@@ -865,20 +865,20 @@ if [ "$path_present" = false ] && [ "${YGG_NO_MODIFY_PATH:-0}" != "1" ]; then
             */sh|*/dash|*/ksh) profile="$HOME/.profile" ;;
         esac
     fi
-    marker="# Added by the Ygg installer"
+    marker="# Added by the octet installer"
     if [ -n "$profile" ] && ! grep -F "$marker" "$profile" >/dev/null 2>&1; then
         printf '\n%s\n%s\n' "$marker" "$path_line" >> "$profile"
         printf 'Added %s to PATH in %s\n' "$install_directory" "$profile"
     fi
 fi
 
-"$install_directory/ygg" --version
+"$install_directory/octet" --version
 if ! command -v rg >/dev/null 2>&1; then
     printf '%s\n' \
-        "Note: Ygg also requires ripgrep (rg)." \
+        "Note: octet also requires ripgrep (rg)." \
         "Install it with 'brew install ripgrep' on macOS or your Linux package manager."
 fi
 if [ "$path_present" = false ]; then
     printf 'Restart your shell, or run:\n  export PATH="%s:$PATH"\n' "$install_directory"
 fi
-printf '%s\n' "Ygg is installed. Run 'ygg --help' to get started."
+printf '%s\n' "octet is installed. Run 'octet --help' to get started."

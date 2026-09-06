@@ -1,17 +1,36 @@
 # Changelog
 
-All notable changes to Ygg are documented here. This project follows Semantic Versioning while pre-1.0 APIs may evolve rapidly.
+## [Unreleased]
 
-## 0.6.7 — 2026-09-02
+### Added
+
+- Added repository documentation, usage examples, and the octet Brand Kit.
+
+### Changed
+
+- Adopted the octet product name, `octet` and `octet-host` binaries,
+  `octet-*` packages, `OCTET_*` settings, and `.octet` directories.
 
 ### Fixed
 
+- Fixed provider-start retry handling, typed-media validation, and local
+  compaction replay.
+- Fixed narrow terminal layouts and duplicate startup rendering.
+
+## [0.6.7] - 2026-09-02
+
+### Fixed
+
+- Keep remote Streamable HTTP MCP unavailable by default: only the one-shot
+  process-owner CLI opt-in `--experimental-streamable-http-mcp` can pass the
+  gate to the first-party bridge. Project/global/session configuration,
+  environment, and manifests cannot activate it; stdio MCP is unaffected.
 - Fully neutralize Git clean/process filters from repository, worktree, and
   included configuration during Serve status refresh. Filter names that cannot
   be represented safely, including invalid UTF-8 and delimiter-bearing names,
   now fail closed before Git status can execute them.
 
-## 0.6.6 — 2026-09-02
+## [0.6.6] - 2026-09-02
 
 ### Added
 
@@ -51,7 +70,7 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
 - Reconcile inline terminal scrollback after long transcript shrinkage without
   corrupting retained rows.
 
-## 0.6.5 — 2026-08-30
+## [0.6.5] - 2026-08-30
 
 ### Added
 
@@ -68,8 +87,6 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
   breakdown, including adaptive capacity grids for large model windows.
 - Raise the default model-visible tool-result cap from 16 KiB to 50 KiB while
   retaining bounded output capture and policy enforcement.
-
-### Performance
 
 - Keep the Responses Lite wire contract serial while host admission overlaps
   explicitly parallel-safe pure/workspace-read calls; arbitrary shell and
@@ -92,7 +109,7 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
 - Use the active model's adaptive accent consistently for slash completion,
   model selection, session resume, and other picker focus controls.
 
-## 0.6.4 — 2026-08-30
+## [0.6.4] - 2026-08-30
 
 ### Added
 
@@ -120,8 +137,6 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
   including after public assistant text, and distinguish normal completion,
   completion with warnings, interruption, and failure after animation stops.
 
-### Performance
-
 - Advance context-capacity estimates incrementally across appended session
   messages and re-anchor them to authoritative provider usage, avoiding repeated
   whole-history reconstruction during ordinary multi-turn and tool-heavy runs.
@@ -143,7 +158,7 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
 - Bound nested Pi extension-manifest traversal and fail closed on incomplete or
   replaced migration inputs.
 
-## 0.6.3 — 2026-08-28
+## [0.6.3] - 2026-08-28
 
 ### Added
 
@@ -197,7 +212,7 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
   perform TERM→KILL descendant cleanup before artifact conversion/finalization,
   and fail closed if process death cannot be verified.
 
-## 0.6.2 — 2026-08-27
+## [0.6.2] - 2026-08-27
 
 ### Fixed
 
@@ -219,7 +234,7 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
   first-party bundles and Ygg Serve refresh to the exact hotfix version during
   startup.
 
-## 0.6.1 — 2026-08-27
+## [0.6.1] - 2026-08-27
 
 ### Changed
 
@@ -249,7 +264,8 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
 - Added `ygg pi install`/`list` and the persistent `ygg-pi-compat` subprocess for
   explicitly trusted local Pi tools, commands, lifecycle, notification, input,
   and confirmation compatibility.
-## 0.6.0 — 2026-08-23
+
+## [0.6.0] - 2026-08-23
 
 ### Added
 
@@ -341,7 +357,7 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
 - Clear composer-adjacent subagent activity when hydrating a different session,
   so worker telemetry cannot persist across a session switch.
 
-## 0.5.0 — 2026-08-19
+## [0.5.0] - 2026-08-19
 
 ### Added
 
@@ -435,8 +451,6 @@ All notable changes to Ygg are documented here. This project follows Semantic Ve
   uses compact `Working` and `Compacting context` labels instead of animated
   shimmer.
 
-### Performance
-
 - Session discovery now keeps JSONL transcripts authoritative while caching
   bounded title projections in a disposable workspace SQLite catalog, and
   streams transcript replay and metadata scans so large sessions no longer need
@@ -481,7 +495,7 @@ but still-open child; a full application rebuild still recreates extension
 processes. The coding product does not yet configure an approval UI adapter or
 secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 
-## 0.4.0 — 2026-08-10
+## [0.4.0] - 2026-08-10
 
 ### Added
 
@@ -520,8 +534,6 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Enforced dependency review, high-severity npm audit, plus `cargo audit` and
   `cargo deny` for both lockfiles on pull-request and release paths.
 
-### Performance and reliability
-
 - Replaced broad Serve session inventory replays with bounded, targeted catalog
   scans and carried an authorized resume session into the worker by descriptor.
   On the isolated 891-transcript fixture, startup improved from 43.01 seconds to
@@ -544,7 +556,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   environment variables when `ygg serve` dispatches to the exact-version
   first-party package runtime.
 
-## 0.3.2-alpha — 2026-08-01 (experimental)
+## [0.3.2-alpha] - 2026-08-01
 
 ### Added
 
@@ -564,8 +576,6 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   terminal state, and independent display metadata for steering and follow-up
   inputs.
 
-### Ygg Serve (experimental, feature-gated)
-
 - Added the loopback-only Ygg Serve backend under `extensions/ygg-serve/`, with
   bounded host/session contracts, deterministic snapshots and replay,
   authenticated HTTP/WebSocket transport, session supervision, evidence and
@@ -583,8 +593,6 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   target-specific release packaging for GNU/Linux x86-64 and both supported
   macOS architectures.
 
-### Documentation
-
 - Added architecture, current-state, lifecycle safety, LAN pairing, native
   delivery, P0/P1 delivery, and web acceptance documentation for Ygg Serve.
 
@@ -599,6 +607,13 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   not the visual layout.
 - Reconciled the vendored renderer's `0.3.1` package metadata and provenance with
   the Ygg workspace while keeping its unsynchronized standalone baseline explicit.
+
+- Added PTY coverage proving only explicit `app` mode negotiates mouse ownership;
+  `auto`/`terminal`/`off` leave it to the terminal, and all four restore terminal
+  state.
+- Added regressions that grow one live Markdown block while scrolled above the
+  tail and reflow cached transcript rows across consecutive wide and narrow
+  renders.
 
 ### Fixed
 
@@ -616,30 +631,11 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   while sending the request or awaiting response headers; replay-safe connection
   failures remain visible, cancellable, and bounded.
 
-### Performance and reliability
-
-- Added PTY coverage proving only explicit `app` mode negotiates mouse ownership;
-  `auto`/`terminal`/`off` leave it to the terminal, and all four restore terminal
-  state.
-- Added regressions that grow one live Markdown block while scrolled above the
-  tail and reflow cached transcript rows across consecutive wide and narrow
-  renders.
-
-### Security
-
 - Enforced `#![forbid(unsafe_code)]` across the vendored `sexy-tui-rs` crate.
 
-## 0.3.1-alpha — 2026-07-26
+## [0.3.1-alpha] - 2026-07-26
 
-### Fixed
-
-- Prevented finalized streamed output from being duplicated, omitted, or
-  overwritten in native terminal scrollback when Markdown rows shrink, the
-  terminal is resized, or scrolling and resizing overlap with generation.
-- Preserved terminal-owned history across theme and disclosure repaints without
-  clearing scrollback or replaying the committed transcript.
-
-### Performance and reliability
+### Changed
 
 - Replaced width-dependent commit row bookkeeping with stable semantic cursors
   that remap after reflow, including list-item and table-row boundaries for
@@ -649,7 +645,15 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Added terminal-emulator regressions for streaming layout shrink, nonzero
   scrollback offsets, synchronized output, and width changes during generation.
 
-## 0.3.0-alpha — 2026-07-25
+### Fixed
+
+- Prevented finalized streamed output from being duplicated, omitted, or
+  overwritten in native terminal scrollback when Markdown rows shrink, the
+  terminal is resized, or scrolling and resizing overlap with generation.
+- Preserved terminal-owned history across theme and disclosure repaints without
+  clearing scrollback or replaying the committed transcript.
+
+## [0.3.0-alpha] - 2026-07-25
 
 ### Added
 
@@ -665,7 +669,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Refreshed the project identity, terminal demo, installation references, and
   release documentation for the `0.3.0-alpha` line.
 
-### Security and reliability
+### Fixed
 
 - Redacted request credentials and terminal controls from bounded provider and
   transport diagnostics before they can be persisted or printed.
@@ -676,7 +680,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Centralized terminal-safe human-facing command output and strengthened session
   export redaction without changing provider-visible conversation context.
 
-## 0.2.0-alpha — 2026-07-25
+## [0.2.0-alpha] - 2026-07-25
 
 ### Added
 
@@ -687,6 +691,9 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   with macOS 27 Apple Foundation Models: system and private cloud compute (PCC).
 - Added PDF attachment handling that resolves to a workspace path for file tools
   instead of pretending PDFs are supported as multimodal payloads.
+
+- Showcased sexy-tui-rs themes and added the ygg demo to the README.
+- Updated installation, security-support, and release references for this alpha.
 
 ### Changed
 
@@ -701,12 +708,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   stale footer after exiting the interactive TUI.
 - Fixed release-blocking image/audio ingestion and media capability handling.
 
-### Documentation
-
-- Showcased sexy-tui-rs themes and added the ygg demo to the README.
-- Updated installation, security-support, and release references for this alpha.
-
-## 0.1.1-alpha — 2026-07-24
+## [0.1.1-alpha] - 2026-07-24
 
 ### Added
 
@@ -750,8 +752,6 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
   expose diffs when relevant, and completed tool evidence stays collapsed unless
   explicitly expanded.
 
-### Compatibility and reliability
-
 - Existing sessions containing historical `exec` calls continue to render as
   Bash events; new provider schemas advertise only `bash`.
 - Command cancellation and timeouts retain process-group cleanup, bounded
@@ -762,7 +762,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Reduced development-profile codegen units to limit incremental artifact
   accumulation without disabling incremental compilation.
 
-## 0.1.0-alpha — 2026-07-22
+## [0.1.0-alpha] - 2026-07-22
 
 ### Added
 
@@ -773,8 +773,6 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Bounded `read`, `search`, `edit`, `write`, and `exec` tools plus skill discovery/activation tools.
 - Complete CLI tool allowlist/deny controls, offline startup, context-file disable switch, workspace trust gate, and `--version`.
 - Deterministic checked-in model metadata and Unix containment profile.
-
-### Security and reliability
 
 - Project configuration/resources are ignored unless the workspace is explicitly trusted; project settings cannot relax global authority floors.
 - Disabled tools are absent from provider schemas and execution dispatch.
@@ -787,7 +785,11 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Cancellation propagates through autonomous compaction and prevents post-cancel summary/usage commits.
 - TTY print output neutralizes terminal control sequences.
 
-### Performance and usability
+- Added root installation/security documentation, MIT and third-party notices, checked-in architecture docs, reproducible release gates, dependency policy, a fuzz target, and complete package metadata.
+- Release builds enable ThinLTO, one codegen unit, symbol stripping, and abort-on-panic to reduce startup work and binary/RSS footprint.
+- The alpha release target is macOS and Linux; command execution is explicitly Unix-only.
+
+### Changed
 
 - Session resume hydrates and paints only a bounded tail instead of cloning, parsing, and rendering the entire transcript; older history materializes on demand for PageUp/PageDown, wheel navigation, selection, and semantic copy.
 - Session discovery uses bounded lightweight metadata scans, and direct resume-by-id avoids parsing unrelated session bodies.
@@ -807,8 +809,19 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Every bundled theme retains its authored palette, while the compiled default follows the selected model lab and resets cleanly after theme switches.
 - Batched tool results retain independent bounded output allowances so a large early result cannot starve later calls in the same turn.
 
-### Release engineering
-
-- Added root installation/security documentation, MIT and third-party notices, checked-in architecture docs, reproducible release gates, dependency policy, a fuzz target, and complete package metadata.
-- Release builds enable ThinLTO, one codegen unit, symbol stripping, and abort-on-panic to reduce startup work and binary/RSS footprint.
-- The alpha release target is macOS and Linux; command execution is explicitly Unix-only.
+[0.6.7]: https://github.com/skaft-software/ygg/releases/tag/v0.6.7
+[0.6.6]: https://github.com/skaft-software/ygg/releases/tag/v0.6.6
+[0.6.5]: https://github.com/skaft-software/ygg/releases/tag/v0.6.5
+[0.6.4]: https://github.com/skaft-software/ygg/releases/tag/v0.6.4
+[0.6.3]: https://github.com/skaft-software/ygg/releases/tag/v0.6.3
+[0.6.2]: https://github.com/skaft-software/ygg/releases/tag/v0.6.2
+[0.6.1]: https://github.com/skaft-software/ygg/releases/tag/v0.6.1
+[0.6.0]: https://github.com/skaft-software/ygg/releases/tag/v0.6.0
+[0.5.0]: https://github.com/skaft-software/ygg/releases/tag/v0.5.0
+[0.4.0]: https://github.com/skaft-software/ygg/releases/tag/v0.4.0
+[0.3.2-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.3.2-alpha
+[0.3.1-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.3.1-alpha
+[0.3.0-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.3.0-alpha
+[0.2.0-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.2.0-alpha
+[0.1.1-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.1.1-alpha
+[0.1.0-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.1.0-alpha

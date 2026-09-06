@@ -1,1 +1,1 @@
-"""Evaluation adapters that are intentionally kept outside Ygg's runtime."""
+"""Evaluation adapters that are intentionally kept outside octet's runtime."""
