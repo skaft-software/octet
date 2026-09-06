@@ -4,10 +4,11 @@ octet is [MIT licensed](LICENSE). The projects below retain their own licenses.
 
 ## Design influences
 
-octet's design draws on **Pi** and the **Terminus 2 agent**. The project author
-states that no benchmark evaluation data was used to develop octet. Benchmark
-results are used only to compare octet's measured results with published
-leaderboard results after benchmarking.
+octet's design draws on **Pi** and the **Terminus 2 agent**. 
+Absolutely no benchmark evaluation data/traces was used, or should ever be used to develop octet. 
+
+Benchmark results are used only to evaluate octet's measured results against published
+leaderboard results after benchmarking+adjudication.
 
 ## Pi
 
