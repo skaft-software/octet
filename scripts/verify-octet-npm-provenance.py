@@ -17,10 +17,10 @@ from urllib.parse import unquote, urlsplit
 REPOSITORY_HOST = "registry.npmjs.org"
 SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1"
 PACKAGE_ARTIFACTS = {
-    "@skaft-software/octet": "octet-{version}.tgz",
-    "@skaft-software/octet-darwin-arm64": "octet-darwin-arm64-{version}.tgz",
-    "@skaft-software/octet-darwin-x64": "octet-darwin-x64-{version}.tgz",
-    "@skaft-software/octet-linux-x64-gnu": "octet-linux-x64-gnu-{version}.tgz",
+    "@skaft/octet": "octet-{version}.tgz",
+    "@skaft/octet-darwin-arm64": "octet-darwin-arm64-{version}.tgz",
+    "@skaft/octet-darwin-x64": "octet-darwin-x64-{version}.tgz",
+    "@skaft/octet-linux-x64-gnu": "octet-linux-x64-gnu-{version}.tgz",
 }
 
 

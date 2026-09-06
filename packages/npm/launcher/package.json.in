@@ -1,5 +1,5 @@
 {
-  "name": "@skaft-software/octet",
+  "name": "@skaft/octet",
   "version": "__VERSION__",
   "description": "Native octet coding agent launcher",
   "license": "MIT",
@@ -15,8 +15,8 @@
     "octet-host": "bin/octet-host"
   },
   "optionalDependencies": {
-    "@skaft-software/octet-darwin-arm64": "__VERSION__",
-    "@skaft-software/octet-darwin-x64": "__VERSION__",
-    "@skaft-software/octet-linux-x64-gnu": "__VERSION__"
+    "@skaft/octet-darwin-arm64": "__VERSION__",
+    "@skaft/octet-darwin-x64": "__VERSION__",
+    "@skaft/octet-linux-x64-gnu": "__VERSION__"
   }
 }

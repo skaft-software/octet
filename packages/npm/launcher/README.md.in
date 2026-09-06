@@ -1,6 +1,6 @@
 # octet npm launcher
 
-`@skaft-software/octet` is a small, shell-only launcher for the native octet
+`@skaft/octet` is a small, shell-only launcher for the native octet
 runtime. npm selects one exact-version platform package through
 `optionalDependencies`; the normal `octet` and `octet-host` paths immediately `exec`
 the selected native binary.
@@ -14,7 +14,7 @@ execute an install lifecycle hook. Install it with scripts, audit, and funding
 requests disabled:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/octet@VERSION
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@VERSION
 ```
 
 GNU/Linux uses the glibc x64 package. macOS uses the arm64 or x64 package that

@@ -42,7 +42,7 @@ The release workflows do not publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets; verify public installation after upload. |
-| npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft-software/octet*` packages, platform-first. Requires verified registry ownership and trusted publishers for all four packages; disabled by default. |
+| npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft/octet*` packages, platform-first. Requires verified registry ownership and trusted publishers for all four packages; disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication required; the public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Do not advertise registry installation. Publishing the CLI/dependency graph and verifying registry ownership is separate work. |
 | Homebrew | `homebrew-formula.yml` | Separate signed-asset handoff and protected tap pull request; not automatic with the binary release. |
@@ -54,7 +54,7 @@ version-pinned installation commands are:
 
 ```sh
 cargo install --locked --git https://github.com/skaft-software/ygg --tag v0.7.0 --bins octet-coding-agent
-npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/octet@0.7.0
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.0
 ```
 
 These are **future published-channel commands**, not evidence that either remote

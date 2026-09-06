@@ -7,9 +7,12 @@ source/release/OIDC repository remains `skaft-software/ygg`.
 
 The source contract defines four immutable packages:
 
-- `@skaft-software/octet`: a shell-only launcher.
-- `@skaft-software/octet-darwin-arm64`, `@skaft-software/octet-darwin-x64`, and
-  `@skaft-software/octet-linux-x64-gnu`: the native runtime and packaged docs.
+- `@skaft/octet`: a shell-only launcher.
+- `@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`, and
+  `@skaft/octet-linux-x64-gnu`: the native runtime and packaged docs.
+
+The npm scope is `@skaft`. This does not rename the GitHub source/release
+repository (`skaft-software/ygg`) or the Rust CLI crate (`octet-coding-agent`).
 
 All four versions must equal the canonical `vX.Y.Z` release tag's version. The
 launcher has no npm lifecycle hook. It resolves only the installed optional
@@ -94,7 +97,7 @@ recommendation. Use it only after publication is authorized and the exact
 package/version and provenance have been independently verified:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/octet@VERSION
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@VERSION
 ```
 
 `octet update` offers npm automatically only for a physically validated global

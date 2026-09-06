@@ -109,19 +109,19 @@ WINDOWS_DEVICES = {
 }
 TARGETS = {
     "aarch64-apple-darwin": (
-        "@skaft-software/octet-darwin-arm64",
+        "@skaft/octet-darwin-arm64",
         "darwin",
         "arm64",
         "octet-darwin-arm64-" + version + ".tgz",
     ),
     "x86_64-apple-darwin": (
-        "@skaft-software/octet-darwin-x64",
+        "@skaft/octet-darwin-x64",
         "darwin",
         "x64",
         "octet-darwin-x64-" + version + ".tgz",
     ),
     "x86_64-unknown-linux-gnu": (
-        "@skaft-software/octet-linux-x64-gnu",
+        "@skaft/octet-linux-x64-gnu",
         "linux",
         "x64",
         "octet-linux-x64-gnu-" + version + ".tgz",

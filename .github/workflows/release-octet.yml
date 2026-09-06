@@ -868,10 +868,10 @@ jobs:
         run: |
           set -euo pipefail
           for descriptor in \
-            '@skaft-software/octet|octet-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz'; do
+            '@skaft/octet|octet-'"$VERSION"'.tgz' \
+            '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
             if existing=$(npm view "$package@$VERSION" dist.integrity --json --registry "$NPM_REGISTRY" 2>/dev/null); then
@@ -893,10 +893,10 @@ jobs:
         run: |
           set -euo pipefail
           for descriptor in \
-            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
-            '@skaft-software/octet|octet-'"$VERSION"'.tgz'; do
+            '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft/octet|octet-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             if npm view "$package@$VERSION" version --registry "$NPM_REGISTRY" >/dev/null 2>&1; then
               echo "skipping already verified immutable package $package@$VERSION"
@@ -919,10 +919,10 @@ jobs:
         run: |
           set -euo pipefail
           for descriptor in \
-            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
-            '@skaft-software/octet|octet-'"$VERSION"'.tgz'; do
+            '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft/octet|octet-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
             registry_metadata="$RUNNER_TEMP/npm-registry.json"
@@ -1048,10 +1048,10 @@ jobs:
           (cd npm-assets && sha256sum --check OCTET_NPM_SHA256SUMS)
           python3 scripts/verify-octet-npm.py "$VERSION" npm-assets --json > "$RUNNER_TEMP/npm-verification.json"
           for descriptor in \
-            '@skaft-software/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
-            '@skaft-software/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
-            '@skaft-software/octet|octet-'"$VERSION"'.tgz'; do
+            '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
+            '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
+            '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft/octet|octet-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
             registry_metadata="$RUNNER_TEMP/npm-registry.json"
@@ -1132,7 +1132,7 @@ jobs:
             --ignore-scripts \
             --no-audit \
             --no-fund \
-            "@skaft-software/octet@$VERSION"
+            "@skaft/octet@$VERSION"
           PATH="$prefix/bin:$PATH"
           export PATH
           test "$(octet --version)" = "octet $VERSION"
@@ -1140,7 +1140,7 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"npm-published-smoke","command":"hello"}' \
             | octet-host \
             | grep -F '"type":"hello"' >/dev/null
-          npm uninstall --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund @skaft-software/octet
+          npm uninstall --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund @skaft/octet
           test ! -e "$prefix/bin/octet"
 
   publish-installer-repair:

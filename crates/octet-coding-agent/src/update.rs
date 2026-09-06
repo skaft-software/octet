@@ -212,11 +212,11 @@ impl UpdateAction {
     }
 }
 
-const NPM_LAUNCHER: &str = "@skaft-software/octet";
+const NPM_LAUNCHER: &str = "@skaft/octet";
 const NPM_PLATFORM_PACKAGES: [&str; 3] = [
-    "@skaft-software/octet-darwin-arm64",
-    "@skaft-software/octet-darwin-x64",
-    "@skaft-software/octet-linux-x64-gnu",
+    "@skaft/octet-darwin-arm64",
+    "@skaft/octet-darwin-x64",
+    "@skaft/octet-linux-x64-gnu",
 ];
 
 fn npm_command_args(version: &str) -> Vec<OsString> {
@@ -345,14 +345,14 @@ fn npm_global_root() -> Option<PathBuf> {
 fn expected_npm_platform() -> Option<(&'static str, &'static str, &'static str, &'static str)> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some((
-            "@skaft-software/octet-darwin-arm64",
+            "@skaft/octet-darwin-arm64",
             "aarch64-apple-darwin",
             "darwin",
             "arm64",
         ))
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         Some((
-            "@skaft-software/octet-darwin-x64",
+            "@skaft/octet-darwin-x64",
             "x86_64-apple-darwin",
             "darwin",
             "x64",
@@ -363,7 +363,7 @@ fn expected_npm_platform() -> Option<(&'static str, &'static str, &'static str, 
         target_env = "gnu"
     )) {
         Some((
-            "@skaft-software/octet-linux-x64-gnu",
+            "@skaft/octet-linux-x64-gnu",
             "x86_64-unknown-linux-gnu",
             "linux",
             "x64",
@@ -607,9 +607,7 @@ fn npm_layout(bin_dir: &Path) -> Option<NpmLayout> {
     let platform_root = bin_dir.parent()?.to_path_buf();
     let platform_name = platform_root.file_name()?.to_str()?;
     let scope_directory = platform_root.parent()?;
-    if scope_directory.file_name()?.to_str()? != "@skaft-software"
-        || !real_directory(scope_directory)
-    {
+    if scope_directory.file_name()?.to_str()? != "@skaft" || !real_directory(scope_directory) {
         return None;
     }
     let node_modules = scope_directory.parent()?;
@@ -639,13 +637,13 @@ fn npm_layout(bin_dir: &Path) -> Option<NpmLayout> {
         (
             launcher_root.clone(),
             launcher_root
-                .join("node_modules/@skaft-software")
+                .join("node_modules/@skaft")
                 .join(platform_name),
         )
     } else {
         (
-            node_modules.join("@skaft-software/octet"),
-            node_modules.join("@skaft-software").join(platform_name),
+            node_modules.join("@skaft/octet"),
+            node_modules.join("@skaft").join(platform_name),
         )
     };
     if !real_directory(&launcher_root) || !same_directory(&platform_root, &expected_platform) {
@@ -690,7 +688,7 @@ fn validated_npm_global_package(bin_dir: &Path, env: &InstallEnvironment) -> Opt
         return None;
     }
     let layout = npm_layout(bin_dir)?;
-    let global_public = npm_root.join("@skaft-software/octet");
+    let global_public = npm_root.join("@skaft/octet");
     if !real_directory(&global_public) || !same_directory(&layout.launcher_root, &global_public) {
         return None;
     }
@@ -1008,7 +1006,7 @@ mod tests {
         let npm_root = root.join("prefix/node_modules");
         let launcher_root = npm_root.join(NPM_LAUNCHER);
         let platform_root = launcher_root
-            .join("node_modules/@skaft-software")
+            .join("node_modules/@skaft")
             .join(platform_name);
         std::fs::create_dir_all(launcher_root.join("bin")).unwrap();
         std::fs::create_dir_all(launcher_root.join("lib")).unwrap();
@@ -1211,6 +1209,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_npm_layout_outside_skaft_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let (npm_root, platform_root, platform_name) = create_npm_fixture(root.path());
+        let other_scope = npm_root.join("@other");
+        std::fs::create_dir(&other_scope).unwrap();
+        let other_platform = other_scope.join(platform_name);
+        std::fs::rename(platform_root, &other_platform).unwrap();
+        let environment = InstallEnvironment {
+            npm_root: Some(npm_root),
+            ..InstallEnvironment::default()
+        };
+        assert_eq!(
+            detect_install_method_in(&other_platform.join("bin/octet"), &environment),
+            InstallMethod::Unknown
+        );
+    }
+
+    #[test]
     fn rejects_npm_layout_with_wrong_platform_metadata() {
         let root = tempfile::tempdir().unwrap();
         let (npm_root, platform_root, _) = create_npm_fixture(root.path());
@@ -1252,9 +1268,7 @@ mod tests {
         assert_eq!(
             UpdateAction::for_method(
                 &InstallMethod::Npm {
-                    package_root: PathBuf::from(
-                        "/npm/lib/node_modules/@skaft-software/octet-linux-x64-gnu"
-                    ),
+                    package_root: PathBuf::from("/npm/lib/node_modules/@skaft/octet-linux-x64-gnu"),
                 },
                 &version,
             ),
@@ -1325,7 +1339,7 @@ mod tests {
         };
         assert_eq!(
             npm.command_str(),
-            "npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/octet@0.5.0"
+            "npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.5.0"
         );
         let (program, args) = npm.command_args();
         assert_eq!(program, OsString::from("npm"));
@@ -1337,7 +1351,7 @@ mod tests {
                 OsString::from("--ignore-scripts"),
                 OsString::from("--no-audit"),
                 OsString::from("--no-fund"),
-                OsString::from("@skaft-software/octet@0.5.0"),
+                OsString::from("@skaft/octet@0.5.0"),
             ]
         );
     }
