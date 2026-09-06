@@ -546,6 +546,74 @@ class BridgeProtocolTests(unittest.TestCase):
                 )
                 self.assertFalse(marker.exists())
 
+    def test_pinned_loading_never_executes_workspace_or_global_extensions(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                workspace = root / "workspace"
+                agent_dir = root / "agent"
+                markers = []
+                for name, ambient in (
+                    ("workspace", workspace / ".pi" / "extensions"),
+                    ("global", agent_dir / "extensions"),
+                ):
+                    ambient.mkdir(parents=True)
+                    marker = root / f"{name}-executed"
+                    markers.append(marker)
+                    (ambient / "unselected.js").write_text(
+                        'import { writeFileSync } from "node:fs";\n'
+                        f'writeFileSync({json.dumps(str(marker))}, "unselected");\n'
+                        "export default function () {}\n",
+                        encoding="utf-8",
+                    )
+                with BridgeProcess(
+                    strict_identity=True,
+                    agent_dir=agent_dir,
+                    api_version=api_version,
+                ) as bridge:
+                    params = bridge.initialization_params()
+                    params["workspace"] = str(workspace)
+                    response = bridge.request("initialize", params)
+                    for marker in markers:
+                        self.assertFalse(marker.exists(), f"unselected source executed: {marker.name}")
+                    self.assertNotIn("error", response)
+                    bridge.initialized = True
+
+    def test_pinned_directory_entrypoints_ignore_unrelated_package_resources(self) -> None:
+        manifests = (
+            None,
+            {"type": "module"},
+            {"type": "module", "pi": {"prompts": ["./prompts"]}},
+            {"type": "module", "pi": {"extensions": ["./selected.js"]}},
+        )
+        manifest_cases = [(manifest, "") for manifest in manifests] + [(manifests[-1], "\ufeff")]
+        for api_version in ("0.2", "0.3"):
+            for manifest, prefix in manifest_cases:
+                with self.subTest(api_version=api_version, manifest=manifest, prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    source = root / "source"
+                    (source / "prompts").mkdir(parents=True)
+                    if manifest is not None:
+                        (source / "package.json").write_text(prefix + json.dumps(manifest), encoding="utf-8")
+                    for name in ("index.js", "selected.js"):
+                        (source / name).write_text(
+                            'import { writeFileSync } from "node:fs";\n'
+                            f'writeFileSync({json.dumps(str(root / name))}, "loaded");\n'
+                            "export default function () {}\n",
+                            encoding="utf-8",
+                        )
+                    with BridgeProcess(
+                        extension=source,
+                        strict_identity=True,
+                        api_version=api_version,
+                    ) as bridge:
+                        response = bridge.request("initialize", bridge.initialization_params())
+                        self.assertNotIn("error", response)
+                        bridge.initialized = True
+                    declared = manifest is not None and "extensions" in manifest.get("pi", {})
+                    self.assertEqual(not declared, (root / "index.js").exists())
+                    self.assertEqual(declared, (root / "selected.js").exists())
+
     def test_strict_aggregate_preserves_load_order_shared_globals_and_restart_state(self) -> None:
         sources = [FIXTURES / "aggregate" / "first.mjs", FIXTURES / "aggregate" / "second.mjs"]
         observed: list[dict] = []

@@ -3107,6 +3107,25 @@ function selectV03Contract(params) {
   };
 }
 
+function explicitExtensionLoadPath(source) {
+  if (!lstatSync(source).isDirectory()) return source;
+  const manifestPath = join(source, "package.json");
+  if (existsSync(manifestPath)) {
+    const manifest = JSON.parse(
+      readRegularUtf8Bounded(manifestPath, MAX_PI_PACKAGE_MANIFEST_BYTES).replace(/^\uFEFF/, ""),
+    );
+    if (manifest?.pi?.extensions?.length) return source;
+  }
+  // Preserve Pi's root index fallback. The resource loader otherwise treats a
+  // prompts/skills/themes directory as a package even when it has no extensions.
+  // Keep the original directory pinned; only narrow the path passed to loading.
+  for (const name of ["index.ts", "index.js"]) {
+    const entry = join(source, name);
+    if (existsSync(entry)) return entry;
+  }
+  return source;
+}
+
 async function loadBridge(params, v03Selection = undefined) {
   validateNodeRuntime();
   const linkManifest = args.strictIdentity ? canonicalManifestPath(args.linkManifest) : null;
@@ -3173,16 +3192,23 @@ async function loadBridge(params, v03Selection = undefined) {
   bridge.piRuntimeVersion = piRuntime.version;
   bridge.piRuntimeIntegrity = piRuntime.integrity;
   const pi = await import(pathToFileURL(join(piRuntime.root, "dist/index.js")).href);
-  if (typeof pi.discoverAndLoadExtensions !== "function") {
-    throw new Error("installed Pi runtime does not expose discoverAndLoadExtensions");
+  if (typeof pi.DefaultResourceLoader !== "function" || typeof pi.SettingsManager?.inMemory !== "function") {
+    throw new Error("installed Pi runtime does not expose the bounded public resource loader");
   }
   const eventBus = pi.createEventBus();
-  const loaded = await pi.discoverAndLoadExtensions(
-    bridge.extensionPaths,
-    bridge.cwd,
-    bridge.agentDir,
+  // Discovery imports workspace/global extensions before returning its result,
+  // so checking the aggregate count afterward cannot protect the source pins.
+  // Use Pi's public explicit-path loader with no ambient settings/packages.
+  const loader = new pi.DefaultResourceLoader({
+    cwd: bridge.cwd,
+    agentDir: bridge.agentDir,
+    settingsManager: pi.SettingsManager.inMemory(),
     eventBus,
-  );
+    additionalExtensionPaths: bridge.extensionPaths.map(explicitExtensionLoadPath),
+    noExtensions: true,
+  });
+  // This extension-only stage does not load context, skills, prompts or themes.
+  const loaded = await loader.loadProjectTrustExtensions();
   verifySourceFingerprints();
   if (args.strictIdentity && piRuntimeIntegrity(piRuntime.root) !== args.piRuntimeIntegrity) {
     throw new Error("Pinned Pi runtime integrity changed during startup; review the package and publish a replacement link");
