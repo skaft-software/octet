@@ -85,7 +85,7 @@ Select `api_version = "0.3"` exactly; an extension's own `version` does not sele
 the wire. octet 0.7.0 source uses `octet_version`, `requires_octet`, `OCTET_*`, and
 `octet_extension`, with no aliases for earlier first-party wire names or imports.
 The first-party source distribution version is `0.7.0`, independent of API
-`0.3`; octet 0.7.0 is unpublished.
+`0.3`.
 
 Declare the entrypoint and tools for the implementation you actually supply.
 Return the complete tool catalog and a valid selected contract from
@@ -100,7 +100,7 @@ present, and mandatory as an exact running-version requirement for an installed
 bundle. Installation never enables, trusts, starts, or runs setup code. See
 [bundle validation and commands](extensions/legacy-authoring.md#installable-extension-bundles).
 Published-catalog examples remain publication-gated; use a reviewed source or
-local archive for unpublished octet 0.7.0.
+local archive when matching publication has not been verified.
 
 ### API `0.3` CLI flags
 

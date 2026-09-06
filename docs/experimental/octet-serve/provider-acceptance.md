@@ -2,10 +2,10 @@
 
 Maintainer reference for provider routes and acceptance procedures in the
 supplied source snapshot. For usage, see the [Serve guide](README.md).
-**octet 0.7.0 is unpublished and not qualified.** Optional live-provider checks
-have not been run. Graphical media, recovery, and capture work remains separately
-tracked. Provider/reasoning work outside this snapshot must be reconciled with
-the final source before integration.
+Optional live-provider checks have **not been run** for octet 0.7.0. Graphical
+media, recovery, and capture work remains separately tracked. Provider/reasoning
+work outside this snapshot must be reconciled with the final source before
+integration.
 
 The retained [v0.4.0 record](#release-record) is historical Ygg evidence, not a
 pass or waiver of [octet 0.7.0 release gates](../../releases/v0.7.0.md).

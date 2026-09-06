@@ -2,8 +2,8 @@
 
 [Documentation](README.md) · [Getting started](getting-started.md) · [Security](../SECURITY.md)
 
-The former combined reference is now a topic index. **octet 0.7.0 is unpublished**;
-these source documents are not release, channel, or live-provider qualification.
+The former combined reference is now a topic index. These source documents
+are not release, channel, or live-provider qualification.
 Existing fragment links below lead to the canonical guide or retained reference,
 not a second user manual.
 

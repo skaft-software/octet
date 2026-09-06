@@ -1,11 +1,11 @@
 # Distribution channels
 
-**octet 0.7.0 is unpublished and not release-qualified.** Use the
-[local checkout build](../README.md#install). No octet npm, Homebrew, crates.io,
-or native download channel is verified as published here. This page describes
-release tooling, not available installation channels. Source/release URLs and
-OIDC checks remain bound to `skaft-software/ygg` until a separately authorized,
-verified cutover.
+octet 0.7.0 uses signed native assets on the
+[version-pinned GitHub release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0).
+See [installation](installation.md) for the installer and a source-build fallback
+while assets are being prepared. npm is not published yet; Homebrew, crates.io
+and SDK registry publication are separate. Source/release URLs and OIDC checks
+remain bound to `skaft-software/ygg`; website deployment does not rename them.
 
 ## Package identities
 
@@ -49,17 +49,21 @@ The release workflows do not publish every source package automatically:
 | Serve | `release-serve.yml` | Separate exact-version application package and installation checks. |
 | Python/TypeScript SDK registries | Not provided by the CLI release workflow | Source SDKs/generated bindings are not automatically published to PyPI or npm by the four-package CLI job. |
 
-After the exact tag and npm packages have been published and verified, the
-version-pinned installation commands are:
+Cargo installation builds the exact canonical tag (Rust 1.86+ and ripgrep):
 
 ```sh
 cargo install --locked --git https://github.com/skaft-software/ygg --tag v0.7.0 --bins octet-coding-agent
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.0
 ```
 
-These are **future published-channel commands**, not evidence that either remote
-channel is available now. `cargo install octet` and registry-based
-`cargo install octet-coding-agent` are not this release's supported Cargo path.
+The tag must exist before using this command. `cargo install octet` and
+registry-based `cargo install octet-coding-agent` are not the supported Cargo path.
+
+The npm channel remains unpublished pending functional first-package bootstrap,
+trusted publishers and registry provenance verification. Its future command is:
+
+```sh
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.0
+```
 
 ## Homebrew
 
@@ -121,5 +125,5 @@ hosted-acceptance or publication claims. See the
 publication and provenance checks. Bun is unqualified.
 
 Cargo can build/install the local checkout without a registry channel. Public
-canonical-tag installation remains gated on separately authorized release
-publication.
+canonical-tag installation requires the version-pinned GitHub tag, not a
+crates.io package.

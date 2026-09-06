@@ -9,7 +9,7 @@ octet migrate pi --dry-run
 This scanner reads local files without running package code, starting a model,
 or changing either setup. It always runs dry, even without `--dry-run`; it is
 not an apply command or a compatibility promise. The commands here describe the
-unpublished octet `0.7.0` source build, not a public installation channel.
+octet `0.7.0` source build, not a public installation channel.
 
 ## Current command
 

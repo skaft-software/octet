@@ -15,9 +15,9 @@ Current work tracking is on the [Project](https://github.com/orgs/skaft-software
 ## Bottom line
 
 The snapshot describes a real-session local web prototype, not a finished coding
-workbench. octet 0.7.0 is unpublished. Live-provider, media, recovery, and capture
-qualification remain deferred, and no signed octet 0.7.0 Serve artifact is
-asserted here. LAN pairing and native applications are specification-only.
+workbench. Live-provider, media, recovery, and capture qualification remain
+deferred, and no signed octet 0.7.0 Serve artifact is asserted here.
+LAN pairing and native applications are specification-only.
 
 ## Current status at a glance
 
