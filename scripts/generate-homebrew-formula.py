@@ -19,7 +19,9 @@ import stat
 import sys
 from typing import Any, Iterable, Mapping, Sequence
 
-REPOSITORY = "skaft-software/ygg"
+from octet_release_identity import CANONICAL_REPOSITORY, release_repository
+
+REPOSITORY = CANONICAL_REPOSITORY
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}"
 SCHEMA = "octet.release.metadata.v1"
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -137,7 +139,10 @@ def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], 
     }
     if set(value) != expected_top_level:
         fail("release metadata has unexpected or missing top-level fields")
-    if value.get("schema") != SCHEMA or value.get("repository") != REPOSITORY:
+    identity_repository = release_repository(
+        value.get("version"), value.get("source_commit"), value.get("workflow_commit")
+    )
+    if value.get("schema") != SCHEMA or value.get("repository") != identity_repository:
         fail("release metadata is not for the canonical octet repository")
 
     version = require_string(value, "version", "version")
@@ -150,7 +155,7 @@ def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], 
             fail(f"release metadata {label} is malformed")
     workflow_ref = require_string(value, "workflow_ref", "workflow ref")
     expected_workflow_ref = (
-        f"{REPOSITORY}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v{version}"
+        f"{identity_repository}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v{version}"
     )
     if workflow_ref != expected_workflow_ref:
         fail("release metadata workflow ref is not the immutable binary release tag")
@@ -181,7 +186,7 @@ def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], 
             fail(f"release metadata asset fields are malformed: {name}")
         if target is not None and asset.get("target") != target:
             fail(f"release metadata asset target is malformed: {name}")
-        if asset.get("url") != f"{REPOSITORY_URL}/releases/download/{tag}/{name}":
+        if asset.get("url") != f"https://github.com/{identity_repository}/releases/download/{tag}/{name}":
             fail(f"release metadata asset URL is not immutable: {name}")
         parsed[name] = require_digest(asset.get("sha256"), f"asset {name}")
     if set(parsed) != set(expected):

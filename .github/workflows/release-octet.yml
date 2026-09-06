@@ -848,7 +848,7 @@ jobs:
           manifest = json.load(open(path, encoding="utf-8"))
           expected = {
               "schema": "octet.npm.release.v1",
-              "repository": "skaft-software/ygg",
+              "repository": "skaft-software/octet",
               "tag": tag,
               "version": version,
               "source_commit": source_commit,

@@ -18,7 +18,7 @@ import stat
 import sys
 from typing import Any, Mapping, Sequence
 
-REPOSITORY = "skaft-software/ygg"
+from octet_release_identity import release_repository
 TARGETS = (
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -93,7 +93,7 @@ def validate_identity(
     for label, value in (("source", source_commit), ("workflow", workflow_commit)):
         if COMMIT_PATTERN.fullmatch(value) is None:
             fail(f"{label} commit is malformed")
-    if repository != REPOSITORY:
+    if repository != release_repository(version, source_commit, workflow_commit):
         fail(f"repository is not the canonical octet repository: {repository}")
     expected_workflow_ref = (
         f"{repository}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-{tag}"

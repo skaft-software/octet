@@ -11,7 +11,7 @@
 //! [`auth`], [`error`], [`pricing`], and the model [`catalog`]. Everything under
 //! `protocol` is private: canonical types never mirror provider JSON.
 //!
-//! See the [AI design](https://github.com/skaft-software/ygg/blob/main/docs/design/octet-ai.md)
+//! See the [AI design](https://github.com/skaft-software/octet/blob/main/docs/design/octet-ai.md)
 //! for the normative design.
 //!
 //! # Example

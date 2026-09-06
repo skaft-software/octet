@@ -1,11 +1,14 @@
 # Distribution channels
 
 octet 0.7.0 uses signed native assets on the
-[version-pinned GitHub release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0).
+[version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.0).
 See [installation](installation.md) for the verified native installer or a
 source build. npm is not published yet; Homebrew, crates.io
-and SDK registry publication are separate. Source/release URLs and OIDC checks
-remain bound to `skaft-software/ygg`; website deployment does not rename them.
+and SDK registry publication are separate. The repository is now
+`skaft-software/octet`. The immutable v0.7.0 assets retain their original
+`skaft-software/ygg` signing identity; future releases use the new identity.
+Existing clone and release-asset URLs redirect to the same repository.
+Do not recreate the old name.
 
 ## Package identities
 
@@ -24,7 +27,7 @@ availability or change independent API and schema versions.
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
 | Product, SDK and first-party extension distribution versions | `0.7.0`; installed compatibility `requires_octet = "=0.7.0"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
-| Source/release/OIDC repository | `skaft-software/ygg`, unchanged |
+| Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
 Current extension authoring targets API 0.3. The four bundled executable-extension
@@ -52,7 +55,7 @@ The release workflows do not publish every source package automatically:
 Cargo installation builds the exact canonical tag (Rust 1.86+ and ripgrep):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/ygg --tag v0.7.0 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.0 --bins octet-coding-agent
 ```
 
 The public `v0.7.0` tag pins this source build. `cargo install octet` and

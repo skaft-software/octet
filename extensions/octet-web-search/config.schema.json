@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/skaft-software/ygg/extensions/octet-web-search/config.schema.json",
+  "$id": "https://github.com/skaft-software/octet/extensions/octet-web-search/config.schema.json",
   "title": "octet-web-search configuration",
   "type": "object",
   "additionalProperties": false,

@@ -79,8 +79,8 @@ python3 "$script_directory/generate-octet-release-metadata.py" \
     0.7.0 v0.7.0 \
     0123456789abcdef0123456789abcdef01234567 \
     abcdef0123456789abcdef0123456789abcdef01 \
-    skaft-software/ygg/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v0.7.0 \
-    skaft-software/ygg \
+    skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v0.7.0 \
+    skaft-software/octet \
     "$fixture_directory/assets/OCTET_SHA256SUMS" \
     "$work_directory/recomputed.json"
 cmp "$fixture_directory/OCTET_RELEASE_METADATA.json" "$work_directory/recomputed.json"

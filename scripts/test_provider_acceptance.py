@@ -569,7 +569,7 @@ source_commit="$SOURCE_SHA"
             environment = {
                 "PATH": os.defpath,
                 "HOME": str(root),
-                "GITHUB_REPOSITORY": "skaft-software/ygg",
+                "GITHUB_REPOSITORY": "skaft-software/octet",
                 "GITHUB_STEP_SUMMARY": str(summary),
                 "GH_CALLS": str(calls),
                 "SOURCE_SHA": self.source_sha,

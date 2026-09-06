@@ -117,8 +117,8 @@ python3 "$script_directory/generate-octet-release-metadata.py" \
     "v$version" \
     "0123456789abcdef0123456789abcdef01234567" \
     "abcdef0123456789abcdef0123456789abcdef01" \
-    "skaft-software/ygg/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v$version" \
-    "skaft-software/ygg" \
+    "skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v$version" \
+    "skaft-software/octet" \
     "$native_directory/OCTET_SHA256SUMS" \
     "$native_directory/OCTET_RELEASE_METADATA.json" >/dev/null
 python3 "$script_directory/create-octet-npm-manifest.py" \
@@ -154,12 +154,12 @@ payload = {
         "buildDefinition": {
             "externalParameters": {
                 "workflow": {
-                    "repository": "https://github.com/skaft-software/ygg",
+                    "repository": "https://github.com/skaft-software/octet",
                     "path": ".github/workflows/release-octet.yml",
                 }
             },
             "resolvedDependencies": [{
-                "uri": "git+https://github.com/skaft-software/ygg@refs/tags/octet-binaries-v" + version,
+                "uri": "git+https://github.com/skaft-software/octet@refs/tags/octet-binaries-v" + version,
                 "digest": {"gitCommit": workflow_commit},
             }],
         }
@@ -206,7 +206,7 @@ python3 "$script_directory/verify-octet-npm-provenance.py" \
     "@skaft/octet" \
     "$version" \
     "$expected_integrity" \
-    "https://github.com/skaft-software/ygg" \
+    "https://github.com/skaft-software/octet" \
     ".github/workflows/release-octet.yml" \
     "0123456789abcdef0123456789abcdef01234567" \
     "abcdef0123456789abcdef0123456789abcdef01" \
@@ -231,7 +231,7 @@ if python3 "$script_directory/verify-octet-npm-provenance.py" \
     "$output_directory/OCTET_NPM_MANIFEST.json" \
     "@skaft/octet" "$version" \
     "$expected_integrity" \
-    "https://github.com/skaft-software/ygg" \
+    "https://github.com/skaft-software/octet" \
     ".github/workflows/release-octet.yml" \
     "0123456789abcdef0123456789abcdef01234567" \
     "abcdef0123456789abcdef0123456789abcdef01" \
@@ -261,7 +261,7 @@ if python3 "$script_directory/verify-octet-npm-provenance.py" \
     "$output_directory/OCTET_NPM_MANIFEST.json" \
     "@skaft/octet" "$version" \
     "$expected_integrity" \
-    "https://github.com/skaft-software/ygg" \
+    "https://github.com/skaft-software/octet" \
     ".github/workflows/release-octet.yml" \
     "0123456789abcdef0123456789abcdef01234567" \
     "abcdef0123456789abcdef0123456789abcdef01" \

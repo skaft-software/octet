@@ -18,9 +18,10 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Context;
 
-const REPOSITORY: &str = "https://github.com/skaft-software/ygg";
-const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/skaft-software/ygg/releases/download";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/skaft-software/ygg/releases/latest";
+const REPOSITORY: &str = "https://github.com/skaft-software/octet";
+const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/skaft-software/octet/releases/download";
+const LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/skaft-software/octet/releases/latest";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RELEASE_RESPONSE_BYTES: usize = 64 * 1024;
 
@@ -105,7 +106,7 @@ async fn check_url(url: &str, current: &str) -> anyhow::Result<UpdateStatus> {
             latest,
             url: release.html_url.unwrap_or_else(|| {
                 format!(
-                    "https://github.com/skaft-software/ygg/releases/tag/{}",
+                    "https://github.com/skaft-software/octet/releases/tag/{}",
                     release.tag_name
                 )
             }),
@@ -989,12 +990,12 @@ mod tests {
             .join(",");
         let manifest = if let (Some(os), Some(cpu)) = (os, cpu) {
             format!(
-                r#"{{"name":"{name}","version":"{version}","description":"Native octet runtime for {target}","license":"MIT","repository":"https://github.com/skaft-software/ygg","os":["{os}"],"cpu":["{cpu}"],"files":["README.md","LICENSE","bin/","share/octet/"]}}"#,
+                r#"{{"name":"{name}","version":"{version}","description":"Native octet runtime for {target}","license":"MIT","repository":"https://github.com/skaft-software/octet","os":["{os}"],"cpu":["{cpu}"],"files":["README.md","LICENSE","bin/","share/octet/"]}}"#,
                 target = expected_npm_platform().unwrap().1,
             )
         } else {
             format!(
-                r#"{{"name":"{name}","version":"{version}","description":"Native octet coding agent launcher","license":"MIT","repository":"https://github.com/skaft-software/ygg","files":["README.md","LICENSE","bin/","lib/"],"bin":{{"octet":"bin/octet","octet-host":"bin/octet-host"}},"optionalDependencies":{{{optional}}}}}"#
+                r#"{{"name":"{name}","version":"{version}","description":"Native octet coding agent launcher","license":"MIT","repository":"https://github.com/skaft-software/octet","files":["README.md","LICENSE","bin/","lib/"],"bin":{{"octet":"bin/octet","octet-host":"bin/octet-host"}},"optionalDependencies":{{{optional}}}}}"#
             )
         };
         std::fs::write(root.join("package.json"), manifest).unwrap();
@@ -1299,7 +1300,7 @@ mod tests {
         };
         assert_eq!(
             installer.command_str(),
-            "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/skaft-software/ygg/releases/download/v0.5.0/install-octet.sh | sh"
+            "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/skaft-software/octet/releases/download/v0.5.0/install-octet.sh | sh"
         );
         let (program, args) = installer.command_args();
         assert_eq!(program, OsString::from("sh"));
@@ -1316,7 +1317,7 @@ mod tests {
         };
         assert_eq!(
             cargo.command_str(),
-            "cargo install --locked --git https://github.com/skaft-software/ygg --tag v0.5.0 --bins octet-coding-agent"
+            "cargo install --locked --git https://github.com/skaft-software/octet --tag v0.5.0 --bins octet-coding-agent"
         );
         let (program, args) = cargo.command_args();
         assert_eq!(program, OsString::from("cargo"));

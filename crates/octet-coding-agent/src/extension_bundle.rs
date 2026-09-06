@@ -18,7 +18,7 @@ use crate::extension_package::{
 
 pub(super) const BUNDLE_MANIFEST: &str = "extension.toml";
 pub(super) const INSTALL_RECORD: &str = "install.json";
-const RELEASE_REPOSITORY: &str = "https://github.com/skaft-software/ygg";
+const RELEASE_REPOSITORY: &str = "https://github.com/skaft-software/octet";
 const RELEASE_CATALOG: &str = include_str!("../../../extensions/release-catalog.txt");
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_INSTALL_RECORD_BYTES: u64 = 64 * 1024;

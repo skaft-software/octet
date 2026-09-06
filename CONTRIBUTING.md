@@ -11,7 +11,7 @@ supported version. Install Rust through [rustup](https://rustup.rs/) and install
 `rg` (ripgrep). Clone the actual repository if you need a checkout:
 
 ```sh
-git clone https://github.com/skaft-software/ygg.git octet
+git clone https://github.com/skaft-software/octet.git octet
 cd octet
 ```
 
@@ -41,7 +41,7 @@ artifacts are excluded from both Git and the Docker context.
 2. Check the [project](https://github.com/orgs/skaft-software/projects/5).
    Discuss substantial changes in an issue before writing a large patch; broad
    or unresolved ideas can start in
-   [Discussions](https://github.com/skaft-software/ygg/discussions).
+   [Discussions](https://github.com/skaft-software/octet/discussions).
 3. For security-sensitive findings, use the private reporting path in
    [SECURITY.md](SECURITY.md). Do not open a public issue first.
 4. Keep unrelated formatting, generated output, local notes, credentials, and

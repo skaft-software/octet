@@ -10,7 +10,7 @@ fake_bin="$work_directory/fake-bin"
 installer="$work_directory/install-octet.sh"
 version=0.7.0
 identity_version=${version//./\\.}
-expected_identity="^https://github\\.com/skaft-software/ygg/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
+expected_identity="^https://github\\.com/skaft-software/octet/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
 package="octet-$version-aarch64-apple-darwin"
 archive_name="$package.tar.gz"
 release_commit=0123456789abcdef0123456789abcdef01234567
@@ -67,7 +67,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --certificate-github-workflow-repository)
-            [ "$2" = skaft-software/ygg ] || exit 2
+            [ "$2" = skaft-software/octet ] || exit 2
             saw_repository=true
             shift 2
             ;;

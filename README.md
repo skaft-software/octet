@@ -18,7 +18,7 @@ and lets you add tools through subprocess extensions.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/ygg/releases/download/v0.7.0/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.7.0/install-octet.sh | sh
 ```
 
 octet 0.7.0 is released with signed native assets. See

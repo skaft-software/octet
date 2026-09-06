@@ -38,5 +38,5 @@ Included:
   unresolved mutating calls become durable indeterminate errors and are never
   silently repeated after an unclean crash.
 
-See the [agent design](https://github.com/skaft-software/ygg/blob/main/docs/design/octet-agent.md)
+See the [agent design](https://github.com/skaft-software/octet/blob/main/docs/design/octet-agent.md)
 and the crate-level Rust documentation for the public API.
