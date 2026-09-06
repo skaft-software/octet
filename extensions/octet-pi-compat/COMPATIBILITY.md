@@ -336,6 +336,18 @@ python3 extensions/octet-pi-compat/conformance.py --full --network-isolated \
 
 The full gate initializes all 78 unchanged sources through Pi’s public loader. It does not turn extension initialization into permission to use credentials or the network; Linux user/network namespace support is a prerequisite.
 
+The bridge uses Pi's public resource loader with only the explicitly pinned paths
+and in-memory settings. Workspace/global extension discovery and configured Pi
+packages are excluded before any extension is imported. Explicit directories
+retain Pi's `index.ts`/`index.js` fallback when no `pi.extensions` entries are
+declared, even if unrelated prompts, skills, or themes are present. The whole
+selected directory remains pinned. Post-load source and runtime integrity checks
+remain in place; they are not a substitute for that pre-load selection boundary.
+
+Prepare each example's locked dependencies separately before the isolated gate;
+the bridge and gate do not install missing dependencies. A load failure is not
+permission to rewrite an example or remove its aggregate-count check.
+
 ## Aggregate publication and API 0.3 evidence seam
 
 A Pi aggregate is published only from a canonical, inert plan. The plan and its

@@ -2,8 +2,8 @@
 // It implements only the public methods consumed by bridge.mjs. The aggregate
 // hooks deliberately model ordered source loading and one shared event bus.
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -204,7 +204,7 @@ function fixtureExtension(path, mode) {
   };
 }
 
-export async function discoverAndLoadExtensions(paths, _cwd, _agentDir, eventBus) {
+async function loadFixtureExtensions(paths, eventBus) {
   console.log("fixture loader wrote to console.log");
   process.stdout.write("fixture loader wrote directly to stdout\n");
   delete globalThis.__octetPiAggregateShared;
@@ -219,7 +219,8 @@ export async function discoverAndLoadExtensions(paths, _cwd, _agentDir, eventBus
   const errors = [];
   for (const path of paths) {
     try {
-      const entrypoint = existsSync(join(path, "index.mjs")) ? join(path, "index.mjs") : path;
+      const entrypoint = ["index.ts", "index.js", "index.mjs"]
+        .map((name) => join(path, name)).find((entry) => existsSync(entry)) ?? path;
       const module = await import(pathToFileURL(entrypoint).href);
       if (typeof module.installFakePiAggregate === "function") {
         await module.installFakePiAggregate({ eventBus, runtime });
@@ -230,6 +231,54 @@ export async function discoverAndLoadExtensions(paths, _cwd, _agentDir, eventBus
     }
   }
   return { extensions, runtime, errors };
+}
+
+// Model Pi's ambient discovery so tests catch executing an unselected source
+// before the bridge's post-load aggregate count check.
+export async function discoverAndLoadExtensions(paths, cwd, agentDir, eventBus) {
+  const discovered = [];
+  for (const directory of [join(cwd, ".pi", "extensions"), join(agentDir, "extensions")]) {
+    if (!existsSync(directory)) continue;
+    for (const name of readdirSync(directory)) {
+      if (name.endsWith(".js")) discovered.push(join(directory, name));
+    }
+  }
+  return loadFixtureExtensions([...discovered, ...paths], eventBus);
+}
+
+export class SettingsManager {
+  static inMemory() {
+    return { fixtureInMemory: true };
+  }
+}
+
+export class DefaultResourceLoader {
+  constructor(options) {
+    if (options.settingsManager?.fixtureInMemory !== true) {
+      throw new Error("fixture requires in-memory settings, not ambient package configuration");
+    }
+    this.options = options;
+  }
+
+  async loadProjectTrustExtensions() {
+    const { additionalExtensionPaths, cwd, agentDir, eventBus, noExtensions } = this.options;
+    // Pi's package manager considers even a prompts-only directory a package,
+    // suppressing its extension loader's root index fallback.
+    const paths = additionalExtensionPaths.flatMap((path) => {
+      if (!lstatSync(path).isDirectory()) return [path];
+      const manifestPath = join(path, "package.json");
+      const manifest = existsSync(manifestPath)
+        ? JSON.parse(readFileSync(manifestPath, "utf8").replace(/^\uFEFF/, "")) : null;
+      if (manifest?.pi) return (manifest.pi.extensions ?? []).map((entry) => resolve(path, entry));
+      if (["extensions", "skills", "prompts", "themes"].some((name) => existsSync(join(path, name)))) {
+        return [];
+      }
+      return [path];
+    });
+    return noExtensions
+      ? loadFixtureExtensions(paths, eventBus)
+      : discoverAndLoadExtensions(paths, cwd, agentDir, eventBus);
+  }
 }
 
 export class ExtensionRunner {

@@ -2,9 +2,10 @@
 
 Maintainer reference for provider routes and acceptance procedures in the
 supplied source snapshot. For usage, see the [Serve guide](README.md).
-**octet 0.7.0 is unpublished and not qualified.** Live-provider, media, recovery,
-and capture work remains deferred. Provider/reasoning work outside this snapshot
-must be reconciled with the final source before integration.
+**octet 0.7.0 is unpublished and not qualified.** Optional live-provider checks
+have not been run. Graphical media, recovery, and capture work remains separately
+tracked. Provider/reasoning work outside this snapshot must be reconciled with
+the final source before integration.
 
 The retained [v0.4.0 record](#release-record) is historical Ygg evidence, not a
 pass or waiver of [octet 0.7.0 release gates](../../releases/v0.7.0.md).
@@ -15,12 +16,14 @@ Serve uses the coding agent's provider stack rather than a web-specific client.
 The documented workflow separates:
 
 1. required deterministic, credential-free conformance testing on pull requests;
-2. separately approved credentialed checks against representative live providers.
+2. optional, separately approved credentialed checks against live providers.
 
 Pull-request CI must not inherit developer or repository provider credentials.
 Credentialed results must not upload raw provider traffic, prompts, or logs.
-Credentialed checks do not block packaging by default; that default does not
-establish release acceptance. Nothing on this page authorizes a live run.
+Live credentials and paid API calls are not release prerequisites. Unexecuted
+live checks are recorded as **NOT RUN**, never as passing. Deterministic CI,
+security, artifact signing and public-install verification remain required.
+Nothing on this page authorizes a live run.
 
 The live procedure below builds `octet-host` and tests **native-host protocol 1**,
 not extension API 0.3 or the graphical Serve transport. In particular, native
@@ -104,9 +107,9 @@ loopback-only and credential-free. No current run is reported here.
 The snapshot describes a protected `Stable provider acceptance` workflow. Both
 stable release workflows expose `require_provider_acceptance`, defaulting to
 `false`. Packaging then does not read provider secrets or require an acceptance
-run. Setting it to `true` enables fail-closed exact-SHA and protected-approval
-enforcement for that workflow run; the default does not waive octet 0.7.0
-qualification.
+run; this is the credential-free release policy for octet 0.7.0. Setting it to
+`true` explicitly opts that workflow run into fail-closed exact-SHA and
+protected-approval enforcement.
 
 For a separately authorized run, the `stable-release-provider-acceptance`
 environment requires reviewers and these spend-limited secrets:
@@ -149,12 +152,14 @@ GitHub's immutable Actions history and fail closed unless the exact source commi
 has a successful `workflow_dispatch` run with a recorded approval for
 `stable-release-provider-acceptance`. A local run, a run for another SHA, or an
 unapproved successful run is not release evidence. When the input is `false`,
-the workflow records the waiver in its job summary and continues packaging.
+the workflow records **NOT RUN** (optional) in its job summary and continues
+packaging. This does not claim that any live route or model was tested.
 
 ## Manual Serve acceptance
 
-The inherited real-provider Serve checklist remains unqualified and deferred.
-A separately approved assessment must record evidence for:
+The inherited real-provider Serve checklist has not been run. It is optional,
+not a release prerequisite. A separately approved assessment must record
+evidence for:
 
 - fresh and restored sessions, including concurrent independent sessions;
 - real prompts, streaming, tool activity, and context/compaction accounting;
