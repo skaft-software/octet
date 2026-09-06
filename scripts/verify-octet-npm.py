@@ -13,11 +13,11 @@ import tarfile
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
-LAUNCHER_NAME = "@skaft-software/octet"
+LAUNCHER_NAME = "@skaft/octet"
 PLATFORM_PACKAGES = {
-    "octet-darwin-arm64": ("@skaft-software/octet-darwin-arm64", "darwin", "arm64"),
-    "octet-darwin-x64": ("@skaft-software/octet-darwin-x64", "darwin", "x64"),
-    "octet-linux-x64-gnu": ("@skaft-software/octet-linux-x64-gnu", "linux", "x64"),
+    "octet-darwin-arm64": ("@skaft/octet-darwin-arm64", "darwin", "arm64"),
+    "octet-darwin-x64": ("@skaft/octet-darwin-x64", "darwin", "x64"),
+    "octet-linux-x64-gnu": ("@skaft/octet-linux-x64-gnu", "linux", "x64"),
 }
 REPOSITORY = "https://github.com/skaft-software/ygg"
 SECRET_SCANNER_VERSION = "octet-npm-secret-rules-v1"

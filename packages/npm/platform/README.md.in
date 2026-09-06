@@ -8,11 +8,11 @@ These scoped names are source packaging identities, not proof of registry rights
 or availability. Use the installation command only after an authorized release
 has published the packages.
 
-It is an implementation package selected by `@skaft-software/octet`. Install the
+It is an implementation package selected by `@skaft/octet`. Install the
 public launcher rather than selecting a platform package by hand. This package
 has no dependencies or lifecycle scripts and its binaries never resolve or
 download another package at runtime:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft-software/octet@VERSION
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@VERSION
 ```

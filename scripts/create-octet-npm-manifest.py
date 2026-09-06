@@ -18,20 +18,20 @@ REPOSITORY = "skaft-software/ygg"
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 PACKAGES = (
-    ("octet-{version}.tgz", "@skaft-software/octet", "launcher"),
+    ("octet-{version}.tgz", "@skaft/octet", "launcher"),
     (
         "octet-darwin-arm64-{version}.tgz",
-        "@skaft-software/octet-darwin-arm64",
+        "@skaft/octet-darwin-arm64",
         "aarch64-apple-darwin",
     ),
     (
         "octet-darwin-x64-{version}.tgz",
-        "@skaft-software/octet-darwin-x64",
+        "@skaft/octet-darwin-x64",
         "x86_64-apple-darwin",
     ),
     (
         "octet-linux-x64-gnu-{version}.tgz",
-        "@skaft-software/octet-linux-x64-gnu",
+        "@skaft/octet-linux-x64-gnu",
         "x86_64-unknown-linux-gnu",
     ),
 )

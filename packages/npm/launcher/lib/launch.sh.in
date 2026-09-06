@@ -42,12 +42,12 @@ machine=$(uname -m 2>/dev/null) || fail 'octet npm launcher could not determine 
 platform_package=
 case "$operating_system:$machine" in
     Darwin:arm64|Darwin:aarch64)
-        platform_package='@skaft-software/octet-darwin-arm64'
+        platform_package='@skaft/octet-darwin-arm64'
         ;;
     Darwin:x86_64|Darwin:amd64)
         # Select the package matching the executable ABI. An x86_64 octet under
         # Rosetta is still an x86_64 binary and must not exec arm64 code.
-        platform_package='@skaft-software/octet-darwin-x64'
+        platform_package='@skaft/octet-darwin-x64'
         ;;
     Linux:x86_64|Linux:amd64)
         glibc_available=false
@@ -65,7 +65,7 @@ case "$operating_system:$machine" in
         fi
         [ "$glibc_available" = true ] || \
             fail 'octet npm package requires GNU libc on Linux; musl is not supported'
-        platform_package='@skaft-software/octet-linux-x64-gnu'
+        platform_package='@skaft/octet-linux-x64-gnu'
         ;;
     Darwin:*) fail "octet npm package does not support macOS architecture: $machine" ;;
     Linux:*) fail "octet npm package does not support Linux architecture: $machine" ;;

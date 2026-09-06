@@ -146,7 +146,7 @@ digest = hashlib.sha512(pathlib.Path(artifact).read_bytes()).hexdigest()
 payload = {
     "_type": "https://in-toto.io/Statement/v1",
     "subject": [{
-        "name": "pkg:npm/%40skaft-software%2Foctet@" + version,
+        "name": "pkg:npm/%40skaft%2Foctet@" + version,
         "digest": {"sha512": digest},
     }],
     "predicateType": "https://slsa.dev/provenance/v1",
@@ -178,12 +178,12 @@ attestations = {
     }]
 }
 registry = {
-    "name": "@skaft-software/octet",
+    "name": "@skaft/octet",
     "version": version,
     "dist": {
         "integrity": integrity,
         "attestations": {
-            "url": "https://registry.npmjs.org/-/npm/v1/attestations/%40skaft-software%2Foctet@" + version,
+            "url": "https://registry.npmjs.org/-/npm/v1/attestations/%40skaft%2Foctet@" + version,
             "provenance": {"predicateType": "https://slsa.dev/provenance/v1"},
         },
     },
@@ -203,7 +203,7 @@ python3 "$script_directory/verify-octet-npm-provenance.py" \
     "$work_directory/registry.json" \
     "$work_directory/attestations.json" \
     "$output_directory/OCTET_NPM_MANIFEST.json" \
-    "@skaft-software/octet" \
+    "@skaft/octet" \
     "$version" \
     "$expected_integrity" \
     "https://github.com/skaft-software/ygg" \
@@ -229,7 +229,7 @@ if python3 "$script_directory/verify-octet-npm-provenance.py" \
     "$work_directory/noncanonical-registry.json" \
     "$work_directory/valid-attestations.json" \
     "$output_directory/OCTET_NPM_MANIFEST.json" \
-    "@skaft-software/octet" "$version" \
+    "@skaft/octet" "$version" \
     "$expected_integrity" \
     "https://github.com/skaft-software/ygg" \
     ".github/workflows/release-octet.yml" \
@@ -259,7 +259,7 @@ if python3 "$script_directory/verify-octet-npm-provenance.py" \
     "$work_directory/registry.json" \
     "$work_directory/attestations.json" \
     "$output_directory/OCTET_NPM_MANIFEST.json" \
-    "@skaft-software/octet" "$version" \
+    "@skaft/octet" "$version" \
     "$expected_integrity" \
     "https://github.com/skaft-software/ygg" \
     ".github/workflows/release-octet.yml" \

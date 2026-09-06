@@ -159,15 +159,20 @@ fi
 # JavaScript process in the execution path.
 ln -s "$bin_directory/octet" "$work_directory/octet-symlink"
 [[ "$(run_isolated "$work_directory/octet-symlink" --version)" == "octet $version" ]]
-public_root="$prefix/lib/node_modules/@skaft-software/octet"
+public_root="$prefix/lib/node_modules/@skaft/octet"
 platform_name=${platform_artifact%-"$version".tgz}
-platform_name=${platform_name#octet-}
-nested_root="$public_root/node_modules/@skaft-software/$platform_name"
-hoisted_root="$prefix/lib/node_modules/@skaft-software/$platform_name"
+nested_root="$public_root/node_modules/@skaft/$platform_name"
+hoisted_root="$prefix/lib/node_modules/@skaft/$platform_name"
 if [[ -d "$nested_root" && ! -L "$nested_root" && ! -e "$hoisted_root" ]]; then
     mv "$nested_root" "$hoisted_root"
-    [[ "$(run_isolated octet --version)" == "octet $version" ]]
 fi
+[[ -d "$hoisted_root" && ! -L "$hoisted_root" && ! -e "$nested_root" ]]
+[[ "$(run_isolated octet --version)" == "octet $version" ]]
+mkdir -p "$(dirname "$nested_root")"
+mv "$hoisted_root" "$nested_root"
+[[ "$(run_isolated octet --version)" == "octet $version" ]]
+mv "$nested_root" "$hoisted_root"
+[[ "$(run_isolated octet --version)" == "octet $version" ]]
 
 run_isolated npm uninstall \
     --global \
@@ -176,7 +181,7 @@ run_isolated npm uninstall \
     --ignore-scripts \
     --no-audit \
     --no-fund \
-    @skaft-software/octet >/dev/null
+    @skaft/octet >/dev/null
 [[ ! -e "$bin_directory/octet" && ! -e "$bin_directory/octet-host" ]]
 [[ "$(cat "$sentinel")" == 'must survive npm uninstall' ]]
 printf 'npm local install, launcher, and uninstall tests passed for %s\n' "$version"
