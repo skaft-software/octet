@@ -2,6 +2,28 @@
 
 [Documentation](README.md) · [Getting started](getting-started.md)
 
+<a id="binary-availability"></a>
+
+## Install native binaries
+
+The [v0.7.0 release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0)
+provides signed native archives and the version-pinned installer for macOS
+Apple silicon/Intel and GNU/Linux x86-64. Public installation is verified on
+all three targets.
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/skaft-software/ygg/releases/download/v0.7.0/install-octet.sh | sh
+octet --version
+```
+
+Install octet afresh. Older installations and data remain untouched; no automatic
+migration is performed. npm is not published yet; Homebrew,
+crates.io and SDK registry publication are separate channels. Bun is unqualified.
+See [distribution channels](distribution.md) for their exact boundaries.
+[Historical Ygg instructions](reference/historical-installation.md) describe
+older releases, not a way to install or migrate to octet.
+
 ## Build from a checkout
 
 On macOS or GNU/Linux, install Rust 1.86+ and
@@ -19,41 +41,24 @@ Command execution is Unix-only. Normal builds use checked-in model metadata;
 they do not refresh the catalog over the network. Continue with
 [provider setup](providers.md).
 
-## Binary availability
-
-The version-pinned [v0.7.0 release](https://github.com/skaft-software/ygg/releases/tag/v0.7.0)
-is the source for signed native archives and the installer. Native targets are
-macOS Apple silicon/Intel and GNU/Linux x86-64. If release assets are still
-being prepared, use the checkout build above rather than an older Ygg installer.
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/ygg/releases/download/v0.7.0/install-octet.sh | sh
-octet --version
-```
-
-Install octet afresh; `ygg update` is not an octet upgrade path. Existing Ygg
-installations and data remain untouched. npm is not published yet; Homebrew,
-crates.io and SDK registry publication are separate channels. Bun is unqualified.
-See [distribution channels](distribution.md) for their exact boundaries.
-[Historical Ygg instructions](reference/historical-installation.md) describe
-older releases, not a way to install or migrate to octet.
-
 ## Optional packages
 
-After reviewing a locally built archive, installation is inert:
+The four official executable bundles and Serve 0.7.0 are published. For example:
 
 ```sh
-octet extension install --path ./bundle.tar.gz
+octet extension install octet-web-search
 octet extension list
 ```
+
+For a reviewed local archive instead, use
+`octet extension install --path ./bundle.tar.gz`. Installation is inert.
 
 Installation does not enable, trust, start code, or provision dependencies.
 Executable bundles are separate from the terminal binary and from the graphical
 Serve application. Use [resource discovery](resources.md) for source selection
 and [extensions](extensions.md) for exact packaging, trust, atomic update, and
-removal rules. Catalog install/update commands require separately verified,
-exact-version publication; their forms are in the [CLI reference](cli.md#packages-and-serve).
+removal rules. Catalog install/update selects the package matching the running
+octet version; command forms are in the [CLI reference](cli.md#packages-and-serve).
 
 | Package | Canonical setup and limits |
 | --- | --- |

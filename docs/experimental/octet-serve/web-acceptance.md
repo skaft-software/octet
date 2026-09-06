@@ -1,9 +1,11 @@
 # Web acceptance
 
 Maintainer acceptance criteria, **not a current test result**. The web-first gate
-requires observed evidence for every applicable item below. The source snapshot
-and historical fixture/local-provider passes do not qualify unpublished octet
-0.7.0. Live-provider, media, recovery, and captures remain deferred.
+requires observed evidence for every applicable item below. Published package
+and public-install results are recorded in the
+[0.7.0 release verification](../../releases/v0.7.0.md#release-verification).
+Those checks and historical fixtures do not claim every manual journey below
+passed. Live-provider/native-audio checks are optional and **NOT RUN**.
 
 For local usage, see the [Serve guide](README.md). Consult
 [implementation limits](current-state.md#what-remains-fixture-only-specified-or-absent)

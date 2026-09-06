@@ -6,7 +6,7 @@ shutdown. This is not an agent team, swarm, or second model loop.
 
 ## Try a read-only investigation
 
-After [enabling the local bundle](#enable-the-local-bundle), a `subagent_spawn`
+After [installing and enabling the bundle](#install-and-enable), a `subagent_spawn`
 call can narrow a worker to reading and search:
 
 ```json
@@ -37,17 +37,20 @@ identical spawn key is retry-safe; using it with different input fails.
 | `subagent_stop` | Supply exactly one of `{"target":"explore-auth"}` or `{"all":true}`. Acknowledgement is not terminal completion. |
 | `subagent_continue` | Supply `target` and `message` to steer an active worker or resume a settled one with its conversation retained. Stopping and orphaned workers are rejected. |
 
-## Enable the local bundle
+<a id="enable-the-local-bundle"></a>
 
-With source-built octet `0.7.0`, install a reviewed locally built archive, then
-separately enable and trust it:
+## Install and enable
+
+With [octet 0.7.0 installed](../../docs/installation.md), install the signed public
+bundle, then separately enable and trust it:
 
 ```console
-octet extension install --path ./octet-subagents-0.7.0.tar.gz
+octet extension install octet-subagents
 octet --enable-extension octet-subagents --trust-extension octet-subagents
 ```
 
-This does not imply a public download: octet `0.7.0` bundles are unpublished.
+For a reviewed local archive instead, use
+`octet extension install --path ./octet-subagents-0.7.0.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
 starts nothing. Executable extensions require full-access policy; `--safe-mode`
 keeps them stopped. `/extensions status` shows the selected source, trust, API,

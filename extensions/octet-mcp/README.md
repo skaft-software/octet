@@ -27,16 +27,17 @@ paths with your reviewed local paths. Protect the file with `chmod 600`.
 }
 ```
 
-From a reviewed repository checkout, using source-built octet `0.7.0` and Python
-3.9+ on `PATH`:
+With [octet 0.7.0 installed](../../docs/installation.md) and Python 3.9+ on
+`PATH`, install the signed public bundle and validate your configuration:
 
 ```console
-extensions/octet-mcp/octet-mcp --config ~/.octet/mcp.json --check-config
-octet --extension-dir ./extensions \
-    --enable-extension octet-mcp --trust-extension octet-mcp
+octet extension install octet-mcp
+~/.octet/extensions/octet-mcp/octet-mcp --config ~/.octet/mcp.json --check-config
+octet --enable-extension octet-mcp --trust-extension octet-mcp
 ```
 
-These are local-source commands. octet `0.7.0` bundles are unpublished.
+A reviewed source checkout remains an alternative; add
+`--extension-dir ./extensions` when launching from the repository root.
 Installation and discovery are inert; enablement and exact executable trust are
 separate. The bridge runs only under full-access policy, never in `--safe-mode`.
 If the configuration file is absent, it stays healthy with zero servers.

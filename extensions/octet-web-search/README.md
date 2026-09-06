@@ -7,14 +7,16 @@ browser tabs, sign in, run JavaScript, or submit forms.
 
 ## Start a search
 
-From a reviewed repository checkout, with source-built octet `0.7.0` and Python
-3.9+ available as `python3`:
+With [octet 0.7.0 installed](../../docs/installation.md) and Python 3.9+ available
+as `python3`, install the signed public bundle, then separately enable and trust it:
 
 ```console
-octet --extension-dir ./extensions \
-    --enable-extension octet-web-search \
-    --trust-extension octet-web-search
+octet extension install octet-web-search
+octet --enable-extension octet-web-search --trust-extension octet-web-search
 ```
+
+For a reviewed source checkout instead, add `--extension-dir ./extensions` to
+the launch command from the repository root.
 
 Then choose a provider and load the optional research skill:
 
@@ -74,12 +76,10 @@ extensions run with your OS authority under the full-access policy; manifest
 consent metadata is not a sandbox, and `--safe-mode` keeps this extension stopped.
 Enablement, exact trust, and skill loading are independent.
 
-Bundle `0.7.0` requires exactly octet `0.7.0` and retains API `0.2`; neither octet
-`0.7.0` nor its bundles are published. The guide uses local source, not a public
-installation channel. The following is a bundled-runtime reference, not a current
-SDK authoring tutorial.
+The published bundle `0.7.0` requires exactly octet `0.7.0` and retains API `0.2`.
+The following is a bundled-runtime reference, not a current SDK authoring tutorial.
 
-- <a id="install-and-opt-in"></a>[Install and opt in](REFERENCE.md#install-and-opt-in): conditional catalog installation and persistent activation.
+- <a id="install-and-opt-in"></a>[Install and opt in](REFERENCE.md#install-and-opt-in): public catalog installation and persistent activation.
 - <a id="choose-a-provider"></a>[Choose a provider](REFERENCE.md#choose-a-provider).
   - <a id="brave-search-recommended"></a>[Brave Search (recommended)](REFERENCE.md#brave-search-recommended).
   - <a id="searxng"></a>[SearXNG](REFERENCE.md#searxng): full example and strict file validation.

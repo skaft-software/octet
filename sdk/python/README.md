@@ -20,7 +20,8 @@ python3 -m pip install ./sdk/python
 
 This installs the source package, not proof of current-API runtime parity or
 registry publication. Its source distribution version is `0.7.0`, independent
-of the extension API version; octet 0.7.0 is unpublished. Imports and wire names
+of the extension API version. Native octet publication does not publish the SDK
+to PyPI. Imports and wire names
 use `octet_extension`, `octet_version`, `requires_octet`, and `OCTET_*`, with no
 aliases for earlier first-party names.
 

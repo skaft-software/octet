@@ -4,15 +4,20 @@ Use a visible, isolated Chromium window to inspect pages and perform bounded
 browser actions. Sign in manually; octet Browse never uses your normal browser
 profile.
 
-## Start from a reviewed checkout
+<a id="start-from-a-reviewed-checkout"></a>
 
-With a source-built octet `0.7.0`, select the reviewed bundle from the repository
-root. octet `0.7.0` and its bundles are unpublished; this is not a public install.
+## Install the bundle
+
+With [octet 0.7.0 installed](../../docs/installation.md), install the signed
+public bundle, then separately enable and trust it:
 
 ```console
-octet --extension-dir ./extensions \
-    --enable-extension octet-browse --trust-extension octet-browse
+octet extension install octet-browse
+octet --enable-extension octet-browse --trust-extension octet-browse
 ```
+
+For a reviewed source checkout instead, add `--extension-dir ./extensions` to
+the launch command from the repository root.
 
 Then, in octet:
 

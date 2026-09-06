@@ -2,8 +2,8 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-The source snapshot is experimental; octet 0.7.0 is unpublished and these
-contracts are not final release qualification.
+Serve remains experimental. Signed octet 0.7.0 packages are published; these
+implementation contracts do not imply complete feature or live-provider acceptance.
 
 ## Focused checks
 
@@ -93,9 +93,9 @@ The described package requires exactly `=0.7.0` and declares three targets:
 - macOS x86_64;
 - macOS arm64.
 
-Linux musl is unsupported. Declared targets are not evidence of platform
-acceptance. A matching local archive can be installed offline; catalog install
-and update require separately verified publication. See
+Linux musl is unsupported. Signed 0.7.0 packages are published for all three
+targets, with package launch and public installation checks passed. A matching
+local archive can also be installed offline. See
 [package usage](../../docs/experimental/octet-serve/README.md#install-or-update-a-package).
 
 The source-described `.github/workflows/release-serve.yml` contract accepts only
@@ -109,7 +109,9 @@ existing canonical release. Repair/source tags use
 `scripts/package-octet-serve-release.sh` is the local reproducibility and
 package-layout gate before separately authorized publication.
 
-No signed octet 0.7.0 Serve artifact or completed live-provider/media/recovery
-qualification is asserted here. Retained passes belong to the
+[octet 0.7.0](../../docs/releases/v0.7.0.md#release-verification) includes signed
+Serve artifacts and verified public installation. Live-provider/native-audio checks
+are optional and **NOT RUN**; package smoke does not establish full live-feature
+acceptance. Earlier passes belong to the
 [historical validation record](../../docs/experimental/octet-serve/current-state.md#validation-evidence).
 Work tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).

@@ -7,7 +7,8 @@ import a setup first; a generated link is not proof of compatibility.
 
 ## Create a local link
 
-With source-built octet `0.7.0` and a separately reviewed local Pi installation:
+With [octet 0.7.0 installed](../../docs/installation.md) and a separately reviewed
+local Pi installation:
 
 ```console
 octet pi plan ./extension.ts --pi-package /reviewed/pi-coding-agent \
@@ -17,8 +18,8 @@ octet pi publish --plan /private/review/pi-plan.json
 octet pi list
 ```
 
-`publish` creates a **local** aggregate link, not a public release. octet `0.7.0`
-is unpublished. `octet pi install SOURCE` is the local one-command shorthand;
+`publish` creates a **local** aggregate link, not a public release.
+`octet pi install SOURCE` is the local one-command shorthand;
 none of these commands installs npm dependencies or imports source. Plans are
 inert and preflight/publish revalidate their pins. Generated links remain inert
 until separately enabled and trusted. Package code then runs with your OS

@@ -150,8 +150,8 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-Catalog forms below require separately published, exact-version packages;
-**no octet 0.7.0 public bundle is verified**:
+The four official executable bundles and Serve 0.7.0 are published with verified
+signatures and public installation. Catalog forms select an exact-version package:
 
 ```text
 octet extension install NAME
@@ -168,8 +168,8 @@ occurs. Packaged skills require explicit loading. [Packaging contract](extension
 Serve is a separate version-matched application package. With a reviewed,
 compatible package installed, `octet serve` starts its loopback web interface;
 `octet serve --no-open --port 0` avoids opening a browser and lets the OS select a
-port. `extension install/update/remove octet-serve` use the same catalog
-publication gate; local archive forms above also apply. Removal leaves sessions
+port. `extension install/update/remove octet-serve` use the published catalog;
+local archive forms above also apply. Removal leaves sessions
 and other Serve data intact. [Serve setup and limits](experimental/octet-serve/README.md).
 
 `--experimental-streamable-http-mcp` is a conspicuous **one-shot process-owner**

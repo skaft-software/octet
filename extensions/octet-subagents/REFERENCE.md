@@ -84,13 +84,15 @@ use the graph/recipe spike, built-in team mailboxes, or another scheduler.
 
 ## Install, enable, and trust
 
-The archive has one root directory named `octet-subagents`. octet `0.7.0` bundles
-are unpublished; use a reviewed locally built archive, not an assumed public
-download:
+The signed public bundle requires [octet 0.7.0](../../docs/installation.md) and
+has one root directory named `octet-subagents`:
 
 ```console
-octet extension install --path ./octet-subagents-0.7.0.tar.gz
+octet extension install octet-subagents
 ```
+
+For a reviewed local archive instead, use
+`octet extension install --path ./octet-subagents-0.7.0.tar.gz`.
 
 Installation/discovery is inert: it does not enable, trust, or start the process.
 Executable activation requires full-access mode; prefer separate OS isolation.
