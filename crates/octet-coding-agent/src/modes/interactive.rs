@@ -36,7 +36,7 @@ use crate::commands::{self, Command};
 use crate::compaction::{
     attempt_compaction, context_window, estimate_next_request_tokens, CompactionOutcome,
 };
-use crate::config::{CompactionMode, ThinkingLevel};
+use crate::config::{CompactionMode, Config, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
 use crate::prompts::{render_and_record, RenderedPrompt};
@@ -57,6 +57,7 @@ use crate::tui::pickers::{
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
     background_from_terminal_rgb, load_theme, load_theme_for_background, TerminalBackground,
+    TerminalThemeChoice,
 };
 use crate::tui::view::{InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult};
 
@@ -3938,6 +3939,9 @@ async fn run_idle_command(
                 commands::model_selection_text(&app.model)
             ));
         }
+        Command::Theme(requested) => {
+            configure_terminal_theme(shell, input, &mut app.config, requested, false).await?;
+        }
         Command::Thinking(Some(level)) => {
             let level = ThinkingLevel::parse(&level)?;
             let reasoning =
@@ -4408,8 +4412,16 @@ fn apply_detected_terminal_background(
     config: &crate::config::Config,
 ) {
     if explicit_terminal_background_override()
+        || TerminalThemeChoice::from_config(config)
+            .and_then(TerminalThemeChoice::explicit_background)
+            .is_some()
         || shell.theme().background() != TerminalBackground::Unknown
     {
+        return;
+    }
+    if shell.theme().capabilities().color == crate::tui::terminal::ColorDepth::None {
+        // NO_COLOR still gets the deterministic Auto fallback, but should not
+        // receive a background query or any other colour-oriented control.
         return;
     }
     let Some((red, green, blue)) =
@@ -4419,6 +4431,86 @@ fn apply_detected_terminal_background(
     };
     let background = background_from_terminal_rgb(red, green, blue);
     shell.set_theme(load_theme_for_background(config, background));
+}
+
+fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
+    let items = TerminalThemeChoice::all()
+        .into_iter()
+        .map(|choice| choice.label().to_owned())
+        .collect();
+    let descriptions = vec![
+        Some(
+            "Detect the terminal background; use a readable neutral fallback when unavailable"
+                .into(),
+        ),
+        Some("Use light-terminal contrast without painting the terminal canvas".into()),
+        Some("Use dark-terminal contrast without painting the terminal canvas".into()),
+    ];
+    (items, descriptions)
+}
+
+async fn pick_terminal_theme(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    config: &Config,
+    onboarding: bool,
+) -> anyhow::Result<Option<TerminalThemeChoice>> {
+    let (items, descriptions) = terminal_theme_picker_data();
+    let initial = TerminalThemeChoice::from_config(config)
+        .unwrap_or(TerminalThemeChoice::Auto)
+        .index();
+    let title = if onboarding {
+        "Choose terminal appearance"
+    } else {
+        "Terminal appearance"
+    };
+    Ok(
+        provider_setup_picker(shell, input, title, items, descriptions, initial)
+            .await?
+            .and_then(|index| TerminalThemeChoice::all().get(index).copied()),
+    )
+}
+
+async fn configure_terminal_theme(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    config: &mut Config,
+    requested: Option<String>,
+    onboarding: bool,
+) -> anyhow::Result<Option<TerminalThemeChoice>> {
+    let selected = match requested {
+        Some(value) => match TerminalThemeChoice::parse(&value) {
+            Some(choice) => Some(choice),
+            None => {
+                shell.error(format!(
+                    "invalid terminal appearance {value:?}; use /theme auto, /theme light, or /theme dark"
+                ));
+                shell.render();
+                return Ok(None);
+            }
+        },
+        None => pick_terminal_theme(shell, input, config, onboarding).await?,
+    };
+    // A first-run dismissal still commits the recommended default, so a user
+    // who leaves from the picker is not forced through the same onboarding on
+    // every launch. The caller still honors a pending close request.
+    let Some(choice) = selected.or_else(|| onboarding.then_some(TerminalThemeChoice::Auto)) else {
+        return Ok(None);
+    };
+
+    config.theme = Some(choice.key().to_owned());
+    shell.set_runtime_config(config.clone());
+    shell.set_theme(load_theme(config));
+    if matches!(choice, TerminalThemeChoice::Auto) {
+        apply_detected_terminal_background(shell, config);
+    }
+    if let Err(error) = crate::cli::persist_theme_choice(choice.key()) {
+        shell.error(format!("failed to save terminal appearance: {error}"));
+    } else if !onboarding {
+        shell.notice(format!("terminal appearance: {}", choice.label()));
+    }
+    shell.render();
+    Ok(Some(choice))
 }
 
 fn startup_launch_outcome<T>(
@@ -4510,6 +4602,10 @@ async fn run_interactive_without_model(
                             .to_owned(),
                     );
                     shell.render();
+                }
+                Command::Theme(requested) => {
+                    configure_terminal_theme(shell, input, &mut boot.config, requested, false)
+                        .await?;
                 }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
                     Ok("codex") => {
@@ -5055,6 +5151,16 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
     shell.set_runtime_config(boot.config.clone());
     apply_detected_terminal_background(&mut shell, &boot.config);
     let mut input = EventStream::new();
+    if crate::cli::should_offer_theme_onboarding(&boot.config)
+        && shell.theme().capabilities().interactive
+        && !boot.config.plain
+    {
+        configure_terminal_theme(&mut shell, &mut input, &mut boot.config, None, true).await?;
+        if shell.close_requested() {
+            shell.leave();
+            return Ok(());
+        }
+    }
     // Offer setup only when bootstrap has no runnable provider inventory. An
     // explicit --model remains authoritative, and resumed provenance is still
     // resolved after this optional first-run transaction.

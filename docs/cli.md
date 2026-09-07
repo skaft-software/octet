@@ -206,6 +206,6 @@ and [historical Ygg update behavior](reference/historical-installation.md#updati
 are deliberately separate.
 
 `--safe` is hidden compatibility for `--safe-mode`; `--yolo` is rejected.
-`--reasoning-mode pro` loads legacy state only. `--theme`, `--theme-dir`, `theme`,
-and `OCTET_THEME` do not enable theme customization. See
-[compatibility inputs](configuration.md#compatibility-inputs).
+`--reasoning-mode pro` loads legacy state only. `--theme-dir` and arbitrary
+theme names remain compatibility inputs; built-in terminal appearance choices
+are documented in [Theme status](themes.md). See [compatibility inputs](configuration.md#compatibility-inputs).

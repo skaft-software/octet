@@ -1,16 +1,27 @@
 # octet themes
 
-Theme customization is disabled in octet v0.7.0. The terminal and graphical Serve
-frontend always use octet's compiled default theme. The default remains
-model-aware: deterministic model-family palettes color active completion and
-picker controls consistently without changing layout, interaction grammar, or
-semantic status colours.
+Theme-file customization is disabled. octet uses one compiled default theme
+whose model-family accents adapt focused controls and startup atmosphere without
+changing layout or semantic status colours.
 
-The `/theme` command is not registered, and the runtime does not discover or
-load bundled or filesystem theme files. Legacy `--theme`, `--theme-dir`,
-`theme` configuration, and `OCTET_THEME` inputs are retained only for launch
-compatibility: they are ignored or fall back to the compiled default.
+On the first capable interactive TUI launch, octet offers three built-in
+terminal appearances:
 
-The typed theme implementation and schema remain in the source tree so theme
-support can be restored in a later release. They are not part of the v0.7.0
-user-facing customization contract.
+- `Auto (recommended)` detects the terminal background through reliable
+  environment or terminal capability signals and uses a readable neutral
+  fallback when detection is unavailable.
+- `Light terminal` and `Dark terminal` explicitly select the corresponding
+  contrast profile and override detection.
+
+The choice is persisted as `theme = "auto"`, `theme = "light"`, or
+`theme = "dark"` in the user config without replacing unrelated settings. Use
+`/theme` later to revisit it; `/theme auto`, `/theme light`, and `/theme dark`
+are also accepted. Existing configured installations do not reopen onboarding,
+and print/plain/RPC, redirected, and `TERM=dumb` sessions never open it.
+
+`--theme`, `--theme-dir`, arbitrary `theme` values, and arbitrary theme files
+remain compatibility inputs only. They never add a theme loader or marketplace;
+unrecognized values fall back to the compiled default. An explicit
+`OCTET_COLOR_SCHEME` is also treated as an existing terminal-appearance choice,
+so automation and already-configured shells do not get interrupted by
+onboarding.

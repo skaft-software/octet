@@ -172,6 +172,66 @@ pub(crate) enum TerminalBackground {
     Unknown,
 }
 
+/// The three terminal-appearance choices exposed by the interactive TUI.
+/// These are selectors for the compiled theme, not filesystem theme names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalThemeChoice {
+    Auto,
+    Light,
+    Dark,
+}
+
+impl TerminalThemeChoice {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_config(config: &Config) -> Option<Self> {
+        config.theme.as_deref().and_then(Self::parse)
+    }
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (recommended)",
+            Self::Light => "Light terminal",
+            Self::Dark => "Dark terminal",
+        }
+    }
+
+    pub(crate) fn explicit_background(self) -> Option<TerminalBackground> {
+        match self {
+            Self::Auto => None,
+            Self::Light => Some(TerminalBackground::Light),
+            Self::Dark => Some(TerminalBackground::Dark),
+        }
+    }
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Auto => 0,
+            Self::Light => 1,
+            Self::Dark => 2,
+        }
+    }
+
+    pub(crate) fn all() -> [Self; 3] {
+        [Self::Auto, Self::Light, Self::Dark]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Rgb {
     red: u8,
@@ -651,12 +711,18 @@ impl OctetTheme {
                 green: 255,
                 blue: 255,
             },
-            // Preserve the conservative dark-terminal fallback when neither
-            // OCTET_COLOR_SCHEME nor COLORFGBG identifies the background.
-            TerminalBackground::Dark | TerminalBackground::Unknown => Rgb {
+            // Unknown profiles may be light, dark, or custom. Keep the idle
+            // border near the readable midpoint instead of painting a dark
+            // terminal assumption into a user's custom background.
+            TerminalBackground::Dark => Rgb {
                 red: 0,
                 green: 0,
                 blue: 0,
+            },
+            TerminalBackground::Unknown => Rgb {
+                red: 128,
+                green: 128,
+                blue: 128,
             },
         };
         let idle = blend(source, destination, 0.88);
@@ -1807,6 +1873,9 @@ pub(crate) fn load_theme_for_background(
     config: &Config,
     background: TerminalBackground,
 ) -> OctetTheme {
+    let background = TerminalThemeChoice::from_config(config)
+        .and_then(TerminalThemeChoice::explicit_background)
+        .unwrap_or(background);
     match config
         .theme
         .as_deref()
@@ -2349,7 +2418,41 @@ mod tests {
 
         assert_eq!(dark.composer_idle_rgb(accent), (12, 10, 8));
         assert_eq!(light.composer_idle_rgb(accent), (236, 234, 232));
-        assert_eq!(unknown.composer_idle_rgb(accent), (12, 10, 8));
+        assert_eq!(unknown.composer_idle_rgb(accent), (124, 122, 120));
+    }
+
+    #[test]
+    fn terminal_theme_choices_are_builtin_and_override_detection() {
+        assert_eq!(
+            TerminalThemeChoice::all()
+                .into_iter()
+                .map(TerminalThemeChoice::label)
+                .collect::<Vec<_>>(),
+            vec!["Auto (recommended)", "Light terminal", "Dark terminal"]
+        );
+        assert_eq!(
+            TerminalThemeChoice::parse("LIGHT"),
+            Some(TerminalThemeChoice::Light)
+        );
+        assert_eq!(TerminalThemeChoice::parse("custom"), None);
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        config.theme = Some("dark".to_owned());
+        assert_eq!(
+            load_theme_for_background(&config, TerminalBackground::Light).background,
+            TerminalBackground::Dark
+        );
+        config.theme = Some("light".to_owned());
+        assert_eq!(
+            load_theme_for_background(&config, TerminalBackground::Dark).background,
+            TerminalBackground::Light
+        );
+        config.theme = Some("auto".to_owned());
+        assert_eq!(
+            load_theme_for_background(&config, TerminalBackground::Unknown).background,
+            TerminalBackground::Unknown
+        );
     }
 
     #[test]

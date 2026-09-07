@@ -76,7 +76,7 @@ pub(super) fn render_welcome_card(
     let Some(started) = state.startup_card_started_at else {
         return Vec::new();
     };
-    if state.overlay.is_some() || width < 24 || max_rows < 7 {
+    if state.overlay.is_some() || max_rows < 7 {
         return Vec::new();
     }
     if state
@@ -129,6 +129,41 @@ pub(super) fn render_welcome_card(
     } else {
         model
     };
+    if width < 24 {
+        // A narrow terminal cannot fit the two-column card. Keep a compact,
+        // bounded identity instead of silently dropping the startup surface.
+        let mut compact = Vec::with_capacity(5);
+        if width >= 8 {
+            let logo = crate::tui::splash::render_logo(
+                &state.theme,
+                usize::from(width).min(16),
+                2,
+                elapsed,
+                adaptive_accent,
+                splash_color,
+            );
+            compact.extend(logo.into_iter().map(|line| fit_line(&line, width)));
+        } else {
+            compact.push(fit_line(&splash_bold("octet"), width));
+        }
+        compact.push(fit_line(
+            &format!(
+                "{} {}",
+                splash_bold("octet"),
+                splash_text(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+            ),
+            width,
+        ));
+        compact.push(fit_line(
+            &splash_text(&format!("{model} / {}", state.reasoning)),
+            width,
+        ));
+        compact.push(fit_line(
+            &format!("{} {}", splash_bold("Ctrl+D"), splash_text("to exit")),
+            width,
+        ));
+        return compact;
+    }
     let text = if splash_color.is_some() {
         [
             format!(
@@ -376,5 +411,25 @@ mod tests {
             render_welcome_card(&safe_shell.state.borrow(), 80, 10, Instant::now()).join("\n");
         let rendered = strip_terminal_sequences(&rendered);
         assert!(rendered.contains("permissions: safe mode"), "{rendered}");
+    }
+
+    #[test]
+    fn narrow_welcome_card_keeps_a_bounded_identity_fallback() {
+        let shell = InteractiveShell::test_shell();
+        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        for width in [4, 8, 16, 23] {
+            let rendered = render_welcome_card(&shell.state.borrow(), width, 10, Instant::now());
+            assert!(
+                !rendered.is_empty(),
+                "narrow welcome missing at width {width}"
+            );
+            assert!(rendered
+                .iter()
+                .all(|line| { sexy_tui_rs::visible_width(line) <= usize::from(width) }));
+            assert!(rendered
+                .iter()
+                .map(|line| strip_terminal_sequences(line))
+                .any(|line| line.contains('o') || line.contains('#')));
+        }
     }
 }

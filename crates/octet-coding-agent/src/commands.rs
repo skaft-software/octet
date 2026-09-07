@@ -21,6 +21,8 @@ pub enum Command {
     Logout(Option<String>),
     Model(Option<String>),
     Thinking(Option<String>),
+    /// Inspect or change the compiled terminal appearance selector.
+    Theme(Option<String>),
     Verbose(Option<bool>),
     /// Request an immediate final answer without exposing tools.
     Answer(Option<String>),
@@ -150,6 +152,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         "thinking",
         "/thinking [level]",
         "set reasoning effort",
+        true
+    ),
+    slash!(
+        "theme",
+        "/theme [auto|light|dark]",
+        "choose terminal appearance",
         true
     ),
     slash!(
@@ -435,6 +443,7 @@ pub fn parse(input: &str) -> Command {
         "logout" => Command::Logout(argument),
         "model" => Command::Model(argument),
         "thinking" => Command::Thinking(argument),
+        "theme" => Command::Theme(argument),
         "verbose" => match argument.as_deref() {
             None => Command::Verbose(None),
             Some("on" | "true" | "yes") => Command::Verbose(Some(true)),
@@ -969,6 +978,9 @@ mod tests {
             Command::Model(Some("gpt-4o-mini".into()))
         );
         assert_eq!(parse("/thinking"), Command::Thinking(None));
+        assert_eq!(parse("/theme"), Command::Theme(None));
+        assert_eq!(parse("/theme light"), Command::Theme(Some("light".into())));
+        assert!(matches!(parse("/theme neon"), Command::Theme(Some(_))));
         assert_eq!(parse("/verbose on"), Command::Verbose(Some(true)));
         assert_eq!(parse("/verbose off"), Command::Verbose(Some(false)));
         assert_eq!(parse("/answer"), Command::Answer(None));
@@ -1068,10 +1080,13 @@ mod tests {
     fn slash_suggestions_filter_and_tab_complete_unique_prefixes() {
         assert_eq!(slash_suggestions("/").len(), SLASH_COMMANDS.len());
         assert_eq!(slash_suggestions("/mod")[0].usage, "/model [id]");
-        assert_eq!(slash_suggestions("/th").len(), 1);
+        assert_eq!(slash_suggestions("/th").len(), 2);
         assert!(slash_suggestions("/model ").is_empty());
         assert_eq!(complete_slash_command("/mod"), Some("/model ".to_owned()));
-        assert_eq!(complete_slash_command("/th"), Some("/thinking ".to_owned()));
+        assert_eq!(
+            complete_slash_command("/thi"),
+            Some("/thinking ".to_owned())
+        );
         assert_eq!(
             complete_slash_command("/status"),
             Some("/status".to_owned())
@@ -1081,7 +1096,7 @@ mod tests {
     #[test]
     fn popup_registry_includes_self_help_without_removed_commands() {
         assert!(SLASH_COMMANDS.iter().any(|command| command.name == "help"));
-        for removed in ["cycle-model", "docs", "sessions", "tool", "theme"] {
+        for removed in ["cycle-model", "docs", "sessions", "tool"] {
             assert!(SLASH_COMMANDS.iter().all(|command| command.name != removed));
         }
         assert!(SLASH_COMMANDS
@@ -1126,7 +1141,7 @@ mod tests {
         assert!(matches!(parse("/checkout"), Command::Unknown(_)));
         assert!(matches!(parse("/auto-compact 0%"), Command::Unknown(_)));
         assert!(matches!(parse("/auto-compact 101%"), Command::Unknown(_)));
-        for removed in ["/cycle-model", "/docs", "/sessions", "/tool", "/theme"] {
+        for removed in ["/cycle-model", "/docs", "/sessions", "/tool"] {
             assert!(matches!(parse(removed), Command::Unknown(_)));
         }
     }

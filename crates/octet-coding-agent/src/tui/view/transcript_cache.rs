@@ -42,6 +42,10 @@ pub(super) struct RenderedTranscriptBlock {
 pub(super) struct TranscriptCache {
     pub(super) width: Option<u16>,
     pub(super) lines: Vec<String>,
+    /// Whether the cached welcome prefix was rendered while an overlay was
+    /// active. Overlays suppress that prefix without changing transcript
+    /// blocks, so this is part of cache staleness rather than a block revision.
+    pub(super) welcome_overlay_active: bool,
     pub(super) block_starts: Vec<usize>,
     pub(super) block_lengths: Vec<usize>,
     pub(super) block_geometries: Vec<SurfaceGeometry>,
@@ -98,6 +102,7 @@ impl Default for TranscriptCache {
         Self {
             width: None,
             lines: Vec::new(),
+            welcome_overlay_active: false,
             block_starts: Vec::new(),
             block_lengths: Vec::new(),
             block_geometries: Vec::new(),
@@ -110,11 +115,45 @@ impl Default for TranscriptCache {
     }
 }
 
+fn replace_welcome_prefix(
+    cache: &mut TranscriptCache,
+    welcome: Vec<String>,
+    overlay_active: bool,
+    first_changed: &mut usize,
+) {
+    let old_length = cache
+        .block_starts
+        .first()
+        .copied()
+        .unwrap_or(cache.lines.len())
+        .min(cache.lines.len());
+    let changed = cache.welcome_overlay_active != overlay_active
+        || cache.lines.get(..old_length) != Some(welcome.as_slice());
+    if changed {
+        *first_changed = 0;
+        let new_length = welcome.len();
+        cache.lines.splice(0..old_length, welcome);
+        let delta = new_length as isize - old_length as isize;
+        if delta > 0 {
+            for start in &mut cache.block_starts {
+                *start += delta as usize;
+            }
+        } else if delta < 0 {
+            for start in &mut cache.block_starts {
+                *start = start.saturating_sub((-delta) as usize);
+            }
+        }
+    }
+    cache.welcome_overlay_active = overlay_active;
+}
+
 impl ShellState {
     pub(super) fn rendered_transcript(&self, width: u16) -> Ref<'_, Vec<String>> {
         let stale = {
             let cache = self.transcript_cache.borrow();
-            cache.dirty || cache.width != Some(width)
+            cache.dirty
+                || cache.width != Some(width)
+                || cache.welcome_overlay_active != self.overlay.is_some()
         };
         if stale {
             let mut rich_renderer_slot = self.rich_renderer.borrow_mut();
@@ -134,6 +173,7 @@ impl ShellState {
             let mut cache = self.transcript_cache.borrow_mut();
             let previous_line_count = cache.lines.len();
             let rainbow_strength = self.status_rainbow_strength();
+            let overlay_active = self.overlay.is_some();
             let mut first_changed = cache.lines.len();
             let rebuild =
                 cache.width != Some(width) || cache.block_revisions.len() > self.transcript.len();
@@ -147,6 +187,7 @@ impl ShellState {
                 cache.block_revisions.clear();
                 cache.dirty_blocks.clear();
                 cache.width = Some(width);
+                cache.welcome_overlay_active = overlay_active;
                 cache
                     .lines
                     .extend(render_welcome_card(self, width, 10, Instant::now()));
@@ -175,6 +216,16 @@ impl ShellState {
                     cache.block_revisions.push(self.block_revisions[index]);
                 }
             } else {
+                // The startup card is a bounded prefix, not a transcript
+                // block. Refresh it independently so a 2.2 s animation or an
+                // overlay transition never reparses historical Markdown.
+                replace_welcome_prefix(
+                    &mut cache,
+                    render_welcome_card(self, width, 10, Instant::now()),
+                    overlay_active,
+                    &mut first_changed,
+                );
+
                 // New blocks are appended in normal operation. Render them
                 // once and leave every existing block's layout untouched.
                 while cache.block_revisions.len() < self.transcript.len() {
@@ -306,5 +357,77 @@ impl ShellState {
             }
         }
         Ref::map(self.transcript_cache.borrow(), |cache| &cache.lines)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::tui::view::InteractiveShell;
+    use sexy_tui_rs::strip_terminal_sequences;
+
+    #[test]
+    fn welcome_prefix_replacement_reanchors_following_blocks() {
+        let mut cache = TranscriptCache {
+            width: Some(80),
+            lines: vec!["old 1".into(), "old 2".into(), "history".into()],
+            welcome_overlay_active: false,
+            block_starts: vec![2],
+            block_lengths: vec![1],
+            block_geometries: vec![SurfaceGeometry::default()],
+            block_revisions: vec![0],
+            dirty_blocks: Vec::new(),
+            dirty: true,
+            generation: 0,
+            last_update_start: 0,
+        };
+        let mut first_changed = cache.lines.len();
+        replace_welcome_prefix(&mut cache, vec!["new".into()], false, &mut first_changed);
+        assert_eq!(cache.lines, ["new", "history"]);
+        assert_eq!(cache.block_starts, [1]);
+        assert_eq!(first_changed, 0);
+    }
+
+    #[test]
+    fn welcome_animation_and_overlay_changes_replace_one_prefix() {
+        let mut shell = InteractiveShell::test_shell();
+        let started = Instant::now() - Duration::from_millis(350);
+        shell.state.borrow_mut().startup_card_started_at = Some(started);
+        let first = shell.state.borrow().rendered_transcript(80).clone();
+
+        let next_started = Instant::now() - Duration::from_millis(1400);
+        {
+            let mut state = shell.state.borrow_mut();
+            state.startup_card_started_at = Some(next_started);
+            state.invalidate_transcript();
+        }
+        let second = shell.state.borrow().rendered_transcript(80).clone();
+        assert_ne!(
+            first, second,
+            "animation must replace the cached welcome prefix"
+        );
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .transcript_cache
+                .borrow()
+                .last_update_start,
+            0,
+            "prefix changes must redraw from the first logical row"
+        );
+
+        shell.show_overlay_text("overlay".into());
+        let overlay = shell.state.borrow().rendered_transcript(80).clone();
+        assert!(!overlay
+            .iter()
+            .any(|line| { strip_terminal_sequences(line).contains("octet") }));
+        shell.close_overlay();
+        let restored = shell.state.borrow().rendered_transcript(80).clone();
+        assert!(restored
+            .iter()
+            .any(|line| strip_terminal_sequences(line).contains("octet")));
     }
 }

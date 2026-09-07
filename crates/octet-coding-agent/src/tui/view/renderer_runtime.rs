@@ -266,7 +266,10 @@ pub(super) fn render_loop(
         if welcome || advance_event_dot || advance_status_animation || advance_status_timer {
             let mut shell = state.borrow_mut();
             if welcome {
-                shell.invalidate_transcript_layout();
+                // The animated card is a bounded cache prefix. Repaint that
+                // prefix without reflowing the complete transcript on every
+                // 16 ms tick.
+                shell.invalidate_transcript();
             }
             if advance_event_dot {
                 shell.advance_event_dot_animation();
