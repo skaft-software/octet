@@ -28,3 +28,19 @@ compiled default. An explicit
 `OCTET_COLOR_SCHEME` is also treated as an existing terminal-appearance choice,
 so automation and already-configured shells do not get interrupted by
 onboarding.
+
+## Startup and terminal replies
+
+The first branded frame waits for resolved model/setup state, workspace, and
+appearance; the welcome animation starts at that boundary. SSH alone does not
+reduce the advertised terminal color capability.
+
+Auto can issue one OSC 11 background query and use a neutral fallback after its
+short detection deadline. The shared input owner continues recognizing a late
+reply after that deadline, including slowly fragmented bodies once the OSC 11
+header is recognized. Genuine typing and bracketed paste are retained.
+
+Escape and Alt+] remain genuine keys: an incomplete opening header has a 250 ms
+ambiguity timeout. A header fragmented more slowly can still pass through as
+input. Use explicit `--theme dark` or `--theme light` to skip the query on such
+terminals. This is not a guarantee for arbitrary terminal-protocol corruption.

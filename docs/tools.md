@@ -51,10 +51,18 @@ Select `effect_policy`, `OCTET_EFFECT_POLICY`, or `--effect-policy`:
 | `controlled` | Pure/workspace reads; confirmation for workspace mutation and non-whitelisted bash calls. Conservative known-safe read-only bash calls may be auto-approved; other ambient effects are denied. |
 | `controlled_bash_approval` | Workspace-mutation approval and one-shot approval for **every** bash process call; other ambient effects denied. |
 
+Full access implicitly trusts selected executable extensions, but they remain
+**disabled by default** until explicitly enabled. Trust does not bypass process
+gates, source validation, bundle integrity, or protocol checks, and implicit
+trust is never persisted as a grant.
+
 `--safe-mode` selects `ControlledBashApproval`, conflicts with `--effect-policy`,
-and forces `allow_external_paths = false`. Executable extensions are discovered
-but never started in safe mode, even with process/shell gates enabled. A trusted
-project may tighten but not relax the global authority profile. Approval cannot
+and forces `allow_external_paths = false`. It removes implicit extension trust.
+Executable extensions are discovered but never started in safe mode, even with
+explicit trust and process/shell gates enabled: startup still requires
+`unsafe_host`. This does not add an OS sandbox or change the one-shot approval
+required for every bash call. A trusted project may tighten but not relax the
+global authority profile. Approval cannot
 undo an already admitted action. See the [effect contract](design/octet-agent.md#effect-admission-boundary).
 
 `--safe` is a hidden compatibility alias. `--yolo` and its configuration and

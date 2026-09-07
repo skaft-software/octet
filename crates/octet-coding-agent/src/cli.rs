@@ -265,7 +265,8 @@ pub struct Cli {
         num_args = 1..
     )]
     pub enable_extensions: Vec<String>,
-    /// Trust the selected extension source for this invocation (comma-separated).
+    /// Explicit invocation-only trust (comma-separated); full access already
+    /// trusts selected extensions. Does not enable them or bypass safe mode.
     #[arg(
         long = "trust-extension",
         value_name = "NAMES",
@@ -351,6 +352,8 @@ struct ExtensionFlagBootstrap {
     enable_extensions: Vec<String>,
     trust_extensions: Vec<String>,
     workspace_trusted: bool,
+    safe_mode: bool,
+    effect_policy: Option<String>,
 }
 
 fn collect_bootstrap_list(args: &[OsString], index: &mut usize, target: &mut Vec<String>) -> bool {
@@ -379,6 +382,16 @@ fn extension_flag_bootstrap(args: &[OsString]) -> Option<ExtensionFlagBootstrap>
         let value = args[index].to_str()?;
         if value == "--" {
             break;
+        }
+        if value == "--safe-mode" || value == "--safe" {
+            result.safe_mode = true;
+            index += 1;
+            continue;
+        }
+        if let Some(policy) = value.strip_prefix("--effect-policy=") {
+            result.effect_policy = Some(policy.to_owned());
+            index += 1;
+            continue;
         }
         if value == "--workspace-trusted" || value == "--trust-workspace" {
             result.workspace_trusted = true;
@@ -410,6 +423,11 @@ fn extension_flag_bootstrap(args: &[OsString]) -> Option<ExtensionFlagBootstrap>
             continue;
         }
         match value {
+            "--effect-policy" => {
+                index += 1;
+                result.effect_policy = Some(args.get(index)?.to_str()?.to_owned());
+                index += 1;
+            }
             "--workspace" => {
                 index += 1;
                 result.workspace = Some(PathBuf::from(args.get(index)?.to_str()?));
@@ -448,6 +466,8 @@ fn bootstrap_extension_config(args: &[OsString], cwd: &Path) -> Option<Config> {
         enable_extensions: bootstrap.enable_extensions,
         trust_extensions: bootstrap.trust_extensions,
         workspace_trusted: bootstrap.workspace_trusted,
+        safe_mode: bootstrap.safe_mode,
+        effect_policy: bootstrap.effect_policy,
         ..Cli::default()
     };
     build_config_for_extension_flags(cli, cwd).ok()
@@ -2285,6 +2305,40 @@ mod tests {
     }
 
     #[test]
+    fn extension_flag_bootstrap_preserves_authority_options_after_dynamic_flags() {
+        for safe in ["--safe-mode", "--safe"] {
+            let args = [
+                "octet",
+                "--fixture-option",
+                "--enable-extension",
+                "fixture",
+                safe,
+            ]
+            .map(OsString::from);
+            let bootstrap = extension_flag_bootstrap(&args).unwrap();
+            assert!(bootstrap.safe_mode);
+            assert_eq!(bootstrap.enable_extensions, ["fixture"]);
+            assert!(bootstrap.trust_extensions.is_empty());
+        }
+        for policy in ["unsafe_host", "controlled", "controlled_bash_approval"] {
+            for options in [
+                vec!["--effect-policy".to_owned(), policy.to_owned()],
+                vec![format!("--effect-policy={policy}")],
+            ] {
+                let mut args = vec![OsString::from("octet"), OsString::from("--fixture-option")];
+                args.extend(options.into_iter().map(OsString::from));
+                let bootstrap = extension_flag_bootstrap(&args).unwrap();
+                assert_eq!(bootstrap.effect_policy.as_deref(), Some(policy));
+                assert!(!bootstrap.safe_mode);
+            }
+        }
+        let args = ["octet", "--", "--safe-mode", "--effect-policy=controlled"].map(OsString::from);
+        let bootstrap = extension_flag_bootstrap(&args).unwrap();
+        assert!(!bootstrap.safe_mode);
+        assert!(bootstrap.effect_policy.is_none());
+    }
+
+    #[test]
     fn extension_flags_parse_types_defaults_inverses_and_help() {
         let registered = register_extension_flags(vec![
             (
@@ -2804,6 +2858,9 @@ max_output_bytes = 4096
         let config = config_with_empty_global(cli, directory.path()).unwrap();
         assert_eq!(config.effect_policy, octet_agent::EffectPolicy::UnsafeHost);
         assert!(config.sandbox.allow_external_paths);
+        assert!(config.enabled_extensions.is_empty());
+        assert!(config.trusted_extensions.is_empty());
+        assert!(config.invocation_trusted_extensions.is_empty());
         assert!(Cli::try_parse_from(["octet", "--yolo"]).is_err());
     }
 
@@ -2826,6 +2883,54 @@ max_output_bytes = 4096
             Cli::try_parse_from(["octet", "--safe-mode", "--effect-policy", "unsafe_host",])
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn safe_mode_extension_selection_preserves_every_bash_approval() {
+        let directory = cwd();
+        for explicit_trust in [false, true] {
+            let mut cli = base();
+            cli.safe_mode = true;
+            cli.enable_extensions.push("fixture".into());
+            if explicit_trust {
+                cli.trust_extensions.push("fixture".into());
+            }
+            let config = config_with_empty_global(cli, directory.path()).unwrap();
+            assert_eq!(config.effect_policy, EffectPolicy::ControlledBashApproval);
+            assert!(config.sandbox.process_execution_allowed());
+            assert!(!config.sandbox.allow_external_paths);
+            let broker = octet_agent::EffectBroker::new(config.effect_policy);
+            for command in ["ls", "printf changed > file.txt"] {
+                let intent = octet_agent::EffectIntent::new(
+                    "principal",
+                    "run",
+                    1,
+                    "call",
+                    "bash",
+                    octet_agent::ToolEffect::HostProcess,
+                    serde_json::json!({"command": command}),
+                )
+                .unwrap();
+                assert!(matches!(
+                    broker.authorize(&intent, None).await,
+                    Err(octet_agent::EffectBrokerError::ApprovalUnavailable { .. })
+                ));
+            }
+            let extension_intent = octet_agent::EffectIntent::new(
+                "principal",
+                "run",
+                1,
+                "extension-call",
+                "fixture",
+                octet_agent::ToolEffect::Extension,
+                serde_json::json!({}),
+            )
+            .unwrap();
+            assert!(matches!(
+                broker.authorize(&extension_intent, None).await,
+                Err(octet_agent::EffectBrokerError::Denied { .. })
+            ));
+        }
     }
 
     #[test]

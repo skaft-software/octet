@@ -381,6 +381,49 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         })
         .unwrap_or_default();
 
+    if state.startup_pending {
+        // Only the current startup input owner is meaningful before readiness.
+        // Pickers own their own cursor; credential/endpoint prompts use the
+        // existing temporary composer, without its provisional model footer.
+        let mut composer = if state.tool_input_prompt.is_some() {
+            let mut lines =
+                crate::tui::composer_surface::render_composer_surface(state, width, now);
+            if crate::tui::composer_surface::status_footer_visible(state, width) {
+                lines.pop();
+            }
+            lines
+        } else {
+            Vec::new()
+        };
+        let rows = usize::from(state.size.1.max(1));
+        composer.truncate(rows);
+        let header = if !state.run_label.is_empty() && state.panel.is_none() {
+            vec![fit_line(
+                &state.theme.dim(&sanitize_for_terminal(&state.run_label)),
+                width,
+            )]
+        } else {
+            Vec::new()
+        };
+        error.truncate(
+            rows.saturating_sub(header.len() + composer.len() + usize::from(state.panel.is_some())),
+        );
+        let remaining = rows.saturating_sub(header.len() + error.len() + composer.len());
+        let panel = render_panel_with_limit(state, width, remaining);
+        return ShellChrome {
+            header,
+            error,
+            composer,
+            transcript_rows: remaining.saturating_sub(panel.len()),
+            panel,
+            subagents: Vec::new(),
+            extension_above: Vec::new(),
+            extension_below: Vec::new(),
+            pending: Vec::new(),
+            suggestions: Vec::new(),
+        };
+    }
+
     // Render the integrated composer surface with its ordinary status row.
     // Autocomplete can claim that row below once we know it has real matches.
     let footer_visible = crate::tui::composer_surface::status_footer_visible(state, width);
@@ -463,6 +506,16 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         error,
         transcript_rows: remaining,
     }
+}
+
+/// Before launch readiness, setup is a transient viewport in either mouse
+/// mode. Never render/materialize the provisional transcript as native history.
+/// The same retained renderer replaces this bounded surface with the ready frame.
+pub(super) fn render_startup_surface(state: &ShellState, width: u16) -> Vec<String> {
+    let chrome = shell_chrome(state, width, Instant::now());
+    let mut lines = super::viewport::overlay_lines(state, width, chrome.transcript_rows);
+    append_viewport_chrome(&mut lines, chrome);
+    lines
 }
 
 pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrome) {

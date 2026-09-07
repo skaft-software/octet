@@ -103,9 +103,37 @@ fn render_subagent_activity_panel(
     };
     let label = theme.bold(&theme.fg("foreground", "Subagents"));
     let mut lines = vec![label];
-    // A subagents event is already a bounded roster (at most eight workers),
-    // so keep every child visible even when ordinary tool output is collapsed.
+    // A subagents event is already a bounded roster, so keep every child
+    // visible even when ordinary tool output is collapsed.
     let unicode = theme.unicode();
+    let separator = if unicode { " · " } else { " - " };
+    let render_row = |text: &str, last: bool| {
+        let elbow = match (unicode, last) {
+            (true, true) => "└",
+            (true, false) => "├",
+            (false, true) => "`-",
+            (false, false) => "+-",
+        };
+        // Nest connectors beneath the heading and align wrapped content with
+        // the worker name, including the wider ASCII connector.
+        let prefix = format!("{ACTIVITY_DETAIL_INDENT}{} ", theme.fg("muted", elbow));
+        let continuation = " ".repeat(visible_width(&prefix));
+        wrap_hanging(text, &prefix, &continuation, width)
+    };
+    let usage_detail = |input: u64, output: u64, cost: Option<u64>| {
+        let input = crate::tui::composer_surface::compact_token_count(input);
+        let output = crate::tui::composer_surface::compact_token_count(output);
+        let mut detail = if unicode {
+            format!("{separator}↑{input} ↓{output}")
+        } else {
+            format!("{separator}in {input} out {output}")
+        };
+        if let Some(cost) = cost {
+            detail.push_str(if unicode { " • " } else { " - " });
+            detail.push_str(&crate::tui::composer_surface::format_microdollars(cost));
+        }
+        detail
+    };
 
     if !view.telemetry.is_empty() {
         let children = &view.telemetry;
@@ -116,14 +144,8 @@ fn render_subagent_activity_panel(
             .unwrap_or_default();
         for (index, child) in children.iter().rev().enumerate() {
             let last = index + 1 == children.len();
-            let elbow = match (unicode, last) {
-                (true, true) => "└",
-                (true, false) => "├",
-                (false, true) => "`-",
-                (false, false) => "+-",
-            };
             let task = sanitize_for_terminal(&child.task_name);
-            let task = format!("{task:<task_width$}");
+            let padding = " ".repeat(task_width - visible_width(&task));
             let status = if child.state.is_empty() {
                 "running"
             } else {
@@ -132,48 +154,32 @@ fn render_subagent_activity_panel(
             let mut detail = status.to_owned();
             if matches!(child.state.as_str(), "pending" | "running") {
                 if let Some(tool) = child.current_tool.as_deref() {
-                    detail.push_str(" · ");
+                    detail.push_str(separator);
                     detail.push_str(&sanitize_for_terminal(tool));
                 }
             }
-            let calls = child.tool_use_count;
-            detail.push_str(" · ");
-            detail.push_str(&format!(
-                "{calls} call{}",
-                if calls == 1 { "" } else { "s" }
-            ));
-            // Live token and cost telemetry, matching the composer chrome
-            // strip. Input buckets all occupy context, so cache reads and
-            // writes are folded into the prompt-side count.
+            // Input buckets are disjoint; reasoning is already in output.
+            // Tool-call counts remain in telemetry, not the transcript row.
             let input = child
                 .input_tokens
                 .saturating_add(child.cache_read_tokens)
                 .saturating_add(child.cache_write_tokens);
-            if unicode {
-                detail.push_str(&format!(
-                    " · ↑{} ↓{}",
-                    crate::tui::composer_surface::compact_token_count(input),
-                    crate::tui::composer_surface::compact_token_count(child.output_tokens),
-                ));
-            } else {
-                detail.push_str(&format!(
-                    " · in {} out {}",
-                    crate::tui::composer_surface::compact_token_count(input),
-                    crate::tui::composer_surface::compact_token_count(child.output_tokens),
-                ));
+            detail.push_str(&usage_detail(
+                input,
+                child.output_tokens,
+                child.cost_microdollars,
+            ));
+            if let Some(reason) = child.failure_reason.as_deref() {
+                detail.push_str(separator);
+                detail.push_str(&sanitize_for_terminal(reason));
             }
-            if let Some(cost) = child.cost_microdollars {
-                detail.push_str(if unicode { " • " } else { " - " });
-                detail.push_str(&crate::tui::composer_surface::format_microdollars(cost));
-            }
-            lines.push(fit_line(
+            lines.extend(render_row(
                 &format!(
-                    "{} {} {}",
-                    theme.fg("muted", elbow),
+                    "{}{padding} {}",
                     theme.fg("foreground", &task),
                     theme.fg("muted", &detail),
                 ),
-                width,
+                last,
             ));
         }
     } else {
@@ -185,44 +191,39 @@ fn render_subagent_activity_panel(
             .unwrap_or_default();
         for (index, activity) in activities.iter().rev().enumerate() {
             let last = index + 1 == activities.len();
-            let elbow = match (unicode, last) {
-                (true, true) => "└",
-                (true, false) => "├",
-                (false, true) => "`-",
-                (false, false) => "+-",
-            };
             let summary = sanitize_for_terminal(&activity.summary);
-            let summary = format!("{summary:<summary_width$}");
-            let calls = activity.metrics.map_or(0, |metrics| metrics.tool_calls);
-            let detail = format!(
-                "{} · {calls} call{}",
-                extension_activity_state_label(activity.state),
-                if calls == 1 { "" } else { "s" }
-            );
-            lines.push(fit_line(
+            let padding = " ".repeat(summary_width - visible_width(&summary));
+            let mut detail = extension_activity_state_label(activity.state).to_owned();
+            if let Some(metrics) = activity.metrics {
+                let input = metrics
+                    .input_tokens
+                    .saturating_add(metrics.cache_read_tokens)
+                    .saturating_add(metrics.cache_write_tokens);
+                detail.push_str(&usage_detail(
+                    input,
+                    metrics.output_tokens,
+                    metrics.cost_microdollars,
+                ));
+            }
+            lines.extend(render_row(
                 &format!(
-                    "{} {} {}",
-                    theme.fg("muted", elbow),
+                    "{}{padding} {}",
                     theme.fg("foreground", &summary),
                     theme.fg("muted", &detail),
                 ),
-                width,
+                last,
             ));
         }
     }
 
     if lines.len() == 1 {
         if let Some(reason) = view.failure_reason.as_deref() {
-            lines.push(fit_line(
-                &format!(
-                    "{} {}",
-                    theme.fg("muted", if unicode { "└" } else { "`-" }),
-                    theme.fg(
-                        "muted",
-                        &format!("failed · {}", sanitize_for_terminal(reason))
-                    ),
+            lines.extend(render_row(
+                &theme.fg(
+                    "muted",
+                    &format!("failed{separator}{}", sanitize_for_terminal(reason)),
                 ),
-                width,
+                true,
             ));
         }
     }
@@ -356,7 +357,7 @@ pub(super) fn render_block_planned_with_rainbow(
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
                 && panel.display.shell_command.is_some();
             let mut lines = if let Some(command) = panel.display.shell_command.as_deref() {
-                render_bash_row(command, rich_renderer, theme, width)
+                render_bash_row(command, rich_renderer, theme, width, verbose_tools)
             } else {
                 let compact = width < 60;
                 let summary = if !panel.finished {

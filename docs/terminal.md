@@ -38,9 +38,12 @@ OS containment.
 ## Input and active work
 
 Type `/` for [command discovery](commands.md), `@` for gitignore-aware file
-mentions, or Tab after `./`, `../`, `~/`, or an absolute path token. Directory
-completion stays open; spaces are backslash-escaped. Multiline editing,
-bracketed paste, and large-paste chips are supported. Explicitly pasted/dropped
+mentions, or a `./`, `../`, `~/`, or absolute path token for filesystem
+completion. Up/Down selects a visible path or mention suggestion; Tab inserts
+the selected result. Directory completion stays open; spaces are
+backslash-escaped. Without a visible completion menu, arrows retain normal
+editor navigation. Multiline editing, bracketed paste, and large-paste chips are
+supported. Explicitly pasted/dropped
 media needs an attachment chip before submission; [typed paths alone are text](media.md#attach-explicitly).
 
 Enter submits or queues a follow-up while work is active. Ctrl+S steers at the
@@ -106,6 +109,15 @@ foreground/muted tones without changing size. Completed success is green and
 failed tools red. [Selecting reasoning](providers.md#reasoning).
 
 ## Tool evidence and worker activity
+
+In terse mode, a Bash tool command shows its first three rendered lines, followed
+by a count of hidden command lines. Ctrl+O expands the complete retained command
+and collapses it again; this does not alter the executed command or the separate
+output preview.
+
+The transcript's **Subagents** event indents the complete worker roster beneath
+its heading. Rows retain state, input/output tokens, and cost, but omit call
+counts; the underlying telemetry and inspector remain unchanged.
 
 `octet --show-images` (or `show_images = true` in user configuration) opts in to
 bounded inline **tool-result display**, off by default. Validated inline image

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::tui::terminal::TerminalInput as EventStream;
 use anyhow::Context;
-use crossterm::event::EventStream;
 use futures_util::StreamExt;
 use octet_agent::extension_runtime::ExtensionRuntimeManager;
 use octet_agent::secure_fs::{create_regular_file_for_append, open_regular_file_for_append};

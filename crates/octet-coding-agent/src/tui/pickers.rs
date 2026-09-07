@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crate::tui::terminal::TerminalInput as EventStream;
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use octet_agent::extension_process::{ConfirmationRequest, ExtensionInputRequest};
 use octet_agent::tool::{ToolConfirmation, ToolInputRequest};

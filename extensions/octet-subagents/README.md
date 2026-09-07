@@ -41,21 +41,25 @@ identical spawn key is retry-safe; using it with different input fails.
 
 ## Install and enable
 
-With [octet 0.7.1 installed](../../docs/installation.md), once the matching signed
-public bundle is published, install it, then separately enable and trust it:
+With [octet 0.7.2 installed](../../docs/installation.md), once the matching signed
+public bundle is published, install it, then explicitly enable it:
 
 ```console
 octet extension install octet-subagents
-octet --enable-extension octet-subagents --trust-extension octet-subagents
+octet --enable-extension octet-subagents
 ```
 
 For a reviewed local archive instead, use
-`octet extension install --path ./octet-subagents-0.7.1.tar.gz`.
+`octet extension install --path ./octet-subagents-0.7.2.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
-starts nothing. Executable extensions require full-access policy; `--safe-mode`
-keeps them stopped. `/extensions status` shows the selected source, trust, API,
-generation, and negotiated features. Enabling never grants trust. The packaged
-skill is separately opt-in with `/skills load octet-subagents`.
+starts nothing; the bundle stays disabled until explicitly enabled. Default full
+access (`unsafe_host`) implicitly trusts it without saving a grant. Optional
+`--trust-extension` or source-bound `trusted_extensions` grants never enable it.
+`--safe-mode` removes implicit trust and keeps executable processes stopped even
+with explicit grants: startup still requires `unsafe_host`. Neither mode supplies
+an OS sandbox. `/extensions status` shows the selected source, trust, API,
+generation, and negotiated features. The packaged skill is separately opt-in with
+`/skills load octet-subagents`.
 
 ## Bound the work
 
@@ -75,16 +79,18 @@ skill is separately opt-in with `/skills load octet-subagents`.
 ## Inspect the work
 
 `/subagents` opens the host-owned worker list. Use Up/Down to select, Enter for a
-scrollable read-only transcript, and Escape or Left to return. The TUI's live
-roster shows tool calls, token usage, and cost without exposing prompts, tool
-arguments/results, or running model prose.
+scrollable read-only transcript, and Escape or Left to return. The transcript's
+complete worker roster is indented beneath **Subagents** and shows state, token
+usage, and cost without per-worker call counts. Tool-call telemetry remains in
+the inspector; prompts, tool arguments/results, and running model prose stay
+out of the roster.
 Serve inspection is also owner-bound and read-only; inspection cannot send a
 prompt. `/subagents inspect <name-or-id>` provides cached detail and
 `/extensions inspect agent-session:<digest>` is the explicit-reference fallback.
 
 ## Reference
 
-Bundle `0.7.1` requires exactly octet `0.7.1` and retains API `0.2`. The detailed
+Bundle `0.7.2` requires exactly octet `0.7.2` and retains API `0.2`. The detailed
 contract is a bundled-runtime reference, not a current extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.

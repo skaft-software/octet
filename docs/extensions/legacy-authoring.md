@@ -76,12 +76,16 @@ capabilities. Pi migration is capability-oriented, not Pi's in-process ABI:
 `octet pi install` creates an inert wrapper for the bounded `octet-pi-compat`
 subset. See [Pi migration](../pi-migration.md).
 
-Discovery is available under every effect policy. Startup requires all three
-independent gates: enablement, an exact trust grant, and the default full-access
-policy. `--safe-mode` never starts an executable extension, even when
-process/shell sandbox flags are enabled, and `/extensions status` reports the
-blocked startup. Use full-access mode only inside separate OS-level isolation.
-Capability declarations are visible consent metadata, not an OS sandbox.
+Discovery is available under every effect policy; executable extensions remain
+disabled until explicitly enabled. In the coding product, startup requires
+enablement, trust, the `unsafe_host` effect-policy floor, and independent
+process permissions. Default full access (`unsafe_host`) implicitly trusts the
+selected extension without persisting a grant or enabling it. `--safe-mode`
+does not inherit that implicit trust and never starts an executable extension,
+even with explicit trust grants or enabled process/shell flags.
+`/extensions status` reports the blocked startup. Use full-access mode only
+inside separate OS-level isolation. Capability declarations are visible consent
+metadata, not an OS sandbox.
 
 ## Layout and discovery
 
@@ -95,17 +99,17 @@ Each direct child directory contains one `extension.toml`:
 Precedence is global, then trusted project, then explicit directories in
 command-line order; later definitions win by directory name. Project extensions
 are ignored until the workspace is trusted. Discovery never executes code;
-enablement and executable trust are independent, explicit decisions bound to the
-selected manifest name and source. The direct child name must exactly match the
-manifest `name`; aliases are rejected with a diagnostic.
+enablement remains explicit. Coding-product full access implicitly trusts the
+selected extension; optional explicit grants remain bound to the selected
+manifest name and source. The direct child name must exactly match the manifest
+`name`; aliases are rejected with a diagnostic.
 
 Repeatable one-shot options select and activate an existing reviewed extension:
 
 ```console
 octet \
     --extension-dir ./my-extensions \
-    --enable-extension hello-world \
-    --trust-extension hello-world
+    --enable-extension hello-world
 ```
 
 Or persist activation in user config:
@@ -114,12 +118,12 @@ Or persist activation in user config:
 # Unsafe: full-access mode is intended only inside separate OS-level isolation.
 # Use --safe-mode when approval is required.
 enabled_extensions = ["hello-world"]
-trusted_extensions = ["hello-world"]
 ```
 
-A bare persistent trust name applies only under `~/.octet/extensions`, never to
-a same-named project or explicit extension. Those sources require an exact
-absolute manifest path:
+Optional explicit trust grants do not enable an extension. A bare persistent
+trust name applies only under `~/.octet/extensions`, never to a same-named
+project or explicit extension. To record an explicit grant for those sources,
+use an exact absolute manifest path:
 
 ```toml
 enabled_extensions = ["git-tools"]
@@ -128,13 +132,15 @@ trusted_extensions = [
 ]
 ```
 
-`--trust-extension git-tools` trusts the currently selected source only for that
-process invocation; it is never written back as a persistent name grant. A
-trusted project config may suggest `enabled_extensions`, but cannot grant
-itself executable trust. Persistent trust comes from user config or environment
-(`OCTET_TRUSTED_EXTENSIONS`); one-shot trust comes from `--trust-extension`.
-Full-access policy permits a fully enabled, trusted extension to start;
-`--safe-mode` keeps it stopped.
+`--trust-extension git-tools` optionally grants explicit trust to the
+currently selected source only for that process invocation; it is never
+written back as a persistent name grant. A trusted project config may suggest
+`enabled_extensions`, but cannot create explicit executable-trust grants.
+Persistent grants come from user config or environment
+(`OCTET_TRUSTED_EXTENSIONS`); one-shot grants come from `--trust-extension`.
+Coding-product full access supplies implicit trust independently of those
+grants; `--safe-mode` does not inherit it and keeps executable extensions
+stopped even with explicit grants.
 
 The agent crate exposes `discover_extension_manifests` for direct-child layouts
 and `ExtensionCatalog::load_resolved` for already resolved manifest paths in
@@ -373,12 +379,13 @@ host-owned footer adds live priced child spend while active, then durable
 root-session delegated usage after settlement, never an extension footer string.
 
 `/extensions` opens the installed-bundle management menu. Enter toggles ordinary
-bundles or opens the enabled first-party web-search provider picker; trust remains
-separate. Activation is read-only when project/environment/CLI activation makes
-user config non-authoritative. `/extensions status` is the diagnostic and
-presentation fallback; `/extensions inspect <agent-session:…>` opens a current
-parent-bound delegated transcript; `/extensions action <extension> <action-id>`
-performs validated interactive routing.
+bundles or opens the enabled first-party web-search provider picker; activation
+does not persist trust grants. Activation is read-only when
+project/environment/CLI activation makes user config non-authoritative.
+`/extensions status` is the diagnostic and presentation fallback;
+`/extensions inspect <agent-session:…>` opens a current parent-bound delegated
+transcript; `/extensions action <extension> <action-id>` performs validated
+interactive routing.
 
 The enabled package's no-argument `/subagents` opens a live arrow-key worker list.
 Owner-bound refresh reconciles authoritative `agent_sessions` state and retains
@@ -572,16 +579,17 @@ after bounded grace. Cancellation promises neither rollback nor unsafe replay.
 `/extensions` manages installed bundles: Up/Down moves, Enter toggles, Escape
 closes. Selecting enabled `octet-web-search` opens a provider picker; Brave
 Search is recommended and requests its key through correlated secret input;
-SearXNG remains available. Only `enabled_extensions` changes, never trust;
-provider state remains extension-owned. Activation is read-only if project,
-environment, or CLI layers participate, because user config is not next-launch
-authority; already running web-search setup remains available. Precedence is
-revalidated immediately before each write. Enabled unavailable bundles remain
-disable-only. Source-changing trust, tool-name collisions, and explicit
-required-tool removal fail closed.
+SearXNG remains available. Only `enabled_extensions` changes, never trust
+grants; provider state remains extension-owned. Activation is read-only if
+project, environment, or CLI layers participate, because user config is not
+next-launch authority; already running web-search setup remains available.
+Precedence is revalidated immediately before each write. Enabled unavailable
+bundles remain disable-only. Source-changing trust, tool-name collisions, and
+explicit required-tool removal fail closed.
 
 `/extensions status` includes the selected manifest path and a copyable exact
-persistent/one-shot trust grant for enabled-but-untrusted entries.
+persistent/one-shot trust grant for enabled-but-untrusted entries. These grants
+do not bypass safe-mode startup denial.
 `/extensions reload` replaces running processes after successful handshakes;
 general `/reload` reruns discovery and rebuilds the product boundary.
 
@@ -780,9 +788,15 @@ version. Removal accepts only managed bundles and deletes only their directory.
 Config, provider state, sessions, artifacts, browser profiles, and other data
 must live outside it and are not removed.
 
-Installation/discovery never enables, trusts, starts, or grants capabilities.
-`/extensions` may persist activation but trust remains explicit and separate;
-`--enable-extension` and `--trust-extension` remain invocation-only gates.
+Installation/discovery never enables or starts an extension, records a trust
+grant, or grants capabilities. `/extensions` may persist activation; it never
+records a trust grant. Coding-product full access implicitly trusts the selected
+extension without persisting trust. `--enable-extension` is invocation-only
+activation; `--trust-extension` is an optional invocation-only explicit grant
+that does not enable anything. `--safe-mode` does not inherit implicit trust and
+keeps executable extensions stopped even with explicit grants; the `unsafe_host`
+floor and independent process gates still apply.
+
 Packaged `skills/*/SKILL.md` become user-installed skill candidates but stay
 inactive until explicitly loaded. `~/.octet/skills` and explicit `--skill-dir`
 have higher precedence.

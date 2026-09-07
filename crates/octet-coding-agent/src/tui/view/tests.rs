@@ -1496,7 +1496,7 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     let footer = paths.last().expect("mention suggestion footer");
     assert_eq!(
         strip_terminal_sequences(footer).trim(),
-        "project files · tab complete"
+        "project files · tab complete · ↑↓ navigate"
     );
     assert!(footer.contains(&model_accent), "{footer:?}");
     assert!(!footer.contains(&ui_accent), "{footer:?}");
@@ -9052,7 +9052,19 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
         .join("\n");
     assert!(activity.contains("Subagents"), "{activity}");
     assert!(activity.contains("read-diffs · using read"), "{activity}");
-    assert!(activity.contains("16 call"), "{activity}");
+    assert!(!activity.contains("call"), "{activity}");
+    assert!(activity.contains("↑88.2k ↓99 • $0.209"), "{activity}");
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .activities,
+        snapshot.activities,
+        "rendering must retain tool-call and usage accounting"
+    );
     assert!(plain_footer(&shell, 120, Instant::now()).contains("$0.300"));
 
     assert!(shell.set_subagent_presentation(Some(&snapshot), false));
@@ -9139,12 +9151,11 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     let heading_column = visible_width(&heading[..heading_byte]);
     let elbow_column = visible_width(&child[..elbow_byte]);
     let task_column = visible_width(&child[..task_byte]);
-    assert_eq!(elbow_column, heading_column, "{block}");
+    assert_eq!(elbow_column, heading_column + 2, "{block}");
     assert_eq!(task_column, elbow_column + 2, "{block}");
     assert!(block.contains("failed"), "{block}");
-    // Live tool-call and token/cost telemetry must render in the transcript
-    // event, matching the composer chrome strip.
-    assert!(block.contains("4 calls"), "{block}");
+    // Hide call counts only in the row; keep live token/cost and failure detail.
+    assert!(!block.contains("call"), "{block}");
     assert!(block.contains("12.8k"), "{block}");
     assert!(
         block.contains("↓220") || block.contains("out 220"),
@@ -9152,16 +9163,17 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     );
     assert!(block.contains("$0.007"), "{block}");
     assert!(
-        block.contains("provider request failed: upstream unavailable")
-            || shell
-                .state
-                .borrow()
-                .subagent_activity
-                .as_ref()
-                .and_then(|view| view.failure_reason.as_deref())
-                == Some("spawn rejected: worker limit reached"),
+        block.contains("provider request failed: upstream unavailable"),
         "{block}"
     );
+    let state = shell.state.borrow();
+    let view = state.subagent_activity.as_ref().unwrap();
+    assert!(view.telemetry.iter().all(|child| child.tool_use_count == 4));
+    assert_eq!(
+        view.failure_reason.as_deref(),
+        Some("spawn rejected: worker limit reached")
+    );
+    drop(state);
     assert!(!shell
         .state
         .borrow()
@@ -9190,6 +9202,281 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     });
     let transcript = shell.state.borrow().rendered_transcript(120).join("\n");
     assert!(!transcript.contains("Used subagent spawn"), "{transcript}");
+}
+
+fn subagent_transcript_test_view(native: bool) -> SubagentActivityView {
+    let children = [
+        ("Read changelog", "running", 0, Some(165_000)),
+        ("Audit docs", "completed", 1, Some(0)),
+        ("Inspect tests", "failed", 16, None),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(
+        |(index, (task, state, calls, cost))| octet_agent::DelegationTelemetryChild {
+            child_id: format!("agent-{index}"),
+            task_name: task.into(),
+            profile: Some("explore".into()),
+            model: "test-model".into(),
+            state: state.into(),
+            phase: state.into(),
+            current_tool: (state == "running").then(|| "read".into()),
+            tool_use_count: calls,
+            input_tokens: 5_500_000,
+            cache_read_tokens: 80_000,
+            cache_write_tokens: 20_000,
+            output_tokens: 3_900,
+            reasoning_tokens: 1_000,
+            total_tokens: 5_603_900,
+            cost: None,
+            cost_microdollars: cost,
+            elapsed_ms: 500,
+            failure_class: (state == "failed").then(|| "provider_failure".into()),
+            failure_reason: (state == "failed")
+                .then(|| "provider request failed: \x1b[31mupstream unavailable\x1b[0m".into()),
+            effective_tool_policy: test_effective_tool_policy(),
+            orchestration_provenance: inherited_delegation_provenance(),
+            session: Some("agent-session:opaque".into()),
+        },
+    )
+    .collect::<Vec<_>>();
+    if native {
+        SubagentActivityView {
+            telemetry: children,
+            ..SubagentActivityView::default()
+        }
+    } else {
+        SubagentActivityView {
+            activities: children
+                .into_iter()
+                .map(|child| octet_agent::ExtensionPresentationActivity {
+                    id: child.child_id,
+                    kind: "subagent".into(),
+                    state: match child.state.as_str() {
+                        "running" => octet_agent::ExtensionPresentationState::Running,
+                        "completed" => octet_agent::ExtensionPresentationState::Succeeded,
+                        _ => octet_agent::ExtensionPresentationState::Failed,
+                    },
+                    summary: child.task_name,
+                    provenance: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    metrics: Some(octet_agent::ExtensionPresentationMetrics {
+                        tool_calls: child.tool_use_count,
+                        input_tokens: child.input_tokens,
+                        cache_read_tokens: child.cache_read_tokens,
+                        cache_write_tokens: child.cache_write_tokens,
+                        output_tokens: child.output_tokens,
+                        reasoning_tokens: child.reasoning_tokens,
+                        cost_microdollars: child.cost_microdollars,
+                    }),
+                    references: Vec::new(),
+                })
+                .collect(),
+            ..SubagentActivityView::default()
+        }
+    }
+}
+
+fn subagent_transcript_test_rows(
+    view: &SubagentActivityView,
+    theme: &OctetTheme,
+    width: u16,
+    verbose: bool,
+) -> Vec<String> {
+    render_block(
+        None,
+        &TranscriptBlock::Tool(Box::new(ToolPanel::subagent_activity(view))),
+        theme,
+        &theme.rich_renderer(),
+        &theme.reasoning_renderer(),
+        width,
+        verbose,
+    )
+    .iter()
+    .map(|line| strip_terminal_sequences(line))
+    .collect()
+}
+
+#[test]
+fn subagent_transcript_rows_nest_and_wrap_without_call_counts() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+
+    for (unicode, color) in [
+        (false, ColorDepth::None),
+        (true, ColorDepth::None),
+        (true, ColorDepth::TrueColor),
+    ] {
+        let theme =
+            crate::tui::theme::test_theme_with(TerminalCapabilities::test(true, unicode, color));
+        let separator = if unicode { " · " } else { " - " };
+        let usage = if unicode {
+            "↑5.6m ↓3.9k"
+        } else {
+            "in 5.6m out 3.9k"
+        };
+        let cost_separator = if unicode { " • " } else { " - " };
+        for native in [true, false] {
+            let view = subagent_transcript_test_view(native);
+            let reason = if native {
+                format!("{separator}provider request failed: upstream unavailable")
+            } else {
+                String::new()
+            };
+            let tool = if native {
+                format!("{separator}read")
+            } else {
+                String::new()
+            };
+            let expected = vec![
+                format!("Inspect tests failed{separator}{usage}{reason}"),
+                format!("Audit docs completed{separator}{usage}{cost_separator}$0.000"),
+                format!("Read changelog running{tool}{separator}{usage}{cost_separator}$0.165"),
+            ];
+            for width in [24, 40, 80, 120] {
+                for verbose in [false, true] {
+                    let rows = subagent_transcript_test_rows(&view, &theme, width, verbose);
+                    assert_eq!(
+                        rows[0],
+                        if unicode {
+                            "• Subagents"
+                        } else {
+                            "* Subagents"
+                        }
+                    );
+                    assert!(
+                        rows.iter()
+                            .all(|line| visible_width(line) <= usize::from(width)),
+                        "{rows:?}"
+                    );
+                    assert!(!rows.join("\n").contains("call"), "{rows:?}");
+                    if !unicode {
+                        assert!(rows.iter().all(|line| line.is_ascii()), "{rows:?}");
+                    }
+                    if width <= 40 {
+                        assert!(rows.len() > 4, "narrow worker details must wrap: {rows:?}");
+                    }
+                    let branch = if unicode { "    ├ " } else { "    +- " };
+                    let last = if unicode { "    └ " } else { "    `- " };
+                    let continuation = if unicode { "      " } else { "       " };
+                    let mut workers = Vec::<String>::new();
+                    let mut last_connectors = 0;
+                    for row in &rows[1..] {
+                        if let Some(text) = row.strip_prefix(branch) {
+                            assert_eq!(last_connectors, 0, "{rows:?}");
+                            workers.push(text.to_owned());
+                        } else if let Some(text) = row.strip_prefix(last) {
+                            last_connectors += 1;
+                            workers.push(text.to_owned());
+                        } else {
+                            let text = row
+                                .strip_prefix(continuation)
+                                .expect("wrapped worker-name column");
+                            let worker = workers.last_mut().expect("continuation follows a worker");
+                            worker.push(' ');
+                            worker.push_str(text);
+                        }
+                    }
+                    assert_eq!(last_connectors, 1, "{rows:?}");
+                    let workers = workers
+                        .iter()
+                        .map(|worker| worker.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        workers, expected,
+                        "native={native}, width={width}, verbose={verbose}: {rows:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn subagent_transcript_aligns_unicode_names_by_visible_width() {
+    let theme = crate::tui::theme::test_theme();
+    for native in [true, false] {
+        let mut view = subagent_transcript_test_view(native);
+        let names = ["審査", "Review", "e\u{301}xam"];
+        for (child, name) in view.telemetry.iter_mut().zip(names) {
+            child.task_name = name.into();
+        }
+        for (activity, name) in view.activities.iter_mut().zip(names) {
+            activity.summary = name.into();
+        }
+        let rows = subagent_transcript_test_rows(&view, &theme, 120, false);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        for ((row, name), state) in
+            rows[1..]
+                .iter()
+                .zip(names.into_iter().rev())
+                .zip(["failed", "completed", "running"])
+        {
+            let name_byte = row.find(name).unwrap();
+            let state_byte = row.find(state).unwrap();
+            assert_eq!(visible_width(&row[..name_byte]), 6, "{row}");
+            assert_eq!(visible_width(&row[..state_byte]), 13, "{row}");
+        }
+    }
+}
+
+#[test]
+fn subagent_transcript_does_not_invent_missing_activity_metrics() {
+    let theme = crate::tui::theme::test_theme();
+    let mut view = subagent_transcript_test_view(false);
+    for activity in &mut view.activities {
+        activity.metrics = None;
+    }
+    let rows = subagent_transcript_test_rows(&view, &theme, 120, false);
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for row in &rows[1..] {
+        assert!(!row.contains("call"), "{row}");
+        assert!(
+            !row.contains('↑') && !row.contains('↓') && !row.contains('$'),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn subagent_transcript_failure_wraps_at_the_worker_indent() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+
+    let view = SubagentActivityView {
+        failure_reason: Some("spawn rejected: \x1b[31mworker limit reached\x1b[0m".into()),
+        ..SubagentActivityView::default()
+    };
+    for unicode in [true, false] {
+        let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+            true,
+            unicode,
+            ColorDepth::None,
+        ));
+        for width in [24, 40, 120] {
+            let rows = subagent_transcript_test_rows(&view, &theme, width, false);
+            let prefix = if unicode { "    └ " } else { "    `- " };
+            let continuation = if unicode { "      " } else { "       " };
+            let mut detail = rows[1].strip_prefix(prefix).unwrap().to_owned();
+            for row in &rows[2..] {
+                detail.push(' ');
+                detail.push_str(row.strip_prefix(continuation).unwrap());
+            }
+            assert_eq!(
+                detail.split_whitespace().collect::<Vec<_>>().join(" "),
+                if unicode {
+                    "failed · spawn rejected: worker limit reached"
+                } else {
+                    "failed - spawn rejected: worker limit reached"
+                },
+                "{rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .all(|line| visible_width(line) <= usize::from(width)),
+                "{rows:?}"
+            );
+        }
+    }
 }
 
 #[test]

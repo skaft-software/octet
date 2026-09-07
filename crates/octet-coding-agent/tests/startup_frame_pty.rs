@@ -190,6 +190,15 @@ impl Pty {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StartupFixture<'a> {
+    Model(&'a str),
+    /// A persisted selection, resolved through the real registry with no auth.
+    ConfiguredGemma,
+    /// Empty inventory and no appearance preference: both onboarding owners run.
+    Setup,
+}
+
 struct PtyOctet {
     child: Child,
     pty: Pty,
@@ -209,7 +218,7 @@ impl PtyOctet {
             color,
             (INITIAL_COLUMNS, INITIAL_ROWS),
             (2, false, false),
-            "probe",
+            StartupFixture::Model("probe"),
         )
     }
 
@@ -220,24 +229,53 @@ impl PtyOctet {
         color: bool,
         dimensions: (u16, u16),
         start: (u16, bool, bool),
-        model: &str,
+        fixture: StartupFixture<'_>,
     ) -> Self {
         let root = tempfile::tempdir().expect("PTY test tempdir");
-        let home = root.path().join("home");
-        let workspace = root.path().join("workspace");
-        let sessions = root.path().join("sessions");
+        // The CLI resolves the workspace physically. Give HOME the same path
+        // identity, including macOS's /var -> /private/var temporary-directory
+        // alias, so a workspace beneath HOME is faithfully displayed as ~/….
+        let canonical_root = root
+            .path()
+            .canonicalize()
+            .expect("canonical PTY fixture root");
+        let home = canonical_root.join("home");
+        let workspace = match fixture {
+            StartupFixture::Model(_) => canonical_root.join("workspace"),
+            _ => home.join("workspace"),
+        };
+        let sessions = canonical_root.join("sessions");
         create_inert_environment(&home, &workspace, &sessions);
-        if api.is_some() || model != "probe" {
-            let base_url = api.unwrap_or("http://127.0.0.1:9/v1/");
-            let credential = serde_json::json!({
-                "base_url": base_url, "api_key": "", "api_name": model,
-                "headers": [], "models": [], "auto_discover": false,
-            });
-            fs::write(
-                home.join(".octet/credentials/custom.json"),
-                credential.to_string(),
-            )
-            .expect("loopback provider fixture");
+        let credential = home.join(".octet/credentials/custom.json");
+        match fixture {
+            StartupFixture::Model(model) if api.is_some() || model != "probe" => {
+                let base_url = api.unwrap_or("http://127.0.0.1:9/v1/");
+                let record = serde_json::json!({
+                    "base_url": base_url, "api_key": "", "api_name": model,
+                    "headers": [], "models": [], "auto_discover": false,
+                });
+                fs::write(&credential, record.to_string()).expect("loopback provider fixture");
+            }
+            StartupFixture::ConfiguredGemma => {
+                let record = serde_json::json!({
+                    "version": 1,
+                    "providers": {"cerebras": {
+                        "label": "Cerebras", "base_url": "http://127.0.0.1:9/v1/",
+                        "auth": {"kind": "none"}, "auto_discover": false,
+                        "models": [{"api_name": "gemma-4-31b", "display_name": "Gemma 4 31B"}]
+                    }}
+                });
+                fs::write(&credential, record.to_string()).expect("offline Cerebras/Gemma fixture");
+                fs::write(
+                    home.join(".octet/config.toml"),
+                    "model = \"custom/cerebras/gemma-4-31b\"\ntheme = \"dark\"\n",
+                )
+                .expect("persisted model and appearance fixture");
+            }
+            StartupFixture::Setup => {
+                fs::remove_file(&credential).expect("empty disposable provider inventory");
+            }
+            StartupFixture::Model(_) => {}
         }
 
         let mut pty = Pty::open(dimensions.0, dimensions.1);
@@ -265,11 +303,15 @@ impl PtyOctet {
                 "--no-context-files",
                 "--no-tools",
                 "--color",
-                if color { "always" } else { "never" },
+                if !color {
+                    "never"
+                } else if matches!(fixture, StartupFixture::ConfiguredGemma) {
+                    "auto"
+                } else {
+                    "always"
+                },
                 "--mouse",
                 mode.as_arg(),
-                "--model",
-                &format!("custom/{model}"),
                 "--workspace",
             ])
             .arg(&workspace)
@@ -287,6 +329,25 @@ impl PtyOctet {
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);
+
+        match fixture {
+            StartupFixture::Model(model) => {
+                command.args(["--model", &format!("custom/{model}")]);
+            }
+            StartupFixture::ConfiguredGemma | StartupFixture::Setup => {
+                // SSH is transport, not evidence of limited terminal colour.
+                command
+                    .env("TERM_PROGRAM", "ghostty")
+                    .env("SSH_CONNECTION", "192.0.2.1 12345 192.0.2.2 22");
+                if matches!(fixture, StartupFixture::Setup) {
+                    // Reliable background signal avoids an OSC dependency while
+                    // leaving first-run appearance onboarding unconfigured.
+                    command
+                        .env_remove("OCTET_COLOR_SCHEME")
+                        .env("COLORFGBG", "15;0");
+                }
+            }
+        }
 
         // `openpty` alone does not make the slave a controlling terminal. A
         // session/controlling TTY makes the resize path match a real shell.
@@ -776,6 +837,295 @@ fn real_octet_startup_frame_pty_contract() {
         include_str!("fixtures/startup-frame-pty/primary-app.trace"),
         &current_app.debug_report(),
     );
+}
+
+fn assert_unbranded_startup(parser: &vt100::Parser, columns: u16) {
+    let text = screen_text(parser, columns);
+    assert!(!text.contains("octet v"), "premature branded frame\n{text}");
+    assert!(!text.contains('█'), "premature byte mark\n{text}");
+    assert!(!text.contains("selecting model"), "{text}");
+    assert!(!text.contains("workspace unavailable"), "{text}");
+    assert!(!text.contains(STALE_MARKER), "{text}");
+}
+
+fn assert_green_gemma_frame(parser: &vt100::Parser) {
+    let text = screen_text(parser, INITIAL_COLUMNS);
+    assert_single_welcome(parser, INITIAL_COLUMNS, "first-ready Gemma");
+    assert!(text.contains("Gemma 4 31B"), "{text}");
+    assert!(text.contains("~/workspace"), "{text}");
+    let wordmark = status_colors(parser, "octet", INITIAL_COLUMNS).unwrap();
+    let vt100::Color::Rgb(red, green, blue) = wordmark[0] else {
+        panic!("SSH/Ghostty fixture lost truecolor: {wordmark:?}");
+    };
+    assert!(
+        green > red && green > blue,
+        "Gemma accent is green: {wordmark:?}"
+    );
+    assert!(wordmark.iter().all(|color| *color == wordmark[0]));
+    let (rows, columns) = parser.screen().size();
+    let mut logo_columns = vec![None; usize::from(columns)];
+    let mut rules = 0;
+    for row in 0..rows {
+        for col in 0..columns {
+            let cell = parser.screen().cell(row, col).unwrap();
+            match cell.contents().as_str() {
+                "─" => {
+                    assert_eq!(cell.fgcolor(), wordmark[0], "mixed composer accent\n{text}");
+                    rules += 1;
+                }
+                "█" => {
+                    // The approved logo intentionally blends a gradient with
+                    // the model accent. Shimmer may lift each column by <=20%,
+                    // but all occupied rows in that column must agree.
+                    let previous = &mut logo_columns[usize::from(col)];
+                    if let Some(color) = previous {
+                        assert_eq!(*color, cell.fgcolor(), "mixed logo column {col}\n{text}");
+                    }
+                    *previous = Some(cell.fgcolor());
+                    let gradient: [[u8; 3]; 8] = [
+                        [0x4b, 0x8d, 0xff],
+                        [0x48, 0xad, 0xf5],
+                        [0x45, 0xce, 0xeb],
+                        [0x49, 0xdc, 0xd9],
+                        [0x4f, 0xe2, 0xc3],
+                        [0x5c, 0xe9, 0xaa],
+                        [0x74, 0xf4, 0x8a],
+                        [0x8d, 0xff, 0x6a],
+                    ];
+                    let vt100::Color::Rgb(r, g, b) = cell.fgcolor() else {
+                        panic!("logo lost truecolor");
+                    };
+                    let column = usize::from(col - 2) / 3; // 24-cell mark in a 96-column fixture
+                    for ((base, accent), actual) in gradient[column]
+                        .into_iter()
+                        .zip([red, green, blue])
+                        .zip([r, g, b])
+                    {
+                        let blended =
+                            (f32::from(base) + (f32::from(accent) - f32::from(base)) * 0.58) as u8;
+                        let brightest =
+                            (f32::from(blended) + (255.0 - f32::from(blended)) * 0.2) as u8;
+                        assert!(
+                            (blended.saturating_sub(1)..=brightest.saturating_add(1))
+                                .contains(&actual),
+                            "logo retained a provisional palette at {row},{col}: {:?}\n{text}",
+                            cell.fgcolor()
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(rules, usize::from(INITIAL_COLUMNS) * 2);
+}
+
+#[test]
+fn real_octet_first_branded_frame_has_resolved_gemma_workspace_and_accent() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            None,
+            true,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (7, false, false),
+            StartupFixture::ConfiguredGemma,
+        );
+        octet.wait_until(STARTUP_TIMEOUT, |output| {
+            synchronized_frame_end_containing(output, b"Gemma 4 31B").is_some()
+        });
+        octet.pty.drain_for(Duration::from_millis(150));
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        let mut consumed = 0;
+        let mut branded = false;
+        for frame in frame_ranges(&octet.pty.output) {
+            parser.process(&octet.pty.output[consumed..frame.end]);
+            consumed = frame.end;
+            if !branded && !parser.screen().contents().contains("octet v") {
+                assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+            } else {
+                branded = true;
+                assert_green_gemma_frame(&parser);
+            }
+        }
+        assert!(branded, "no branded frame");
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert!(!uses_alternate_screen(&capture.output));
+    }
+}
+
+#[test]
+fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            None,
+            true,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (7, false, false),
+            StartupFixture::Setup,
+        );
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        let mut consumed = 0;
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Choose terminal appearance",
+            STARTUP_TIMEOUT,
+        );
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        // Preview/confirm Light; no provider is installed by an appearance choice.
+        octet.pty.write_input(b"\x1b[B\r");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Set up a provider",
+            STARTUP_TIMEOUT,
+        );
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        for (columns, rows) in [
+            (RESIZED_COLUMNS, RESIZED_ROWS),
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+        ] {
+            octet.pty.drain_for(DRAIN_TIME);
+            let start = octet.pty.output.len();
+            parser.process(&octet.pty.output[consumed..start]);
+            octet.resize(columns, rows);
+            parser.set_size(rows, columns);
+            octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                synchronized_frame_end_containing(&bytes[start..], b"\x1b[2J").is_some()
+            });
+            let end = start
+                + synchronized_frame_end_containing(&octet.pty.output[start..], b"\x1b[2J")
+                    .unwrap();
+            parser.process(&octet.pty.output[start..end]);
+            consumed = end;
+            assert_unbranded_startup(&parser, columns);
+            assert!(parser.screen().contents().contains("Set up a provider"));
+            assert!(!parser.screen().hide_cursor());
+        }
+        // Open the existing endpoint-input owner, type without submitting, and
+        // Ctrl-C out. This never probes a service or writes provider state.
+        octet.pty.write_input(b"\x1b[B\r");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Endpoint URL:",
+            STARTUP_TIMEOUT,
+        );
+        octet.pty.write_input(b"http://127.0.0.1:9/v1/");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "http://127.0.0.1:9/v1/",
+            STARTUP_TIMEOUT,
+        );
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        octet.pty.write_input(&[3]);
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Set up a provider",
+            STARTUP_TIMEOUT,
+        );
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        let readiness_start = consumed;
+        octet.pty.write_input(b"\x1b[B\x1b[B\r"); // Continue without a provider.
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+            synchronized_frame_end_containing(&bytes[readiness_start..], b"setup needed").is_some()
+        });
+        octet.pty.drain_for(DRAIN_TIME);
+        let mut branded = false;
+        for frame in frame_ranges(&octet.pty.output[readiness_start..]) {
+            let end = readiness_start + frame.end;
+            parser.process(&octet.pty.output[consumed..end]);
+            consumed = end;
+            let text = screen_text(&parser, INITIAL_COLUMNS);
+            if !branded && !text.contains("octet v") {
+                assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+                continue;
+            }
+            branded = true;
+            assert_single_welcome(&parser, INITIAL_COLUMNS, "model-less ready");
+            assert!(
+                text.contains("no configured model · setup needed"),
+                "{text}"
+            );
+            assert!(text.contains("~/workspace"), "{text}");
+            assert!(
+                !text.contains("Set up a provider"),
+                "stale setup rows\n{text}"
+            );
+            assert!(!text.contains("Endpoint URL:"), "stale input rows\n{text}");
+        }
+        assert!(branded, "model-less setup never became ready");
+        assert!(
+            fs::read_to_string(octet._root.path().join("home/.octet/config.toml"))
+                .unwrap()
+                .contains("light")
+        );
+        assert!(!octet
+            ._root
+            .path()
+            .join("home/.octet/credentials/custom.json")
+            .exists());
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert!(!uses_alternate_screen(&capture.output));
+        assert_eq!(
+            count_bytes(&capture.output, FRAME_BEGIN),
+            count_bytes(&capture.output, FRAME_END)
+        );
+    }
+}
+
+#[test]
+fn real_octet_ctrl_d_before_startup_readiness_restores_terminal() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            None,
+            true,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (7, false, false),
+            StartupFixture::Setup,
+        );
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+            synchronized_frame_end_containing(bytes, b"Choose terminal appearance").is_some()
+        });
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        parser.process(&capture.output);
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        assert!(!parser.screen().hide_cursor());
+        assert!(!parser.screen().bracketed_paste());
+        let restore = &capture.output[capture.shutdown_start..];
+        assert!(contains_bytes(restore, b"\x1b[?1000l"));
+        assert!(contains_bytes(restore, b"\x1b[?1006l"));
+        assert!(!uses_alternate_screen(&capture.output));
+    }
 }
 
 #[test]
@@ -1434,6 +1784,18 @@ fn visible_bytes(bytes: &[u8]) -> String {
 fn assert_single_welcome(parser: &vt100::Parser, columns: u16, label: &str) {
     let text = screen_text(parser, columns);
     let version = format!("octet v{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        !text.contains("selecting model"),
+        "{label}: provisional model\n{text}"
+    );
+    assert!(
+        !text.contains("workspace unavailable"),
+        "{label}: unresolved workspace\n{text}"
+    );
+    assert!(
+        !text.contains(STALE_MARKER),
+        "{label}: stale startup rows\n{text}"
+    );
     assert_eq!(
         text.matches(&version).count(),
         1,
@@ -1483,12 +1845,22 @@ fn check_welcome_frames(
         .unwrap();
     }
     let start = *consumed;
+    let version = format!("octet v{}", env!("CARGO_PKG_VERSION"));
+    let mut branded = parser.screen().contents().contains(&version);
     for frame in frame_ranges(&octet.pty.output[start..]) {
         let end = start + frame.end;
         parser.process(&octet.pty.output[*consumed..end]);
         *consumed = end;
+        if !branded && !parser.screen().contents().contains(&version) {
+            // Startup may need an input owner or a lifecycle wait first. Only
+            // the first branded frame claims a resolved welcome-card contract.
+            assert_unbranded_startup(parser, columns);
+            continue;
+        }
+        branded = true;
         assert_single_welcome(parser, columns, label);
     }
+    assert!(branded, "{label}: no ready branded frame");
     // Retain the entire tail, including cursor controls and any incomplete
     // synchronized frame. A later read completes it; never assert a partial
     // screen that synchronized output has not presented to the user.
@@ -1522,7 +1894,7 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                     true,
                     (columns, rows),
                     (starting_row, margins, origin),
-                    "qwen-3.8-27b",
+                    StartupFixture::Model("qwen-3.8-27b"),
                 );
                 octet.wait_until(STARTUP_TIMEOUT, |bytes| {
                     synchronized_frame_end_containing(bytes, b"Qwen 3.8 27B").is_some()

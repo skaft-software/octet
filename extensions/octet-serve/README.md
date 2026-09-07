@@ -88,7 +88,8 @@ contains the adapter into private `App`. Source-level extraction behind a stable
 Runtime API is deferred; the default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface. See [architecture](../../docs/experimental/octet-serve/architecture.md).
 
-The described package requires exactly `=0.7.1` and declares three targets:
+The current source package requires exactly `=0.7.2`; its
+[publication is pending](../../docs/releases/v0.7.2.md). It declares three targets:
 
 - GNU/Linux x86_64: `x86_64-unknown-linux-gnu`;
 - macOS x86_64;

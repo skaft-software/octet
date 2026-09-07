@@ -8,12 +8,12 @@ profile.
 
 ## Install the bundle
 
-With [octet 0.7.1 installed](../../docs/installation.md), once the matching signed
-public bundle is published, install it, then separately enable and trust it:
+With [octet 0.7.2 installed](../../docs/installation.md), once the matching signed
+public bundle is published, install it, then explicitly enable it:
 
 ```console
 octet extension install octet-browse
-octet --enable-extension octet-browse --trust-extension octet-browse
+octet --enable-extension octet-browse
 ```
 
 For a reviewed source checkout instead, add `--extension-dir ./extensions` to
@@ -33,9 +33,12 @@ background. Wait for status to say `ready` before opening the browser and loadin
 the skill. For example, ask: “Open https://example.com and summarize the visible
 page. Do not submit forms.”
 
-Enablement, executable trust, and skill activation are separate. The extension
-runs with your OS authority under octet's full-access policy; safe mode keeps it
-stopped. Installing files alone starts nothing.
+The bundle stays disabled until explicitly enabled. Default full access
+(`unsafe_host`) trusts it implicitly without saving a grant; `--trust-extension`
+and source-bound `trusted_extensions` grants are optional, not activation.
+Safe mode removes implicit trust and keeps it stopped even with explicit grants:
+executable startup still requires `unsafe_host`. It runs with your OS authority,
+not in a sandbox. Installing files starts nothing; skill activation is separate.
 
 ## Work safely
 
@@ -59,8 +62,8 @@ before removing only the locked, sentinel-verified isolated profile.
 ## Reference
 
 The bundled runtime still uses API `0.2`; these are usage and implementation
-references, not current extension-authoring examples. Bundle `0.7.1` requires
-exactly octet `0.7.1` and `playwright==1.57.0`.
+references, not current extension-authoring examples. Bundle `0.7.2` requires
+exactly octet `0.7.2` and `playwright==1.57.0`.
 
 - <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
 - <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.

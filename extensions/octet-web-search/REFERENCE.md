@@ -1,7 +1,7 @@
 # octet-web-search reference
 
 [Usage guide](README.md). This describes the bundled API `0.2` implementation,
-not current extension authoring. Bundle `0.7.1` requires exactly octet `0.7.1`.
+not current extension authoring. Bundle `0.7.2` requires exactly octet `0.7.2`.
 
 The opt-in executable supports [Brave Search API](https://brave.com/search/api/)
 (recommended) and an explicitly configured [SearXNG](https://docs.searxng.org/)
@@ -9,15 +9,17 @@ JSON endpoint. It is search and public-page retrieval only: no browser tabs,
 cookies, login, JavaScript, form submission, image search, crawler, or
 computer-use authority.
 
-Installation is inert. Discovery does not execute the extension, installation
-does not enable or trust it, and `--safe-mode` keeps it stopped. A running
-extension has the current user's OS authority under octet's full-access policy;
-network and fixed user-state manifest declarations are visible consent metadata,
-not a sandbox.
+Installation and discovery are inert; the bundle is disabled by default. Default
+full access (`unsafe_host`) implicitly trusts the selected extension without
+saving a grant, but never enables it. `--safe-mode` removes implicit trust and
+keeps the process stopped even with explicit grants: executable startup still
+requires `unsafe_host` and the process gate. A running extension has the current
+user's OS authority; network and fixed user-state manifest declarations are
+visible consent metadata, not a sandbox.
 
 ## Install and opt in
 
-With [octet 0.7.1 installed](../../docs/installation.md), once the matching signed
+With [octet 0.7.2 installed](../../docs/installation.md), once the matching signed
 public bundle is published, install it:
 
 ```console
@@ -28,30 +30,32 @@ For local development, select a reviewed local checkout without installation:
 
 ```console
 octet --extension-dir ./extensions \
-    --enable-extension octet-web-search \
-    --trust-extension octet-web-search
+    --enable-extension octet-web-search
 ```
 
-For an installed global bundle, explicitly enable and trust it for an invocation:
+For an installed global bundle, explicitly enable it for an invocation:
 
 ```console
-octet --enable-extension octet-web-search --trust-extension octet-web-search
+octet --enable-extension octet-web-search
 ```
 
-Or add both names to user configuration:
+Or persist activation in user configuration:
 
 ```toml
 enabled_extensions = ["octet-web-search"]
-trusted_extensions = ["octet-web-search"]
 ```
+
+`--trust-extension` and source-bound `trusted_extensions` grants remain optional
+explicit trust decisions. They never enable the bundle or bypass safe mode, and
+full-access implicit trust is never copied into them.
 
 The bundle includes `skills/octet-web-search/SKILL.md`. Bundle skill discovery is
 safe and inert; load it explicitly with `/skills load octet-web-search` when web
 research is wanted. The runtime contains its dependency-free Python SDK, so
 installation performs no `pip install`, model call, service setup, or other
 arbitrary code. Python 3.9 or newer must be available as `python3`.
-Release compatibility is recorded in `extension.toml`: bundle `0.7.1`, extension
-API `0.2`, exact octet `0.7.1`.
+Release compatibility is recorded in `extension.toml`: bundle `0.7.2`, extension
+API `0.2`, exact octet `0.7.2`.
 
 ## Choose a provider
 

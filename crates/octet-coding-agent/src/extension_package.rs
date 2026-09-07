@@ -232,7 +232,7 @@ fn print_bundle_installed(
         manifest.id, manifest.version, manifest.api_version, manifest.requires_octet
     ));
     crate::output::stdout_line(
-        "The extension remains disabled and untrusted until you explicitly enable and trust it.",
+        "Installation does not enable extensions. Full access trusts enabled extensions by default; safe mode keeps them stopped.",
     );
 }
 

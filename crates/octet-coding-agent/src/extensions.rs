@@ -4,8 +4,8 @@
 //!
 //! `octet-agent` owns the typed JSON-RPC process protocol. This module owns the
 //! coding product boundary: shared-resource discovery, explicit activation and
-//! trust, startup diagnostics, host-state refresh, slash commands, context
-//! composition, semantic status collection, and reload.
+//! policy-derived trust, startup diagnostics, host-state refresh, slash commands,
+//! context composition, semantic status collection, and reload.
 
 #[cfg(feature = "serve")]
 pub mod serve;
@@ -93,14 +93,6 @@ pub fn subagents_extension_activation_configured(config: &Config) -> bool {
             .enabled_extensions
             .iter()
             .any(|name| name == SUBAGENTS_EXTENSION_NAME)
-        && (config
-            .invocation_trusted_extensions
-            .iter()
-            .any(|name| name == SUBAGENTS_EXTENSION_NAME)
-            || config.trusted_extensions.iter().any(|grant| {
-                grant == SUBAGENTS_EXTENSION_NAME
-                    || grant.starts_with(&format!("{SUBAGENTS_EXTENSION_NAME}@"))
-            }))
 }
 
 const MAX_EXTENSION_CONTEXT_BYTES: usize = 256 * 1024;
@@ -142,7 +134,7 @@ const MAX_PROJECTED_EXTENSION_UI_LINES: usize = if MAX_EXTENSION_UI_ENTRIES > MA
     MAX_EXTENSION_UI_LINES
 };
 const SESSION_LIFECYCLE_QUEUE_CAPACITY: usize = 8;
-const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: safe mode denies extension process startup; rerun without --safe-mode only inside OS-level isolation";
+const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: safe mode/controlled policies deny extension process startup even with explicit trust; full access (unsafe_host) is required and should be used only inside OS-level isolation";
 static NEXT_EXTENSION_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The active-session driver is dispatched only by the interactive idle loop.
@@ -214,7 +206,9 @@ fn extension_policy(
     config: &Config,
     diagnostics: &mut Vec<String>,
 ) -> (ExtensionPolicy, Vec<ConfiguredTrustGrant>) {
-    let mut policy = ExtensionPolicy::default();
+    // Implicit full-access trust is derived anew, never copied into either
+    // persistent or invocation-specific grants in the product configuration.
+    let mut policy = ExtensionPolicy::for_effect_policy(config.effect_policy);
     for name in &config.enabled_extensions {
         policy.enable(name.clone());
     }
@@ -1858,18 +1852,18 @@ impl ExecutableExtensions {
             }
         }
         let host_state = host_state(session, model, reasoning, sessions);
-        let has_enabled_trusted = descriptors.iter().any(|descriptor| {
-            descriptor.activation.enabled && descriptor.activation.trust == ExtensionTrust::Trusted
-        });
+        let has_enabled = descriptors
+            .iter()
+            .any(|descriptor| descriptor.activation.enabled);
         // Executable extensions are ambient-authority child processes, not
         // merely optional tools. Controlled must prevent startup itself; later
         // broker checks cannot contain an already-running process.
-        if config.effect_policy != octet_agent::EffectPolicy::UnsafeHost && has_enabled_trusted {
+        if config.effect_policy != octet_agent::EffectPolicy::UnsafeHost && has_enabled {
             diagnostics.push(CONTROLLED_EXTENSION_START_DIAGNOSTIC.to_owned());
         }
         // Keep the independent product process gate as an additional
         // prerequisite. Discovery remains available for actionable diagnostics.
-        if !config.sandbox.process_execution_allowed() && has_enabled_trusted {
+        if !config.sandbox.process_execution_allowed() && has_enabled {
             diagnostics.push(
                 "executable extensions were not started: process execution is disabled by --no-process/--no-shell".to_owned(),
             );
@@ -5627,6 +5621,62 @@ flags = [{{ name = {flag:?}, type = "boolean", default = false }}]
 
     #[cfg(unix)]
     #[test]
+    fn full_access_cli_flags_need_enablement_but_no_extra_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("extensions");
+        let directory = root.join("flag-fixture");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(EXTENSION_MANIFEST_FILENAME),
+            r#"name = "flag-fixture"
+version = "0.3.0"
+api_version = "0.3"
+[entrypoint]
+command = "must-not-run"
+[contributes]
+flags = [{ name = "fixture-option", type = "boolean", default = false }]
+"#,
+        )
+        .unwrap();
+        let mut config = executable_extension_config(temp.path(), &root, "flag-fixture");
+        config.invocation_trusted_extensions.clear();
+        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        assert_eq!(selected_extension_flag_declarations(&config).len(), 1);
+        config.enabled_extensions.clear();
+        assert!(selected_extension_flag_declarations(&config).is_empty());
+        config.enabled_extensions.push("flag-fixture".into());
+        for policy in [
+            octet_agent::EffectPolicy::Controlled,
+            octet_agent::EffectPolicy::ControlledBashApproval,
+        ] {
+            config.effect_policy = policy;
+            assert!(selected_extension_flag_declarations(&config).is_empty());
+        }
+        assert!(config.trusted_extensions.is_empty());
+        assert!(config.invocation_trusted_extensions.is_empty());
+    }
+
+    #[cfg(all(unix, feature = "serve"))]
+    #[test]
+    fn subagents_preflight_uses_full_access_trust_without_enabling() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config =
+            executable_extension_config(temp.path(), temp.path(), SUBAGENTS_EXTENSION_NAME);
+        config.invocation_trusted_extensions.clear();
+        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        assert!(subagents_extension_activation_configured(&config));
+        config.effect_policy = octet_agent::EffectPolicy::ControlledBashApproval;
+        assert!(!subagents_extension_activation_configured(&config));
+        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        config.sandbox.allow_process = false;
+        assert!(!subagents_extension_activation_configured(&config));
+        config.sandbox.allow_process = true;
+        config.enabled_extensions.clear();
+        assert!(!subagents_extension_activation_configured(&config));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn active_session_lifecycle_is_offered_only_to_interactive_frontends() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = executable_extension_config(temp.path(), temp.path(), "fixture");
@@ -5671,10 +5721,133 @@ command = "launch-probe.sh"
         permissions.set_mode(0o700);
         std::fs::set_permissions(&executable, permissions).unwrap();
 
-        let config =
-            executable_extension_config(temp.path(), &extension_root, "controlled-launch-probe");
-        assert!(config.sandbox.allow_process);
-        assert!(config.sandbox.allow_shell);
+        for (effect_policy, allow_process) in [
+            (octet_agent::EffectPolicy::Controlled, true),
+            (octet_agent::EffectPolicy::ControlledBashApproval, true),
+            (octet_agent::EffectPolicy::UnsafeHost, false),
+        ] {
+            let mut config = executable_extension_config(
+                temp.path(),
+                &extension_root,
+                "controlled-launch-probe",
+            );
+            config.effect_policy = effect_policy;
+            config.sandbox.allow_process = allow_process;
+            assert!(config.sandbox.allow_shell);
+            let session =
+                Session::create(temp.path().join(format!("session-{effect_policy:?}.jsonl")))
+                    .unwrap();
+            let model = octet_ai::ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+                .unwrap();
+            let sessions = SessionStore::new(&config.session_dir, temp.path());
+            let mut host = ExtensionHost::new();
+
+            let mut extensions = ExecutableExtensions::discover_and_start(
+                &config,
+                &session,
+                &model,
+                &ReasoningConfig::Off,
+                &sessions,
+                &mut host,
+            );
+
+            assert!(!temp.path().join("controlled-extension-launched").exists());
+            assert!(extensions.processes.is_empty());
+            assert!(extensions.summaries.iter().any(|extension| {
+                extension.name == "controlled-launch-probe"
+                    && extension.enabled
+                    && extension.trusted
+                    && !extension.running
+            }));
+            if allow_process {
+                assert!(extensions
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic == CONTROLLED_EXTENSION_START_DIAGNOSTIC));
+            } else {
+                assert!(extensions
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("process execution is disabled")));
+            }
+            extensions.shutdown().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn installed_extension_is_disabled_by_default_and_full_access_trust_is_not_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("extensions");
+        let name = "policy-fixture";
+        let manifest = format!(
+            r#"name = "policy-fixture"
+version = "0.1.0"
+api_version = "0.2"
+requires_octet = "={}"
+[entrypoint]
+command = "extension.sh"
+[runtime]
+lifecycle = "workspace_service"
+sharing = "workspace"
+"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        let script = r#"#!/bin/sh
+printf 'launched\n' >> "$OCTET_WORKSPACE/policy-extension-starts"
+while IFS= read -r request; do
+  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$request" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}\n' "$id"
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let archive_path = temp.path().join("policy-fixture.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_mode(0o755);
+        header.set_size(0);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, name, std::io::empty())
+            .unwrap();
+        for (file, body, mode) in [
+            ("extension.toml", manifest.as_bytes(), 0o644),
+            ("extension.sh", script.as_bytes(), 0o755),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(mode);
+            header.set_size(body.len() as u64);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("{name}/{file}"), body)
+                .unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap();
+        crate::extension_bundle::install_local(&root, &archive_path, false).unwrap();
+        let install_path = root.join(name).join("install.json");
+        let install_record = std::fs::read(&install_path).unwrap();
+        let marker = temp.path().join("policy-extension-starts");
+        assert!(!marker.exists(), "installation must never execute code");
+        assert!(!temp.path().join("config.toml").exists());
+
+        let mut config = executable_extension_config(temp.path(), &root, name);
+        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        config.enabled_extensions.clear();
+        config.invocation_trusted_extensions.clear();
         let session = Session::create(temp.path().join("session.jsonl")).unwrap();
         let model = octet_ai::ModelCatalog::builtin()
             .unwrap()
@@ -5682,8 +5855,7 @@ command = "launch-probe.sh"
             .unwrap();
         let sessions = SessionStore::new(&config.session_dir, temp.path());
         let mut host = ExtensionHost::new();
-
-        let extensions = ExecutableExtensions::discover_and_start(
+        let mut disabled = ExecutableExtensions::discover_and_start(
             &config,
             &session,
             &model,
@@ -5691,19 +5863,68 @@ command = "launch-probe.sh"
             &sessions,
             &mut host,
         );
-
-        assert!(!temp.path().join("controlled-extension-launched").exists());
-        assert!(extensions.processes.is_empty());
-        assert!(extensions.summaries.iter().any(|extension| {
-            extension.name == "controlled-launch-probe"
-                && extension.enabled
-                && extension.trusted
-                && !extension.running
+        assert!(disabled.summaries.iter().any(|entry| {
+            entry.name == name && !entry.enabled && entry.trusted && !entry.running
         }));
-        assert!(extensions
+        assert!(disabled.processes.is_empty());
+        assert!(!marker.exists());
+        disabled.shutdown().await;
+
+        config.enabled_extensions.push(name.into());
+        let mut started = ExecutableExtensions::discover_and_start(
+            &config,
+            &session,
+            &model,
+            &ReasoningConfig::Off,
+            &sessions,
+            &mut host,
+        );
+        assert!(
+            started.summaries.iter().any(|entry| {
+                entry.name == name && entry.enabled && entry.trusted && entry.running
+            }),
+            "{:?}",
+            started.diagnostics.entries
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "launched\n");
+        assert!(config.trusted_extensions.is_empty());
+        assert!(config.invocation_trusted_extensions.is_empty());
+
+        // Even a retained shared runtime must lose implicit trust in safe mode.
+        config.effect_policy = octet_agent::EffectPolicy::ControlledBashApproval;
+        let mut safe_host = ExtensionHost::new();
+        let mut safe = ExecutableExtensions::discover_and_start_with_runtime_manager(
+            &config,
+            &session,
+            &model,
+            &ReasoningConfig::Off,
+            &sessions,
+            &mut safe_host,
+            started.runtime_manager(),
+        );
+        assert!(safe.summaries.iter().any(|entry| {
+            entry.name == name && entry.enabled && !entry.trusted && !entry.running
+        }));
+        assert!(safe.processes.is_empty());
+        assert!(safe
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic == CONTROLLED_EXTENSION_START_DIAGNOSTIC));
+            .any(|entry| entry.contains("enabled but untrusted")));
+        assert!(safe
+            .diagnostics
+            .iter()
+            .any(|entry| entry == CONTROLLED_EXTENSION_START_DIAGNOSTIC));
+        assert_eq!(
+            started.processes[0].health_snapshot().state,
+            ExtensionHealthState::Stopped
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "launched\n");
+        assert!(config.trusted_extensions.is_empty());
+        assert!(config.invocation_trusted_extensions.is_empty());
+        assert_eq!(std::fs::read(&install_path).unwrap(), install_record);
+        assert!(!temp.path().join("config.toml").exists());
+        safe.shutdown().await;
+        started.shutdown().await;
     }
 
     #[cfg(unix)]
@@ -6008,17 +6229,19 @@ command = "lifecycle-fixture.sh"
         let resource = snapshot.get("alias").unwrap();
         let mut diagnostics = Vec::new();
 
-        let descriptor = load_extension_descriptor(
-            &resolver,
-            resource,
-            &ExtensionPolicy::default(),
-            &mut diagnostics,
-        );
+        for policy in [
+            ExtensionPolicy::default(),
+            ExtensionPolicy::for_effect_policy(octet_agent::EffectPolicy::UnsafeHost),
+        ] {
+            diagnostics.clear();
+            let descriptor =
+                load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics);
 
-        assert!(descriptor.is_none());
-        assert!(diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("must match manifest name")));
+            assert!(descriptor.is_none());
+            assert!(diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("must match manifest name")));
+        }
     }
 
     #[test]

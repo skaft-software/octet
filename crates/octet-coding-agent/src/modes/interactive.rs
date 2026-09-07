@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{Stream, StreamExt};
 use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
 #[cfg(unix)]
@@ -54,6 +54,7 @@ use crate::tui::pickers::{
     read_only_document, read_only_document_live_styled, session_picker, subagent_picker,
     thinking_picker, tool_input_picker, SubagentPickerSnapshot,
 };
+use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
     background_from_terminal_rgb, load_theme, load_theme_for_background, TerminalBackground,
@@ -842,17 +843,19 @@ fn observe_extension_terminal_event(
 
 /// Keep raw-terminal input, resize handling, rendering, and termination
 /// signals live while a bounded lifecycle operation runs elsewhere. Ordinary
-/// typing is intentionally ignored at this boundary. Ctrl-C becomes the same
-/// coordinated SIGINT shutdown used by the signal thread; Ctrl-D records a
-/// close request and lets the owned operation settle before its caller exits.
-async fn await_lifecycle<F, T>(
+/// typing/paste stays in the draft, including input retained by the startup
+/// appearance probe. Ctrl-C becomes the same coordinated SIGINT shutdown used
+/// by the signal thread; Ctrl-D records a close request and lets the owned
+/// operation settle before its caller exits.
+async fn await_lifecycle<F, T, S>(
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     label: &str,
     operation: F,
 ) -> anyhow::Result<T>
 where
     F: Future<Output = anyhow::Result<T>>,
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let mut operation = Box::pin(operation);
     let mut input_open = true;
@@ -889,7 +892,11 @@ where
                     shell.set_size(columns, rows);
                     shell.render();
                 }
-                Some(Ok(_)) => {}
+                Some(Ok(event)) => {
+                    // Submission is not admitted during lifecycle work, but
+                    // ordinary editing must not lose the probe's saved input.
+                    let _ = handle_cancellable_wait_input(shell, event);
+                }
                 Some(Err(error)) => {
                     // A blocking lifecycle worker cannot be aborted safely: it
                     // may own the only App and dropping its JoinHandle merely
@@ -2384,7 +2391,7 @@ async fn extension_management_menu(
             .into_iter()
             .find(|summary| summary.name == choice.name);
         let detail = if enabled && summary.as_ref().is_some_and(|summary| !summary.trusted) {
-            "; trust remains a separate explicit decision"
+            "; executable extensions require full access; safe mode keeps them stopped"
         } else {
             ""
         };
@@ -4409,10 +4416,13 @@ fn explicit_terminal_background_override() -> bool {
         .unwrap_or(false)
 }
 
-fn apply_detected_terminal_background(
+async fn apply_detected_terminal_background<S>(
     shell: &mut InteractiveShell,
+    input: &mut EventStream<S>,
     config: &crate::config::Config,
-) {
+) where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     if explicit_terminal_background_override()
         || TerminalThemeChoice::from_config(config)
             .and_then(TerminalThemeChoice::explicit_background)
@@ -4427,7 +4437,8 @@ fn apply_detected_terminal_background(
         return;
     }
     let Some((red, green, blue)) =
-        crate::tui::terminal::query_terminal_background_color(Duration::from_millis(120))
+        crate::tui::terminal::query_terminal_background_color(input, Duration::from_millis(120))
+            .await
     else {
         return;
     };
@@ -4512,7 +4523,7 @@ where
 
 async fn configure_terminal_theme<S>(
     shell: &mut InteractiveShell,
-    input: &mut S,
+    input: &mut EventStream<S>,
     config: &mut Config,
     requested: Option<String>,
     onboarding: bool,
@@ -4549,7 +4560,7 @@ where
         shell.set_theme(load_theme(config));
     }
     if matches!(choice, TerminalThemeChoice::Auto) {
-        apply_detected_terminal_background(shell, config);
+        apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = crate::cli::persist_theme_choice(choice.key()) {
         shell.error(format!("failed to save terminal appearance: {error}"));
@@ -4593,6 +4604,7 @@ async fn run_interactive_without_model(
     shell.set_input_modalities(octet_ai::ModalitySet::none());
     shell.set_session_telemetry(&session, None);
     shell.hydrate(&session)?;
+    shell.finish_startup();
     shell.notice(
         "No configured model. Use /login, /model, or /reload to configure one; prompts are disabled until then.",
     );
@@ -5196,8 +5208,8 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
     let mut shell =
         InteractiveShell::enter_with_mouse(theme, size, boot.config.mouse.application_owned())?;
     shell.set_runtime_config(boot.config.clone());
-    apply_detected_terminal_background(&mut shell, &boot.config);
     let mut input = EventStream::new();
+    apply_detected_terminal_background(&mut shell, &mut input, &boot.config).await;
     if crate::cli::should_offer_theme_onboarding(&boot.config)
         && shell.theme().capabilities().interactive
         && !boot.config.plain
@@ -5275,6 +5287,7 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
     request_extension_ui(&mut shell, &mut app);
+    shell.finish_startup();
     shell.render();
     schedule_responses_prewarm(&app);
 
@@ -6050,7 +6063,7 @@ mod tests {
                 )))),
                 _ => unreachable!(),
             }
-            let mut input = tokio_stream::iter(events);
+            let mut input = EventStream::from_stream(tokio_stream::iter(events));
             // Exercise the configuration boundary too: none of these /theme
             // outcomes may reach its persistence branch or mutate the config.
             let result =
@@ -6509,6 +6522,49 @@ mod tests {
         assert!(result.is_none());
         assert_eq!(shell.pending(), "draft during wait");
         assert_ne!(shell.verbose_tools(), was_verbose);
+        assert!(!shell.close_requested());
+    }
+
+    #[tokio::test]
+    async fn osc11_startup_lifecycle_keeps_handed_off_typing_paste_and_shortcuts() {
+        use crossterm::event::KeyEvent;
+
+        let events = [
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Paste(" draft during startup".into())),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+        ];
+        let (finished, settled) = tokio::sync::oneshot::channel();
+        let mut finished = Some(finished);
+        // Settle only after the input owner has processed every queued event.
+        let source = tokio_stream::iter(events).chain(futures_util::stream::poll_fn(move |_| {
+            if let Some(finished) = finished.take() {
+                let _ = finished.send(());
+            }
+            std::task::Poll::Ready(None)
+        }));
+        let mut input = EventStream::from_stream(source);
+        let mut shell = InteractiveShell::test_shell();
+        let verbose = shell.verbose_tools();
+        let result = await_lifecycle(&mut shell, &mut input, "starting…", async move {
+            settled.await?;
+            Ok(42)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(shell.pending(), "x draft during startup");
+        assert_ne!(shell.verbose_tools(), verbose);
         assert!(!shell.close_requested());
     }
 

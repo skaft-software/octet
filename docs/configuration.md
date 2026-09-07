@@ -68,7 +68,8 @@ runtime defaults.
 | `cost_warning_microdollars` | Optional cost warning; example `50000`, integer microdollars. |
 | `telemetry` | Optional explicit JSONL output path; disabled unless set. Example `"./artifacts/octet-telemetry.jsonl"`. |
 | `[compaction]` | `mode = "local"`, `threshold_fraction = 1.0`, optional `max_active_tokens` (zero/unset uses model limit), `keep_recent_tokens = 20000`, optional `compact_model = "provider/model"`. [Exact budgeting and caveats](context.md#settings). |
-| `enabled_extensions`, `trusted_extensions` | Separate activation and exact-source trust decisions; [resource rules](resources.md#locations-and-precedence). |
+| `enabled_extensions` | Default `[]`: installed executable extensions stay disabled until explicitly enabled. Full access does not change activation. |
+| `trusted_extensions` | Default `[]`: optional persistent source-bound grants. Full access implicitly trusts selected extensions without adding grants; safe mode removes implicit trust and blocks executable startup even with explicit grants. [Resource rules](resources.md#locations-and-precedence). |
 
 ## Environment variables
 

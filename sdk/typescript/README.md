@@ -14,7 +14,7 @@ This is a contract-binding example, **not a complete runnable extension**. It
 does not demonstrate a manifest, stdio process loop, tool dispatch, cancellation,
 or shutdown. Do not infer a complete extension runtime from generated bindings.
 
-The source package distribution version is `0.7.1`, independent of extension
+The source package distribution version is `0.7.2`, independent of extension
 API `0.3`. The package name does not assert npm publication or registry
 availability; native octet publication does not publish this SDK to npm.
 Generated declarations/runtime have no registry dependencies.

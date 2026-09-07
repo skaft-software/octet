@@ -801,12 +801,9 @@ fn publish_plan_for_api(
         plan.sources.len()
     ));
     crate::output::stdout_line(
-        "The link remains disabled and untrusted until you explicitly enable and trust it.",
+        "Publishing the link does not enable it. Full access trusts enabled extensions by default; safe mode keeps them stopped.",
     );
-    crate::output::stdout_line(format!(
-        "Run: octet --enable-extension {} --trust-extension {}",
-        plan.name, plan.name
-    ));
+    crate::output::stdout_line(format!("Run: octet --enable-extension {}", plan.name));
     crate::output::stdout_line(
         "No Pi package code, npm lifecycle hook, dependency installer, or extension source was run.",
     );

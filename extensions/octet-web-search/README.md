@@ -7,13 +7,13 @@ browser tabs, sign in, run JavaScript, or submit forms.
 
 ## Start a search
 
-With [octet 0.7.1 installed](../../docs/installation.md) and Python 3.9+ available
+With [octet 0.7.2 installed](../../docs/installation.md) and Python 3.9+ available
 as `python3`, once the matching signed public bundle is published, install it,
-then separately enable and trust it:
+then explicitly enable it:
 
 ```console
 octet extension install octet-web-search
-octet --enable-extension octet-web-search --trust-extension octet-web-search
+octet --enable-extension octet-web-search
 ```
 
 For a reviewed source checkout instead, add `--extension-dir ./extensions` to
@@ -72,12 +72,15 @@ it. See the [complete configuration rules](REFERENCE.md#searxng).
 
 ## Activation and reference
 
-Installation is inert and does not enable, trust, or start the bundle. Executable
-extensions run with your OS authority under the full-access policy; manifest
-consent metadata is not a sandbox, and `--safe-mode` keeps this extension stopped.
-Enablement, exact trust, and skill loading are independent.
+Installation is inert; the bundle stays disabled until explicitly enabled.
+Default full access (`unsafe_host`) trusts the selected extension implicitly
+without saving a grant. `--trust-extension` and source-bound `trusted_extensions`
+grants are optional, never activation. `--safe-mode` removes implicit trust and
+keeps the process stopped even with explicit grants: executable startup still
+requires `unsafe_host`. An admitted extension has your OS authority; manifest
+consent metadata is not a sandbox. Skill loading remains independent.
 
-The source bundle `0.7.1` requires exactly octet `0.7.1` and retains API `0.2`.
+The source bundle `0.7.2` requires exactly octet `0.7.2` and retains API `0.2`.
 The following is a bundled-runtime reference, not a current SDK authoring tutorial.
 
 - <a id="install-and-opt-in"></a>[Install and opt in](REFERENCE.md#install-and-opt-in): public catalog installation and persistent activation.
