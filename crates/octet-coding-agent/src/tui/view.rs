@@ -4337,6 +4337,25 @@ impl InteractiveShell {
         self.state.borrow().panel.is_some()
     }
 
+    /// Original item index of the highlighted select-list row, after filtering.
+    pub(crate) fn highlighted_panel_index(&self) -> Option<usize> {
+        let state = self.state.borrow();
+        let Panel::SelectList {
+            items,
+            descriptions,
+            selected,
+            filter,
+            action,
+            ..
+        } = state.panel.as_ref()?
+        else {
+            return None;
+        };
+        filtered_indices_for_action(items, descriptions, action, filter)
+            .get(*selected)
+            .copied()
+    }
+
     /// Drain view-owned picker operations for the driver that has store access.
     pub(crate) fn drain_panel_requests(&mut self) -> Vec<PanelRequest> {
         std::mem::take(&mut self.state.borrow_mut().pending_panel_requests)

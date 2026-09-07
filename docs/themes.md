@@ -13,15 +13,18 @@ terminal appearances:
 - `Light terminal` and `Dark terminal` explicitly select the corresponding
   contrast profile and override detection.
 
-The choice is persisted as `theme = "auto"`, `theme = "light"`, or
-`theme = "dark"` in the user config without replacing unrelated settings. Use
-`/theme` later to revisit it; `/theme auto`, `/theme light`, and `/theme dark`
-are also accepted. Existing configured installations do not reopen onboarding,
-and print/plain/RPC, redirected, and `TERM=dumb` sessions never open it.
+Moving through the picker previews each appearance without saving it. Confirming
+persists `theme = "auto"`, `theme = "light"`, or `theme = "dark"` in the user
+config without replacing unrelated settings. Use `/theme` later to revisit it;
+`/theme auto`, `/theme light`, and `/theme dark` are also accepted. Cancelling
+`/theme` restores the previous appearance; dismissing first-run onboarding uses
+Auto. Existing configured installations do not reopen onboarding, and
+print/plain/RPC, redirected, and `TERM=dumb` sessions never open it.
 
-`--theme`, `--theme-dir`, arbitrary `theme` values, and arbitrary theme files
-remain compatibility inputs only. They never add a theme loader or marketplace;
-unrecognized values fall back to the compiled default. An explicit
+The built-in choices also work with `--theme` and `OCTET_THEME`. Other theme names,
+`--theme-dir`, and arbitrary theme files remain compatibility inputs only. They
+never add a theme loader or marketplace; unrecognized values fall back to the
+compiled default. An explicit
 `OCTET_COLOR_SCHEME` is also treated as an existing terminal-appearance choice,
 so automation and already-configured shells do not get interrupted by
 onboarding.

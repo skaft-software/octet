@@ -7,8 +7,16 @@
 See the [release notes](docs/releases/v0.7.1.md) for candidate publication and
 verification status.
 
+### Added
+
+- Added first-install Auto/Light/Dark appearance selection with preview and
+  persistence, plus `/theme` for later changes; configured and non-TUI launches
+  do not reopen onboarding.
+
 ### Fixed
 
+- Made startup presentation capability-safe and refreshed the welcome prefix
+  across animation, overlays, theme/model changes and redraws (#367).
 - Suppressed duplicate prompt replay in interactive plain mode while preserving
   explicit one-shot and piped prompt output (#368).
 - Added bounded retries across trusted release GET headers and streamed bodies
