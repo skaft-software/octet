@@ -134,13 +134,9 @@ fn replace_welcome_prefix(
         let new_length = welcome.len();
         cache.lines.splice(0..old_length, welcome);
         let delta = new_length as isize - old_length as isize;
-        if delta > 0 {
+        if delta != 0 {
             for start in &mut cache.block_starts {
-                *start += delta as usize;
-            }
-        } else if delta < 0 {
-            for start in &mut cache.block_starts {
-                *start = start.saturating_sub((-delta) as usize);
+                *start = start.saturating_add_signed(delta);
             }
         }
     }
