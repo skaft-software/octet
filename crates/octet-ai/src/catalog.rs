@@ -650,6 +650,28 @@ mod tests {
     }
 
     #[test]
+    fn auxiliary_reasoning_uses_exact_default_when_off_is_not_advertised() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let base = catalog.resolve(&ModelId("gpt-6-astra".to_owned())).unwrap();
+        let mut spec = (*base.spec).clone();
+        let capability = spec.capabilities.reasoning.as_mut().unwrap();
+        capability.options = Some(crate::types::ReasoningOptions {
+            values: vec!["medium".into(), "high".into(), "max".into()],
+            default: Some("high".into()),
+        });
+        capability.min_effort = crate::types::ReasoningEffort::Medium;
+        let model = Model {
+            spec: Arc::new(spec),
+            endpoint: base.endpoint,
+        };
+
+        assert_eq!(
+            crate::select_auxiliary_reasoning(&model).unwrap(),
+            crate::types::ReasoningConfig::Effort(crate::types::ReasoningEffort::High)
+        );
+    }
+
+    #[test]
     fn endpoint_labels_are_presentation_only_and_follow_endpoint_identity() {
         let mut catalog = ModelCatalog::default();
         let endpoint_id = EndpointId("custom-apple-fm".into());

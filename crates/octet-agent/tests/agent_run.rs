@@ -924,6 +924,22 @@ fn build_agent_from_session(
     session: Session,
     max_turns: Option<u64>,
 ) -> Agent {
+    build_agent_from_session_with_model(
+        scripted_model(uri),
+        workspace,
+        session,
+        ReasoningConfig::Off,
+        max_turns,
+    )
+}
+
+fn build_agent_from_session_with_model(
+    model: Model,
+    workspace: &Path,
+    session: Session,
+    reasoning: ReasoningConfig,
+    max_turns: Option<u64>,
+) -> Agent {
     let mut extensions = ExtensionHost::new();
     extensions.load(&CoreTools);
     let mut sandbox = SandboxConfig::new(workspace);
@@ -933,14 +949,14 @@ fn build_agent_from_session(
     sandbox.allow_shell = true;
     Agent::new(AgentConfig {
         client: AiClient::new(),
-        model: scripted_model(uri),
+        model,
         session,
         system: "You are a scripted test agent.".to_string(),
         sandbox,
         effect_broker: EffectBroker::new(EffectPolicy::UnsafeHost),
         extensions,
         max_turns,
-        reasoning: ReasoningConfig::Off,
+        reasoning,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         cache_retention: octet_ai::CacheRetention::Short,
         session_id: None,
@@ -972,6 +988,29 @@ fn scripted_model_with_reasoning(uri: &str) -> Model {
         }),
         openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
         max_effort: octet_ai::ReasoningEffort::High,
+    });
+    Model {
+        spec: Arc::new(spec),
+        endpoint: base.endpoint,
+    }
+}
+
+/// Replaces a scripted model's reasoning contract with an exact advertised set
+/// that intentionally omits `Off`, matching current Codex discovery metadata.
+fn scripted_model_requiring_reasoning(base: Model) -> Model {
+    let mut spec = (*base.spec).clone();
+    spec.capabilities.reasoning = Some(ReasoningCapability {
+        options: Some(octet_ai::types::ReasoningOptions {
+            values: vec!["medium".into(), "high".into(), "max".into()],
+            default: Some("high".into()),
+        }),
+        control: ReasoningControl::Effort,
+        exposes_text: true,
+        preserves_state: true,
+        min_effort: octet_ai::ReasoningEffort::Medium,
+        effort_budgets: None,
+        openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+        max_effort: octet_ai::ReasoningEffort::Max,
     });
     Model {
         spec: Arc::new(spec),
@@ -1018,6 +1057,7 @@ fn build_responses_agent_from_session(
     workspace: &Path,
     max_turns: Option<u64>,
     system: &str,
+    reasoning: ReasoningConfig,
 ) -> Agent {
     let mut extensions = ExtensionHost::new();
     extensions.load(&CoreTools);
@@ -1035,7 +1075,7 @@ fn build_responses_agent_from_session(
         effect_broker: EffectBroker::new(EffectPolicy::UnsafeHost),
         extensions,
         max_turns,
-        reasoning: ReasoningConfig::Off,
+        reasoning,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         cache_retention: octet_ai::CacheRetention::Short,
         session_id: Some("lifecycle-session".into()),
@@ -1466,6 +1506,7 @@ async fn responses_restart_compact_and_post_checkpoint_replay_stay_exact_end_to_
     let mut spec = (*model.spec).clone();
     spec.cache.session_affinity_format = Some(octet_ai::SessionAffinityFormat::Codex);
     model.spec = Arc::new(spec);
+    let model = scripted_model_requiring_reasoning(model);
 
     let mut first = build_responses_agent_from_session(
         model.clone(),
@@ -1473,6 +1514,7 @@ async fn responses_restart_compact_and_post_checkpoint_replay_stay_exact_end_to_
         &workspace,
         Some(1),
         "ORIGINAL LIFECYCLE INSTRUCTIONS",
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
     );
     let mut run = first.prompt("start lifecycle").await.unwrap();
     let events = collect(&mut run).await;
@@ -1489,6 +1531,7 @@ async fn responses_restart_compact_and_post_checkpoint_replay_stay_exact_end_to_
         &workspace,
         Some(4),
         "ORIGINAL LIFECYCLE INSTRUCTIONS",
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
     );
     let output = agent.complete("continue after restart").await.unwrap();
     assert_eq!(output.text, "continued after restart");
@@ -1536,6 +1579,7 @@ async fn responses_restart_compact_and_post_checkpoint_replay_stay_exact_end_to_
     );
 
     let compact_body = request_json(compact);
+    assert_eq!(compact_body["reasoning"]["effort"], "high");
     assert_eq!(
         compact_body["instructions"],
         "ORIGINAL LIFECYCLE INSTRUCTIONS"
@@ -1940,7 +1984,14 @@ async fn authoritative_usage_compacts_and_reports_phase_before_opening_slow_main
     let sessions = tempfile::tempdir().unwrap();
     let session_path = sessions.path().join("authoritative-pressure.jsonl");
     let session = session_with_authoritative_pressure(&session_path, 180_000);
-    let mut agent = build_agent_from_session(&server.uri(), workspace.path(), session, Some(4));
+    let model = scripted_model_requiring_reasoning(scripted_model(&server.uri()));
+    let mut agent = build_agent_from_session_with_model(
+        model,
+        workspace.path(),
+        session,
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+        Some(4),
+    );
     // Even when the keep preference exceeds the number of available turns,
     // the configured threshold still has to trigger compaction.
     agent
@@ -1981,6 +2032,7 @@ async fn authoritative_usage_compacts_and_reports_phase_before_opening_slow_main
 
     let requests = wire_requests(&server).await;
     assert!(!requests.is_empty(), "compaction summary request missing");
+    assert_eq!(requests[0]["output_config"]["effort"], "high");
     assert!(
         requests.iter().all(|request| request
             .get("tools")
@@ -2964,6 +3016,38 @@ async fn terminal_gate_uses_an_isolated_one_token_decision() {
                 if assistant.content.iter().any(|part| matches!(part, AssistantPart::Text(text) if text == "R"))
         )
     }));
+}
+
+#[tokio::test]
+async fn terminal_gate_uses_advertised_default_when_reasoning_cannot_be_disabled() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![text_turn("Completed and verified."), text_turn("R")],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let model = scripted_model_requiring_reasoning(scripted_model(&server.uri()));
+    let mut agent = build_agent_with_reasoning(
+        model,
+        &sessions.path().join("required-reasoning-gate.jsonl"),
+        workspace.path(),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+        Some(4),
+    );
+    agent.set_completion_policy(CompletionPolicy::TerminalGate);
+
+    let output = agent.complete("complete autonomously").await.unwrap();
+    assert!(matches!(output.reason, FinishReason::Completed));
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["output_config"]["effort"], "high");
+    assert_eq!(requests[1]["output_config"]["effort"], "high");
+    assert_eq!(requests[1]["max_tokens"], 1);
 }
 
 #[tokio::test]
@@ -4814,6 +4898,7 @@ async fn websocket_connection_limit_is_retried_by_agent() {
         &workspace,
         Some(4),
         "You are a scripted Responses test agent.",
+        ReasoningConfig::Off,
     );
 
     let output = agent

@@ -14,6 +14,9 @@ live-provider availability or acceptance.
 - CLI/config and persisted choices may normalize to a supported choice. Core
   generation requests do not silently clamp unsupported values, even in Lossy
   mode. Product labels describe the effective selection.
+- Host-generated terminal-gate and local-compaction requests prefer Off only
+  when the exact model contract accepts it; otherwise they use the advertised
+  default. Native Responses compaction preserves the active reasoning selection.
 - Ultra requires explicit support and V2 delegation. The coding product also
   requires its trusted, enabled observing subagents extension. Responses encodes
   supported Ultra as `max`; offline Codex metadata removes dynamic Ultra/V2

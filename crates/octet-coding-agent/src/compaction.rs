@@ -8,8 +8,8 @@ use octet_agent::{
     SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
 };
 use octet_ai::{
-    AssistantPart, Media, Message, OutputFormat, OutputModalities, ReasoningConfig, Request,
-    ToolChoice, ToolResultPart, UserPart,
+    AssistantPart, Media, Message, OutputFormat, OutputModalities, Request, ToolChoice,
+    ToolResultPart, UserPart,
 };
 
 use crate::app::App;
@@ -182,7 +182,7 @@ async fn compaction_call(
         max_output_tokens: Some(model.spec.limits.max_output_tokens.clamp(1, output_tokens)),
         temperature: None,
         stop: vec![],
-        reasoning: ReasoningConfig::Off,
+        reasoning: octet_ai::select_auxiliary_reasoning(model)?,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         responses: None,
         output_format: OutputFormat::Text,
@@ -443,8 +443,8 @@ pub(crate) mod tests {
     use super::*;
     use octet_agent::EntryValue;
     use octet_ai::{
-        AssistantMessage, Media, ModelId, Protocol, ToolCall, ToolCallId, ToolResult,
-        ToolResultPart, UserMessage,
+        AssistantMessage, Media, ModelId, Protocol, ReasoningConfig, ToolCall, ToolCallId,
+        ToolResult, ToolResultPart, UserMessage,
     };
 
     use crate::app::bootstrap::{bootstrap, build_app, LaunchSelection, SessionSelection};
@@ -753,7 +753,21 @@ pub(crate) mod tests {
             crate::config::CompactionMode::Local
         );
         let mut model = app.model.clone();
-        Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.protocol = Protocol::OpenAiResponses;
+        spec.capabilities.reasoning = Some(octet_ai::ReasoningCapability {
+            options: Some(octet_ai::types::ReasoningOptions {
+                values: vec!["medium".into(), "high".into(), "max".into()],
+                default: Some("high".into()),
+            }),
+            control: octet_ai::ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            min_effort: octet_ai::ReasoningEffort::Medium,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            max_effort: octet_ai::ReasoningEffort::Max,
+        });
         let endpoint = Arc::make_mut(&mut model.endpoint);
         endpoint.base_url = format!("{}/", server.uri()).parse().unwrap();
         endpoint.auth = octet_ai::Auth::None;
@@ -773,7 +787,7 @@ pub(crate) mod tests {
                 ),
                 extensions: octet_agent::ExtensionHost::new(),
                 max_turns: None,
-                reasoning: ReasoningConfig::Off,
+                reasoning: ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
                 reasoning_mode: octet_ai::ReasoningMode::Standard,
                 cache_retention: octet_ai::CacheRetention::Short,
                 session_id: None,
@@ -783,6 +797,7 @@ pub(crate) mod tests {
         let session_path = directory.path().join("local-responses.jsonl");
         app.agent = agent_for_session(Session::create(&session_path).unwrap());
         app.model = model.clone();
+        app.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
         app.agent.complete("prefix user request").await.unwrap();
         // Keep the default 20K retention policy. Make the final real user turn
         // cross that token walk so compaction cannot select an assistant-only
@@ -855,6 +870,7 @@ pub(crate) mod tests {
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 4);
         let summary_request: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert_eq!(summary_request["reasoning"]["effort"], "high");
         assert!(summary_request["input"]
             .to_string()
             .contains("prefix user request"));

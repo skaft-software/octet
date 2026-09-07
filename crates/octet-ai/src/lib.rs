@@ -87,6 +87,35 @@ pub use types::{
     ToolCallId, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
 };
 
+/// Selects reasoning for a host-generated auxiliary request.
+///
+/// [`ReasoningConfig::Off`] is preferred only when strict validation accepts it
+/// for this exact model route. Otherwise this returns the model capability's
+/// valid advertised default (or its first advertised choice when no default was
+/// declared). It never invents a missing effort or changes explicit user input.
+pub fn select_auxiliary_reasoning(model: &Model) -> Result<ReasoningConfig, AiError> {
+    catalog::validate_model_spec(&model.spec)?;
+    let off = ReasoningConfig::Off;
+    if validate::validate_reasoning_selection(&off, &model.spec.capabilities, model.spec.protocol)
+        .is_ok()
+    {
+        return Ok(off);
+    }
+
+    let Some(capability) = model.spec.capabilities.reasoning.as_ref() else {
+        return Err(UnsupportedError::Reasoning.into());
+    };
+    let selected = capability
+        .default_selection()
+        .ok_or(UnsupportedError::Reasoning)?;
+    validate::validate_reasoning_selection(
+        &selected,
+        &model.spec.capabilities,
+        model.spec.protocol,
+    )?;
+    Ok(selected)
+}
+
 /// Validates normalized arguments against the exact tool-definition snapshot.
 ///
 /// A completed JSON object that merely violates a valid schema returns
