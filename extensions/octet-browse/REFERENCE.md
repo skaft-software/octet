@@ -1,8 +1,8 @@
 # octet Browse reference
 
 [Usage guide](README.md). This reference describes the bundled API `0.2`
-implementation, not current extension authoring. Distribution `0.7.1` requires
-exactly octet `0.7.1` and pins `playwright==1.57.0`.
+implementation, not current extension authoring. Distribution `0.7.2` requires
+exactly octet `0.7.2` and pins `playwright==1.57.0`.
 
 The opt-in executable always launches Playwright's bundled Chromium visibly
 (`headless=False`) with a persistent profile owned only by octet Browse. It never
@@ -12,24 +12,29 @@ pairs with, copies, discovers, or launches a normal Chrome/Chromium profile.
 
 Bundle installation only copies inert files. It does **not** run Python, install Playwright, download a browser, create a profile, or start this extension.
 
-With [octet 0.7.1 installed](../../docs/installation.md), use the signed public
+With [octet 0.7.2 installed](../../docs/installation.md), use the signed public
 bundle below once matching publication is available. A reviewed checkout or
 locally built archive remains an alternative;
 see the [guide](README.md#install-the-bundle).
 
 ```console
 octet extension install octet-browse
-octet --enable-extension octet-browse --trust-extension octet-browse
+octet --enable-extension octet-browse
 ```
 
 For persistent user-global activation:
 
 ```toml
 enabled_extensions = ["octet-browse"]
-trusted_extensions = ["octet-browse"]
 ```
 
-Executable extensions run with the current user's authority only under octet's full-access policy. Safe mode keeps them stopped. Enablement, exact executable trust, and skill activation are independent decisions.
+The bundle is disabled by default. Default full access (`unsafe_host`) implicitly
+trusts the selected extension without persisting a grant; explicit
+`--trust-extension` or source-bound `trusted_extensions` grants remain optional.
+Trust never enables the bundle or activates its skill. Safe mode removes implicit
+trust and keeps executable processes stopped even with explicit grants: startup
+still requires `unsafe_host` and the independent process gate. An admitted
+extension has the current user's OS authority, not an OS sandbox.
 
 After the extension is running:
 

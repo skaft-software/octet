@@ -124,10 +124,12 @@ pub(super) fn render_welcome_card(
     } else {
         state.model_display.as_str()
     };
-    let model = if model.trim().is_empty() {
-        "selecting model…"
+    let identity = if model.trim().is_empty() {
+        "no configured model · setup needed".to_owned()
+    } else if state.reasoning.is_empty() {
+        model.to_owned()
     } else {
-        model
+        format!("{model} / {}", state.reasoning)
     };
     if width < 24 {
         // A narrow terminal cannot fit the two-column card. Keep a compact,
@@ -154,10 +156,7 @@ pub(super) fn render_welcome_card(
             ),
             width,
         ));
-        compact.push(fit_line(
-            &splash_text(&format!("{model} / {}", state.reasoning)),
-            width,
-        ));
+        compact.push(fit_line(&splash_text(&identity), width));
         compact.push(fit_line(
             &format!("{} {}", splash_bold("Ctrl+D"), splash_text("to exit")),
             width,
@@ -172,7 +171,7 @@ pub(super) fn render_welcome_card(
                 splash_text(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             ),
             String::new(),
-            splash_text(&format!("{model} / {}", state.reasoning)),
+            splash_text(&identity),
             splash_text(&welcome_workspace(state)),
             if state.safe_mode {
                 format!(
@@ -197,9 +196,7 @@ pub(super) fn render_welcome_card(
                 state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             ),
             String::new(),
-            state
-                .theme
-                .fg("foreground", &format!("{model} / {}", state.reasoning)),
+            state.theme.fg("foreground", &identity),
             state.theme.dim(&welcome_workspace(state)),
             if state.safe_mode {
                 format!(

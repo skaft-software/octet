@@ -6,9 +6,9 @@ This is the retained **API `0.1`/`0.2` maintenance reference** for
 models and canonical validators do not implement a complete API `0.3`
 `Extension` runtime. Do not retag a legacy manifest or silently translate wires.
 
-**Identity boundary:** octet 0.7.1 source uses `octet_version`, `requires_octet`,
+**Identity boundary:** octet 0.7.2 source uses `octet_version`, `requires_octet`,
 `OCTET_*`, and `octet_extension`, not aliases for old Ygg names. First-party source
-SDK/extension distributions are version `0.7.1`; independent examples retain
+SDK/extension distributions are version `0.7.2`; independent examples retain
 their own versions. Native octet publication does not publish the SDK to PyPI.
 
 `octet-extension-sdk` is dependency-free. It owns JSON-RPC 2.0 JSON-lines

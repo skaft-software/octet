@@ -41,7 +41,7 @@ use crate::artifact::{ArtifactId, ArtifactPublication, ArtifactSource, ArtifactS
 use crate::delegation::{
     ExtensionAgentSessionPolicy, ExtensionDelegationService, ExtensionDelegationSpawnRequest,
 };
-use crate::effect::ToolEffect;
+use crate::effect::{EffectPolicy, ToolEffect};
 use crate::events::AgentEvent;
 use crate::extension::{
     AssistantPersistenceContext, DynamicToolRegistration, EventObserver, Extension, ExtensionHost,
@@ -2103,7 +2103,7 @@ pub enum ExtensionTrust {
     /// Discovery alone never grants code-execution permission.
     #[default]
     Untrusted,
-    /// The user explicitly trusted this extension identifier.
+    /// Trusted by the host's current full-access policy or an explicit grant.
     Trusted,
 }
 
@@ -2116,20 +2116,35 @@ pub struct ExtensionActivation {
     pub trust: ExtensionTrust,
 }
 
-/// Explicit enablement plus source-bound executable trust. Persistent
-/// name-only grants intentionally apply only to the user's global extension
-/// directory; project and explicit code must match an exact manifest path or
-/// receive a one-invocation grant from the frontend.
+/// Explicit enablement plus executable trust for the current host policy.
+/// The default requires explicit trust: persistent name-only grants apply only
+/// to the user's global extension directory; other sources need an exact path
+/// or one-invocation grant. [`Self::for_effect_policy`] adds non-persistent
+/// implicit trust only for full access, never implicit enablement.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExtensionPolicy {
     enabled: BTreeSet<String>,
     trusted_global: BTreeSet<String>,
     trusted_sources: BTreeSet<(String, PathBuf)>,
     trusted_for_invocation: BTreeSet<String>,
+    implicit_trust: bool,
 }
 
 impl ExtensionPolicy {
-    /// Explicitly enables an extension name without implicitly trusting it.
+    /// Creates an empty policy for the host's effective authority profile.
+    ///
+    /// Full access trusts selected sources without recording a grant. Rebuild
+    /// this policy when authority changes; controlled profiles have no implicit
+    /// trust. Enablement, source validation, and process/effect gates remain
+    /// independent requirements enforced by the host.
+    pub fn for_effect_policy(effect_policy: EffectPolicy) -> Self {
+        Self {
+            implicit_trust: effect_policy == EffectPolicy::UnsafeHost,
+            ..Self::default()
+        }
+    }
+
+    /// Explicitly enables an extension name without changing its trust policy.
     pub fn enable(&mut self, name: impl Into<String>) {
         self.enabled.insert(name.into());
     }
@@ -2159,7 +2174,7 @@ impl ExtensionPolicy {
         self.enabled.remove(name);
     }
 
-    /// Revokes an extension's executable trust grant.
+    /// Revokes explicit grants; this does not override full-access implicit trust.
     pub fn revoke_trust(&mut self, name: &str) {
         self.trusted_global.remove(name);
         self.trusted_for_invocation.remove(name);
@@ -2177,7 +2192,8 @@ impl ExtensionPolicy {
         let source_bound = self
             .trusted_sources
             .contains(&(name.to_owned(), manifest_path.to_owned()));
-        let trusted = self.trusted_for_invocation.contains(name)
+        let trusted = self.implicit_trust
+            || self.trusted_for_invocation.contains(name)
             || source_bound
             || (source == ExtensionSource::Global && self.trusted_global.contains(name));
         ExtensionActivation {
@@ -2200,7 +2216,7 @@ pub struct DiscoveredExtension {
     pub manifest_path: PathBuf,
     /// Resource provenance.
     pub source: ExtensionSource,
-    /// Explicit enablement and trust state.
+    /// Explicit enablement and effective trust state.
     pub activation: ExtensionActivation,
 }
 
@@ -16158,6 +16174,51 @@ flags = [
         assert!(catalog.extensions[0].activation.enabled);
         assert_eq!(catalog.diagnostics.len(), 1);
         assert!(catalog.diagnostics[0].message.contains("shadowed"));
+    }
+
+    #[test]
+    fn full_access_extension_trust_never_enables_or_records_grants() {
+        let path = Path::new("/selected/extensions/fixture/extension.toml");
+        for effect_policy in [
+            EffectPolicy::UnsafeHost,
+            EffectPolicy::Controlled,
+            EffectPolicy::ControlledBashApproval,
+        ] {
+            for source in [
+                ExtensionSource::Global,
+                ExtensionSource::Project,
+                ExtensionSource::Explicit,
+            ] {
+                let mut policy = ExtensionPolicy::for_effect_policy(effect_policy);
+                let expected_trust = if effect_policy == EffectPolicy::UnsafeHost {
+                    ExtensionTrust::Trusted
+                } else {
+                    ExtensionTrust::Untrusted
+                };
+                assert_eq!(
+                    policy.activation("fixture", path, source),
+                    ExtensionActivation {
+                        enabled: false,
+                        trust: expected_trust,
+                    }
+                );
+                policy.enable("fixture");
+                assert_eq!(
+                    policy.activation("fixture", path, source),
+                    ExtensionActivation {
+                        enabled: true,
+                        trust: expected_trust,
+                    }
+                );
+                assert!(policy.trusted_global.is_empty());
+                assert!(policy.trusted_sources.is_empty());
+                assert!(policy.trusted_for_invocation.is_empty());
+            }
+        }
+        assert_eq!(
+            ExtensionPolicy::for_effect_policy(EffectPolicy::ControlledBashApproval),
+            ExtensionPolicy::default()
+        );
     }
 
     #[test]

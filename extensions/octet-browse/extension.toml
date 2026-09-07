@@ -1,7 +1,7 @@
 name = "octet-browse"
-version = "0.7.1"
+version = "0.7.2"
 api_version = "0.2"
-requires_octet = "=0.7.1"
+requires_octet = "=0.7.2"
 description = "Always-headful semantic browser automation with an isolated persistent profile and manual-auth boundary"
 
 [entrypoint]

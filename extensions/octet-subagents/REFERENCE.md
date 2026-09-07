@@ -1,8 +1,8 @@
 # octet-subagents reference
 
 [Usage guide](README.md). This is the bundled API `0.2` runtime contract, not a
-current extension-authoring example. Distribution `0.7.1` targets exactly octet
-`0.7.1`; the API remains `0.2`.
+current extension-authoring example. Distribution `0.7.2` targets exactly octet
+`0.7.2`; the API remains `0.2`.
 
 The executable launches named, single-purpose child conversations through the
 host-owned `agent_sessions` service. It is not an agent team, graph/recipe runtime,
@@ -84,7 +84,7 @@ use the graph/recipe spike, built-in team mailboxes, or another scheduler.
 
 ## Install, enable, and trust
 
-The bundle requires [octet 0.7.1](../../docs/installation.md) and
+The bundle requires [octet 0.7.2](../../docs/installation.md) and
 has one root directory named `octet-subagents`. Once the matching signed public
 bundle is published, install it with:
 
@@ -93,10 +93,13 @@ octet extension install octet-subagents
 ```
 
 For a reviewed local archive instead, use
-`octet extension install --path ./octet-subagents-0.7.1.tar.gz`.
+`octet extension install --path ./octet-subagents-0.7.2.tar.gz`.
 
-Installation/discovery is inert: it does not enable, trust, or start the process.
-Executable activation requires full-access mode; prefer separate OS isolation.
+Installation/discovery is inert: it never enables, persists a trust grant, or
+starts the process. The bundle is disabled by default. Default full access
+(`unsafe_host`) implicitly trusts the selected extension without saving a grant;
+executable activation still requires explicit enablement and the process gate.
+Prefer separate OS isolation.
 The current workspace bundle can be rebuilt and installed deterministically with:
 
 ```console
@@ -105,17 +108,20 @@ The current workspace bundle can be rebuilt and installed deterministically with
 
 This updates `~/.octet/extensions/octet-subagents`; rebuilding `octet` with
 `cargo run` alone does not replace an already installed extension bundle.
-Enable and trust it explicitly:
+Explicitly enable it; no extra trust flag is needed in full access:
 
 ```console
-octet --enable-extension octet-subagents --trust-extension octet-subagents
+octet --enable-extension octet-subagents
 ```
 
-`--safe-mode` never starts executable extensions. Use `/extensions` to enable or
-disable installed executable bundles, and `/extensions status` to inspect source,
-trust, API, generation, and negotiated features. Enabling never grants trust. The
-tools return an explicit unavailable result when the trusted extension is not
-running or the host has not offered its owner-bound `agent_sessions` service.
+`--trust-extension` and source-bound `trusted_extensions` grants are optional
+explicit trust decisions, not enablement. `--safe-mode` removes implicit trust
+and never starts executable extensions even with explicit grants: startup still
+requires `unsafe_host`, and trust is not an OS sandbox. Use `/extensions` to enable
+or disable installed bundles, and `/extensions status` to inspect source, trust,
+API, generation, and negotiated features. The tools return an explicit unavailable
+result when the extension is not running or the host has not offered its
+owner-bound `agent_sessions` service.
 
 The bundle is self-contained and has no install hook or third-party dependency.
 `vendor/octet_extension/` is a synchronized copy of octet's dependency-free Python
@@ -240,10 +246,11 @@ generic activity `metrics`; it never supplies terminal rows or footer text. In
 the TUI, octet renders the complete latest owner-fenced worker roster as a
 persistent transcript event immediately above the composer from native
 `AgentEvent::DelegationUpdated` events; ordinary tool disclosure never truncates
-it. It does not poll `/subagents status` for the composer block. A worker row has
-the compact form `N Tool Calls • ↑input ↓output • $cost`; input includes the three
-disjoint uncached/cache-read/cache-write buckets, while reasoning remains a
-subset of output.
+it. It does not poll `/subagents status` for the composer block. Worker rows are
+indented beneath **Subagents** and show `name  state · ↑input ↓output • $cost`.
+Per-worker call counts remain retained telemetry, not transcript-row text. Input
+includes the three disjoint uncached/cache-read/cache-write buckets, while
+reasoning remains a subset of output.
 
 Before the root run settles, octet stops and briefly joins its children, sums each
 child session's durable usage/cost records including picodollar remainders, and

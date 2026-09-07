@@ -26,14 +26,22 @@ snapshot after package removal.
 Workspace resources are ignored until `--workspace-trusted` is present.
 Explicit paths are an intentional user choice for that invocation. Executable
 extensions add a second boundary: discovery and workspace trust still do not
-launch code. Process startup requires the manifest name to be both enabled and
-independently trusted. Startup is allowed by default but blocked by
-`--safe-mode`. A project config cannot grant itself executable trust. Bare
-persistent trust names apply
-only to the global extension directory; project and explicit extensions require
-an exact absolute `name@.../extension.toml` grant or a one-invocation
-`--trust-extension name` decision. The extension directory name must match the
-manifest name.
+launch code. Installed executable extensions remain **disabled by default**.
+Full access (`unsafe_host`, the default) implicitly trusts the selected validated
+source, so an explicitly enabled extension needs no extra trust flag. Trust and
+enablement are separate; implicit trust never writes a grant to configuration.
+Process startup still requires full access and the independent process gate.
+
+`--safe-mode` removes implicit trust and blocks executable startup even when an
+explicit grant exists. It does not sandbox extensions or allow approval to
+bypass the `unsafe_host` floor. A project config cannot create a persistent
+executable trust grant. Bare persistent trust names apply only to the global
+extension directory; project and explicit sources require an exact absolute
+`name@.../extension.toml` grant to persist trust. `--trust-extension name` grants
+explicit trust only for that invocation, never enablement. These grants do not
+transfer between sources or override safe-mode execution policy. The extension
+directory name must match the manifest name, and source, compatibility, bundle,
+and artifact validation remain mandatory.
 
 If octet cannot resolve an absolute user home directory, global configuration and
 global resources are disabled with a diagnostic. It never falls back to the

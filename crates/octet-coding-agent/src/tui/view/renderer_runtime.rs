@@ -10,6 +10,7 @@ use sexy_tui_rs::{CommitCursor, Component, FrameUpdate, TUI};
 use super::native_scrollback::{
     render_shell, render_shell_update_with_cursor, synchronize_shell_frame,
 };
+use super::shell_chrome::render_startup_surface;
 use super::viewport::{render_shell_viewport_at, render_shell_viewport_update};
 use super::welcome_card::welcome_animating;
 use super::ShellState;
@@ -387,6 +388,12 @@ impl ShellComponent {
 impl Component for ShellComponent {
     fn render(&self, width: u16) -> Vec<String> {
         let state = self.state.borrow();
+        if state.startup_pending {
+            // TUI::start paints immediately. Keep the renderer/input lifecycle
+            // live for onboarding, but do not cache or publish a provisional
+            // transcript/model frame. The ready frame starts from row zero.
+            return render_startup_surface(&state, width);
+        }
         if self.uses_application_viewport(&state) {
             let lines = render_shell_viewport_at(&state, width, Instant::now());
             let mut frame = self.frame.borrow_mut();
@@ -415,6 +422,19 @@ impl Component for ShellComponent {
         cursor: Option<CommitCursor>,
     ) -> Option<FrameUpdate> {
         let state = self.state.borrow();
+        if state.startup_pending {
+            // Setup is a bounded transient surface, never a committed prefix.
+            // Leave ShellFrameState uninitialized until the first ready frame;
+            // the retained TUI diff removes all previous setup rows on release.
+            return Some(FrameUpdate {
+                stable_prefix: 0,
+                replacement: render_startup_surface(&state, width),
+                pinned: None,
+                resize_replay: None,
+                reanchor_viewport: false,
+                rebuild_scrollback: false,
+            });
+        }
         Some(if self.uses_application_viewport(&state) {
             render_shell_viewport_update(
                 &state,

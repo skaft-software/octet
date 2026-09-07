@@ -51,9 +51,9 @@ use crate::tui::theme::{ModelLab, OctetTheme, ThemeDensity};
 #[cfg(test)]
 use self::assistant_block::reasoning_heading_from_block;
 use self::assistant_block::AssistantBlock;
-use self::input_overlays::input_slash_suggestions;
 #[cfg(test)]
 use self::input_overlays::render_slash_suggestions;
+use self::input_overlays::{input_path_suggestions, input_slash_suggestions};
 #[cfg(test)]
 use self::native_scrollback::{render_shell, render_shell_at, render_shell_update};
 pub(crate) use self::ordinary_surface::{
@@ -853,6 +853,8 @@ pub(crate) struct ShellState {
     /// Workspace root and its lazily built mention-completion index.
     workspace: Option<PathBuf>,
     file_index: Option<Vec<String>>,
+    /// Selected result in the bounded path/mention completion list.
+    path_selection: usize,
     /// Cached wrapped transcript lines. Scrolling only slices this cache, and
     /// streaming updates re-render only the changed block.
     transcript_cache: RefCell<TranscriptCache>,
@@ -1011,8 +1013,13 @@ pub(crate) struct ShellState {
     /// Global transcript disclosure mode. Ctrl+O and `/verbose` toggle this.
     pub(crate) verbose_tools: bool,
     pub(crate) size: (u16, u16),
-    /// Start of the animated invocation header. It remains mutable until the
-    /// first real conversation block so model changes can recolor it in place.
+    /// Until launch selection, workspace and appearance are resolved, render
+    /// only the startup input owner, never provisional branded chrome/history.
+    /// Kept in shared state so renderer resumes obey the same readiness gate.
+    startup_pending: bool,
+    /// Start of the animated invocation header, measured from readiness rather
+    /// than terminal construction or time spent in onboarding. It remains
+    /// mutable until the first real conversation block.
     startup_card_started_at: Option<Instant>,
 }
 
@@ -1039,8 +1046,9 @@ fn is_provider_lifecycle_status(heading: &str) -> bool {
     base.starts_with("Loading ") || base.ends_with(" queued") || base.ends_with(" ready")
 }
 
-fn invalidate_extension_autocomplete(state: &mut ShellState) {
+fn invalidate_editor_autocomplete(state: &mut ShellState) {
     state.extension_autocomplete = None;
+    state.path_selection = 0;
 }
 
 fn normal_editor_focused(state: &ShellState) -> bool {
@@ -2303,7 +2311,7 @@ impl InteractiveShell {
             size: initial_size,
             follow_tail: true,
             application_viewport_requested: capture_mouse,
-            startup_card_started_at: Some(Instant::now()),
+            startup_pending: true,
             image_rendering: ToolImageRendering {
                 enabled: false,
                 capabilities: image_capabilities,
@@ -2430,6 +2438,24 @@ impl InteractiveShell {
     pub fn leave(mut self) {
         self.stop_renderer();
         force_restore();
+    }
+
+    /// Publish the first branded frame after launch identity (including an
+    /// intentionally model-less launch), workspace, history and appearance have
+    /// been installed. Startup panels remain usable before this boundary.
+    pub fn finish_startup(&mut self) {
+        {
+            let mut state = self.state.borrow_mut();
+            if !state.startup_pending {
+                return;
+            }
+            state.startup_pending = false;
+            state.startup_card_started_at = Some(Instant::now());
+            // A picker/navigation path may already have measured the history.
+            // Insert exactly one welcome prefix even when that cache is warm.
+            state.invalidate_transcript();
+        }
+        self.render();
     }
 
     /// Queue a retained-frame render without doing layout on the async loop.
@@ -3044,10 +3070,32 @@ impl InteractiveShell {
         } else {
             format!("{restored}\n\n{current}")
         });
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
     }
 
     pub fn apply_edit(&mut self, action: EditAction) {
+        if matches!(action, EditAction::Up | EditAction::Down) {
+            let mut state = self.state.borrow_mut();
+            // Only a visible host path menu claims arrows. An extension result,
+            // modal input, mid-draft cursor, or empty/tiny popup keeps its
+            // existing keyboard ownership and normal visual editor movement.
+            if normal_editor_focused(&state) && state.extension_autocomplete.is_none() {
+                let count = input_path_suggestions(&state).len();
+                if count > 0
+                    && !shell_chrome(&state, state.size.0, Instant::now())
+                        .suggestions
+                        .is_empty()
+                {
+                    state.path_selection = state.path_selection.min(count - 1);
+                    state.path_selection = if matches!(action, EditAction::Up) {
+                        state.path_selection.saturating_sub(1)
+                    } else {
+                        state.path_selection.saturating_add(1).min(count - 1)
+                    };
+                    return;
+                }
+            }
+        }
         let resets_slash_menu = matches!(
             &action,
             EditAction::Char(_)
@@ -3134,7 +3182,7 @@ impl InteractiveShell {
                 state.file_index = Some(composer::workspace_files(&root, 10_000));
             }
         }
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
     }
 
     /// Complete a unique slash-command prefix at the end of the prompt.
@@ -3152,7 +3200,7 @@ impl InteractiveShell {
             );
             state.editor.set_text(completed);
             state.slash_popup_dismissed = true;
-            invalidate_extension_autocomplete(&mut state);
+            invalidate_editor_autocomplete(&mut state);
         }
     }
 
@@ -3202,7 +3250,7 @@ impl InteractiveShell {
                     if command.accepts_argument { " " } else { "" }
                 ));
                 state.slash_popup_dismissed = true;
-                invalidate_extension_autocomplete(&mut state);
+                invalidate_editor_autocomplete(&mut state);
                 return;
             }
             SlashMenuAction::Close => {
@@ -3224,7 +3272,9 @@ impl InteractiveShell {
     /// Drop the mention file index so the next `@` completion re-walks the
     /// workspace. Called after a run ends, when tools may have created files.
     pub fn invalidate_file_index(&mut self) {
-        self.state.borrow_mut().file_index = None;
+        let mut state = self.state.borrow_mut();
+        state.file_index = None;
+        state.path_selection = 0;
     }
 
     pub fn set_workspace(&mut self, root: PathBuf) {
@@ -3235,6 +3285,7 @@ impl InteractiveShell {
             return;
         }
         state.file_index = None;
+        state.path_selection = 0;
         state.workspace = Some(root);
         state.refresh_tool_displays();
     }
@@ -3353,7 +3404,7 @@ impl InteractiveShell {
         false
     }
 
-    /// Complete one trailing mention or literal path at the end of the draft.
+    /// Accept the selected trailing mention or literal path at the end of the draft.
     /// Media and PDF completions remain composer policy and become attachment
     /// chips; literal paths are inserted as text. Directory completions omit
     /// the trailing space so another Tab can descend into them.
@@ -3366,29 +3417,23 @@ impl InteractiveShell {
             return;
         };
 
-        if let Some(query) = composer::active_mention(state.editor.text()).map(str::to_owned) {
-            let suggestion = if composer::is_path_query(&query) {
-                composer::path_matches(&root, &query, 1).into_iter().next()
-            } else {
-                if state.file_index.is_none() {
-                    state.file_index = Some(composer::workspace_files(&root, 10_000));
-                }
-                let top = {
-                    let files = state.file_index.as_ref().expect("file index just built");
-                    composer::mention_matches(files, &query, 1)
-                        .first()
-                        .copied()
-                        .map(str::to_owned)
-                };
-                top.map(|completion| composer::PathSuggestion {
-                    path: root.join(&completion),
-                    completion,
-                    is_dir: false,
-                })
-            };
-            let Some(suggestion) = suggestion else {
-                return;
-            };
+        let mention = composer::active_mention(state.editor.text()).map(str::to_owned);
+        if mention
+            .as_deref()
+            .is_some_and(|query| !composer::is_path_query(query))
+            && state.file_index.is_none()
+        {
+            state.file_index = Some(composer::workspace_files(&root, 10_000));
+        }
+        let suggestions = input_path_suggestions(&state);
+        let selected = state
+            .path_selection
+            .min(suggestions.len().saturating_sub(1));
+        let Some(suggestion) = suggestions.into_iter().nth(selected) else {
+            return;
+        };
+
+        if let Some(query) = mention {
             let token_start = state.editor.text().len() - (query.len() + 1);
             let replacement = if suggestion.is_dir {
                 format!("@{}", suggestion.completion)
@@ -3415,14 +3460,11 @@ impl InteractiveShell {
             let end = state.editor.text().len();
             let _ = state.editor.replace_range(token_start..end, &replacement);
             state.editor.move_to_end();
-            invalidate_extension_autocomplete(&mut state);
+            invalidate_editor_autocomplete(&mut state);
             return;
         }
 
         let Some(query) = composer::active_path(state.editor.text()).map(str::to_owned) else {
-            return;
-        };
-        let Some(suggestion) = composer::path_matches(&root, &query, 1).into_iter().next() else {
             return;
         };
         let token_start = state.editor.text().len() - query.len();
@@ -3431,7 +3473,7 @@ impl InteractiveShell {
         let end = state.editor.text().len();
         let _ = state.editor.replace_range(token_start..end, &replacement);
         state.editor.move_to_end();
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
     }
 
     pub(crate) fn selected_identity(&self) -> (String, String) {
@@ -3617,7 +3659,7 @@ impl InteractiveShell {
             state.slash_selection = 0;
             state.slash_scroll = 0;
             state.slash_popup_dismissed = false;
-            invalidate_extension_autocomplete(&mut state);
+            invalidate_editor_autocomplete(&mut state);
         }
         ShellEditorSnapshot {
             text: state.editor.text().to_owned(),
@@ -3706,7 +3748,7 @@ impl InteractiveShell {
             state.extension_autocomplete = None;
             return false;
         }
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
         true
     }
 
@@ -3738,7 +3780,7 @@ impl InteractiveShell {
     pub fn drain_composed(&mut self) -> ComposedInput {
         let mut state = self.state.borrow_mut();
         let text = state.editor.take_text();
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
 
         // Ordinary path text is not consent to read or transmit a file. Only
         // attachment chips already shown by explicit paste/@ selection resolve
@@ -3757,7 +3799,7 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         state.editor.set_text(composed.display_text);
         state.ledger.restore(composed.attachments);
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
     }
 
     /// Discard the current draft and every attachment it owns.
@@ -3768,7 +3810,7 @@ impl InteractiveShell {
         state.slash_selection = 0;
         state.slash_scroll = 0;
         state.slash_popup_dismissed = false;
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
     }
 
     pub fn drain_editor(&mut self) -> String {
@@ -3777,7 +3819,7 @@ impl InteractiveShell {
         state.slash_scroll = 0;
         state.slash_popup_dismissed = false;
         let text = state.editor.take_text();
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
         text
     }
 
@@ -4421,7 +4463,7 @@ impl InteractiveShell {
         state.slash_selection = 0;
         state.slash_scroll = 0;
         state.slash_popup_dismissed = false;
-        invalidate_extension_autocomplete(&mut state);
+        invalidate_editor_autocomplete(&mut state);
     }
 
     /// Replace a live subagent list without losing its filter or stable-node
@@ -5455,6 +5497,10 @@ mod welcome_card;
 
 #[cfg(test)]
 mod ordinary_surface_contract_tests;
+#[cfg(test)]
+mod path_completion_tests;
+#[cfg(test)]
+mod startup_readiness_tests;
 #[cfg(test)]
 mod tests;
 

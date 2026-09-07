@@ -296,67 +296,73 @@ pub(super) fn render_slash_suggestions(
     lines
 }
 
-fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
-    if max_rows < 2 || state.editor.cursor() != state.editor.text().len() {
+/// One bounded candidate list shared by painting, arrow navigation, and Tab.
+/// The visible window is smaller than this list and follows the selected row.
+pub(super) fn input_path_suggestions(state: &ShellState) -> Vec<composer::PathSuggestion> {
+    const MAX_MATCHES: usize = 100;
+    if state.editor.cursor() != state.editor.text().len() {
         return Vec::new();
     }
-
-    let (heading_label, matches) =
-        if let Some(query) = composer::active_mention(state.editor.text()) {
-            if composer::is_path_query(query) {
-                let Some(root) = &state.workspace else {
-                    return Vec::new();
-                };
-                let matches = composer::path_matches(root, query, 5)
-                    .into_iter()
-                    .map(|suggestion| suggestion.completion)
-                    .collect();
-                ("paths", matches)
-            } else {
-                let Some(files) = state.file_index.as_ref() else {
-                    return Vec::new();
-                };
-                let matches = composer::mention_matches(files, query, 5)
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect();
-                ("project files", matches)
-            }
-        } else if let Some(query) = composer::active_path(state.editor.text()) {
-            let Some(root) = &state.workspace else {
-                return Vec::new();
-            };
-            let matches = composer::path_matches(root, query, 5)
+    let Some(root) = state.workspace.as_ref() else {
+        return Vec::new();
+    };
+    if let Some(query) = composer::active_mention(state.editor.text()) {
+        if composer::is_path_query(query) {
+            return composer::path_matches(root, query, MAX_MATCHES);
+        }
+        return state.file_index.as_ref().map_or_else(Vec::new, |files| {
+            composer::mention_matches(files, query, MAX_MATCHES)
                 .into_iter()
-                .map(|suggestion| suggestion.completion)
-                .collect();
-            ("paths", matches)
-        } else {
-            return Vec::new();
-        };
-    let matches: Vec<String> = matches;
+                .map(|completion| composer::PathSuggestion {
+                    completion: completion.to_owned(),
+                    path: root.join(completion),
+                    is_dir: false,
+                })
+                .collect()
+        });
+    }
+    composer::active_path(state.editor.text()).map_or_else(Vec::new, |query| {
+        composer::path_matches(root, query, MAX_MATCHES)
+    })
+}
+
+fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
+    if max_rows < 2 {
+        return Vec::new();
+    }
+    let matches = input_path_suggestions(state);
     if matches.is_empty() {
         return Vec::new();
     }
+    let heading_label = if composer::active_mention(state.editor.text())
+        .is_some_and(|query| !composer::is_path_query(query))
+    {
+        "project files"
+    } else {
+        "paths"
+    };
 
     let item_rows = max_rows.saturating_sub(1).min(5);
+    let selected = state.path_selection.min(matches.len() - 1);
+    let start = selected.saturating_sub(item_rows - 1);
     let marker = state.theme.glyph("prompt");
     let marker_width = visible_width(marker).max(1);
     let available_width = usize::from(width)
         .saturating_sub(2 + marker_width + 1)
         .max(1);
     let mut lines = Vec::with_capacity(item_rows.saturating_add(1));
-    for (index, path) in matches.into_iter().take(item_rows).enumerate() {
-        let safe_path = sanitize_ordinary_surface_cell(&path, state.theme.unicode());
+    for (index, suggestion) in matches.into_iter().enumerate().skip(start).take(item_rows) {
+        let safe_path =
+            sanitize_ordinary_surface_cell(&suggestion.completion, state.theme.unicode());
         let path =
             truncate_suggestion_display(&safe_path, available_width, state.theme.glyph("ellipsis"));
-        let prefix = if index == 0 {
+        let prefix = if index == selected {
             marker.to_owned()
         } else {
             " ".repeat(marker_width)
         };
         let choice = format!("{prefix} {path}");
-        let choice = if index == 0 {
+        let choice = if index == selected {
             state.theme.bold(&state.theme.fg("model_accent", &choice))
         } else {
             state.theme.fg("muted", &choice)
@@ -368,6 +374,18 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     let mut segments = [
         FooterSegment::optional(state.theme.fg("muted", heading_label), 0),
         FooterSegment::primary(suggestion_key_hint(state, "tab", "complete")),
+        FooterSegment::optional(
+            suggestion_key_hint(
+                state,
+                if state.theme.unicode() {
+                    "↑↓"
+                } else {
+                    "up/down"
+                },
+                "navigate",
+            ),
+            1,
+        ),
     ];
     lines.push(fit_prioritized_footer(
         "  ",

@@ -18,7 +18,7 @@ workspace = true
 benchmarks = []
 
 [dependencies]
-octet-ai = { version = "=0.7.1", path = "../octet-ai" }
+octet-ai = { version = "=0.7.2", path = "../octet-ai" }
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
 serde = { version = "1", features = ["derive"] }

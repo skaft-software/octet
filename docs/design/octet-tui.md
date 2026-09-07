@@ -98,6 +98,9 @@ require a fresh key press.
 The composer supports multiline editing, bracketed paste, large-paste chips,
 media attachments, dropped paths, gitignore-aware `@` completion, and Tab
 completion for relative, parent, home-relative, and absolute path tokens.
+Up/Down selects from a visible path or mention menu, whose bounded window follows
+the selection; Tab inserts that result. With no visible menu or a cursor inside
+the draft, arrows retain visual editor navigation.
 Slash-command discovery, file mentions, and filesystem completion render inline
 directly below the composer. While matches are visible, the suggestion surface
 temporarily replaces the model and token status row; the status returns as soon
@@ -114,10 +117,10 @@ Escape or Left returns to the composer.
 Generic presentation snapshots do not create persistent chrome. The first-party
 `octet-subagents` observation surface is the bounded exception: while an owning
 run has workers, the host renders its complete owner-fenced `subagent` roster in
-a persistent transcript event immediately above the composer. Each worker uses
-a content-free task/phase line and a structured
-`Tool Calls • ↑input ↓output • cost` line; ordinary tool disclosure never
-truncates the roster. A
+a persistent transcript event immediately above the composer. Worker rows are
+indented beneath `Subagents` and show `name  state · ↑input ↓output • cost`;
+ordinary tool disclosure never truncates the roster. Per-worker call counts
+remain retained telemetry, not row text. A
 nonblocking 250 ms host tick invokes the owner-scoped status command, coalesces
 with normal extension events, and retains the last accepted snapshot on failure.
 Live child cost is added to the host-owned cumulative footer only until root
@@ -239,9 +242,14 @@ value column fixed. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 
+Terse Bash tool headers retain the first three rendered command lines and then
+show an exact hidden-command-line count. Wrapping and explicit newlines share
+that visual budget; the stored and executed command is not truncated. The
+command preview is independent of the output-tail budget.
+
 Ctrl+O toggles the global disclosure mode for retained reasoning, compaction,
-search output, Bash/local-shell output, and edit/write diffs. `/verbose [on|off]`
-controls the same mode. Expansion cannot recover capture bytes that the tool
+search output, Bash commands, Bash/local-shell output, and edit/write diffs.
+`/verbose [on|off]` controls the same mode. Expansion cannot recover capture bytes that the tool
 already discarded.
 
 Final structured tool results remain provider-visible and persisted when the

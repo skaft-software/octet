@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.7.2] - Unreleased
+
+See the [release candidate notes](docs/releases/v0.7.2.md). Signed publication
+and public-install verification are pending; v0.7.1 remains the published stable
+release.
+
+### Fixed
+
+- Defer the first branded startup frame until model/setup state, workspace, and
+  appearance are resolved; start its animation at readiness.
+- Prevent delayed or fragmented terminal background replies from entering the
+  prompt, including over SSH.
+- Navigate path and `@` file completions with Up/Down and accept the selected
+  result with Tab, preserving editor movement when no menu is visible.
+- Indent subagent transcript rows beneath their heading and omit per-worker
+  call counts without removing state, tokens, cost, or underlying telemetry.
+- Limit terse Bash command previews to three visual lines plus a hidden-line
+  count; Ctrl+O reveals the full retained command.
+
+### Changed
+
+- Full access implicitly trusts explicitly enabled executable extensions;
+  installed bundles remain disabled by default. Safe mode retains its
+  permission/execution boundaries and does not inherit implicit trust.
+- Align product, SDK, Serve, and first-party distribution versions to 0.7.2;
+  independent extension APIs and native-host protocol versions are unchanged.
+
 ## [0.7.1] - 2026-09-07
 
 See the [release notes](docs/releases/v0.7.1.md) for publication and

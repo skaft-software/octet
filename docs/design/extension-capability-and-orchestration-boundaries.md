@@ -70,7 +70,14 @@ This document defines how octet assigns capability ownership across host, extens
 For non-`octet-serve` extension workflows, octet keeps ownership of policy and lifecycle while the extension owns domain behavior:
 
 - **Extensions are not trusted for policy authority.** They receive capability declarations, session context, and bounded broker services, but do not lower `EffectPolicy`.
-- **Extension trust is explicit.** Running executable extensions requires explicit enablement and explicit trust grants in addition to run policy gates.
+- **Enablement is explicit; trust follows host policy.** The coding product
+  leaves executable extensions disabled by default. Its default full-access
+  (`unsafe_host`) policy implicitly trusts the selected extension without
+  persisting a grant; optional explicit grants never enable it. Safe mode does
+  not inherit this implicit trust and cannot start executable extensions, even
+  with explicit grants: the `unsafe_host` floor and independent process gates
+  remain. Other hosts retain their own trust policy;
+  `ExtensionPolicy::default()` requires explicit trust.
 - **In-harness delegation inherits parent boundaries.** Delegated children inherit the parent’s sandbox, approvals, extension selection, cache/resolution policy, environment/cwd model, and budget constraints. Child telemetry, spawn/list metadata, and durable spawn provenance carry an `effective_tool_policy` plus source-only `orchestration_provenance`: `parent_inherited` or `child_override` for sandbox, effect policy, approval authority, environment, working directory, extension trust, tool scope, and execution limits. A host-validated extension child scope/limit is an override; all other listed authorities remain parent-owned. The provenance never contains paths, environment values, approval material, extension identifiers, or model arguments.
 - **No implicit process isolation from trust alone.** All extension and delegated work still uses the host’s existing security model unless containment is added outside octet.
 - **Telemetry redaction constraints:** host/extension telemetry should carry bounded, non-secret fields; capability/provenance metadata (delegation kind, owner/request lineage, lifecycle outcome, cancellation source, timeout source) is allowed only where bounded and redacted.

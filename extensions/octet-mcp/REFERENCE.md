@@ -1,8 +1,8 @@
 # octet-mcp reference
 
 [Usage guide](README.md). This is the bundled API `0.2` implementation contract,
-not a current extension-authoring example. Distribution `0.7.1` requires exactly
-octet `0.7.1`; these version numbers are independent.
+not a current extension-authoring example. Distribution `0.7.2` requires exactly
+octet `0.7.2`; these version numbers are independent.
 
 One resident extension process owns every explicitly configured
 [Model Context Protocol](https://modelcontextprotocol.io/) server session and
@@ -21,10 +21,12 @@ server installation, and ambient discovery are unsupported.
 
 ## Security and authority
 
-Installing or discovering this package is inert. The bridge starts only after
-octet independently admits the executable extension (enablement, exact trust, and
-full-access startup policy), and it starts no MCP server unless an explicit
-configuration file exists.
+Installing or discovering this package is inert; the bridge is disabled by
+default. Default full access (`unsafe_host`) implicitly trusts the selected
+extension without persisting a grant, but startup still requires explicit
+enablement, source/integrity validation, and the process gate. It starts no MCP
+server unless an explicit configuration file exists; implicit extension trust
+does not approve servers or tool calls.
 
 A local MCP server is arbitrary software running with the current user's OS
 authority. Neither the bridge, its manifest, nor per-call approval is an OS
@@ -46,7 +48,7 @@ An explicitly read-only tool may run without an additional prompt. Every
 `unknown` or `destructive` call goes through the negotiated host
 `policy/evaluate` service. If policy intents are unavailable, evaluation fails,
 or the host denies the intent, the bridge fails closed. It uses a one-use
-approval retry only when the host actually negotiates `approvals`; octet `0.7.1`'s
+approval retry only when the host actually negotiates `approvals`; octet `0.7.2`'s
 coding product does not currently enable approval issuance, so those calls are
 denied with an explanatory tool error. An MCP tool call is never automatically
 replayed after timeout, cancellation, crash, or an ambiguous disconnect.
@@ -72,7 +74,7 @@ one-shot command-line switch for that process:
 
 ```console
 octet --experimental-streamable-http-mcp \
-    --enable-extension octet-mcp --trust-extension octet-mcp
+    --enable-extension octet-mcp
 ```
 
 This is intentionally not a configuration feature. `~/.octet/mcp.json`,
@@ -133,31 +135,33 @@ below does not override this warning.
 
 ## Requirements and installation
 
-- octet exactly `0.7.1` (`requires_octet = "=0.7.1"`)
+- octet exactly `0.7.2` (`requires_octet = "=0.7.2"`)
 - Python 3.9 or newer on `PATH`
 - separately installed MCP server executables
 
 The release bundle includes the dependency-free Python extension SDK under
 `vendor/`; startup never runs `pip`, a browser download, or install code.
 
-With [octet 0.7.1 installed](../../docs/installation.md), once the matching signed
-public bundle is published, install it, then separately enable and trust it:
+With [octet 0.7.2 installed](../../docs/installation.md), once the matching signed
+public bundle is published, install it, then explicitly enable it:
 
 ```console
 octet extension install octet-mcp
-octet --enable-extension octet-mcp --trust-extension octet-mcp
+octet --enable-extension octet-mcp
 ```
 
 For local development, select a reviewed checkout explicitly without installation:
 
 ```console
 octet --extension-dir ./extensions \
-    --enable-extension octet-mcp \
-    --trust-extension octet-mcp
+    --enable-extension octet-mcp
 ```
 
-Executable extensions run only under octet's full-access process gate.
-`--safe-mode` retains discovery but does not start this bridge.
+`--trust-extension` and source-bound `trusted_extensions` grants remain optional
+explicit trust decisions, never enablement. Full-access implicit trust is not
+saved as a grant. `--safe-mode` removes implicit trust and retains discovery but
+never starts this bridge, even with explicit grants: executable startup still
+requires `unsafe_host`. Neither mode supplies an OS sandbox.
 
 ## Configuration
 

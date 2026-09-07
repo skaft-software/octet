@@ -44,10 +44,18 @@ Capability declarations are consent metadata, **not a sandbox**. Message, queue,
 request, concurrency, artifact, shutdown, and process-tree bounds do not provide
 OS CPU/RSS/FD/PID isolation. Use separate OS-level isolation for full-access work.
 
-Discovery never executes code. Startup requires enablement, an exact trust
-grant, and the default full-access policy, plus the host's process-policy gates.
-`--safe-mode` never starts executable extensions, even with process/shell
-sandbox flags enabled. Native-host protocol `1` is a
+**Executable extensions are disabled by default, including installed bundles.**
+Discovery never executes code. **Full access (`unsafe_host`, the default) trusts
+selected extensions implicitly, but never enables them.** An explicitly enabled
+extension can start without an extra trust flag, subject to process-policy gates
+and the existing source, compatibility, and integrity checks. This implicit
+trust is calculated for the current policy; it never writes a persistent trust
+grant or an invocation trust flag back into configuration.
+
+`--safe-mode` removes implicit trust and never starts executable extensions,
+even with explicit trust and process/shell flags enabled. Executable processes
+still require `unsafe_host`: safe mode is not an extension sandbox, and an
+approval cannot bypass that floor. Native-host protocol `1` is a
 [separate embedding interface](sdk.md); it discovers extensions but does not
 start them.
 
@@ -64,15 +72,27 @@ must exactly match the manifest `name`:
 Precedence is global, then trusted project, then explicit `--extension-dir`
 directories in command-line order; later definitions win by directory name.
 Project resources are ignored until the workspace is trusted. Enablement and
-executable trust remain separate and are bound to the selected source.
+executable trust remain separate. Full-access trust applies to the selected,
+validated source, without changing discovery precedence or enabling other
+installed extensions. For example, with a reviewed bundle installed:
 
-`--enable-extension NAME` enables a selected extension;
-`--trust-extension NAME` grants invocation-only trust to that selected source.
-A bare persistent `trusted_extensions` name applies only under
-`~/.octet/extensions`. Project and explicit sources need the exact
-`NAME@/absolute/path/extension.toml` grant. A trusted project config can suggest
-`enabled_extensions` but cannot grant itself trust. Persistent trust comes from
-user config or `OCTET_TRUSTED_EXTENSIONS`, never from that project suggestion.
+```sh
+octet --enable-extension octet-web-search
+```
+
+`--enable-extension NAME` enables a selected extension for that invocation;
+`enabled_extensions = ["octet-web-search"]` persists activation in user config.
+`--trust-extension NAME` remains an optional explicit invocation-only trust grant,
+not activation or permission to bypass safe mode. A bare persistent
+`trusted_extensions` name applies only under `~/.octet/extensions`; an exact
+`NAME@/absolute/path/extension.toml` grant is required to persist trust for project
+or explicit sources. These source-bound grants remain distinct when implicit
+full-access trust is absent. Even an explicitly trusted extension stays stopped
+under a controlled policy.
+
+A trusted project config can suggest `enabled_extensions` but cannot create a
+persistent trust grant. Persistent trust comes from user config or
+`OCTET_TRUSTED_EXTENSIONS`, never from that project suggestion.
 
 See the retained [discovery and trust reference](extensions/legacy-authoring.md#layout-and-discovery)
 for config examples, bounded manifest reads, diagnostics, and resolver APIs.
@@ -82,9 +102,9 @@ for config examples, bounded manifest reads, diagnostics, and resolver APIs.
 ## Manifest
 
 Select `api_version = "0.3"` exactly; an extension's own `version` does not select
-the wire. octet 0.7.1 source uses `octet_version`, `requires_octet`, `OCTET_*`, and
+the wire. octet 0.7.2 source uses `octet_version`, `requires_octet`, `OCTET_*`, and
 `octet_extension`, with no aliases for earlier first-party wire names or imports.
-The first-party source distribution version is `0.7.1`, independent of API
+The first-party source distribution version is `0.7.2`, independent of API
 `0.3`.
 
 Declare the entrypoint and tools for the implementation you actually supply.
@@ -97,7 +117,8 @@ not a current-API template.
 
 `requires_octet` is optional for an unpackaged local extension, enforced when
 present, and mandatory as an exact running-version requirement for an installed
-bundle. Installation never enables, trusts, starts, or runs setup code. See
+bundle. Installation never enables, records a trust grant, starts, or runs setup
+code. Full-access trust is a runtime policy, not an installer side effect. See
 [bundle validation and commands](extensions/legacy-authoring.md#installable-extension-bundles).
 Published-catalog examples remain publication-gated; use a reviewed source or
 local archive when matching publication has not been verified.

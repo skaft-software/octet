@@ -14,10 +14,11 @@ Do not recreate the old name.
 ## Package identities
 
 These are the current source package identities, not claims of published
-packages. The `0.7.1` distribution version does not establish registry
-availability or change independent API and schema versions.
+packages. The `0.7.2` distribution version does not establish registry
+availability or change independent API and schema versions. The
+[0.7.2 candidate](releases/v0.7.2.md) is not yet published.
 
-| Surface | 0.7.1 source identity |
+| Surface | 0.7.2 source identity |
 | --- | --- |
 | Product and native commands | lowercase octet; `octet`, `octet-host` |
 | Core crates | `octet-ai`, `octet-agent`, `octet-coding-agent`, `octet-migrate-types` |
@@ -26,7 +27,7 @@ availability or change independent API and schema versions.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and first-party extension distribution versions | `0.7.1`; installed compatibility `requires_octet = "=0.7.1"` |
+| Product, SDK and first-party extension distribution versions | `0.7.2`; installed compatibility `requires_octet = "=0.7.2"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |

@@ -58,8 +58,9 @@ package; its README is authoritative for arguments.
 
 `/extensions` lists managed executable bundles, not the separate Serve
 application. Up/Down selects; Enter enables/disables only the selected user
-`enabled_extensions` entry. It never grants trust. Selecting enabled
-`octet-web-search` opens the provider picker: Brave Search is recommended,
+`enabled_extensions` entry. It never writes a trust grant: full access implicitly
+trusts enabled extensions, while safe mode keeps executable extensions stopped.
+Selecting enabled `octet-web-search` opens the provider picker: Brave Search is recommended,
 SearXNG remains optional, and Brave's key is requested through private input.
 [Web-search setup](../extensions/octet-web-search/README.md#choose-a-provider).
 
@@ -80,9 +81,10 @@ extension processes stopped. [Discovery and trust](resources.md).
 | Escape | Interrupt active work; close/back out of a panel. |
 | Ctrl+C | Clear a nonempty draft; otherwise abort active work, no-op while idle. |
 | Ctrl+D | Close from any interactive input surface after active-work and child-process cleanup. |
-| Ctrl+O | Globally disclose retained reasoning, compaction, delegated activity, tool evidence, and shell output. Cannot recover discarded capture bytes. |
+| Ctrl+O | Globally disclose retained reasoning, compaction, delegated activity, tool commands, tool evidence, and shell output. Cannot recover discarded capture bytes. |
 | PageUp / PageDown | Semantic transcript navigation; PageUp claims the bounded viewport, PageDown returns toward live output. |
-| Tab | Complete trailing `./`, `../`, `~/`, or absolute path tokens. Keep directory completion open; backslash-escape spaces. |
+| Up / Down | Select a path or `@` file suggestion while its menu is visible; otherwise move through the editor. |
+| Tab | Insert the selected path or `@` file suggestion. Keep directory completion open; backslash-escape spaces. |
 | `@` | Fuzzy gitignore-aware workspace file mentions; path-prefixed mentions use filesystem completion. |
 
 [Resume picker keys](sessions.md#resume-and-branch) and

@@ -25,9 +25,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertIsNotNone(tomllib)
         manifest = tomllib.loads((ROOT / "extension.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "octet-subagents")
-        self.assertEqual(manifest["version"], "0.7.1")
+        self.assertEqual(manifest["version"], "0.7.2")
         self.assertEqual(manifest["api_version"], "0.2")
-        self.assertEqual(manifest["requires_octet"], "=0.7.1")
+        self.assertEqual(manifest["requires_octet"], "=0.7.2")
         self.assertEqual(manifest["entrypoint"]["command"], "octet-subagents")
         self.assertEqual(manifest["capabilities"]["filesystem"], "none")
         self.assertFalse(manifest["capabilities"]["process"])
@@ -110,7 +110,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_release_archive_has_one_regular_portable_root(self):
         with tempfile.TemporaryDirectory() as directory:
-            archive = Path(directory) / "octet-subagents-0.7.1.tar.gz"
+            archive = Path(directory) / "octet-subagents-0.7.2.tar.gz"
             with tarfile.open(archive, "w:gz") as bundle:
                 for path in sorted(ROOT.rglob("*")):
                     if "__pycache__" in path.parts or ".pytest_cache" in path.parts:
@@ -210,9 +210,12 @@ class ReleaseTests(unittest.TestCase):
         readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
         reference = " ".join((ROOT / "REFERENCE.md").read_text(encoding="utf-8").split())
         for required in (
-            "separately enable and trust it",
-            "--enable-extension octet-subagents --trust-extension octet-subagents",
-            "Enabling never grants trust",
+            "then explicitly enable it",
+            "octet --enable-extension octet-subagents",
+            "the bundle stays disabled until explicitly enabled",
+            "Default full access (`unsafe_host`) implicitly trusts it without saving a grant",
+            "grants never enable it",
+            "`--safe-mode` removes implicit trust and keeps executable processes stopped",
             "shared filesystem is **not isolation**",
             "REFERENCE.md#safety-model",
             "REFERENCE.md#kernel-boundary",
@@ -224,7 +227,10 @@ class ReleaseTests(unittest.TestCase):
         ):
             self.assertIn(required, readme)
         for required in (
-            "Enable and trust it explicitly",
+            "Explicitly enable it; no extra trust flag is needed in full access",
+            "The bundle is disabled by default",
+            "implicitly trusts the selected extension without saving a grant",
+            "never starts executable extensions even with explicit grants",
             "shared cwd/filesystem is **not isolation**",
             "There is no dedicated writer profile in V1",
             "host-owned `agent_sessions` service",
