@@ -19,7 +19,7 @@ vocabulary that uses that hierarchy without adding a second TUI.
   screen and saved lines before replaying the complete frame. PageUp transfers
   rendering to the bounded, application-owned semantic viewport for the rest of
   that shell. Explicit `--mouse app` selects that viewport from startup.
-- octet v0.7.0 uses one compiled default theme. Theme selection and runtime theme reload are disabled; terminal/background capability detection still adapts that default safely. Its model-aware accent palette changes atmosphere without changing layout or semantic status colours.
+- octet uses one compiled default theme with three built-in terminal appearance selectors: Auto adapts to a reliably detected background with a neutral fallback, while Light and Dark explicitly select contrast. Runtime theme-file loading and reload remain disabled; model-aware accents change atmosphere without changing layout or semantic status colours.
 - Raw mode, bracketed paste, keyboard enhancements, and mouse reporting are
   enabled only when supported and restored idempotently. Matching Pi, every
   interactive frame is bracketed by CSI 2026 synchronized-output markers;

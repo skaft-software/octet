@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-07
+
+See the [release notes](docs/releases/v0.7.1.md) for candidate publication and
+verification status.
+
+### Added
+
+- Added first-install Auto/Light/Dark appearance selection with preview and
+  persistence, plus `/theme` for later changes; configured and non-TUI launches
+  do not reopen onboarding.
+
+### Fixed
+
+- Made startup presentation capability-safe and refreshed the welcome prefix
+  across animation, overlays, theme/model changes and redraws (#367).
+- Suppressed duplicate prompt replay in interactive plain mode while preserving
+  explicit one-shot and piped prompt output (#368).
+- Added bounded retries across trusted release GET headers and streamed bodies
+  for transient timeouts and HTTP 408/429/5xx; validation failures are never
+  retried (#369).
+- Preserved application-viewport scroll anchors across coalesced tool and
+  subagent updates, including worker-roster insertion and reflow.
+- Selected model-supported reasoning for local compaction and auxiliary requests
+  instead of forcing unsupported Off; explicit user selections remain unchanged
+  (#370).
+
+### Changed
+
+- Use the canonical `skaft-software/octet` source/release repository after #366;
+  immutable v0.7.0 assets retain their original signing identity.
+- Aligned product, SDK and first-party extension distribution versions to 0.7.1;
+  extension API and native-host protocol versions are unchanged.
+
 ## [0.7.0] - 2026-09-06
 
 ### Added
@@ -811,6 +844,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Every bundled theme retains its authored palette, while the compiled default follows the selected model lab and resets cleanly after theme switches.
 - Batched tool results retain independent bounded output allowances so a large early result cannot starve later calls in the same turn.
 
+[0.7.1]: https://github.com/skaft-software/octet/releases/tag/v0.7.1
 [0.7.0]: https://github.com/skaft-software/ygg/releases/tag/v0.7.0
 [0.6.7]: https://github.com/skaft-software/ygg/releases/tag/v0.6.7
 [0.6.6]: https://github.com/skaft-software/ygg/releases/tag/v0.6.6

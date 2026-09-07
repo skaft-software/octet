@@ -27,8 +27,9 @@ paths with your reviewed local paths. Protect the file with `chmod 600`.
 }
 ```
 
-With [octet 0.7.0 installed](../../docs/installation.md) and Python 3.9+ on
-`PATH`, install the signed public bundle and validate your configuration:
+With [octet 0.7.1 installed](../../docs/installation.md) and Python 3.9+ on
+`PATH`, once the matching signed public bundle is published, install it and
+validate your configuration:
 
 ```console
 octet extension install octet-mcp
@@ -62,7 +63,7 @@ same semantic state used by the TUI and Serve.
 A local server runs with your OS authority. Neither configuration nor tool
 approval is a sandbox. Server trust does not approve every tool: only an exact,
 uncontradicted JSON `readOnlyHint: true` gets read-only classification. Unknown
-or destructive calls require host policy. The octet `0.7.0` coding product does
+or destructive calls require host policy. The octet `0.7.1` coding product does
 not issue approvals for those calls, so they fail closed with a tool error.
 Calls are never automatically replayed after an ambiguous failure; cancellation
 does not promise rollback.
@@ -81,7 +82,7 @@ are unsupported.
 
 ## Reference
 
-The bundle requires exactly octet `0.7.0`; its API remains `0.2`. The following
+The bundle requires exactly octet `0.7.1`; its API remains `0.2`. The following
 is a retained bundled-runtime contract, not a current SDK authoring guide.
 
 - <a id="security-and-authority"></a>[Security and authority](REFERENCE.md#security-and-authority).

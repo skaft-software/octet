@@ -36,7 +36,7 @@ use crate::commands::{self, Command};
 use crate::compaction::{
     attempt_compaction, context_window, estimate_next_request_tokens, CompactionOutcome,
 };
-use crate::config::{CompactionMode, ThinkingLevel};
+use crate::config::{CompactionMode, Config, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
 use crate::prompts::{render_and_record, RenderedPrompt};
@@ -50,15 +50,18 @@ use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
     confirmation_picker, extension_confirmation_picker, extension_input_picker, extension_picker,
-    message_picker, optional_model_picker, provider_setup_picker, read_only_document,
-    read_only_document_live_styled, session_picker, subagent_picker, thinking_picker,
-    tool_input_picker, SubagentPickerSnapshot,
+    message_picker, optional_model_picker, pick_list_with_preview, provider_setup_picker,
+    read_only_document, read_only_document_live_styled, session_picker, subagent_picker,
+    thinking_picker, tool_input_picker, SubagentPickerSnapshot,
 };
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
     background_from_terminal_rgb, load_theme, load_theme_for_background, TerminalBackground,
+    TerminalThemeChoice,
 };
-use crate::tui::view::{InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult};
+use crate::tui::view::{
+    InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, PanelAction,
+};
 
 /// Ordered controls sent to the frozen Agent during an active run.
 #[derive(Debug)]
@@ -3938,6 +3941,9 @@ async fn run_idle_command(
                 commands::model_selection_text(&app.model)
             ));
         }
+        Command::Theme(requested) => {
+            configure_terminal_theme(shell, input, &mut app.config, requested, false).await?;
+        }
         Command::Thinking(Some(level)) => {
             let level = ThinkingLevel::parse(&level)?;
             let reasoning =
@@ -4408,8 +4414,16 @@ fn apply_detected_terminal_background(
     config: &crate::config::Config,
 ) {
     if explicit_terminal_background_override()
+        || TerminalThemeChoice::from_config(config)
+            .and_then(TerminalThemeChoice::explicit_background)
+            .is_some()
         || shell.theme().background() != TerminalBackground::Unknown
     {
+        return;
+    }
+    if shell.theme().capabilities().color == crate::tui::terminal::ColorDepth::None {
+        // NO_COLOR still gets the deterministic Auto fallback, but should not
+        // receive a background query or any other colour-oriented control.
         return;
     }
     let Some((red, green, blue)) =
@@ -4419,6 +4433,131 @@ fn apply_detected_terminal_background(
     };
     let background = background_from_terminal_rgb(red, green, blue);
     shell.set_theme(load_theme_for_background(config, background));
+}
+
+fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
+    let items = TerminalThemeChoice::all()
+        .into_iter()
+        .map(|choice| choice.label().to_owned())
+        .collect();
+    let descriptions = vec![
+        Some(
+            "Detect the terminal background; use a readable neutral fallback when unavailable"
+                .into(),
+        ),
+        Some("Use light-terminal contrast without painting the terminal canvas".into()),
+        Some("Use dark-terminal contrast without painting the terminal canvas".into()),
+    ];
+    (items, descriptions)
+}
+
+async fn pick_terminal_theme<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    config: &Config,
+    onboarding: bool,
+) -> anyhow::Result<Option<TerminalThemeChoice>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let (items, descriptions) = terminal_theme_picker_data();
+    let current = TerminalThemeChoice::from_config(config).unwrap_or(TerminalThemeChoice::Auto);
+    let original = shell.theme();
+    let mut preview_config = config.clone();
+    preview_config.theme = Some(TerminalThemeChoice::Auto.key().to_owned());
+    // Preserve Auto's already-resolved background, including an earlier OSC
+    // response. Otherwise use environment detection/fallback once; never query
+    // the terminal while the picker owns its input stream.
+    let auto = if current == TerminalThemeChoice::Auto {
+        original.clone()
+    } else {
+        load_theme(&preview_config)
+    };
+    let previews = TerminalThemeChoice::all().map(|choice| {
+        if choice == TerminalThemeChoice::Auto {
+            auto.clone()
+        } else {
+            preview_config.theme = Some(choice.key().to_owned());
+            load_theme_for_background(&preview_config, auto.background())
+        }
+    });
+    let title = if onboarding {
+        "Choose terminal appearance"
+    } else {
+        "Terminal appearance"
+    };
+    let action = PanelAction::ProviderSetup(items.clone());
+    let selected = pick_list_with_preview(
+        shell,
+        input,
+        OrdinarySurfaceMetadata::new(title),
+        items,
+        descriptions,
+        current.index(),
+        action,
+        |shell, index| {
+            let theme = index.map_or(&original, |index| &previews[index]);
+            shell.set_theme(theme.clone());
+        },
+    )
+    .await;
+    if !matches!(&selected, Ok(Some(_))) {
+        // Escape, EOF, shutdown, coordinated close and input errors all leave
+        // the original in-memory appearance intact, without saving a preview.
+        shell.set_theme(original);
+        shell.render();
+    }
+    selected.map(|index| index.map(|index| TerminalThemeChoice::all()[index]))
+}
+
+async fn configure_terminal_theme<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    config: &mut Config,
+    requested: Option<String>,
+    onboarding: bool,
+) -> anyhow::Result<Option<TerminalThemeChoice>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let used_picker = requested.is_none();
+    let selected = match requested {
+        Some(value) => match TerminalThemeChoice::parse(&value) {
+            Some(choice) => Some(choice),
+            None => {
+                shell.error(format!(
+                    "invalid terminal appearance {value:?}; use /theme auto, /theme light, or /theme dark"
+                ));
+                shell.render();
+                return Ok(None);
+            }
+        },
+        None => pick_terminal_theme(shell, input, config, onboarding).await?,
+    };
+    // A first-run dismissal still commits the recommended default, so a user
+    // who leaves from the picker is not forced through the same onboarding on
+    // every launch. The caller still honors a pending close request.
+    let Some(choice) = selected.or_else(|| onboarding.then_some(TerminalThemeChoice::Auto)) else {
+        return Ok(None);
+    };
+
+    config.theme = Some(choice.key().to_owned());
+    shell.set_runtime_config(config.clone());
+    // A confirmed picker already installed the compiled appearance. Retain it
+    // so confirming Auto does not discard its cached background resolution.
+    if !used_picker || selected.is_none() {
+        shell.set_theme(load_theme(config));
+    }
+    if matches!(choice, TerminalThemeChoice::Auto) {
+        apply_detected_terminal_background(shell, config);
+    }
+    if let Err(error) = crate::cli::persist_theme_choice(choice.key()) {
+        shell.error(format!("failed to save terminal appearance: {error}"));
+    } else if !onboarding {
+        shell.notice(format!("terminal appearance: {}", choice.label()));
+    }
+    shell.render();
+    Ok(Some(choice))
 }
 
 fn startup_launch_outcome<T>(
@@ -4510,6 +4649,10 @@ async fn run_interactive_without_model(
                             .to_owned(),
                     );
                     shell.render();
+                }
+                Command::Theme(requested) => {
+                    configure_terminal_theme(shell, input, &mut boot.config, requested, false)
+                        .await?;
                 }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
                     Ok("codex") => {
@@ -5055,6 +5198,16 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
     shell.set_runtime_config(boot.config.clone());
     apply_detected_terminal_background(&mut shell, &boot.config);
     let mut input = EventStream::new();
+    if crate::cli::should_offer_theme_onboarding(&boot.config)
+        && shell.theme().capabilities().interactive
+        && !boot.config.plain
+    {
+        configure_terminal_theme(&mut shell, &mut input, &mut boot.config, None, true).await?;
+        if shell.close_requested() {
+            shell.leave();
+            return Ok(());
+        }
+    }
     // Offer setup only when bootstrap has no runnable provider inventory. An
     // explicit --model remains authoritative, and resumed provenance is still
     // resolved after this optional first-run transaction.
@@ -5760,6 +5913,190 @@ mod tests {
 
     fn test_theme() -> crate::tui::theme::OctetTheme {
         crate::tui::theme::test_theme()
+    }
+
+    fn terminal_theme_test_config(workspace: PathBuf) -> Config {
+        use crate::config::{CompactionPolicy, Mode, ResumeSelector, SandboxPolicy};
+
+        Config {
+            workspace: workspace.clone(),
+            invocation_cwd: workspace,
+            model: None,
+            model_explicit: false,
+            reasoning: octet_ai::ReasoningConfig::Off,
+            reasoning_explicit: false,
+            reasoning_mode: octet_ai::ReasoningMode::Standard,
+            reasoning_mode_explicit: false,
+            cache_retention: octet_ai::CacheRetention::Short,
+            effect_policy: octet_agent::EffectPolicy::Controlled,
+            sandbox: SandboxPolicy::default(),
+            theme: None,
+            system_prompt: None,
+            theme_paths: vec![],
+            color: crate::config::ColorMode::Auto,
+            mouse: crate::config::MouseMode::Auto,
+            plain: false,
+            show_images: false,
+            session_dir: PathBuf::from("sessions"),
+            compaction: CompactionPolicy::default(),
+            max_cost_microdollars: None,
+            cost_warning_microdollars: None,
+            max_turns: Some(40),
+            show_reasoning_in_print: false,
+            initial_prompt: None,
+            prompt_template: None,
+            debug_prompt: false,
+            prompt_paths: vec![],
+            mode: Mode::Interactive,
+            resume: ResumeSelector::New,
+            skill_paths: vec![],
+            extension_paths: vec![],
+            enabled_extensions: vec![],
+            extension_activation_overridden: false,
+            trusted_extensions: vec![],
+            invocation_trusted_extensions: vec![],
+            experimental_streamable_http_mcp: false,
+            extension_flag_values: Default::default(),
+            tools: crate::config::ToolPolicy::default(),
+            telemetry: None,
+            context_files: true,
+            offline: true,
+            workspace_trusted: true,
+        }
+    }
+
+    fn theme_picker_key(code: KeyCode) -> std::io::Result<Event> {
+        Ok(Event::Key(crossterm::event::KeyEvent::new(
+            code,
+            KeyModifiers::NONE,
+        )))
+    }
+
+    #[tokio::test]
+    async fn terminal_theme_picker_confirms_compiled_previews_without_changing_config() {
+        for choice in TerminalThemeChoice::all() {
+            let mut config = terminal_theme_test_config(PathBuf::from("."));
+            config.theme = Some("auto".into());
+            let mut shell = InteractiveShell::test_shell();
+            let mut original = crate::tui::theme::test_theme_for(
+                TerminalBackground::Dark,
+                shell.theme().capabilities(),
+            );
+            original.override_token("foreground", "#123456");
+            shell.set_theme(original.clone());
+            let mut events = vec![
+                theme_picker_key(KeyCode::End),
+                theme_picker_key(KeyCode::Home),
+            ];
+            for _ in 0..choice.index() {
+                events.push(theme_picker_key(KeyCode::Down));
+            }
+            // Filtering leaves a single displayed row whose original index
+            // is still the choice's index, not necessarily zero.
+            events.extend(
+                choice
+                    .key()
+                    .chars()
+                    .map(|key| theme_picker_key(KeyCode::Char(key))),
+            );
+            events.push(theme_picker_key(KeyCode::Enter));
+            let mut input = tokio_stream::iter(events);
+
+            assert_eq!(
+                pick_terminal_theme(&mut shell, &mut input, &config, false)
+                    .await
+                    .unwrap(),
+                Some(choice)
+            );
+            assert_eq!(
+                shell.theme().background(),
+                choice
+                    .explicit_background()
+                    .unwrap_or(TerminalBackground::Dark),
+                "Auto must retain its already-resolved background after visiting other rows"
+            );
+            if choice == TerminalThemeChoice::Auto {
+                assert_eq!(shell.theme().capabilities(), original.capabilities());
+                assert_eq!(
+                    shell.theme().role_rgb("foreground"),
+                    original.role_rgb("foreground")
+                );
+            }
+            assert_eq!(config.theme.as_deref(), Some("auto"));
+            assert!(!shell.has_panel());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_theme_preview_restores_on_cancel_eof_error_and_close() {
+        for exit in ["escape", "eof", "error", "close"] {
+            let mut config = terminal_theme_test_config(PathBuf::from("."));
+            config.theme = Some("light".into());
+            let mut shell = InteractiveShell::test_shell();
+            let mut original = crate::tui::theme::test_theme_for(
+                TerminalBackground::Light,
+                shell.theme().capabilities(),
+            );
+            original.override_token("foreground", "#123456");
+            shell.set_theme(original.clone());
+            let mut events = vec![theme_picker_key(KeyCode::End)];
+            match exit {
+                "escape" => events.push(theme_picker_key(KeyCode::Esc)),
+                "eof" => {}
+                "error" => events.push(Err(std::io::Error::other("preview input failed"))),
+                "close" => events.push(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char('d'),
+                    KeyModifiers::CONTROL,
+                )))),
+                _ => unreachable!(),
+            }
+            let mut input = tokio_stream::iter(events);
+            // Exercise the configuration boundary too: none of these /theme
+            // outcomes may reach its persistence branch or mutate the config.
+            let result =
+                configure_terminal_theme(&mut shell, &mut input, &mut config, None, false).await;
+            if exit == "error" {
+                assert_eq!(result.unwrap_err().to_string(), "preview input failed");
+            } else {
+                assert_eq!(result.unwrap(), None);
+            }
+            assert_eq!(shell.theme().background(), original.background(), "{exit}");
+            assert_eq!(
+                shell.theme().role_rgb("foreground"),
+                original.role_rgb("foreground"),
+                "{exit}"
+            );
+            assert_eq!(
+                shell.theme().capabilities(),
+                original.capabilities(),
+                "{exit}"
+            );
+            assert_eq!(config.theme.as_deref(), Some("light"), "{exit}");
+            assert_eq!(shell.close_requested(), exit == "close");
+            assert!(!shell.has_panel());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_theme_onboarding_dismissal_returns_no_preview_choice() {
+        let config = terminal_theme_test_config(PathBuf::from("."));
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut input = tokio_stream::iter([
+            theme_picker_key(KeyCode::End),
+            theme_picker_key(KeyCode::Esc),
+        ]);
+        // configure_terminal_theme retains its dismissal-to-Auto fallback;
+        // the highlighted Dark preview must not masquerade as confirmation.
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &config, true)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(shell.theme().background(), original.background());
+        assert_eq!(shell.theme().capabilities(), original.capabilities());
+        assert!(config.theme.is_none());
     }
 
     #[test]

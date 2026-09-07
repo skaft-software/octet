@@ -68,6 +68,7 @@ impl PtyOctet {
             mouse,
             None,
             None,
+            Some("auto"),
         )
     }
 
@@ -81,6 +82,7 @@ impl PtyOctet {
             "app",
             Some(&invocation_cwd),
             None,
+            Some("auto"),
         )
     }
 
@@ -93,9 +95,15 @@ impl PtyOctet {
             "app",
             Some(invocation_cwd),
             Some(command_line),
+            Some("auto"),
         )
     }
 
+    fn spawn_for_theme_onboarding(root: &Path) -> Self {
+        Self::spawn_with_mode_and_mouse_at(root, &[], true, false, "app", None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn spawn_with_mode_and_mouse_at(
         root: &Path,
         extra_args: &[String],
@@ -104,6 +112,7 @@ impl PtyOctet {
         mouse: &str,
         invocation_cwd: Option<&Path>,
         command_line: Option<&str>,
+        appearance: Option<&str>,
     ) -> Self {
         let home = root.join("home");
         let workspace = root.join("workspace");
@@ -210,6 +219,11 @@ impl PtyOctet {
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);
+        // Existing lifecycle probes start after appearance setup. The dedicated
+        // onboarding probe below leaves this unset and exercises the new picker.
+        if let Some(appearance) = appearance {
+            command.env("OCTET_THEME", appearance);
+        }
         let child = command.spawn().expect("spawn octet");
 
         let mut process = Self {
@@ -497,6 +511,40 @@ fn resume_notice_tracks_the_active_session_after_a_resume_transition() {
     assert!(elapsed < EXIT_DEADLINE, "shutdown took {elapsed:?}");
     let notice = assert_resume_notice(directory.path(), &output);
     assert_eq!(notice.id, original);
+}
+
+#[test]
+fn shutdown_during_theme_onboarding_restores_terminal() {
+    let _guard = PTY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for sigterm in [false, true] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut octet = PtyOctet::spawn_for_theme_onboarding(directory.path());
+        octet.wait_until(READY_DEADLINE, |output| {
+            contains_bytes(output, b"Choose terminal appearance")
+        });
+        octet.write_input(b"\x1b[B"); // Preview Light without confirming it.
+        let (status, elapsed, _) = if sigterm {
+            octet.terminate()
+        } else {
+            let started = Instant::now();
+            octet.write_input(&[4]);
+            octet.wait_for_exit(started)
+        };
+        assert_eq!(
+            status.code(),
+            Some(if sigterm { 128 + libc::SIGTERM } else { 0 })
+        );
+        assert!(
+            elapsed < EXIT_DEADLINE,
+            "onboarding shutdown took {elapsed:?}"
+        );
+        assert!(
+            session_ids(directory.path()).is_empty(),
+            "shutdown must not launch a session"
+        );
+    }
 }
 
 #[test]

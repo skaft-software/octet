@@ -10,7 +10,7 @@ members = [
 exclude = ["extensions/octet-serve"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 authors = ["Skaft Software"]
 repository = "https://github.com/skaft-software/octet"

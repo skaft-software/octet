@@ -414,7 +414,8 @@ pub struct Config {
     /// Host-owned admission policy for model-requested tool effects.
     pub effect_policy: EffectPolicy,
     pub sandbox: SandboxPolicy,
-    /// Legacy theme selector; the current runtime always resolves the compiled default.
+    /// Built-in terminal appearance selector: auto, light, or dark. Other
+    /// legacy names remain compatibility inputs and fall back to default.
     pub theme: Option<String>,
     /// Explicit system prompt override. `None` uses composed built-in
     /// instructions, while `Some("")` intentionally blanks the system

@@ -1,8 +1,8 @@
 # octet-mcp reference
 
 [Usage guide](README.md). This is the bundled API `0.2` implementation contract,
-not a current extension-authoring example. Distribution `0.7.0` requires exactly
-octet `0.7.0`; these version numbers are independent.
+not a current extension-authoring example. Distribution `0.7.1` requires exactly
+octet `0.7.1`; these version numbers are independent.
 
 One resident extension process owns every explicitly configured
 [Model Context Protocol](https://modelcontextprotocol.io/) server session and
@@ -46,7 +46,7 @@ An explicitly read-only tool may run without an additional prompt. Every
 `unknown` or `destructive` call goes through the negotiated host
 `policy/evaluate` service. If policy intents are unavailable, evaluation fails,
 or the host denies the intent, the bridge fails closed. It uses a one-use
-approval retry only when the host actually negotiates `approvals`; octet `0.7.0`'s
+approval retry only when the host actually negotiates `approvals`; octet `0.7.1`'s
 coding product does not currently enable approval issuance, so those calls are
 denied with an explanatory tool error. An MCP tool call is never automatically
 replayed after timeout, cancellation, crash, or an ambiguous disconnect.
@@ -133,15 +133,15 @@ below does not override this warning.
 
 ## Requirements and installation
 
-- octet exactly `0.7.0` (`requires_octet = "=0.7.0"`)
+- octet exactly `0.7.1` (`requires_octet = "=0.7.1"`)
 - Python 3.9 or newer on `PATH`
 - separately installed MCP server executables
 
 The release bundle includes the dependency-free Python extension SDK under
 `vendor/`; startup never runs `pip`, a browser download, or install code.
 
-With [octet 0.7.0 installed](../../docs/installation.md), install the signed
-public bundle, then separately enable and trust it:
+With [octet 0.7.1 installed](../../docs/installation.md), once the matching signed
+public bundle is published, install it, then separately enable and trust it:
 
 ```console
 octet extension install octet-mcp

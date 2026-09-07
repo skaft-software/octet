@@ -7,8 +7,9 @@ browser tabs, sign in, run JavaScript, or submit forms.
 
 ## Start a search
 
-With [octet 0.7.0 installed](../../docs/installation.md) and Python 3.9+ available
-as `python3`, install the signed public bundle, then separately enable and trust it:
+With [octet 0.7.1 installed](../../docs/installation.md) and Python 3.9+ available
+as `python3`, once the matching signed public bundle is published, install it,
+then separately enable and trust it:
 
 ```console
 octet extension install octet-web-search
@@ -76,7 +77,7 @@ extensions run with your OS authority under the full-access policy; manifest
 consent metadata is not a sandbox, and `--safe-mode` keeps this extension stopped.
 Enablement, exact trust, and skill loading are independent.
 
-The published bundle `0.7.0` requires exactly octet `0.7.0` and retains API `0.2`.
+The source bundle `0.7.1` requires exactly octet `0.7.1` and retains API `0.2`.
 The following is a bundled-runtime reference, not a current SDK authoring tutorial.
 
 - <a id="install-and-opt-in"></a>[Install and opt in](REFERENCE.md#install-and-opt-in): public catalog installation and persistent activation.

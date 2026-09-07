@@ -28,6 +28,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/checkout <id>` | Move the durable head to another entry and branch without deleting ancestry. |
 | `/model [id]` | Open the model picker or select an ID. |
 | `/thinking [level]` | Inspect/change [model-supported reasoning](providers.md#reasoning). |
+| `/theme [auto\|light\|dark]` | Choose the compiled terminal appearance or open its picker. |
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
 | `/compact` | Request compaction at the next safe boundary. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
@@ -48,7 +49,8 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/help [command]` | Local command help and self-documentation. |
 | `/quit` | Exit octet. |
 
-The current runtime does not register `/theme`. [Theme status](themes.md).
+`/theme` changes only the compiled terminal appearance selector; it does not
+load arbitrary theme files. [Theme status](themes.md).
 Additional extension commands depend on the enabled, independently trusted
 package; its README is authoritative for arguments.
 

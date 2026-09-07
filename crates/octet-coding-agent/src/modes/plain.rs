@@ -136,6 +136,24 @@ fn write_prompt(output: &mut impl Write, theme: &OctetTheme, prompt: &str) -> st
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptPresentation {
+    Explicit,
+    TerminalEcho,
+}
+
+fn present_prompt(
+    output: &mut impl Write,
+    theme: &OctetTheme,
+    prompt: &str,
+    presentation: PromptPresentation,
+) -> std::io::Result<()> {
+    match presentation {
+        PromptPresentation::Explicit => write_prompt(output, theme, prompt),
+        PromptPresentation::TerminalEcho => Ok(()),
+    }
+}
+
 fn outcome_text(outcome: &RunOutcome) -> String {
     match outcome {
         RunOutcome::Completed { elapsed, summary } => {
@@ -173,6 +191,7 @@ async fn run_prompt(
     output: &mut impl Write,
     theme: &OctetTheme,
     tracker: &mut RunTracker,
+    presentation: PromptPresentation,
 ) -> anyhow::Result<PromptExit> {
     let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
@@ -196,7 +215,7 @@ async fn run_prompt(
             prompt
         }
     };
-    write_prompt(output, theme, &display_prompt)?;
+    present_prompt(output, theme, &display_prompt, presentation)?;
     let run_id = tracker
         .begin_for_model(&app.model.endpoint.id.0, &app.model.spec.id.0)
         .expect("fresh tracker cannot have an active run");
@@ -610,12 +629,28 @@ pub async fn run_plain(boot: Bootstrap, initial_prompt: Option<String>) -> anyho
     )?;
 
     if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.trim().is_empty()) {
-        let exit = run_prompt(&mut app, prompt, &mut output, &theme, &mut tracker).await?;
+        let exit = run_prompt(
+            &mut app,
+            prompt,
+            &mut output,
+            &theme,
+            &mut tracker,
+            PromptPresentation::Explicit,
+        )
+        .await?;
         return finish_one_shot(exit);
     }
 
     if app.config.prompt_template.is_some() && std::io::stdin().is_terminal() {
-        let exit = run_prompt(&mut app, String::new(), &mut output, &theme, &mut tracker).await?;
+        let exit = run_prompt(
+            &mut app,
+            String::new(),
+            &mut output,
+            &theme,
+            &mut tracker,
+            PromptPresentation::Explicit,
+        )
+        .await?;
         return finish_one_shot(exit);
     }
 
@@ -625,9 +660,24 @@ pub async fn run_plain(boot: Bootstrap, initial_prompt: Option<String>) -> anyho
         if prompt.trim().is_empty() {
             anyhow::bail!("plain mode needs a positional prompt or text on stdin");
         }
-        let exit = run_prompt(&mut app, prompt, &mut output, &theme, &mut tracker).await?;
+        let exit = run_prompt(
+            &mut app,
+            prompt,
+            &mut output,
+            &theme,
+            &mut tracker,
+            PromptPresentation::Explicit,
+        )
+        .await?;
         return finish_one_shot(exit);
     }
+
+    // Stdin is a TTY here, but its echo does not reach redirected stdout.
+    let presentation = if output.is_terminal() {
+        PromptPresentation::TerminalEcho
+    } else {
+        PromptPresentation::Explicit
+    };
 
     // A blocking terminal read must not prevent coordinated signal cleanup.
     // Keep the OS read on a dedicated thread and let this async owner select
@@ -683,7 +733,15 @@ pub async fn run_plain(boot: Bootstrap, initial_prompt: Option<String>) -> anyho
         if prompt.is_empty() {
             continue;
         }
-        let exit = run_prompt(&mut app, prompt, &mut output, &theme, &mut tracker).await?;
+        let exit = run_prompt(
+            &mut app,
+            prompt,
+            &mut output,
+            &theme,
+            &mut tracker,
+            presentation,
+        )
+        .await?;
         if !exit_status.observe(exit) {
             return exit_status.finish();
         }
@@ -737,6 +795,49 @@ mod tests {
         assert_eq!(safe_text("a\x1b[31m\x07"), "a^[[31m<BEL>");
         assert_eq!(safe_text("a\r\nb\rc"), "a\nb\nc");
         assert_eq!(safe_text("a\u{202e}b"), "a<U+202E>b");
+    }
+
+    #[test]
+    fn interactive_terminal_echo_owns_prompt_presentation() {
+        let theme = crate::tui::theme::test_theme();
+        let mut interactive_output = b"> first prompt\n> second prompt\n".to_vec();
+        let echoed = interactive_output.clone();
+
+        present_prompt(
+            &mut interactive_output,
+            &theme,
+            "first prompt",
+            PromptPresentation::TerminalEcho,
+        )
+        .unwrap();
+        present_prompt(
+            &mut interactive_output,
+            &theme,
+            "second prompt",
+            PromptPresentation::TerminalEcho,
+        )
+        .unwrap();
+
+        assert_eq!(interactive_output, echoed);
+        let interactive_output = String::from_utf8(interactive_output).unwrap();
+        assert_eq!(interactive_output.matches("first prompt").count(), 1);
+        assert_eq!(interactive_output.matches("second prompt").count(), 1);
+
+        let mut explicit_output = Vec::new();
+        present_prompt(
+            &mut explicit_output,
+            &theme,
+            "piped prompt",
+            PromptPresentation::Explicit,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(explicit_output)
+                .unwrap()
+                .matches("piped prompt")
+                .count(),
+            1
+        );
     }
 
     #[test]

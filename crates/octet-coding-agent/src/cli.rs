@@ -202,7 +202,8 @@ pub struct Cli {
     /// Workspace root override.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
-    /// Legacy TUI theme name; the current runtime always uses the compiled default.
+    /// Terminal appearance selector: auto, light, or dark. Arbitrary theme
+    /// names remain compatibility inputs and never load filesystem themes.
     #[arg(long, value_name = "NAME", hide = true)]
     pub theme: Option<String>,
     /// Legacy theme directory option; the current runtime does not load custom themes.
@@ -1068,6 +1069,54 @@ pub fn persist_reasoning(reasoning: &str) -> anyhow::Result<()> {
     persist_key_to_path("reasoning", reasoning, &path)
 }
 
+/// Persist one of the compiled terminal-appearance choices. The value is
+/// deliberately validated here so the interactive picker can never turn the
+/// user config into an arbitrary theme-file selector.
+pub fn persist_theme_choice(choice: &str) -> anyhow::Result<()> {
+    let choice = choice.trim().to_ascii_lowercase();
+    if !matches!(choice.as_str(), "auto" | "light" | "dark") {
+        anyhow::bail!("invalid terminal appearance {choice:?}; use auto, light, or dark")
+    }
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist terminal appearance: user home directory is unavailable")
+    })?;
+    persist_key_to_path("theme", &choice, &path)
+}
+
+/// First-run appearance onboarding is only eligible for a genuinely fresh
+/// interactive configuration. Existing global/project configs and legacy
+/// theme selectors are left alone so upgrades never reopen the picker.
+pub(crate) fn should_offer_theme_onboarding(config: &Config) -> bool {
+    let Some(global) = global_config_path() else {
+        return false;
+    };
+    should_offer_theme_onboarding_at(config, Some(&global))
+}
+
+fn should_offer_theme_onboarding_at(config: &Config, global: Option<&Path>) -> bool {
+    matches!(config.mode, Mode::Interactive)
+        && !config.plain
+        && config.theme.is_none()
+        && !terminal_appearance_environment_is_configured()
+        && global.is_some_and(|path| !path.exists())
+        && !project_config_path(&config.workspace).exists()
+}
+
+fn terminal_appearance_environment_is_configured() -> bool {
+    terminal_appearance_environment_is_configured_value(
+        std::env::var("OCTET_COLOR_SCHEME").ok().as_deref(),
+    )
+}
+
+fn terminal_appearance_environment_is_configured_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "auto" | "dark" | "light" | "unknown" | "universal"
+        )
+    })
+}
+
 pub fn persist_reasoning_mode(mode: octet_ai::ReasoningMode) -> anyhow::Result<()> {
     let path = global_config_path().ok_or_else(|| {
         anyhow::anyhow!("cannot persist reasoning mode: user home directory is unavailable")
@@ -1265,6 +1314,11 @@ fn persist_key_to_path(key: &str, value: &str, path: &std::path::Path) -> anyhow
 #[cfg(test)]
 fn persist_model_to_path(model: &str, path: &std::path::Path) -> anyhow::Result<()> {
     persist_key_to_path("model", model, path)
+}
+
+#[cfg(test)]
+fn persist_theme_to_path(choice: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    persist_key_to_path("theme", choice, path)
 }
 
 fn project_config_path(workspace: &Path) -> PathBuf {
@@ -3558,6 +3612,93 @@ max_output_bytes = 4096
         persist_model_to_path("gpt-4o-mini", &path).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("model = \"gpt-4o-mini\""), "{content}");
+    }
+
+    #[test]
+    fn persist_theme_choice_preserves_unrelated_user_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# keep this comment\nmodel = \"gpt-4o-mini\"\ntheme = \"auto\"\n[compaction]\nkeep_recent_tokens = 8\n",
+        )
+        .unwrap();
+
+        persist_theme_to_path("light", &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        assert_eq!(parsed["theme"].as_str(), Some("light"));
+        assert_eq!(parsed["model"].as_str(), Some("gpt-4o-mini"));
+        assert_eq!(
+            parsed["compaction"]["keep_recent_tokens"].as_integer(),
+            Some(8)
+        );
+        assert!(content.contains("# keep this comment"), "{content}");
+    }
+
+    #[test]
+    fn theme_onboarding_only_applies_to_fresh_interactive_installs() {
+        let directory = cwd();
+        let mut cli = base();
+        cli.workspace = Some(directory.path().into());
+        cli.workspace_trusted = true;
+        let config = config_with_empty_global(cli, directory.path()).unwrap();
+        let missing_global = directory.path().join("missing-user-config.toml");
+        assert!(should_offer_theme_onboarding_at(
+            &config,
+            Some(&missing_global)
+        ));
+
+        std::fs::write(&missing_global, "theme = \"auto\"\n").unwrap();
+        assert!(!should_offer_theme_onboarding_at(
+            &config,
+            Some(&missing_global)
+        ));
+
+        let mut configured = config.clone();
+        configured.theme = Some("legacy-theme".into());
+        assert!(!should_offer_theme_onboarding_at(
+            &configured,
+            Some(&directory.path().join("still-missing.toml"))
+        ));
+
+        let mut plain = config;
+        plain.plain = true;
+        assert!(!should_offer_theme_onboarding_at(
+            &plain,
+            Some(&directory.path().join("another-missing.toml"))
+        ));
+
+        let mut print = plain.clone();
+        print.plain = false;
+        print.mode = Mode::Print {
+            prompt: "hello".into(),
+        };
+        assert!(!should_offer_theme_onboarding_at(
+            &print,
+            Some(&directory.path().join("print-missing.toml"))
+        ));
+
+        let mut rpc = print;
+        rpc.mode = Mode::Rpc;
+        assert!(!should_offer_theme_onboarding_at(
+            &rpc,
+            Some(&directory.path().join("rpc-missing.toml"))
+        ));
+    }
+
+    #[test]
+    fn recognized_terminal_appearance_environment_counts_as_configured() {
+        for value in ["auto", "dark", "light", "unknown", "universal"] {
+            assert!(terminal_appearance_environment_is_configured_value(Some(
+                value
+            )));
+        }
+        assert!(!terminal_appearance_environment_is_configured_value(Some(
+            "neon"
+        )));
+        assert!(!terminal_appearance_environment_is_configured_value(None));
     }
 
     #[test]

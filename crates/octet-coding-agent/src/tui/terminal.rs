@@ -251,7 +251,9 @@ impl TerminalCapabilities {
             color,
             italics: interactive && (rich_terminal || apple_terminal) && color != ColorDepth::None,
             hyperlinks: interactive && rich_terminal,
-            animation: interactive && !probe.explicit_plain,
+            // A colourless terminal still gets the complete static splash;
+            // cursor animation would only redraw identical bytes at 60 fps.
+            animation: interactive && !probe.explicit_plain && color != ColorDepth::None,
         }
     }
 
@@ -263,7 +265,7 @@ impl TerminalCapabilities {
             color,
             italics: interactive && color == ColorDepth::TrueColor,
             hyperlinks: interactive && color == ColorDepth::TrueColor,
-            animation: interactive,
+            animation: interactive && color != ColorDepth::None,
         }
     }
 }
@@ -1074,10 +1076,9 @@ mod tests {
     fn no_color_and_explicit_plain_override_forced_colour() {
         let mut no_color = probe(Some("xterm-256color"));
         no_color.no_color = true;
-        assert_eq!(
-            TerminalCapabilities::from_probe(ColorMode::Always, no_color).color,
-            ColorDepth::None
-        );
+        let caps = TerminalCapabilities::from_probe(ColorMode::Always, no_color);
+        assert_eq!(caps.color, ColorDepth::None);
+        assert!(!caps.animation, "no-color startup must be static");
         let mut plain = probe(Some("xterm-256color"));
         plain.explicit_plain = true;
         let caps = TerminalCapabilities::from_probe(ColorMode::Always, plain);

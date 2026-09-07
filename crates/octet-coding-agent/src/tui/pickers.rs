@@ -255,6 +255,36 @@ async fn pick_list<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    pick_list_with_preview(
+        shell,
+        input,
+        surface,
+        items,
+        descriptions,
+        initial_selected,
+        action,
+        |_, _| {},
+    )
+    .await
+}
+
+/// Preview receives original item indices, including `None` for an empty filter
+/// result. The caller owns rollback and any persistence after confirmation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn pick_list_with_preview<S, F>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    surface: OrdinarySurfaceMetadata,
+    items: Vec<String>,
+    descriptions: Vec<Option<String>>,
+    initial_selected: usize,
+    action: PanelAction,
+    mut preview: F,
+) -> anyhow::Result<Option<usize>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+    F: FnMut(&mut InteractiveShell, Option<usize>),
+{
     if items.is_empty() {
         shell.error("nothing is available to select".into());
         shell.render();
@@ -270,6 +300,8 @@ where
         filter: String::new(),
         action,
     });
+    let mut highlighted = shell.highlighted_panel_index();
+    preview(shell, highlighted);
     shell.render();
 
     loop {
@@ -309,6 +341,11 @@ where
                 PanelResult::Cancel => None,
                 PanelResult::Select(_) => None,
             });
+        }
+        let next_highlighted = shell.highlighted_panel_index();
+        if next_highlighted != highlighted {
+            highlighted = next_highlighted;
+            preview(shell, highlighted);
         }
         // Panel consumed the event; render updated state.
         shell.render();
@@ -1297,6 +1334,112 @@ mod tests {
         assert_eq!(labels, ["off", "high", "max (current)"]);
         let mut empty = Vec::new();
         assert_eq!(mark_current_choice(&mut empty, None), 0);
+    }
+
+    #[tokio::test]
+    async fn preview_follows_navigation_and_filtered_original_indices_before_next_input() {
+        use crate::tui::theme::{test_theme_for, TerminalBackground};
+        use std::cell::RefCell;
+        use std::task::Poll;
+
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let backgrounds = [
+            TerminalBackground::Unknown,
+            TerminalBackground::Light,
+            TerminalBackground::Dark,
+        ];
+        let themes =
+            backgrounds.map(|background| test_theme_for(background, original.capabilities()));
+        let observed = RefCell::new(Vec::new());
+        // Each expectation is checked when the stream is polled for the NEXT
+        // event: the previous navigation must have already changed the theme.
+        let mut script = [
+            (Some(0), KeyCode::Down),
+            (Some(1), KeyCode::Down),
+            (Some(2), KeyCode::Up),
+            (Some(1), KeyCode::Home),
+            (Some(0), KeyCode::End),
+            (Some(2), KeyCode::Char('t')),
+            (Some(0), KeyCode::Char('e')),
+            (Some(1), KeyCode::Down), // "te" matches Light and Dark terminal.
+            (Some(2), KeyCode::Char('x')),
+            (None, KeyCode::Enter), // Empty results cannot be confirmed.
+            (None, KeyCode::Backspace),
+            (Some(1), KeyCode::Down),
+            (Some(2), KeyCode::Enter),
+        ]
+        .into_iter();
+        let mut input = futures_util::stream::poll_fn(|_| {
+            let Some((expected, code)) = script.next() else {
+                return Poll::Ready(None);
+            };
+            let background = expected.map_or(original.background(), |index| backgrounds[index]);
+            assert_eq!(observed.borrow().last(), Some(&(expected, background)));
+            Poll::Ready(Some(Ok(Event::Key(KeyEvent::new(
+                code,
+                KeyModifiers::NONE,
+            )))))
+        });
+        let items = vec![
+            "Auto (recommended)".into(),
+            "Light terminal".into(),
+            "Dark terminal".into(),
+        ];
+        let action = PanelAction::ProviderSetup(items.clone());
+        let selected = pick_list_with_preview(
+            &mut shell,
+            &mut input,
+            OrdinarySurfaceMetadata::new("Terminal appearance"),
+            items,
+            vec![
+                Some("neutral".into()),
+                Some("daytime".into()),
+                Some("nighttime".into()),
+            ],
+            0,
+            action,
+            |shell, index| {
+                assert_eq!(shell.highlighted_panel_index(), index);
+                shell.set_theme(index.map_or(&original, |index| &themes[index]).clone());
+                observed
+                    .borrow_mut()
+                    .push((index, shell.theme().background()));
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selected, Some(2));
+        assert_eq!(shell.theme().background(), TerminalBackground::Dark);
+        assert!(!shell.has_panel());
+        assert_eq!(observed.borrow().len(), 12);
+    }
+
+    #[tokio::test]
+    async fn ordinary_provider_picker_navigation_does_not_change_theme() {
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut input = tokio_stream::iter([
+            Ok(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+        ]);
+        let selected = provider_setup_picker(
+            &mut shell,
+            &mut input,
+            "Provider setup",
+            vec!["one".into(), "two".into()],
+            vec![None, None],
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected, Some(1));
+        assert_eq!(shell.theme().background(), original.background());
+        assert_eq!(shell.theme().capabilities(), original.capabilities());
     }
 
     #[tokio::test]

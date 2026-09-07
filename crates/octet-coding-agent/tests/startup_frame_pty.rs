@@ -4,7 +4,8 @@
 //!
 //! The real binary is run against a disposable HOME, workspace, session store,
 //! and a local custom-provider record. Startup tests submit no prompt. API-wait
-//! tests use only a gated loopback fixture, never credentials or a live model.
+//! and plain-prompt tests use only a gated loopback fixture, never credentials
+//! or a live model.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -798,6 +799,7 @@ struct HeldChatApi {
     arrived: std::sync::mpsc::Receiver<usize>,
     release: std::sync::mpsc::Sender<()>,
     count: Arc<std::sync::atomic::AtomicUsize>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -813,6 +815,8 @@ impl HeldChatApi {
         let (release, released) = mpsc::channel();
         let count = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
         let counted = count.clone();
         let stopped = stop.clone();
         let worker = thread::spawn(move || {
@@ -863,6 +867,9 @@ impl HeldChatApi {
                     assert!(n > 0);
                     request.extend_from_slice(&bytes[..n]);
                 }
+                recorded.lock().unwrap().push(
+                    serde_json::from_slice(&request[header_end..header_end + length]).unwrap(),
+                );
                 let body = concat!(
                     "data: {\"id\":\"fixture\",\"model\":\"probe\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"fixture response done\"},\"finish_reason\":null}]}\n\n",
                     "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
@@ -894,6 +901,7 @@ impl HeldChatApi {
             arrived,
             release,
             count,
+            requests,
             stop,
             worker: Some(worker),
         }
@@ -1611,6 +1619,272 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                 );
                 eprintln!("composed redraw PASS {label}");
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PlainInput<'a> {
+    Interactive,
+    Positional(&'a str),
+    Template(&'a str),
+    Piped(&'a str),
+}
+
+fn spawn_plain(
+    api: &str,
+    input: PlainInput<'_>,
+    redirected_stdout: bool,
+) -> (PtyOctet, Option<PathBuf>) {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let workspace = root.path().join("workspace");
+    let sessions = root.path().join("sessions");
+    create_inert_environment(&home, &workspace, &sessions);
+    fs::write(
+        home.join(".octet/credentials/custom.json"),
+        serde_json::json!({
+            "base_url": api, "api_key": "", "api_name": "probe",
+            "headers": [], "models": [], "auto_discover": false,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut pty = Pty::open(INITIAL_COLUMNS, INITIAL_ROWS);
+    // Plain mode leaves line editing and echo to the terminal. Set that
+    // contract explicitly rather than inheriting the test runner's modes.
+    pty.original_termios.c_lflag |= libc::ICANON | libc::ECHO;
+    pty.original_termios.c_iflag |= libc::ICRNL;
+    pty.original_termios.c_oflag |= libc::OPOST | libc::ONLCR;
+    pty.original_termios.c_cc[libc::VEOF] = 4;
+    assert_eq!(
+        unsafe { libc::tcsetattr(pty.slave.as_raw_fd(), libc::TCSANOW, &pty.original_termios) },
+        0
+    );
+    let log = redirected_stdout.then(|| root.path().join("stdout.log"));
+    let stdout = match &log {
+        Some(path) => Stdio::from(File::create(path).unwrap()),
+        None => duplicate_stdio(pty.slave.as_raw_fd()),
+    };
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octet"));
+    command
+        .args([
+            "--plain",
+            "--offline",
+            "--no-context-files",
+            "--no-tools",
+            "--color",
+            "never",
+            "--model",
+            "custom/probe",
+            "--system-prompt",
+            "PTY fixture",
+        ])
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--session-dir")
+        .arg(&sessions)
+        .current_dir(&workspace)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("PWD", &workspace)
+        .env("TERM", "xterm-256color")
+        .env("LANG", "C.UTF-8")
+        .stdin(duplicate_stdio(pty.slave.as_raw_fd()))
+        .stdout(stdout)
+        .stderr(duplicate_stdio(pty.slave.as_raw_fd()));
+    match input {
+        PlainInput::Interactive => {}
+        PlainInput::Positional(prompt) => {
+            command.arg(prompt);
+        }
+        PlainInput::Template(prompt) => {
+            fs::create_dir_all(home.join(".octet/prompts")).unwrap();
+            fs::write(home.join(".octet/prompts/plain-fixture.md"), prompt).unwrap();
+            command.args(["--prompt", "plain-fixture"]);
+        }
+        PlainInput::Piped(_) => {
+            command.stdin(Stdio::piped());
+        }
+    }
+    let tty_fd = pty.slave.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() == -1
+                || libc::ioctl(tty_fd, libc::TIOCSCTTY as libc::c_ulong, 0) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("spawn plain octet under PTY");
+    if let PlainInput::Piped(prompt) = input {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt.as_bytes())
+            .unwrap();
+    }
+    (
+        PtyOctet {
+            child,
+            pty,
+            _root: root,
+        },
+        log,
+    )
+}
+
+fn plain_output(octet: &mut PtyOctet, log: Option<&Path>) -> Vec<u8> {
+    octet.pty.read_available();
+    match log {
+        Some(path) => fs::read(path).unwrap(),
+        None => octet.pty.output.clone(),
+    }
+}
+
+fn wait_for_plain_ready(octet: &mut PtyOctet, log: Option<&Path>, completed: usize) {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        let output = plain_output(octet, log);
+        if count_bytes(&output, b"[completed]") == completed && output.ends_with(b"\n> ") {
+            return;
+        }
+        assert!(
+            octet.child.try_wait().unwrap().is_none() && Instant::now() < deadline,
+            "plain mode not ready after {completed} runs; stdout: {}; PTY: {}",
+            visible_bytes(&output),
+            visible_bytes(&octet.pty.output),
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn assert_plain_user_messages(api: &HeldChatApi, index: usize, expected: &[&str]) {
+    let requests = api.requests.lock().unwrap();
+    let users = requests[index]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| {
+            message["content"]
+                .as_str()
+                .expect("text-only fixture prompt")
+        })
+        .collect::<Vec<_>>();
+    // History reappears in the second request; each input must be appended
+    // once, not counted as a duplicate merely because history is replayed.
+    assert_eq!(users, expected);
+}
+
+#[test]
+fn real_octet_plain_tty_prompts_once() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for redirected in [false, true] {
+        let api = HeldChatApi::start();
+        let (mut octet, log) = spawn_plain(&api.url, PlainInput::Interactive, redirected);
+        let prompts = ["plain first unique input", "plain second unique input"];
+        wait_for_plain_ready(&mut octet, log.as_deref(), 0);
+        for (index, prompt) in prompts.iter().copied().enumerate() {
+            let start = plain_output(&mut octet, log.as_deref()).len();
+            octet.pty.write_input(format!("{prompt}\n").as_bytes());
+            api.wait_for_request(&mut octet, index + 1);
+            assert_plain_user_messages(&api, index, &prompts[..=index]);
+            api.release.send(()).unwrap();
+            wait_for_plain_ready(&mut octet, log.as_deref(), index + 1);
+            let output = plain_output(&mut octet, log.as_deref());
+            let run = String::from_utf8(output[start..].to_vec()).unwrap();
+            assert_eq!(
+                run.matches(prompt).count(),
+                1,
+                "redirected={redirected}: {run}"
+            );
+            assert_eq!(run.matches("fixture response done").count(), 1, "{run}");
+            let prompt_at = run.find(prompt).unwrap();
+            let working_at = run.find("[working]").unwrap();
+            let response_at = run.find("fixture response done").unwrap();
+            let completed_at = run.find("[completed]").unwrap();
+            assert!(
+                prompt_at < working_at && working_at < response_at && response_at < completed_at,
+                "{run}"
+            );
+            assert!(run.ends_with("\n> "), "ready prompt after each run: {run}");
+        }
+        // EOF is supplied only after the second ready prompt. A duplicate
+        // submission would either prevent readiness or appear in the count.
+        let output = plain_output(&mut octet, log.as_deref());
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert!(
+            !capture.output.contains(&0x1b),
+            "plain PTY must be cursor-free"
+        );
+        for prompt in prompts {
+            assert_eq!(count_bytes(&output, prompt.as_bytes()), 1);
+        }
+        assert!(!output.contains(&0x1b), "plain output must be cursor-free");
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+}
+
+#[test]
+fn real_octet_plain_explicit_prompts_once() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let prompt = "plain explicit unique input";
+    for input in [
+        PlainInput::Positional(prompt),
+        PlainInput::Template(prompt),
+        PlainInput::Piped(prompt),
+    ] {
+        for redirected in [false, true] {
+            let api = HeldChatApi::start();
+            let (mut octet, log) = spawn_plain(&api.url, input, redirected);
+            api.wait_for_request(&mut octet, 1);
+            assert_plain_user_messages(&api, 0, &[prompt]);
+            api.release.send(()).unwrap();
+            let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+            loop {
+                octet.pty.read_available();
+                if let Some(status) = octet.child.try_wait().unwrap() {
+                    assert!(status.success(), "{input:?}: {status}");
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{input:?} did not exit; {}",
+                    visible_bytes(&octet.pty.output)
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            let output = plain_output(&mut octet, log.as_deref());
+            let text = String::from_utf8(output).unwrap();
+            assert_eq!(
+                text.matches(prompt).count(),
+                1,
+                "{input:?}, redirected={redirected}: {text}"
+            );
+            assert!(
+                text.contains(&format!("> {prompt}\n"))
+                    || text.contains(&format!("> {prompt}\r\n")),
+                "{text}"
+            );
+            assert_eq!(text.matches("fixture response done").count(), 1, "{text}");
+            assert_eq!(text.matches("[completed]").count(), 1, "{text}");
+            assert!(
+                !text.ends_with("> "),
+                "one-shot must not wait for another prompt"
+            );
+            assert!(!text.contains('\x1b'), "plain output must be cursor-free");
+            assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }
 }

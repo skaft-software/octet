@@ -274,7 +274,7 @@ fn viewport_anchor_for_visual_row(
     visual_row: usize,
     desired_screen_row: usize,
 ) -> Option<ViewportAnchor> {
-    let (block, block_start, block_length) = {
+    let (block, block_start, block_length, visual_width) = {
         let cache = state.transcript_cache.borrow();
         let block = cache
             .block_starts
@@ -284,6 +284,7 @@ fn viewport_anchor_for_visual_row(
             block,
             *cache.block_starts.get(block)?,
             *cache.block_lengths.get(block)?,
+            cache.width?,
         )
     };
     let fallback_block_row = visual_row.checked_sub(block_start)?;
@@ -299,6 +300,13 @@ fn viewport_anchor_for_visual_row(
             state.transcript.get(block),
             Some(TranscriptBlock::Tool(_) | TranscriptBlock::Shell(_))
         );
+    // Clean Markdown copy can omit visual spacing, so its coordinate mapping
+    // need not round-trip to the selected row. Retain that difference at this
+    // width so resolving an anchor cannot undo navigation on an unchanged
+    // layout. Width reflow still follows the semantic text coordinate.
+    let semantic_row_correction = position
+        .and_then(|position| visual_line_for_transcript_position(state, position))
+        .map_or(0, |row| visual_row as isize - row as isize);
     let position = position.unwrap_or(TranscriptPosition {
         block,
         offset: 0,
@@ -309,6 +317,8 @@ fn viewport_anchor_for_visual_row(
         block_hint: block,
         text_offset: position.offset,
         trailing_affinity: position.trailing_affinity,
+        visual_width,
+        semantic_row_correction,
         fallback_block_row,
         fallback_visual_row: visual_row,
         desired_screen_row,
@@ -335,6 +345,24 @@ fn capture_viewport_anchor(state: &ShellState, start: usize, end: usize) {
     state.viewport_anchor.set(fallback);
 }
 
+/// Resolve pending layout changes before navigation discards the old anchor,
+/// and retain the new position before a coalesced renderer can receive more
+/// tool/model events. A bottom-relative row delta alone cannot distinguish
+/// growth above the reader from growth below it.
+pub(super) fn retain_viewport_anchor(state: &ShellState) {
+    if state.follow_tail || state.overlay.is_some() {
+        return;
+    }
+    let chrome = shell_chrome(state, state.size.0, Instant::now());
+    let transcript = transcript_lines(state, state.size.0);
+    let scroll = resolved_scroll_from_bottom(state, transcript.len(), chrome.transcript_rows);
+    if scroll > 0 {
+        let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
+        let end = transcript.len().saturating_sub(scroll);
+        capture_viewport_anchor(state, end.saturating_sub(capacity), end);
+    }
+}
+
 fn resolve_viewport_anchor(state: &ShellState, mut anchor: ViewportAnchor) -> usize {
     let block = if state.transcript_commit_ids.get(anchor.block_hint) == Some(&anchor.commit_id) {
         Some(anchor.block_hint)
@@ -350,7 +378,7 @@ fn resolve_viewport_anchor(state: &ShellState, mut anchor: ViewportAnchor) -> us
     anchor.block_hint = block;
     state.viewport_anchor.set(Some(anchor));
 
-    let (start, length) = {
+    let (start, length, width) = {
         let cache = state.transcript_cache.borrow();
         let Some(start) = cache.block_starts.get(block).copied() else {
             return anchor.fallback_visual_row;
@@ -358,7 +386,7 @@ fn resolve_viewport_anchor(state: &ShellState, mut anchor: ViewportAnchor) -> us
         let Some(length) = cache.block_lengths.get(block).copied() else {
             return anchor.fallback_visual_row;
         };
-        (start, length)
+        (start, length, cache.width)
     };
     if length == 0 {
         return start;
@@ -370,6 +398,11 @@ fn resolve_viewport_anchor(state: &ShellState, mut anchor: ViewportAnchor) -> us
             trailing_affinity: anchor.trailing_affinity,
         };
         if let Some(row) = visual_line_for_transcript_position(state, position) {
+            let row = if width == Some(anchor.visual_width) {
+                row.saturating_add_signed(anchor.semantic_row_correction)
+            } else {
+                row
+            };
             return row.clamp(start, start.saturating_add(length - 1));
         }
     }

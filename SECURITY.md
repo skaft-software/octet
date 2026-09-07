@@ -9,7 +9,7 @@ owners privately through the GitHub organization.
 
 ## Supported versions
 
-octet is pre-1.0 software. Version 0.7.0 is the current release. Reports
+octet is pre-1.0 software. Version 0.7.1 is the current source version. Reports
 against the release or current source are welcome; include the version and
 commit because behavior may change.
 

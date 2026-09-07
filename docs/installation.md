@@ -6,20 +6,22 @@
 
 ## Install native binaries
 
-The [v0.7.0 release](https://github.com/skaft-software/octet/releases/tag/v0.7.0)
-provides signed native archives and the version-pinned installer for macOS
-Apple silicon/Intel and GNU/Linux x86-64. Public installation is verified on
-all three targets.
+The [v0.7.1 release candidate](releases/v0.7.1.md) targets signed native
+archives and a version-pinned installer for macOS Apple silicon/Intel and
+GNU/Linux x86-64. Publication and public-install verification are pending.
+After the [v0.7.1 release](https://github.com/skaft-software/octet/releases/tag/v0.7.1)
+is published, install with:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.0/install-octet.sh | sh
-octet --version
+  https://github.com/skaft-software/octet/releases/download/v0.7.1/install-octet.sh | sh
+octet --version   # octet 0.7.1
 ```
 
-Install octet afresh. Older installations and data remain untouched; no automatic
-migration is performed. npm is not published yet; Homebrew,
-crates.io and SDK registry publication are separate channels. Bun is unqualified.
+When moving from Ygg, install octet afresh. Older installations and data remain
+untouched; no automatic migration is performed. npm is not published yet;
+Homebrew, crates.io and SDK registries remain separate, unpublished channels.
+Bun is unqualified.
 See [distribution channels](distribution.md) for their exact boundaries.
 [Historical Ygg instructions](reference/historical-installation.md) describe
 older releases, not a way to install or migrate to octet.
@@ -49,7 +51,8 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The four official executable bundles and Serve 0.7.0 are published. For example:
+The v0.7.1 release is planned to include the four official executable bundles
+and the separate Serve 0.7.1 application. After publication, for example:
 
 ```sh
 octet extension install octet-web-search
@@ -86,11 +89,11 @@ The included **linux/amd64** image is a source-build route, not evidence of a
 published image:
 
 ```sh
-scripts/build-octet-image.sh octet:0.7.0
+scripts/build-octet-image.sh octet:0.7.1
 docker run --rm -it \
   -e ANTHROPIC_API_KEY \
   -v "$PWD:/workspace" \
-  octet:0.7.0 --model claude-sonnet-4-6
+  octet:0.7.1 --model claude-sonnet-4-6
 ```
 
 The script builds a clean tracked Git snapshot, refuses tracked changes, and

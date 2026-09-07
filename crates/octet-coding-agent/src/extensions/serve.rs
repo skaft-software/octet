@@ -13574,13 +13574,17 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
 
+        // This cleanup probe must start its fixture, not be rejected because
+        // parallel refresh tests have exhausted process-wide query admission.
+        let permits = tokio::sync::Semaphore::new(1);
         let started = std::time::Instant::now();
         assert_eq!(
-            query_github_pull_request_with_timeout(
+            query_github_pull_request_with_timeout_and_permits(
                 directory.path(),
                 None,
                 &executable,
                 std::time::Duration::from_millis(100),
+                &permits,
             )
             .await,
             PullRequestObservation::Unavailable

@@ -46,6 +46,7 @@ runtime defaults.
 | `reasoning` | Model-supported effort, example `"high"`; [levels and budgets](providers.md#reasoning). |
 | `system_prompt` | Replace all composed system instructions, including with `""`; example `"You are a careful and concise reviewer."`. AGENTS/context/skill instructions are ignored while set. |
 | `cache_retention` | Provider prompt-cache retention selection; example `"short"`. |
+| `theme` | Compiled terminal appearance: `"auto"`, `"light"`, or `"dark"`; explicit light/dark choices override detection. |
 | `color` | Terminal color selection; example `"auto"`, with terminal-capability fallbacks. |
 | `mouse` | Default `"auto"`; `auto`, `terminal`, and `off` preserve native selection/history; `app` selects the captured semantic viewport. |
 | `plain` | Chronological frontend; example `false`. |
@@ -77,7 +78,7 @@ runtime defaults.
 | `OCTET_EFFECT_POLICY` | Effect profile. |
 | `OCTET_SYSTEM_PROMPT` | System-instruction replacement; see [precedence](#precedence). |
 | `OCTET_CACHE_RETENTION` | Cache retention. |
-| `OCTET_COLOR`, `OCTET_MOUSE` | Terminal presentation. |
+| `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_THEME`, `OCTET_COLOR_SCHEME` | Terminal presentation; `OCTET_THEME` accepts `auto`, `light`, or `dark`, while `OCTET_COLOR_SCHEME` remains a background-detection override. |
 | `OCTET_SHOW_IMAGES` | `1` opts in to inline tool-result display, not media upload. |
 | `OCTET_WORKSPACE`, `OCTET_SESSION_DIR` | Workspace and session-storage roots. |
 | `OCTET_MAX_TURNS` | Turn bound. |
@@ -112,7 +113,7 @@ make these logs sensitive even when telemetry is secret-safe.
 - `[compaction] enabled = true` and `OCTET_AUTO_COMPACT=true` select `local`.
 - `reasoning_mode = "pro"`, `OCTET_REASONING_MODE=pro`, and `--reasoning-mode pro` only load legacy config/sessions. They migrate to `reasoning = "ultra"` only with complete current Ultra/V2 support; otherwise octet removes the obsolete mode, retains independently selected supported effort, and warns. New config uses `reasoning` alone.
 - `--safe` is a hidden alias of `--safe-mode`; `--yolo` and its config/environment forms are rejected.
-- Legacy `--theme`, `--theme-dir`, `theme`, and `OCTET_THEME` are ignored or fall back to the compiled default. `/theme` is not registered. [Theme status](themes.md).
+- `--theme-dir` and arbitrary theme names remain compatibility inputs and never load filesystem themes. The built-in `theme` choices are documented in [Theme status](themes.md).
 
 Compatibility inputs do not imply Ygg command aliases, old-root discovery, or an
 automatic first-party migration.

@@ -37,5 +37,5 @@ Source names are `octet`, `octet-host`, `octet-*`, `OCTET_*`, and `.octet`.
 There are no Ygg aliases, old-root readers, or automatic Hamr/Ygg imports.
 The read-only third-party Codex credential source and explicit
 [Pi import/restore](pi-migration.md) are separate interoperability contracts;
-original source stores are not modified. See the [0.7.0 notes](releases/v0.7.0.md)
+original source stores are not modified. See the [0.7.1 notes](releases/v0.7.1.md)
 for outstanding qualification gates.

@@ -16,6 +16,9 @@ use crate::presentation::RunPhase;
 use crate::tui::theme::ThemeSurfaceHeading;
 use sexy_tui_rs::CURSOR_MARKER;
 
+#[path = "scroll_regressions.rs"]
+mod scroll_regressions;
+
 struct EmulatedTerminal {
     size: Arc<Mutex<(u16, u16)>>,
     bytes: Arc<Mutex<Vec<u8>>>,
