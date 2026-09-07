@@ -2,8 +2,9 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. octet 0.7.1 package publication is pending; these
-implementation contracts do not imply complete feature or live-provider acceptance.
+Serve remains experimental. Signed octet 0.7.1 packages are published with verified
+public installation; these implementation contracts do not imply complete feature
+or live-provider acceptance.
 
 ## Focused checks
 
@@ -93,9 +94,9 @@ The described package requires exactly `=0.7.1` and declares three targets:
 - macOS x86_64;
 - macOS arm64.
 
-Linux musl is unsupported. Signed 0.7.1 package publication and public
-installation checks remain pending for all three targets. A matching
-local archive can also be installed offline. See
+Linux musl is unsupported. Signed 0.7.1 packages are published, and public
+installation checks passed for all three targets. A matching local archive can
+also be installed offline. See
 [package usage](../../docs/experimental/octet-serve/README.md#install-or-update-a-package).
 
 The source-described `.github/workflows/release-serve.yml` contract accepts only

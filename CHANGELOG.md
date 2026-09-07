@@ -4,8 +4,8 @@
 
 ## [0.7.1] - 2026-09-07
 
-See the [release notes](docs/releases/v0.7.1.md) for candidate publication and
-verification status.
+See the [release notes](docs/releases/v0.7.1.md) for publication and
+verification evidence.
 
 ### Added
 
