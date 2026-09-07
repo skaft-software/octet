@@ -164,9 +164,22 @@ fn semantic_scroll_holds_anchor_through_tool_and_model_lifecycle() {
         // live navigation still do, without changing mouse ownership.
         shell.apply_edit(EditAction::Char('x'));
         assert!(!shell.state.borrow().follow_tail);
-        while !shell.state.borrow().follow_tail {
+        let maximum_pages = shell.state.borrow().transcript_cache.borrow().lines.len() + 1;
+        for page in 0..maximum_pages {
+            if shell.state.borrow().follow_tail {
+                break;
+            }
+            let previous = shell.state.borrow().scroll_from_bottom.get();
             shell.scroll(1);
+            let state = shell.state.borrow();
+            assert!(
+                state.follow_tail || state.scroll_from_bottom.get() < previous,
+                "PageDown must advance toward live: page={page}, previous={previous}, current={}, anchor={:?}, application_viewport={application_viewport}",
+                state.scroll_from_bottom.get(),
+                state.viewport_anchor.get(),
+            );
         }
+        assert!(shell.state.borrow().follow_tail, "PageDown must reach live");
         assert_eq!(shell.pending(), "x");
         assert!(shell.state.borrow().viewport_anchor.get().is_none());
         assert_eq!(shell.state.borrow().new_output_count, 0);
@@ -178,6 +191,74 @@ fn semantic_scroll_holds_anchor_through_tool_and_model_lifecycle() {
         assert!(shell.state.borrow().follow_tail);
         assert!(shell.state.borrow().viewport_anchor.get().is_none());
         assert_eq!(shell.capture_mouse, application_viewport);
+    }
+}
+
+#[test]
+fn semantic_scroll_navigation_round_trips_markdown_spacing() {
+    for page in [false, true] {
+        for paint_navigation in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(WIDTH, HEIGHT);
+            let markdown = (0..40)
+                .map(|index| format!("{HISTORY}-{index:03}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            shell
+                .state
+                .borrow_mut()
+                .push_block(TranscriptBlock::Assistant(Box::new(
+                    AssistantBlock::finalized(markdown),
+                )));
+            let _ = rendered_history_rows(&shell);
+            let maximum = max_scroll_from_bottom(&shell.state.borrow(), WIDTH);
+            let amount = if page { usize::from(HEIGHT / 2) } else { 1 };
+            let mut corrected_anchor_seen = false;
+            for direction in [-1, 1] {
+                for step in 0..=maximum {
+                    let previous = shell.state.borrow().scroll_from_bottom.get();
+                    let expected = if direction < 0 {
+                        previous.saturating_add(amount).min(maximum)
+                    } else {
+                        previous.saturating_sub(amount)
+                    };
+                    if page {
+                        shell.scroll(direction);
+                    } else {
+                        shell.scroll_lines(direction);
+                    }
+                    assert_eq!(
+                        shell.state.borrow().scroll_from_bottom.get(), expected,
+                        "navigation step={step}, direction={direction}, page={page}, paint={paint_navigation}",
+                    );
+                    if paint_navigation {
+                        let _ = rendered_history_rows(&shell);
+                        assert_eq!(
+                            shell.state.borrow().scroll_from_bottom.get(), expected,
+                            "painting must not undo navigation: step={step}, direction={direction}, page={page}",
+                        );
+                    }
+                    let state = shell.state.borrow();
+                    assert_eq!(state.follow_tail, expected == 0);
+                    corrected_anchor_seen |= state
+                        .viewport_anchor
+                        .get()
+                        .is_some_and(|anchor| anchor.semantic_row_correction != 0);
+                    if expected == if direction < 0 { maximum } else { 0 } {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    shell.state.borrow().scroll_from_bottom.get(),
+                    if direction < 0 { maximum } else { 0 },
+                );
+            }
+            assert!(
+                corrected_anchor_seen,
+                "fixture must exercise non-round-tripping copy rows"
+            );
+            assert!(shell.state.borrow().viewport_anchor.get().is_none());
+        }
     }
 }
 

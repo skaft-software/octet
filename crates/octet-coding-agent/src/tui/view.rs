@@ -726,6 +726,8 @@ struct ViewportAnchor {
     block_hint: usize,
     text_offset: usize,
     trailing_affinity: bool,
+    visual_width: u16,
+    semantic_row_correction: isize,
     fallback_block_row: usize,
     fallback_visual_row: usize,
     desired_screen_row: usize,
