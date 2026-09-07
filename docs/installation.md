@@ -6,11 +6,10 @@
 
 ## Install native binaries
 
-The [v0.7.1 release candidate](releases/v0.7.1.md) targets signed native
-archives and a version-pinned installer for macOS Apple silicon/Intel and
-GNU/Linux x86-64. Publication and public-install verification are pending.
-After the [v0.7.1 release](https://github.com/skaft-software/octet/releases/tag/v0.7.1)
-is published, install with:
+The [v0.7.1 release](releases/v0.7.1.md) includes signed native archives and a
+version-pinned installer for macOS Apple silicon/Intel and GNU/Linux x86-64.
+Public-install verification passed on all three platforms. Install from the
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.1):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -51,8 +50,8 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The v0.7.1 release is planned to include the four official executable bundles
-and the separate Serve 0.7.1 application. After publication, for example:
+The v0.7.1 release includes the four official executable bundles and the
+separate Serve 0.7.1 application. For example:
 
 ```sh
 octet extension install octet-web-search

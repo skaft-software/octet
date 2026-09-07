@@ -52,7 +52,7 @@
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
-- [0.7.1 release candidate notes](releases/v0.7.1.md)
+- [0.7.1 release notes](releases/v0.7.1.md)
 - [Roadmap](https://github.com/orgs/skaft-software/projects/5)
 - [Benchmarks and performance](benchmarks/README.md)
 - [Download benchmark results](assets/evidence/README.md)

@@ -1,13 +1,13 @@
 # Distribution channels
 
-octet 0.7.1 is a release candidate targeting signed native assets on the
-[version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.1).
-Publication and public-install verification are pending. See
-[installation](installation.md) for prospective native installation or a source
-build, and [release notes](releases/v0.7.1.md) for verification status.
+Signed octet 0.7.1 native assets, Serve and four executable bundles are published
+on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.1).
+Public-install verification passed. See [installation](installation.md) for
+native installation or a source build, and [release notes](releases/v0.7.1.md)
+for verification evidence.
 npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.
 The repository is now `skaft-software/octet`. The immutable v0.7.0 assets retain
-their original `skaft-software/ygg` signing identity; v0.7.1 targets the new
+their original `skaft-software/ygg` signing identity; v0.7.1 uses the new
 identity. Existing clone and release-asset URLs redirect to the same repository.
 Do not recreate the old name.
 
@@ -54,7 +54,11 @@ The release workflows do not publish every source package automatically:
 | Serve | `release-serve.yml` | Separate exact-version application package and installation checks. |
 | Python/TypeScript SDK registries | Not provided by the CLI release workflow | Source SDKs/generated bindings are not automatically published to PyPI or npm by the four-package CLI job. |
 
-After the canonical tag is published, Cargo can build that exact source
+Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
+canonical release commit. Its metadata generator requires that ref; the
+protected environment must admit the tag without removing required reviewers.
+
+Cargo can build the published canonical tag's exact source
 (Rust 1.86+ and ripgrep):
 
 ```sh
@@ -125,9 +129,9 @@ release alias.
 
 ## Other channels
 
-The v0.7.1 version-pinned shell installer targets macOS arm64/x64 and GNU/Linux
-x64; publication and public-install verification are pending. The no-lifecycle
-npm launcher targets the same platforms but remains unavailable through npm. See
+The v0.7.1 version-pinned shell installer is published and verified on macOS
+arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
+platforms but remains unavailable through npm. See
 the [npm release contract](release/npm-trusted-publishing.md) for platform-first
 publication and provenance checks. Bun is unqualified.
 

@@ -6,7 +6,7 @@
 
 **A high-performance coding agent, extensible in any language.**
 
-[![Release candidate: 0.7.1](https://img.shields.io/badge/release-0.7.1_candidate-536dfe?style=flat-square)](docs/releases/v0.7.1.md)
+[![Release: 0.7.1](https://img.shields.io/badge/release-0.7.1-536dfe?style=flat-square)](docs/releases/v0.7.1.md)
 
 octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
@@ -16,16 +16,15 @@ and lets you add tools through subprocess extensions.
 
 ## Install
 
-**Native installer (after v0.7.1 publication):** macOS Apple silicon/Intel
-and GNU/Linux x86-64:
+**Native installer:** macOS Apple silicon/Intel and GNU/Linux x86-64:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/skaft-software/octet/releases/download/v0.7.1/install-octet.sh | sh
 ```
 
-octet 0.7.1 is a release candidate; publication and public-install verification
-are pending. See [release notes](docs/releases/v0.7.1.md) and
+Signed octet 0.7.1 assets are published and public-install verification passed.
+See [release notes](docs/releases/v0.7.1.md) and
 [installation](docs/installation.md) for scope, prerequisites and channel availability.
 When moving from Ygg, install octet afresh: older installations and data remain
 separate; no automatic migration is performed.
