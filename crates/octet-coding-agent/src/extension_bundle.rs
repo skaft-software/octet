@@ -13,12 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::extension_package::{
     acquire_lock, checksum_for_asset, download_bytes, download_file, open_archive_snapshot,
     publish_staging, sha256_open_file_bounded, sync_directory, validate_sha256, MAX_ARCHIVE_BYTES,
-    MAX_CHECKSUM_BYTES,
+    MAX_CHECKSUM_BYTES, RELEASE_REPOSITORY,
 };
 
 pub(super) const BUNDLE_MANIFEST: &str = "extension.toml";
 pub(super) const INSTALL_RECORD: &str = "install.json";
-const RELEASE_REPOSITORY: &str = "https://github.com/skaft-software/octet";
 const RELEASE_CATALOG: &str = include_str!("../../../extensions/release-catalog.txt");
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_INSTALL_RECORD_BYTES: u64 = 64 * 1024;

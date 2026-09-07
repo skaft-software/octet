@@ -335,6 +335,24 @@ fn capture_viewport_anchor(state: &ShellState, start: usize, end: usize) {
     state.viewport_anchor.set(fallback);
 }
 
+/// Resolve pending layout changes before navigation discards the old anchor,
+/// and retain the new position before a coalesced renderer can receive more
+/// tool/model events. A bottom-relative row delta alone cannot distinguish
+/// growth above the reader from growth below it.
+pub(super) fn retain_viewport_anchor(state: &ShellState) {
+    if state.follow_tail || state.overlay.is_some() {
+        return;
+    }
+    let chrome = shell_chrome(state, state.size.0, Instant::now());
+    let transcript = transcript_lines(state, state.size.0);
+    let scroll = resolved_scroll_from_bottom(state, transcript.len(), chrome.transcript_rows);
+    if scroll > 0 {
+        let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
+        let end = transcript.len().saturating_sub(scroll);
+        capture_viewport_anchor(state, end.saturating_sub(capacity), end);
+    }
+}
+
 fn resolve_viewport_anchor(state: &ShellState, mut anchor: ViewportAnchor) -> usize {
     let block = if state.transcript_commit_ids.get(anchor.block_hint) == Some(&anchor.commit_id) {
         Some(anchor.block_hint)

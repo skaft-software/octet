@@ -1,22 +1,23 @@
 # Distribution channels
 
-octet 0.7.0 uses signed native assets on the
-[version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.0).
-See [installation](installation.md) for the verified native installer or a
-source build. npm is not published yet; Homebrew, crates.io
-and SDK registry publication are separate. The repository is now
-`skaft-software/octet`. The immutable v0.7.0 assets retain their original
-`skaft-software/ygg` signing identity; future releases use the new identity.
-Existing clone and release-asset URLs redirect to the same repository.
+octet 0.7.1 is a release candidate targeting signed native assets on the
+[version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.1).
+Publication and public-install verification are pending. See
+[installation](installation.md) for prospective native installation or a source
+build, and [release notes](releases/v0.7.1.md) for verification status.
+npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.
+The repository is now `skaft-software/octet`. The immutable v0.7.0 assets retain
+their original `skaft-software/ygg` signing identity; v0.7.1 targets the new
+identity. Existing clone and release-asset URLs redirect to the same repository.
 Do not recreate the old name.
 
 ## Package identities
 
 These are the current source package identities, not claims of published
-packages. The `0.7.0` distribution version does not establish registry
+packages. The `0.7.1` distribution version does not establish registry
 availability or change independent API and schema versions.
 
-| Surface | 0.7.0 source identity |
+| Surface | 0.7.1 source identity |
 | --- | --- |
 | Product and native commands | lowercase octet; `octet`, `octet-host` |
 | Core crates | `octet-ai`, `octet-agent`, `octet-coding-agent`, `octet-migrate-types` |
@@ -25,7 +26,7 @@ availability or change independent API and schema versions.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and first-party extension distribution versions | `0.7.0`; installed compatibility `requires_octet = "=0.7.0"` |
+| Product, SDK and first-party extension distribution versions | `0.7.1`; installed compatibility `requires_octet = "=0.7.1"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
@@ -45,6 +46,7 @@ The release workflows do not publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets; verify public installation after upload. |
+| Four executable bundles | `release-serve.yml` | Separate exact-version `octet-browse`, `octet-mcp`, `octet-subagents`, and `octet-web-search` archives; install/update checks do not enable or trust them. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft/octet*` packages, platform-first. Requires verified registry ownership and trusted publishers for all four packages; disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication required; the public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Do not advertise registry installation. Publishing the CLI/dependency graph and verifying registry ownership is separate work. |
@@ -52,20 +54,22 @@ The release workflows do not publish every source package automatically:
 | Serve | `release-serve.yml` | Separate exact-version application package and installation checks. |
 | Python/TypeScript SDK registries | Not provided by the CLI release workflow | Source SDKs/generated bindings are not automatically published to PyPI or npm by the four-package CLI job. |
 
-Cargo installation builds the exact canonical tag (Rust 1.86+ and ripgrep):
+After the canonical tag is published, Cargo can build that exact source
+(Rust 1.86+ and ripgrep):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.0 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.1 --bins octet-coding-agent
 ```
 
-The public `v0.7.0` tag pins this source build. `cargo install octet` and
-registry-based `cargo install octet-coding-agent` are not the supported Cargo path.
+The public `v0.7.1` tag must exist before using this command. `cargo install octet`
+and registry-based `cargo install octet-coding-agent` are not the supported
+Cargo path.
 
 The npm channel remains unpublished pending functional first-package bootstrap,
 trusted publishers and registry provenance verification. Its future command is:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.0
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.1
 ```
 
 ## Homebrew
@@ -121,10 +125,10 @@ release alias.
 
 ## Other channels
 
-The version-pinned shell installer is published and public-install verified on
-macOS arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
-platforms but remains unavailable through npm. See the
-[npm release contract](release/npm-trusted-publishing.md) for platform-first
+The v0.7.1 version-pinned shell installer targets macOS arm64/x64 and GNU/Linux
+x64; publication and public-install verification are pending. The no-lifecycle
+npm launcher targets the same platforms but remains unavailable through npm. See
+the [npm release contract](release/npm-trusted-publishing.md) for platform-first
 publication and provenance checks. Bun is unqualified.
 
 Cargo can build/install the local checkout without a registry channel. Public

@@ -8,7 +8,7 @@ trap 'rm -rf "$work_directory"' EXIT
 assets="$work_directory/assets"
 fake_bin="$work_directory/fake-bin"
 installer="$work_directory/install-octet.sh"
-version=0.7.0
+version=0.7.1
 identity_version=${version//./\\.}
 expected_identity="^https://github\\.com/skaft-software/octet/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
 package="octet-$version-aarch64-apple-darwin"
@@ -135,7 +135,7 @@ files = {
     "README.md": b"# octet\n",
     "octet": b'''#!/bin/sh
 case "${1:-}" in
-    --version) printf '%s\\n' 'octet 0.7.0' ;;
+    --version) printf '%s\\n' 'octet 0.7.1' ;;
     --help) printf '%s\\n' 'fake octet help' ;;
     *) exit 0 ;;
 esac
@@ -144,7 +144,7 @@ esac
 IFS= read -r request
 case "$request" in
     *'"request_id":"installer-probe"'*)
-        printf '%s\\n' '{"protocol_version":1,"request_id":"installer-probe","seq":1,"type":"hello","data":{"sdk_version":"0.7.0"}}'
+        printf '%s\\n' '{"protocol_version":1,"request_id":"installer-probe","seq":1,"type":"hello","data":{"sdk_version":"0.7.1"}}'
         ;;
     *) exit 2 ;;
 esac
@@ -237,8 +237,8 @@ PY
     {
         printf '%064d  ./install-octet.sh\n' 0
         printf '%s  ./%s\n' "$(sha256_file "$assets/$archive_name")" "$archive_name"
-        printf '%064d  ./octet-0.7.0-x86_64-apple-darwin.tar.gz\n' 0
-        printf '%064d  ./octet-0.7.0-x86_64-unknown-linux-gnu.tar.gz\n' 0
+        printf '%064d  ./octet-0.7.1-x86_64-apple-darwin.tar.gz\n' 0
+        printf '%064d  ./octet-0.7.1-x86_64-unknown-linux-gnu.tar.gz\n' 0
     } > "$assets/OCTET_SHA256SUMS"
 }
 
@@ -289,12 +289,12 @@ while [ "$#" -gt 0 ]; do
 done
 name=${url##*/}
 source="$OCTET_TEST_ASSETS/$name"
-if [ "${OCTET_TEST_HARDLINK_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.0-aarch64-apple-darwin.tar.gz ]; then
+if [ "${OCTET_TEST_HARDLINK_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.1-aarch64-apple-darwin.tar.gz ]; then
     ln "$source" "$output"
 else
     cp "$source" "$output"
 fi
-if [ "${OCTET_TEST_TAMPER_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.0-aarch64-apple-darwin.tar.gz ]; then
+if [ "${OCTET_TEST_TAMPER_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.1-aarch64-apple-darwin.tar.gz ]; then
     printf 'tampered' >> "$output"
 fi
 if [ "${OCTET_TEST_TAMPER_COSIGN:-0}" = 1 ] && [ "$name" = cosign-darwin-arm64 ]; then
@@ -346,8 +346,8 @@ test -x "$positive_home/bin/octet"
 test -x "$positive_home/bin/octet-host"
 printf '%s\n' '{"protocol_version":1,"request_id":"installer-probe","command":"hello"}' \
     | "$positive_home/bin/octet-host" \
-    | grep -F '"sdk_version":"0.7.0"' >/dev/null
-test "$("$positive_home/bin/octet" --version)" = 'octet 0.7.0'
+    | grep -F '"sdk_version":"0.7.1"' >/dev/null
+test "$("$positive_home/bin/octet" --version)" = 'octet 0.7.1'
 test -f "$positive_home/share/octet/README.md"
 test -f "$positive_home/share/octet/docs/index.md"
 test -f "$positive_home/share/octet/docs/current-reference.md"
@@ -377,10 +377,10 @@ printf '%s\n' 'keep config' > "$upgrade_home/.octet/config.toml"
 printf '%s\n' 'keep session' > "$upgrade_home/.octet/sessions/session.jsonl"
 printf '%s\n' 'remove old docs' > "$upgrade_home/share/octet/docs/old.md"
 run_installer "$upgrade_home" > "$work_directory/upgrade.out"
-test "$("$upgrade_home/bin/octet" --version)" = 'octet 0.7.0'
+test "$("$upgrade_home/bin/octet" --version)" = 'octet 0.7.1'
 printf '%s\n' '{"protocol_version":1,"request_id":"installer-probe","command":"hello"}' \
     | "$upgrade_home/bin/octet-host" \
-    | grep -F '"sdk_version":"0.7.0"' >/dev/null
+    | grep -F '"sdk_version":"0.7.1"' >/dev/null
 grep -Fx 'keep helper' "$upgrade_home/bin/unrelated-helper" >/dev/null
 grep -Fx 'keep config' "$upgrade_home/.octet/config.toml" >/dev/null
 grep -Fx 'keep session' "$upgrade_home/.octet/sessions/session.jsonl" >/dev/null
@@ -400,7 +400,7 @@ printf '%s\n' 'untouched old docs' > "$legacy_home/share/ygg/README.md"
 run_installer "$legacy_home" \
     YGG_INSTALL_DIR="$work_directory/forbidden-old-bin" \
     YGG_DATA_DIR="$work_directory/forbidden-old-docs" > "$work_directory/legacy-trap.out"
-test "$("$legacy_home/bin/octet" --version)" = 'octet 0.7.0'
+test "$("$legacy_home/bin/octet" --version)" = 'octet 0.7.1'
 grep -Fx 'untouched old binary' "$legacy_home/bin/ygg" >/dev/null
 grep -Fx 'untouched old host' "$legacy_home/bin/ygg-host" >/dev/null
 grep -Fx 'untouched old config' "$legacy_home/.ygg/config.toml" >/dev/null

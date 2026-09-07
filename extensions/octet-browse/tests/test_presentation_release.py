@@ -204,9 +204,9 @@ class PackageTests(unittest.TestCase):
     def test_manifest_surface_metadata_and_executable(self) -> None:
         manifest = tomllib.loads((PACKAGE / "extension.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "octet-browse")
-        self.assertEqual(manifest["version"], "0.7.0")
+        self.assertEqual(manifest["version"], "0.7.1")
         self.assertEqual(manifest["api_version"], "0.2")
-        self.assertEqual(manifest["requires_octet"], "=0.7.0")
+        self.assertEqual(manifest["requires_octet"], "=0.7.1")
         self.assertEqual(set(manifest["contributes"]["tools"]), TOOLS)
         self.assertEqual(manifest["contributes"]["commands"], ["browse"])
         self.assertTrue(manifest["contributes"]["confirmations"])
@@ -363,7 +363,7 @@ class PackageTests(unittest.TestCase):
             self.skipTest("generic extension release packager is not present")
         with tempfile.TemporaryDirectory() as output:
             process = subprocess.run(
-                [str(script), "octet-browse", output, "v0.7.0", str(PACKAGE)],
+                [str(script), "octet-browse", output, "v0.7.1", str(PACKAGE)],
                 cwd=REPOSITORY,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -371,7 +371,7 @@ class PackageTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(process.returncode, 0, process.stderr)
-            archive = Path(output) / "octet-browse-0.7.0.tar.gz"
+            archive = Path(output) / "octet-browse-0.7.1.tar.gz"
             self.assertTrue(archive.is_file())
             with tarfile.open(archive, "r:gz") as bundle:
                 names = set(bundle.getnames())

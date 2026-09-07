@@ -41,8 +41,8 @@ identical spawn key is retry-safe; using it with different input fails.
 
 ## Install and enable
 
-With [octet 0.7.0 installed](../../docs/installation.md), install the signed public
-bundle, then separately enable and trust it:
+With [octet 0.7.1 installed](../../docs/installation.md), once the matching signed
+public bundle is published, install it, then separately enable and trust it:
 
 ```console
 octet extension install octet-subagents
@@ -50,7 +50,7 @@ octet --enable-extension octet-subagents --trust-extension octet-subagents
 ```
 
 For a reviewed local archive instead, use
-`octet extension install --path ./octet-subagents-0.7.0.tar.gz`.
+`octet extension install --path ./octet-subagents-0.7.1.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
 starts nothing. Executable extensions require full-access policy; `--safe-mode`
 keeps them stopped. `/extensions status` shows the selected source, trust, API,
@@ -84,7 +84,7 @@ prompt. `/subagents inspect <name-or-id>` provides cached detail and
 
 ## Reference
 
-Bundle `0.7.0` requires exactly octet `0.7.0` and retains API `0.2`. The detailed
+Bundle `0.7.1` requires exactly octet `0.7.1` and retains API `0.2`. The detailed
 contract is a bundled-runtime reference, not a current extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.

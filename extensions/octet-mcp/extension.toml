@@ -1,7 +1,7 @@
 name = "octet-mcp"
-version = "0.7.0"
+version = "0.7.1"
 api_version = "0.2"
-requires_octet = "=0.7.0"
+requires_octet = "=0.7.1"
 description = "Resident bridge for explicitly configured stdio and Streamable HTTP MCP tool servers"
 
 [entrypoint]

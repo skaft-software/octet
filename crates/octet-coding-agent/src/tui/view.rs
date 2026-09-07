@@ -107,7 +107,7 @@ use self::viewport::{
     max_scroll_for_available, render_shell_viewport_at, render_shell_viewport_update,
 };
 use self::viewport::{
-    max_scroll_from_bottom, resolved_scroll_from_bottom, transcript_lines,
+    max_scroll_from_bottom, resolved_scroll_from_bottom, retain_viewport_anchor, transcript_lines,
     transcript_viewport_capacity, transcript_viewport_capacity_for_state,
 };
 
@@ -1300,6 +1300,18 @@ impl ShellState {
         }
         if let Some(anchor) = &mut self.pending_selection_anchor {
             anchor.block += usize::from(anchor.block >= index);
+        }
+        // Insertion (notably the first worker roster before active reasoning)
+        // changes block identities at the seam. Retain only the valid prefix;
+        // append-only cache growth would pair old rows with the new commit IDs.
+        let cache = self.transcript_cache.get_mut();
+        if let Some(start) = cache.block_starts.get(index).copied() {
+            cache.lines.truncate(start);
+            cache.block_starts.truncate(index);
+            cache.block_lengths.truncate(index);
+            cache.block_geometries.truncate(index);
+            cache.block_revisions.truncate(index);
+            cache.dirty_blocks.retain(|dirty| *dirty < index);
         }
         self.invalidate_transcript();
     }
@@ -3789,6 +3801,7 @@ impl InteractiveShell {
             }
         }
         let mut state = self.state.borrow_mut();
+        retain_viewport_anchor(&state);
         state.viewport_anchor.set(None);
         if direction < 0 {
             state.application_viewport_requested = true;
@@ -3808,6 +3821,7 @@ impl InteractiveShell {
                 state.jump_to_tail();
             }
         }
+        retain_viewport_anchor(&state);
     }
 
     /// Scroll the transcript in small, trackpad-friendly increments.
@@ -3832,6 +3846,7 @@ impl InteractiveShell {
             }
         }
         let mut state = self.state.borrow_mut();
+        retain_viewport_anchor(&state);
         state.viewport_anchor.set(None);
         if direction < 0 {
             state.application_viewport_requested = true;
@@ -3856,6 +3871,7 @@ impl InteractiveShell {
                 state.jump_to_tail();
             }
         }
+        retain_viewport_anchor(&state);
     }
 
     /// Explicit End/jump-to-live action. It preserves the draft and composer
@@ -3973,6 +3989,7 @@ impl InteractiveShell {
                 state.jump_to_tail();
             }
         }
+        retain_viewport_anchor(&state);
         transcript_rows = transcript_viewport_capacity_for_state(&state, state.size.0);
         if transcript_rows == 0 {
             return;
