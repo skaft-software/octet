@@ -6,15 +6,15 @@
 
 ## Install native binaries
 
-The [v0.7.1 release](releases/v0.7.1.md) includes signed native archives and a
+The [v0.7.2 release](releases/v0.7.2.md) includes signed native archives and a
 version-pinned installer for macOS Apple silicon/Intel and GNU/Linux x86-64.
 Public-install verification passed on all three platforms. Install from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.1):
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.2):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.1/install-octet.sh | sh
-octet --version   # octet 0.7.1
+  https://github.com/skaft-software/octet/releases/download/v0.7.2/install-octet.sh | sh
+octet --version   # octet 0.7.2
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -50,8 +50,8 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The v0.7.1 release includes the four official executable bundles and the
-separate Serve 0.7.1 application. For example:
+The v0.7.2 release includes the four official executable bundles and the
+separate Serve 0.7.2 application. For example:
 
 ```sh
 octet extension install octet-web-search
@@ -61,7 +61,9 @@ octet extension list
 For a reviewed local archive instead, use
 `octet extension install --path ./bundle.tar.gz`. Installation is inert.
 
-Installation does not enable, trust, start code, or provision dependencies.
+Installation does not enable, persist a trust grant, start code, or provision
+dependencies. Full access implicitly trusts selected executable extensions;
+enablement remains explicit. Safe mode keeps executable extensions stopped.
 Executable bundles are separate from the terminal binary and from the graphical
 Serve application. Use [resource discovery](resources.md) for source selection
 and [extensions](extensions.md) for exact packaging, trust, atomic update, and
@@ -73,7 +75,7 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-web-search` | [Brave Search (recommended) or SearXNG](../extensions/octet-web-search/README.md); public search/fetch, not a browser. |
 | `octet-browse` | [Visible isolated browser](../extensions/octet-browse/README.md); authentication is manual. |
 | `octet-mcp` | [MCP bridge](../extensions/octet-mcp/README.md); local stdio is supported, remote Streamable HTTP is blocked by default. |
-| `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); enable and trust separately. |
+| `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
 The four executable bundles in this snapshot still declare API 0.2. They are
@@ -88,11 +90,11 @@ The included **linux/amd64** image is a source-build route, not evidence of a
 published image:
 
 ```sh
-scripts/build-octet-image.sh octet:0.7.1
+scripts/build-octet-image.sh octet:0.7.2
 docker run --rm -it \
   -e ANTHROPIC_API_KEY \
   -v "$PWD:/workspace" \
-  octet:0.7.1 --model claude-sonnet-4-6
+  octet:0.7.2 --model claude-sonnet-4-6
 ```
 
 The script builds a clean tracked Git snapshot, refuses tracked changes, and
