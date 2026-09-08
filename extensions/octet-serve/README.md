@@ -2,7 +2,7 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. Signed octet 0.7.1 packages are published with verified
+Serve remains experimental. Signed octet 0.7.2 packages are published with verified
 public installation; these implementation contracts do not imply complete feature
 or live-provider acceptance.
 
@@ -88,14 +88,14 @@ contains the adapter into private `App`. Source-level extraction behind a stable
 Runtime API is deferred; the default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface. See [architecture](../../docs/experimental/octet-serve/architecture.md).
 
-The current source package requires exactly `=0.7.2`; its
-[publication is pending](../../docs/releases/v0.7.2.md). It declares three targets:
+The signed package requires exactly `=0.7.2`; its
+[publication is verified](../../docs/releases/v0.7.2.md). It declares three targets:
 
 - GNU/Linux x86_64: `x86_64-unknown-linux-gnu`;
 - macOS x86_64;
 - macOS arm64.
 
-Linux musl is unsupported. Signed 0.7.1 packages are published, and public
+Linux musl is unsupported. Signed 0.7.2 packages are published, and public
 installation checks passed for all three targets. A matching local archive can
 also be installed offline. See
 [package usage](../../docs/experimental/octet-serve/README.md#install-or-update-a-package).
@@ -111,7 +111,7 @@ existing canonical release. Repair/source tags use
 `scripts/package-octet-serve-release.sh` is the local reproducibility and
 package-layout gate before separately authorized publication.
 
-[octet 0.7.1](../../docs/releases/v0.7.1.md) records current release gates.
+[octet 0.7.2](../../docs/releases/v0.7.2.md) records current release gates.
 The earlier [octet 0.7.0](../../docs/releases/v0.7.0.md#release-verification) includes signed
 Serve artifacts and verified public installation. Live-provider/native-audio checks
 are optional and **NOT RUN**; package smoke does not establish full live-feature

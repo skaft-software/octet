@@ -2,18 +2,17 @@
 
 ## [Unreleased]
 
-## [0.7.2] - Unreleased
+## [0.7.2] - 2026-09-08
 
-See the [release candidate notes](docs/releases/v0.7.2.md). Signed publication
-and public-install verification are pending; v0.7.1 remains the published stable
-release.
+See the [release notes](docs/releases/v0.7.2.md) for verified signed Native/Serve
+publication, public-install checks, and known terminal-protocol limits.
 
 ### Fixed
 
 - Defer the first branded startup frame until model/setup state, workspace, and
   appearance are resolved; start its animation at readiness.
-- Prevent delayed or fragmented terminal background replies from entering the
-  prompt, including over SSH.
+- Consume late terminal background replies and recognized fragmented OSC 11
+  bodies before editor input; retain bounded Escape-key ambiguity handling.
 - Navigate path and `@` file completions with Up/Down and accept the selected
   result with Tab, preserving editor movement when no menu is visible.
 - Indent subagent transcript rows beneath their heading and omit per-worker

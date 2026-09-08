@@ -1,22 +1,22 @@
 # Distribution channels
 
-Signed octet 0.7.1 native assets, Serve and four executable bundles are published
-on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.1).
+Signed octet 0.7.2 native assets, Serve and four executable bundles are published
+on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.2).
 Public-install verification passed. See [installation](installation.md) for
-native installation or a source build, and [release notes](releases/v0.7.1.md)
+native installation or a source build, and [release notes](releases/v0.7.2.md)
 for verification evidence.
 npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.
 The repository is now `skaft-software/octet`. The immutable v0.7.0 assets retain
-their original `skaft-software/ygg` signing identity; v0.7.1 uses the new
+their original `skaft-software/ygg` signing identity; v0.7.1 and later use the new
 identity. Existing clone and release-asset URLs redirect to the same repository.
 Do not recreate the old name.
 
 ## Package identities
 
-These are the current source package identities, not claims of published
-packages. The `0.7.2` distribution version does not establish registry
-availability or change independent API and schema versions. The
-[0.7.2 candidate](releases/v0.7.2.md) is not yet published.
+These are the current source and signed GitHub package identities. The
+`0.7.2` distribution version does not establish registry availability or change
+independent API and schema versions. See the [0.7.2 release](releases/v0.7.2.md)
+for verified assets and channel boundaries.
 
 | Surface | 0.7.2 source identity |
 | --- | --- |
@@ -47,7 +47,7 @@ The release workflows do not publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets; verify public installation after upload. |
-| Four executable bundles | `release-serve.yml` | Separate exact-version `octet-browse`, `octet-mcp`, `octet-subagents`, and `octet-web-search` archives; install/update checks do not enable or trust them. |
+| Four executable bundles | `release-serve.yml` | Separate exact-version `octet-browse`, `octet-mcp`, `octet-subagents`, and `octet-web-search` archives; install/update never enables them or persists trust grants. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft/octet*` packages, platform-first. Requires verified registry ownership and trusted publishers for all four packages; disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication required; the public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Do not advertise registry installation. Publishing the CLI/dependency graph and verifying registry ownership is separate work. |
@@ -63,10 +63,10 @@ Cargo can build the published canonical tag's exact source
 (Rust 1.86+ and ripgrep):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.1 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.2 --bins octet-coding-agent
 ```
 
-The public `v0.7.1` tag must exist before using this command. `cargo install octet`
+The public `v0.7.2` tag must exist before using this command. `cargo install octet`
 and registry-based `cargo install octet-coding-agent` are not the supported
 Cargo path.
 
@@ -74,7 +74,7 @@ The npm channel remains unpublished pending functional first-package bootstrap,
 trusted publishers and registry provenance verification. Its future command is:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.1
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.2
 ```
 
 ## Homebrew
@@ -130,7 +130,7 @@ release alias.
 
 ## Other channels
 
-The v0.7.1 version-pinned shell installer is published and verified on macOS
+The v0.7.2 version-pinned shell installer is published and verified on macOS
 arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
 platforms but remains unavailable through npm. See
 the [npm release contract](release/npm-trusted-publishing.md) for platform-first
