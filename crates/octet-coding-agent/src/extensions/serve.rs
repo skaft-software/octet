@@ -13576,6 +13576,8 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
 
         // This cleanup probe must start its fixture, not be rejected because
         // parallel refresh tests have exhausted process-wide query admission.
+        // Allow cold process startup before exercising timeout cleanup; this
+        // tests descendant retirement, not sub-100ms spawn latency.
         let permits = tokio::sync::Semaphore::new(1);
         let started = std::time::Instant::now();
         assert_eq!(
@@ -13583,7 +13585,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
                 directory.path(),
                 None,
                 &executable,
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(500),
                 &permits,
             )
             .await,
