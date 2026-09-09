@@ -4605,6 +4605,253 @@ fn streamed_table_and_wrapped_lists_survive_shrink_scroll_and_resize() {
     }
 }
 
+// These probes deliberately use the real ShellComponent and Pi renderer, not
+// render_shell_update alone: a correct final frame can hide repeated ED 3
+// history resets during generation. Keep geometry and chrome fixed throughout.
+struct MarkdownStreamReplay {
+    shell: InteractiveShell,
+    bytes: Arc<Mutex<Vec<u8>>>,
+    terminal: vt100::Parser,
+    run_id: RunId,
+}
+
+impl MarkdownStreamReplay {
+    const WIDTH: u16 = 80;
+    const HEIGHT: u16 = 24;
+    const SCROLLBACK: usize = 2048;
+
+    fn new() -> Self {
+        let (mut shell, bytes) = emulated_shell_with_mode(
+            crate::tui::theme::test_theme(),
+            Self::WIDTH,
+            Self::HEIGHT,
+            true,
+            false,
+        );
+        shell.tui.as_mut().unwrap().set_clear_on_shrink(false);
+        for index in 0..30 {
+            shell.notice(format!("MARKDOWN-HISTORY-{index:02}"));
+        }
+        let run_id = shell.begin_run("openai");
+        let mut replay = Self {
+            shell,
+            bytes,
+            terminal: vt100::Parser::new(Self::HEIGHT, Self::WIDTH, Self::SCROLLBACK),
+            run_id,
+        };
+        replay.render();
+        replay
+    }
+
+    fn render(&mut self) -> String {
+        self.shell.render();
+        let output = std::mem::take(&mut *self.bytes.lock().expect("emulated terminal bytes"));
+        process_vt100_with_saved_line_clear(
+            &mut self.terminal,
+            &output,
+            Self::HEIGHT,
+            Self::WIDTH,
+            Self::SCROLLBACK,
+        );
+        String::from_utf8(output).unwrap()
+    }
+
+    fn delta(&mut self, text: &str) -> String {
+        self.shell.on_run_event(
+            self.run_id,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: text.into(),
+            },
+        );
+        self.render()
+    }
+
+    fn full_redraws(&self) -> usize {
+        self.shell.tui.as_ref().unwrap().full_redraws()
+    }
+
+    fn assert_append_frame(&self, output: &str, baseline: usize, context: &str) {
+        assert!(
+            !output.contains("\x1b[3J") && !output.contains("MARKDOWN-HISTORY-"),
+            "{context}: streaming rewrote native history"
+        );
+        assert_eq!(self.full_redraws(), baseline, "{context}: full replay");
+    }
+
+    // Only call after the last frame: vt100 does not model terminal reflow.
+    fn history(&mut self) -> String {
+        self.terminal.set_size(Self::SCROLLBACK as u16, Self::WIDTH);
+        self.terminal.set_scrollback(usize::MAX);
+        let physical = self.terminal.screen().contents();
+        for index in 0..30 {
+            let sentinel = format!("MARKDOWN-HISTORY-{index:02}");
+            assert_eq!(physical.matches(&sentinel).count(), 1, "{sentinel}");
+        }
+        physical
+    }
+}
+
+#[test]
+fn streamed_table_body_does_not_replay_native_history() {
+    use octet_ai::{AssistantMessage, AssistantPart, ModelId, Protocol, StopReason};
+
+    let mut replay = MarkdownStreamReplay::new();
+    // Establish the table before measuring the body, so recognizing the
+    // header/delimiter is not confused with a body-layout regression.
+    let mut response = String::from("| Marker | Description | State |\n|---|---|---|\n");
+    replay.delta(&response);
+    let baseline = replay.full_redraws();
+    let mut body_ed3 = 0;
+    let mut body_history_rewrites = 0;
+    for index in 0..24 {
+        let row = format!(
+            "| ROW{index:02} | distinct boundary words to wrap inside each cell | retained |\n"
+        );
+        response.push_str(&row);
+        for chunk in row.as_bytes().chunks(5) {
+            let output = replay.delta(std::str::from_utf8(chunk).unwrap());
+            body_ed3 += output.matches("\x1b[3J").count();
+            body_history_rewrites += output.matches("MARKDOWN-HISTORY-00").count();
+        }
+        assert!(
+            replay
+                .terminal
+                .screen()
+                .contents()
+                .contains(&format!("ROW{index:02}")),
+            "completed table row {index} was withheld from the live frame"
+        );
+    }
+    let body_redraws = replay.full_redraws() - baseline;
+
+    // Canonical final parsing may legitimately relayout the table once. Do not
+    // count that separately observable boundary as a streaming-body replay.
+    let before_finish = replay.full_redraws();
+    replay.shell.on_run_event(
+        replay.run_id,
+        &AgentEvent::TurnFinished {
+            message: AssistantMessage {
+                content: vec![AssistantPart::Text(response)],
+                model: ModelId("m".into()),
+                protocol: Protocol::OpenAiResponses,
+            },
+            stop_reason: StopReason::EndTurn,
+            turn_usage: Usage::default(),
+            usage: Usage::default(),
+            session_cost_microdollars: None,
+            run_cost_microdollars: 0,
+        },
+    );
+    let finish_output = replay.render();
+    let finish_redraws = replay.full_redraws() - before_finish;
+    let finish_ed3 = finish_output.matches("\x1b[3J").count();
+    let physical = replay.history();
+    for index in 0..24 {
+        let sentinel = format!("ROW{index:02}");
+        assert_eq!(physical.matches(&sentinel).count(), 1, "{sentinel}");
+    }
+    assert_eq!(
+        (body_redraws, body_ed3, body_history_rewrites),
+        (0, 0, 0),
+        "table body must append without resetting history; canonical finish separately: \
+         full_redraws={finish_redraws}, ED3={finish_ed3}"
+    );
+}
+
+#[test]
+fn streamed_rich_paragraph_keeps_formatting_across_8192_bytes() {
+    let mut replay = MarkdownStreamReplay::new();
+    let mut response = format!("**RICH-PREFIX** {}", "word ".repeat(1636));
+    response.truncate(8192);
+    assert_eq!(response.len(), 8192);
+    replay.delta(&response[..512]);
+    let (row, column) = find_ascii_cell(replay.terminal.screen(), "RICH-PREFIX")
+        .expect("rich prefix must be promptly visible");
+    assert!(replay.terminal.screen().cell(row, column).unwrap().bold());
+    let baseline = replay.full_redraws();
+
+    for (index, chunk) in response.as_bytes()[512..].chunks(512).enumerate() {
+        let output = replay.delta(std::str::from_utf8(chunk).unwrap());
+        replay.assert_append_frame(&output, baseline, &format!("rich chunk {index}"));
+        assert!(!strip_terminal_sequences(&output).contains("**RICH-PREFIX**"));
+    }
+    for source_bytes in [8193, 8194] {
+        let output = replay.delta("x");
+        assert!(
+            !strip_terminal_sequences(&output).contains("**RICH-PREFIX**"),
+            "rich paragraph restored literal delimiters at byte {source_bytes}"
+        );
+        replay.assert_append_frame(&output, baseline, &format!("rich byte {source_bytes}"));
+    }
+    let physical = replay.history();
+    assert_eq!(physical.matches("RICH-PREFIX").count(), 1);
+    assert!(!physical.contains("**RICH-PREFIX**"));
+    let (row, column) = find_ascii_cell(replay.terminal.screen(), "RICH-PREFIX").unwrap();
+    assert!(replay.terminal.screen().cell(row, column).unwrap().bold());
+}
+
+#[test]
+fn streamed_code_closing_fence_fragments_do_not_flash_as_code() {
+    for marker in ['`', '~'] {
+        let mut replay = MarkdownStreamReplay::new();
+        replay.delta(&format!("{}rust\n", marker.to_string().repeat(3)));
+        for index in 0..32 {
+            replay.delta(&format!("let CODE{index:02} = value;\n"));
+        }
+        let baseline = replay.full_redraws();
+        for fragment in [
+            marker.to_string(),
+            marker.to_string(),
+            marker.to_string(),
+            "\n".into(),
+        ] {
+            let output = replay.delta(&fragment);
+            let visible = replay.terminal.screen().contents();
+            assert!(
+                !visible.contains(marker),
+                "closing {marker} fence fragment {fragment:?} flashed as code:\n{visible}"
+            );
+            replay.assert_append_frame(&output, baseline, "closing code fence");
+        }
+        replay.delta("\nAFTER-CODE-SENTINEL");
+        assert!(replay
+            .terminal
+            .screen()
+            .contents()
+            .contains("AFTER-CODE-SENTINEL"));
+        let physical = replay.history();
+        for index in 0..32 {
+            let sentinel = format!("CODE{index:02}");
+            assert_eq!(physical.matches(&sentinel).count(), 1, "{sentinel}");
+        }
+        assert!(!physical.contains(marker));
+    }
+}
+
+#[test]
+fn streamed_huge_newline_free_prose_remains_promptly_visible() {
+    let mut replay = MarkdownStreamReplay::new();
+    let baseline = replay.full_redraws();
+    // Exceed even the 64 KiB unstable-parse budget without a newline. Every
+    // completed delta must remain live; freezing all long tails is not a fix.
+    for index in 0..144 {
+        let text = format!("{} PLAIN{index:03} ", "ordinary prose ".repeat(34));
+        let output = replay.delta(&text);
+        replay.assert_append_frame(&output, baseline, &format!("plain chunk {index}"));
+        let visible = replay.terminal.screen().contents();
+        assert!(
+            visible.contains(&format!("PLAIN{index:03}")),
+            "newline-free prose chunk {index} was withheld:\n{visible}"
+        );
+    }
+    let physical = replay.history();
+    for index in 0..144 {
+        let sentinel = format!("PLAIN{index:03}");
+        assert_eq!(physical.matches(&sentinel).count(), 1, "{sentinel}");
+    }
+}
+
 #[test]
 fn closing_overlay_reanchors_without_replaying_native_scrollback() {
     const WIDTH: u16 = 80;
@@ -9386,15 +9633,10 @@ fn subagent_transcript_rows_nest_and_wrap_without_call_counts() {
             } else {
                 String::new()
             };
-            let tool = if native {
-                format!("{separator}read")
-            } else {
-                String::new()
-            };
             let expected = vec![
                 format!("Inspect tests failed{separator}{usage}{reason}"),
                 format!("Audit docs completed{separator}{usage}{cost_separator}$0.000"),
-                format!("Read changelog running{tool}{separator}{usage}{cost_separator}$0.165"),
+                format!("Read changelog running{separator}{usage}{cost_separator}$0.165"),
             ];
             for width in [24, 40, 80, 120] {
                 for verbose in [false, true] {
@@ -11714,6 +11956,64 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
             assert!(!text.contains("137, 80, 78, 71"));
             assert!(!text.contains("\x1b_G"));
             assert!(!text.contains("\x1b]1337;File="));
+        }
+    }
+}
+
+#[path = "native_history_tests.rs"]
+mod native_history_tests;
+
+#[test]
+fn shell_backspace_atomically_removes_paste_and_attachment_chips() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pastes = vec!["DELETED-PASTE-PAYLOAD\n".repeat(20)];
+    for name in ["image.png", "audio.wav", "document.pdf"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"fixture attachment payload").unwrap();
+        pastes.push(path.display().to_string());
+    }
+    for paste in pastes {
+        // Exercise both the chip's end and an interior editor cursor through
+        // the shell's real key-action path, not the ledger helper alone.
+        for interior in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_input_modalities(
+                octet_ai::ModalitySet::none()
+                    .with(octet_ai::Modality::Image)
+                    .with(octet_ai::Modality::Audio),
+            );
+            shell.apply_edit(EditAction::Paste("keep ".into()));
+            shell.apply_edit(EditAction::Paste(paste.clone()));
+            assert!(shell.pending().starts_with("keep ["), "{}", shell.pending());
+            assert!(!shell.state.borrow().ledger.is_empty());
+            if interior {
+                for _ in 0..3 {
+                    shell.apply_edit(EditAction::Left);
+                }
+            }
+            {
+                let mut state = shell.state.borrow_mut();
+                state.slash_selection = 7;
+                state.slash_scroll = 3;
+                state.slash_popup_dismissed = true;
+            }
+            shell.apply_edit(EditAction::Backspace);
+            assert_eq!(shell.pending(), "keep ");
+            {
+                let state = shell.state.borrow();
+                assert!(state.ledger.is_empty());
+                assert_eq!(state.editor.cursor(), "keep ".len());
+                assert_eq!(state.slash_selection, 0);
+                assert_eq!(state.slash_scroll, 0);
+                assert!(!state.slash_popup_dismissed);
+            }
+            // Ordinary Backspace still reaches the generic editor, and the
+            // revoked payload cannot be composed after its mask disappears.
+            shell.apply_edit(EditAction::Backspace);
+            let composed = shell.drain_composed();
+            assert_eq!(composed.display_text, "keep");
+            assert!(matches!(composed.parts.as_slice(),
+                [octet_agent::InputPart::Text(text)] if text == "keep"));
         }
     }
 }

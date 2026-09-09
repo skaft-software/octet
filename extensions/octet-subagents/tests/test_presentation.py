@@ -11,7 +11,7 @@ except ImportError:
 from fake_agent_sessions import FakeHostState, ManualClock
 from octet_subagents.model import Worker
 from octet_subagents.orchestrator import Orchestrator
-from octet_subagents.presentation import build_snapshot
+from octet_subagents.presentation import STATE_LABEL, build_snapshot, narrow_list
 
 
 class PresentationTests(unittest.TestCase):
@@ -123,11 +123,21 @@ class PresentationTests(unittest.TestCase):
                     agent_id="agent-%d" % index,
                     agent_path="/root/worker-%d" % index,
                     name="worker-%d" % index,
+                    current_tool="search",
+                    phase="using search",
+                    recent_tools=[{"name": "search", "args": "pattern=private", "finished_at_ms": None}],
                 )
                 snapshot = build_snapshot(
                     [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_010_000
                 )
-                self.assertEqual(snapshot["collection"]["nodes"][0]["state"], generic)
+                node = snapshot["collection"]["nodes"][0]
+                activity = snapshot["activities"][0]
+                self.assertEqual(node["state"], generic)
+                self.assertEqual(activity["state"], generic)
+                self.assertEqual(activity["summary"], "%s · %s" % (worker.name, STATE_LABEL[state]))
+                for compact in (node["secondary"], activity["summary"], narrow_list([worker], 1_700_000_010_000)):
+                    self.assertNotIn("search", compact)
+                    self.assertNotIn("pattern=private", compact)
 
     def test_actions_route_only_to_declared_command_and_stop_is_destructive(self):
         worker = self.worker()
@@ -184,9 +194,17 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(host.agents[result["worker"]["id"]].status["state"], "running")
         self.assertTrue(stopped["notifications"])
 
-    def test_recent_tool_activity_surfaces_in_rows_and_detail(self):
+    def test_recent_tool_activity_is_inspector_only_while_usage_remains_compact(self):
         worker = self.worker(
             "running",
+            current_tool="read",
+            phase="using read",
+            tool_call_count=2,
+            turn_count=1,
+            tokens_used=1000,
+            input_tokens=800,
+            output_tokens=200,
+            cost_microdollars=1200,
             recent_tools=[
                 {
                     "name": "search",
@@ -208,19 +226,35 @@ class PresentationTests(unittest.TestCase):
             [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_004_000
         )
         node = snapshot["collection"]["nodes"][0]
-        # The in-progress read with its argument summary is the live focus.
-        self.assertIn("read path=crates/octet-agent/src/delegation.rs", node["secondary"])
-        self.assertIn("* read", node["secondary"])
+        activity = snapshot["activities"][0]
+        for compact in (
+            node["secondary"],
+            activity["summary"],
+            narrow_list([worker], 1_700_000_004_000),
+        ):
+            for entry in worker.recent_tools:
+                self.assertNotIn(entry["name"], compact)
+                self.assertNotIn(entry["args"], compact)
+        self.assertEqual(activity["summary"], "fixture-worker · running")
+        self.assertIn("2 tool calls", node["secondary"])
+        self.assertIn("1/8 turns", node["secondary"])
+        self.assertIn("1000 tok", node["secondary"])
+        self.assertIn("$0.0012", node["secondary"])
+        self.assertEqual(activity["metrics"]["tool_calls"], 2)
+        self.assertEqual(activity["metrics"]["input_tokens"], 800)
+        self.assertEqual(activity["metrics"]["output_tokens"], 200)
+        self.assertEqual(activity["metrics"]["cost_microdollars"], 1200)
         detail = snapshot["collection"]["detail"]["body"]
         self.assertIn("Recent tool activity", detail)
         self.assertIn("[ok] search pattern=spawn_agent path=crates", detail)
         self.assertIn("[running] read path=crates/octet-agent/src/delegation.rs", detail)
-        activity = snapshot["activities"][0]
-        self.assertIn("read path=crates/octet-agent/src/delegation.rs", activity["summary"])
 
-    def test_error_tool_activity_is_marked_in_row_and_detail(self):
+    def test_error_tool_activity_is_inspector_only_without_hiding_worker_failure(self):
         worker = self.worker(
-            "running",
+            "failed",
+            current_tool="bash",
+            phase="using bash",
+            last_error="The worker failed at the provider boundary.",
             recent_tools=[
                 {
                     "name": "bash",
@@ -235,9 +269,21 @@ class PresentationTests(unittest.TestCase):
             [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_003_000
         )
         node = snapshot["collection"]["nodes"][0]
-        self.assertIn("! bash command=make test", node["secondary"])
+        activity = snapshot["activities"][0]
+        self.assertEqual(node["state"], "failed")
+        self.assertEqual(activity["state"], "failed")
+        self.assertEqual(activity["summary"], "fixture-worker · failed")
+        self.assertEqual(snapshot["status"]["state"], "degraded")
+        self.assertIn("1 failed", snapshot["status"]["label"])
+        for compact in (
+            node["secondary"], activity["summary"], narrow_list([worker], 1_700_000_003_000)
+        ):
+            self.assertIn("failed", compact)
+            self.assertNotIn("bash", compact)
+            self.assertNotIn("command=make test", compact)
         detail = snapshot["collection"]["detail"]["body"]
         self.assertIn("[error] bash command=make test", detail)
+        self.assertIn(worker.last_error, detail)
 
     def test_checked_in_presentation_fixtures_cover_live_tree_resync_and_inspection(self):
         live = json.loads(

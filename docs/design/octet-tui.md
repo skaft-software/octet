@@ -58,6 +58,22 @@ previous viewport-top state. It finds the first and last changed physical rows,
 repaints only that range when it remains addressable, and uses bottom-row CRLF
 appends to let new rows enter native scrollback.
 
+An ordinary trailing pending tool now has a height-bounded **live preview**:
+its intent and newest progress remain on the addressable screen, with an explicit
+`result pending` omission marker when space permits. This projection does not
+truncate the semantic/source cache. On completion it is replaced by the canonical
+result under the normal disclosure policy, which can then enter saved history
+exactly once. Octet disables shrink-triggered clearing for its renderer; generic
+Pi behavior remains unchanged. Optional dot/shimmer/timer ticks do not invalidate
+headings already above the native live-screen seam.
+
+This closes the tested pending → progress → result/error case, not all of #392.
+Real updates to historical concurrent tools/rosters, retrospective Markdown
+changes, resize, and other structural transitions can still take the replay path
+below. Do not suppress that path without an emitted-history policy that preserves
+real results. Actual Terminal.app, Ghostty, and Ghostty → SSH reader/selection
+journeys on this candidate remain unrun.
+
 A change above the old viewport cannot be repaired with cursor addressing.
 Matching Pi, that path emits `ED 2`, homes, clears saved lines with `ED 3`, and
 replays the complete materialized frame. Width changes do the same because line
@@ -101,6 +117,9 @@ completion for relative, parent, home-relative, and absolute path tokens.
 Up/Down selects from a visible path or mention menu, whose bounded window follows
 the selection; Tab inserts that result. With no visible menu or a cursor inside
 the draft, arrows retain visual editor navigation.
+Backspace inside or immediately after a registered paste/attachment chip removes
+the whole mask and its ledger association. Ordinary bracketed text is not a chip;
+neighboring Unicode text and other attachments remain unchanged.
 Slash-command discovery, file mentions, and filesystem completion render inline
 directly below the composer. While matches are visible, the suggestion surface
 temporarily replaces the model and token status row; the status returns as soon
@@ -117,12 +136,14 @@ Escape or Left returns to the composer.
 Generic presentation snapshots do not create persistent chrome. The first-party
 `octet-subagents` observation surface is the bounded exception: while an owning
 run has workers, the host renders its complete owner-fenced `subagent` roster in
-a persistent transcript event immediately above the composer. Worker rows are
-indented beneath `Subagents` and show `name  state · ↑input ↓output • cost`;
-ordinary tool disclosure never truncates the roster. Per-worker call counts
-remain retained telemetry, not row text. A
-nonblocking 250 ms host tick invokes the owner-scoped status command, coalesces
-with normal extension events, and retains the last accepted snapshot on failure.
+a persistent transcript event. Compact worker rows retain task name, lifecycle,
+tokens, and cost; transient child-tool names stay in the inspector
+rather than shifting those columns on each tool start/finish. The roster's active
+dot is steady. Full host telemetry remains current, but hidden phase/elapsed
+or call-count changes do not invalidate transcript rows. Call counts remain
+retained telemetry, not row text. Native `DelegationUpdated` events
+feed this view directly; it does not poll the extension's slash command.
+
 Live child cost is added to the host-owned cumulative footer only until root
 settlement persists matching `delegated_agent` usage records; idle rendering
 therefore cannot count it twice.
@@ -164,7 +185,33 @@ historical prompts; it only recolours the composer and prompts submitted after
 the switch. Wrapped and explicit continuation rows keep the same card background
 with a blank primary-text gutter instead of a vertical rail. Fenced Markdown
 code is borderless and uses the compiled default's terminal-adaptive shading.
+Default tool/shell surfaces reserve a two-cell right gutter, reduced in tiny
+panes, before wrapping headers and nested output. Their source and copy text are
+unchanged; custom surfaces retain their configured geometry.
 The unknown-profile fallback remains unpainted.
+
+## Streaming presentation stability
+
+Newlines are interpretation boundaries, not a blanket visibility gate. Ordinary
+prose stays visible immediately. Ambiguous fence/info strings, closing fences,
+structural delimiter lines, and incomplete table rows wait for classification;
+raw input stays exact and semantic copy retains the withheld decoded text.
+Completed inline code can disambiguate a possible backtick fence without LF.
+
+Parser scheduling does not grant permission to replace a rich preview with raw
+Markdown. Geometric discovery passes do not briefly collapse literal source
+lines into soft-wrapped paragraphs. A rich paragraph exceeding its inline parse
+budget keeps its interpreted prefix and appends a literal continuation until a
+proven block boundary or canonical finalization. The compiled default sizes code
+surfaces and table columns from the viewport, so a later longer cell/line does
+not reshape earlier rows. Static and streaming rendering use the same geometry.
+
+Complete source lines, stable semantic blocks, unchanged visual prefixes, and
+native-history commits remain different boundaries. Finalization still produces
+canonical Markdown; it can require a retrospective repaint. Very large tables
+can fall back to literal complete rows beyond the mutable parser budget. These
+policies reduce live churn, not establish that every Markdown boundary or native
+reader journey is qualified. See [the performance contract](performance.md).
 
 ## Approval panels
 
@@ -286,8 +333,12 @@ durable head and hydrates the selected branch. `/reload` recomposes AGENTS
 instructions, rescans skills and prompts, and rebuilds the Agent only at an idle
 boundary.
 
-Model selection is available through a picker or direct `/model <id>`. The
-picker groups providers alphabetically, then models alphabetically within each
+Model selection is available through a picker or direct `/model <id>`. Each
+model-picker opening starts at the first selectable result; `(current)` remains
+an annotation, not an instruction to scroll into the middle of the catalog.
+Successful model/thinking changes update stable status without an extra transcript
+success notice. Queued acknowledgements and failure diagnostics remain visible.
+The picker groups providers alphabetically, then models alphabetically within each
 provider. Provider names appear once as non-selectable headings; aligned model
 metadata is limited to input/output price, context window, and vision/audio
 support. Tool and reasoning support are omitted from these rows. Thinking

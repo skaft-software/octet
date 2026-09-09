@@ -29,13 +29,35 @@ renderer path, distinguish answer/reasoning telemetry, provide repeated
 credential-free renderer replay, and remove premature Bash effects. These are
 specific improvements, not completion of the latency targets below.
 
-Tabs, CR/control normalization, semantic previews, fenced diffs, and some
-content-fitting code geometry still use general tail layout; unbounded
-individual graphemes can also require unbounded frontier work. Full-document and
+Tabs, CR/control normalization, general semantic previews, fenced diffs, and some
+content-fitting code geometry still use general tail layout. A bounded rich
+paragraph prefix followed by append-only literal text retains styled rows and
+replays only its wrapping frontier; prefix flattening and copied layout bytes
+have separate work counters. Unbounded individual graphemes can also require
+unbounded frontier work. Full-document and
 full-lines APIs necessarily materialize their requested output. The input/layout
 shared lock and complete five-client interactive replay remain outstanding.
 Report these boundaries alongside improvements; no end-to-end constant-time or
 all-open-code linearity claim is supported.
+
+## Visual stability is separate from throughput
+
+Streaming regressions also record actual Shell → Pi → ANSI/vt100 frames. They
+check saved-line erasure (`ED 3`), full redraws, historical sentinel duplication,
+and live content—not just final-frame equality or parser timing. Current cases
+cover table body growth, rich paragraphs crossing the inline budget, fragmented
+closing fences, and huge newline-free prose. Canonical completion is a separate
+phase; no-change renders must not repeat it.
+
+The parser keeps ordinary literal previews and interpreted prefixes stable
+between meaningful boundaries. A provisional structural-line classifier tracks
+new bytes separately (`preview_scanned_bytes`); withheld table-cell bytes do not
+invalidate layout. Raw/copy ingestion remains immediate. The compiled default
+uses viewport-sized code/table geometry and a stable compact subagent roster.
+These tests establish composed frames and protocol output, not actual emulator
+paint timing or native wheel-offset preservation. Terminal.app, Ghostty, and
+Ghostty-over-SSH journeys on the exact candidate remain separate qualification;
+issues #392/#393 are not closed merely by these deterministic checks.
 
 ## Non-negotiable rules
 

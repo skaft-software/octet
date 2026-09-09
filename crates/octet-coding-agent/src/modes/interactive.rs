@@ -922,13 +922,14 @@ where
     }
 }
 
-pub(crate) async fn run_blocking_lifecycle<T, W>(
+pub(crate) async fn run_blocking_lifecycle<T, W, S>(
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     label: &str,
     work: W,
 ) -> anyhow::Result<T>
 where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
     T: Send + 'static,
     W: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
@@ -2978,17 +2979,22 @@ async fn checkout_entry(
     Ok(app)
 }
 
-async fn transition(
+async fn transition<S>(
     app: App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     reconfig: Reconfig,
-) -> anyhow::Result<App> {
+) -> anyhow::Result<App>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
         apply_reconfig(app, reconfig)
     })
     .await?;
     shell.hydrate(app.agent.session())?;
+    // Model and thinking changes are acknowledged by stable chrome, not a
+    // duplicate transcript notice. Session-operation notices remain caller-owned.
     update_status(shell, &app);
     app.executable_extensions
         .activate_session_lifecycle_driver();
@@ -3343,14 +3349,12 @@ async fn apply_pending_actions(
             },
             PendingIdleAction::ChangeModel(id) => {
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
-                shell.notice("queued model change applied");
             }
             PendingIdleAction::ChangeThinking(reasoning) => {
                 if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
                     shell.error(format!("failed to save thinking preference: {e}"));
                 }
                 app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
-                shell.notice("queued thinking change applied");
             }
             PendingIdleAction::ChangeThinkingLevel(level) => {
                 let reasoning = thinking_to_reasoning_with_subagents(
@@ -3362,7 +3366,6 @@ async fn apply_pending_actions(
                     shell.error(format!("failed to save thinking preference: {e}"));
                 }
                 app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
-                shell.notice("queued thinking change applied");
             }
             PendingIdleAction::CycleThinking => {
                 let level = next_thinking_level(&app)?;
@@ -3375,7 +3378,6 @@ async fn apply_pending_actions(
                     shell.error(format!("failed to save thinking preference: {e}"));
                 }
                 app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
-                shell.notice(format!("thinking changed to {}", level.label()));
             }
             PendingIdleAction::NewSession => {
                 app = transition(app, shell, input, Reconfig::NewSession).await?;
@@ -3428,7 +3430,6 @@ async fn apply_pending_actions(
             PendingIdleAction::PickModel => {
                 if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
                     app = transition(app, shell, input, Reconfig::Model(model)).await?;
-                    shell.notice("queued model change applied");
                 }
             }
             PendingIdleAction::PickThinking => {
@@ -3450,7 +3451,6 @@ async fn apply_pending_actions(
                         Reconfig::ThinkingMode { mode, reasoning },
                     )
                     .await?;
-                    shell.notice("queued thinking change applied");
                 }
             }
             PendingIdleAction::Skills(sub) => {
@@ -3943,10 +3943,6 @@ async fn run_idle_command(
         }
         Command::Model(Some(id)) => {
             app = transition(app, shell, input, Reconfig::Model(ModelId(id))).await?;
-            shell.notice(format!(
-                "model changed · {}",
-                commands::model_selection_text(&app.model)
-            ));
         }
         Command::Theme(requested) => {
             configure_terminal_theme(shell, input, &mut app.config, requested, false).await?;
@@ -3959,15 +3955,10 @@ async fn run_idle_command(
                 shell.error(format!("failed to save thinking preference: {e}"));
             }
             app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
-            shell.notice("thinking changed");
         }
         Command::Model(None) => {
             if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
                 app = transition(app, shell, input, Reconfig::Model(model)).await?;
-                shell.notice(format!(
-                    "model changed · {}",
-                    commands::model_selection_text(&app.model)
-                ));
             }
         }
         Command::Thinking(None) => {
@@ -3987,7 +3978,6 @@ async fn run_idle_command(
                     Reconfig::ThinkingMode { mode, reasoning },
                 )
                 .await?;
-                shell.notice("thinking changed");
             }
         }
         Command::Verbose(value) => {
@@ -5358,7 +5348,6 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                 app =
                     transition(app, &mut shell, &mut input, Reconfig::Thinking(reasoning)).await?;
                 schedule_responses_prewarm(&app);
-                shell.notice(format!("thinking changed to {}", level.label()));
                 shell.render();
             }
             Idle::Command(command_input) => {
@@ -6758,6 +6747,100 @@ mod tests {
             assert!(queue.is_empty());
             assert!(!quit_requested);
         }
+    }
+
+    #[tokio::test]
+    async fn model_and_thinking_transitions_update_status_without_success_notices() {
+        let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
+        let mut shell = InteractiveShell::test_shell();
+        update_status(&mut shell, &app);
+        let mut input = futures_util::stream::pending();
+        let model = ModelId("claude-sonnet-4-5".into());
+        assert_ne!(shell.selected_identity().0, model.0);
+        app = transition(app, &mut shell, &mut input, Reconfig::Model(model.clone()))
+            .await
+            .unwrap();
+        assert_eq!(shell.selected_identity().0, model.0);
+        assert!(shell.status_detail().contains(&model.0));
+        assert!(shell.debug_snapshot().is_empty());
+
+        for level in [ThinkingLevel::High, ThinkingLevel::Low, ThinkingLevel::High] {
+            let reasoning =
+                thinking_to_reasoning_with_subagents(level, &app.model, app.subagents_available())
+                    .unwrap();
+            let label = reasoning_label(&reasoning);
+            let previous = shell.selected_identity();
+            app = transition(app, &mut shell, &mut input, Reconfig::Thinking(reasoning))
+                .await
+                .unwrap();
+            assert_ne!(shell.selected_identity(), previous);
+            assert_eq!(shell.selected_identity(), (model.0.clone(), label.clone()));
+            assert!(shell.status_detail().contains(&label));
+            assert!(
+                shell.debug_snapshot().is_empty(),
+                "success notices must not accumulate"
+            );
+            assert_eq!(shell.debug_error(), None);
+            assert!(
+                app.agent.session().entries().iter().any(|entry| matches!(
+                    &entry.value,
+                    EntryValue::Config { reasoning: Some(value), .. } if value == &label
+                )),
+                "configuration provenance must remain durable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_model_transition_returns_diagnostic_without_changing_status() {
+        let (_workspace, app) = crate::compaction::tests::app_for_estimate();
+        let mut shell = InteractiveShell::test_shell();
+        update_status(&mut shell, &app);
+        let identity = shell.selected_identity();
+        let mut input = futures_util::stream::pending();
+        let error = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Model(ModelId("missing-release-test-model".into())),
+        )
+        .await
+        .err()
+        .expect("an unresolved model must remain an error");
+        assert!(
+            error.to_string().contains("missing-release-test-model"),
+            "{error}"
+        );
+        assert_eq!(shell.selected_identity(), identity);
+        assert!(shell.debug_snapshot().is_empty());
+    }
+
+    #[test]
+    fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
+        for command in [
+            Command::Model(Some("gpt-4o-mini".into())),
+            Command::Thinking(Some("high".into())),
+        ] {
+            let mut shell = InteractiveShell::test_shell();
+            let mut queue = VecDeque::new();
+            handle_active_command(&mut shell, command, &mut queue, &mut false);
+            assert_eq!(queue.len(), 1);
+            assert!(shell
+                .debug_snapshot()
+                .contains("command queued for the next idle boundary"));
+            assert_eq!(shell.debug_error(), None);
+        }
+        let mut shell = InteractiveShell::test_shell();
+        let mut queue = VecDeque::new();
+        handle_active_command(
+            &mut shell,
+            Command::Thinking(Some("invalid-effort".into())),
+            &mut queue,
+            &mut false,
+        );
+        assert!(queue.is_empty());
+        assert!(shell.debug_error().is_some());
+        assert!(shell.debug_snapshot().is_empty());
     }
 
     #[test]

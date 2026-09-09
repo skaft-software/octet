@@ -60,6 +60,9 @@ pub struct RenderOptions {
     pub code_borders: bool,
     pub syntax_highlighting: bool,
     pub tables: bool,
+    /// Size code surfaces and table columns from the viewport, not growing
+    /// payloads. Earlier rows then keep their geometry as a stream appends.
+    pub stable_block_geometry: bool,
     pub unordered_list_marker: UnorderedListMarker,
 }
 
@@ -71,6 +74,7 @@ impl Default for RenderOptions {
             code_borders: false,
             syntax_highlighting: cfg!(feature = "syntax-highlighting"),
             tables: true,
+            stable_block_geometry: false,
             unordered_list_marker: UnorderedListMarker::Bullet,
         }
     }
@@ -782,10 +786,14 @@ impl RichRenderer {
                 .saturating_add(configured_right)
         };
         let minimum_width = if bordered { 3 } else { 1 };
-        let block_width = required_for_content
-            .max(required_for_label)
-            .max(minimum_width)
-            .min(width);
+        let block_width = if self.options.stable_block_geometry {
+            width
+        } else {
+            required_for_content
+                .max(required_for_label)
+                .max(minimum_width)
+                .min(width)
+        };
         let inner_width = block_width.saturating_sub(frame_width);
         let left_padding = configured_left.min(inner_width.saturating_sub(1));
         let right_padding =
@@ -1074,11 +1082,14 @@ impl RichRenderer {
             return self.render_table_fallback_with_commit_ends(table, width);
         }
 
-        let mut natural = vec![1usize; columns];
-        for row in std::iter::once(&table.header).chain(table.rows.iter()) {
-            for (column, cell) in row.iter().enumerate() {
-                let runs = self.inline_runs(cell, self.theme.style(TextRole::Text));
-                natural[column] = natural[column].max(self.runs_width(&runs).min(40));
+        let mut natural = vec![width; columns];
+        if !self.options.stable_block_geometry {
+            natural.fill(1);
+            for row in std::iter::once(&table.header).chain(table.rows.iter()) {
+                for (column, cell) in row.iter().enumerate() {
+                    let runs = self.inline_runs(cell, self.theme.style(TextRole::Text));
+                    natural[column] = natural[column].max(self.runs_width(&runs).min(40));
+                }
             }
         }
         let interior = width.saturating_sub(overhead);
@@ -1445,7 +1456,7 @@ impl RichRenderer {
                 start += 1;
                 if start + 1 < units.len() {
                     stable_rows = output.len();
-                    restart = units[start].start;
+                    restart = units[start].source_start;
                 }
                 continue;
             }
@@ -1470,7 +1481,7 @@ impl RichRenderer {
             output.push(line_from_units(line_runs, &units[start..line_end]));
             if end + 1 < units.len() && next + 1 < units.len() {
                 stable_rows = output.len();
-                restart = units[next].start;
+                restart = units[next].source_start;
                 skip_space = false;
             } else if prose
                 && end + 1 < units.len()
@@ -1481,7 +1492,7 @@ impl RichRenderer {
                 // grapheme can still acquire a combining suffix. Retain it
                 // and the skip state, not the whole growing whitespace run.
                 stable_rows = output.len();
-                restart = units.last().unwrap().start;
+                restart = units.last().unwrap().source_start;
                 skip_space = true;
             }
             start = next;
@@ -2114,6 +2125,14 @@ pub struct StreamingLayoutStats {
     pub measured_bytes: u64,
     /// Source bytes submitted to wrapping/clipping (including mutable-row replay).
     pub laid_out_bytes: u64,
+    /// Text/link bytes materialized by the append cache for its prefix, layout
+    /// inputs, and encoded output. Renderer-internal temporary copies and caller
+    /// snapshots are not allocation totals and are not included here.
+    pub copied_bytes: u64,
+    /// Immutable rich inline prefixes flattened, once per semantic/reflow epoch.
+    pub rich_prefix_layouts: u64,
+    /// Append caches rejected because literal tabs/CR/controls need source maps.
+    pub literal_transform_fallbacks: u64,
     /// Rows encoded, including mutable rows subsequently replaced.
     pub encoded_rows: u64,
     /// Tail renders using the general semantic/sanitizing layout path.
@@ -2137,6 +2156,10 @@ pub(super) struct AppendOnlyTail {
     code_layout: Option<CodeLayout>,
     language_width: Option<usize>,
     skip_space: bool,
+    // Only the bounded semantic prefix is owned here; growing Raw text remains
+    // in the document. Offsets address flattened prefix + borrowed Raw bytes.
+    paragraph_prefix: Option<Vec<RichRun>>,
+    paragraph_prefix_bytes: usize,
 }
 
 impl AppendOnlyTail {
@@ -2148,8 +2171,38 @@ impl AppendOnlyTail {
         output: &mut Vec<RenderedLine>,
         stats: &mut StreamingLayoutStats,
     ) -> Option<(usize, usize)> {
+        if self.disabled {
+            return None;
+        }
+        let mut prefix_newlines = Vec::new();
         let (source, code) = match block {
             Block::Plain(source) => (source.as_str(), None),
+            Block::Paragraph(content) => {
+                let (Inline::Raw(source), prefix) = content.split_last()? else {
+                    return None;
+                };
+                if self.paragraph_prefix.is_none() {
+                    // The stream owns prefix identity and resets this cache on
+                    // semantic replacement, width/options/theme changes. Never
+                    // hash, clone, or compare the growing paragraph here.
+                    stats.checked_bytes += inline_source_bytes(prefix) as u64;
+                    let runs = renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
+                    stats.copied_bytes += run_bytes(&runs) as u64;
+                    let runs = renderer.expand_run_tabs(&runs);
+                    stats.copied_bytes += run_bytes(&runs) as u64;
+                    let mut offset = 0;
+                    for run in &runs {
+                        prefix_newlines
+                            .extend(run.text.match_indices('\n').map(|(i, _)| offset + i));
+                        offset += run.text.len();
+                    }
+                    stats.checked_bytes += offset as u64;
+                    stats.rich_prefix_layouts += 1;
+                    self.paragraph_prefix_bytes = offset;
+                    self.paragraph_prefix = Some(runs);
+                }
+                (source.as_str(), None)
+            }
             Block::CodeBlock(code)
                 if !code.language.as_deref().is_some_and(|language| {
                     language.eq_ignore_ascii_case("diff") || language.eq_ignore_ascii_case("patch")
@@ -2159,23 +2212,37 @@ impl AppendOnlyTail {
             }
             _ => return None,
         };
-        if self.disabled {
-            return None;
-        }
-        let delta = &source[self.checked..];
+        let prefix_bytes = self.paragraph_prefix_bytes;
+        let source_len = prefix_bytes + source.len();
+        let checked_raw = self.checked.saturating_sub(prefix_bytes);
+        let delta = &source[checked_raw..];
         stats.checked_bytes += delta.len() as u64;
         // Tabs need original logical columns; CRLF and sanitization need source
         // maps. Keep their authoritative general layout rather than guessing at
         // offsets in transformed text. Eligibility checks inspect only the delta.
-        if delta.contains(['\t', '\r']) || renderer.sanitize(delta) != delta {
+        let sanitized = renderer.sanitize(delta);
+        stats.copied_bytes += sanitized.len() as u64;
+        if delta.contains(['\t', '\r']) || sanitized != delta {
+            stats.literal_transform_fallbacks += 1;
             self.disabled = true;
             return None;
         }
         let width = usize::from(width);
-        let mut newlines: Vec<usize> = delta
-            .match_indices('\n')
-            .map(|(offset, _)| self.checked + offset)
-            .collect();
+        // Prose at width zero has exactly one empty physical row regardless of
+        // logical newlines. Do not replay a growing invisible frontier.
+        if width == 0 && code.is_none() {
+            output.clear();
+            output.push(RenderedLine::default());
+            self.checked = source_len;
+            self.restart = source_len;
+            return Some((0, 1));
+        }
+        let mut newlines = prefix_newlines;
+        newlines.extend(
+            delta
+                .match_indices('\n')
+                .map(|(offset, _)| prefix_bytes + checked_raw + offset),
+        );
         let mut stable_prefix = self.stable_rows;
         let mut reflow = self.checked == 0;
         if let Some(code) = code {
@@ -2233,8 +2300,8 @@ impl AppendOnlyTail {
         output.truncate(self.stable_rows);
         let mut visible = self.stable_nonempty;
         for end in newlines {
-            let text = &source[self.restart..end];
-            let (rows, _, _, _) = self.rows(text, renderer, width, stats);
+            let (rows, _, _, _) =
+                self.source_rows(source, self.restart, end, renderer, width, stats);
             self.append_rows(rows, renderer, width, output, stats);
             visible = self.stable_nonempty;
             self.restart = end + 1;
@@ -2244,14 +2311,16 @@ impl AppendOnlyTail {
         // split('\n'). Empty code still has one body row beneath its label.
         if code.is_none() || !source.ends_with('\n') || source.is_empty() {
             let (rows, stable, restart, skip_space) =
-                self.rows(&source[self.restart..], renderer, width, stats);
+                self.source_rows(source, self.restart, source_len, renderer, width, stats);
             let base = output.len();
             for (index, row) in rows.into_iter().enumerate() {
                 if !row.is_empty() {
                     visible = output.len() + 1;
                 }
                 stats.encoded_rows += 1;
-                output.push(renderer.encode_line(row, width));
+                let row = renderer.encode_line(row, width);
+                stats.copied_bytes += (row.plain.len() + row.styled.len()) as u64;
+                output.push(row);
                 if index < stable {
                     self.stable_rows = base + index + 1;
                     self.stable_nonempty = visible;
@@ -2266,7 +2335,9 @@ impl AppendOnlyTail {
                     visible = output.len() + 1;
                 }
                 stats.encoded_rows += 1;
-                output.push(renderer.encode_line(row, width));
+                let row = renderer.encode_line(row, width);
+                stats.copied_bytes += (row.plain.len() + row.styled.len()) as u64;
+                output.push(row);
             }
         }
         // Retain trailing empty stable rows internally so a long blank suffix
@@ -2274,8 +2345,77 @@ impl AppendOnlyTail {
         if output.is_empty() {
             output.push(RenderedLine::default());
         }
-        self.checked = source.len();
+        self.checked = source_len;
         Some((stable_prefix, visible.max(1)))
+    }
+
+    fn source_rows(
+        &self,
+        source: &str,
+        start: usize,
+        end: usize,
+        renderer: &RichRenderer,
+        width: usize,
+        stats: &mut StreamingLayoutStats,
+    ) -> (Vec<RichLine>, usize, usize, bool) {
+        let prefix_bytes = self.paragraph_prefix_bytes;
+        if start >= prefix_bytes {
+            return self.rows(
+                &source[start - prefix_bytes..end - prefix_bytes],
+                renderer,
+                width,
+                stats,
+            );
+        }
+        // Replay just the mutable visual frontier, preserving run boundaries:
+        // grapheme segmentation is per semantic run in the authoritative layout.
+        let mut runs = Vec::new();
+        let mut offset = 0;
+        for run in self.paragraph_prefix.as_ref().unwrap() {
+            let run_end = offset + run.text.len();
+            if run_end >= start && offset <= end {
+                let text = run.text
+                    [start.saturating_sub(offset)..(end - offset).min(run.text.len())]
+                    .to_owned();
+                runs.push(RichRun::new(text, run.style, run.link.clone()));
+            }
+            offset = run_end;
+            if offset > end {
+                break;
+            }
+        }
+        if end >= prefix_bytes {
+            // flatten_inline merges the last prefix run with Raw exactly when
+            // their style/link agree. This also re-segments a split final EGC.
+            push_run(
+                &mut runs,
+                source[..end - prefix_bytes].to_owned(),
+                renderer.theme.style(TextRole::Text),
+                None,
+            );
+        }
+        stats.copied_bytes += run_bytes(&runs) as u64;
+        stats.laid_out_bytes += (end - start) as u64;
+        let units = units(&runs, renderer.options.width);
+        if units.is_empty() {
+            return (vec![RichLine::default()], 0, 0, false);
+        }
+        let leading = if self.skip_space {
+            match units.iter().position(|unit| !unit.whitespace) {
+                Some(leading) => leading,
+                None => return (Vec::new(), 0, units.last().unwrap().source_start, true),
+            }
+        } else {
+            0
+        };
+        let (rows, stable, restart, skip_space) =
+            renderer.wrap_literal_units(&runs, &units[leading..], width, true);
+        (
+            rows,
+            stable,
+            restart.max(units[leading].source_start),
+            skip_space,
+        )
     }
 
     fn rows(
@@ -2321,10 +2461,12 @@ impl AppendOnlyTail {
                     &mut stats.measured_bytes,
                 );
                 stats.laid_out_bytes += prefix.len() as u64;
+                stats.copied_bytes += prefix.len() as u64;
                 let runs = [RichRun::new(prefix.to_owned(), style, None)];
                 (vec![renderer.clip_runs(&runs, content_width)], 0, 0, false)
             } else {
                 stats.laid_out_bytes += source.len() as u64;
+                stats.copied_bytes += source.len() as u64;
                 renderer.literal_rows(source, content_width, style, self.code_layout.is_none())
             };
         let rows = rows
@@ -2350,10 +2492,37 @@ impl AppendOnlyTail {
                 self.stable_nonempty = output.len() + 1;
             }
             stats.encoded_rows += 1;
-            output.push(renderer.encode_line(row, width));
+            let row = renderer.encode_line(row, width);
+            stats.copied_bytes += (row.plain.len() + row.styled.len()) as u64;
+            output.push(row);
         }
         self.stable_rows = output.len();
     }
+}
+
+fn run_bytes(runs: &[RichRun]) -> usize {
+    runs.iter()
+        .map(|run| run.text.len() + run.link.as_ref().map_or(0, String::len))
+        .sum()
+}
+
+// Count the bounded semantic input, including link targets and transformed
+// source bytes, rather than charging only its possibly shorter display text.
+fn inline_source_bytes(content: &[Inline]) -> usize {
+    content
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text(text) | Inline::Raw(text) | Inline::Code(text) => text.len(),
+            Inline::Styled(span) => inline_source_bytes(&span.content),
+            Inline::Role { content, .. }
+            | Inline::Status { content, .. }
+            | Inline::Emphasis(content)
+            | Inline::Strong(content)
+            | Inline::Strikethrough(content) => inline_source_bytes(content),
+            Inline::Link { label, target } => inline_source_bytes(label) + target.len(),
+            Inline::SoftBreak | Inline::HardBreak => 1,
+        })
+        .sum()
 }
 
 fn visible_code_language(code: &CodeBlock) -> Option<&str> {
@@ -2506,6 +2675,8 @@ fn split_runs_at_newlines(runs: &[RichRun]) -> Vec<Vec<RichRun>> {
 
 struct Unit {
     run: usize,
+    // Offset in concatenated runs, while start/end remain run-local for slicing.
+    source_start: usize,
     start: usize,
     end: usize,
     width: usize,
@@ -2515,11 +2686,13 @@ struct Unit {
 fn units(runs: &[RichRun], policy: WidthPolicy) -> Vec<Unit> {
     let mut output = Vec::new();
     let mut column = 0usize;
+    let mut source_offset = 0usize;
     for (run_index, run) in runs.iter().enumerate() {
         for (start, grapheme) in run.text.grapheme_indices(true) {
             let width = policy.grapheme_width(grapheme, column);
             output.push(Unit {
                 run: run_index,
+                source_start: source_offset + start,
                 start,
                 end: start + grapheme.len(),
                 width,
@@ -2527,6 +2700,7 @@ fn units(runs: &[RichRun], policy: WidthPolicy) -> Vec<Unit> {
             });
             column = column.saturating_add(width);
         }
+        source_offset += run.text.len();
     }
     output
 }
@@ -2755,6 +2929,224 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn append_only_rich_paragraph_matches_every_scalar_boundary() {
+        let prefixes = [
+            vec![Inline::strong("bold"), Inline::text(" prefix e")],
+            vec![Inline::strong("bold e")],
+            vec![Inline::strong("bold"), Inline::text(" 🇦")],
+            vec![Inline::strong("bold"), Inline::text(" 👩")],
+            vec![Inline::strong("bold"), Inline::text("  \n\n")],
+            vec![Inline::strong("bold"), Inline::text("          ")],
+            vec![
+                Inline::strong("bold"),
+                Inline::emphasis(""),
+                Inline::text(""),
+            ],
+            vec![
+                Inline::status(StatusKind::Success, "ready"),
+                Inline::SoftBreak,
+                Inline::link("docs", "https://example.com/界"),
+                Inline::HardBreak,
+                Inline::Code("e\t界\x1b[31m\r\n".into()),
+                Inline::text(" 👩"),
+            ],
+        ];
+        let source = concat!(
+            "\u{301}\u{200d}💻🇧 alpha beta gamma longidentifierabcdefghij ",
+            "界界 e\u{301} ♥\u{fe0f} 👩\u{200d}💻 🇦🇧 ",
+            "\n\nsecond line with     spaces\n\n\n",
+            "                  \u{301}more text for wrapping"
+        );
+        for renderer in [RichRenderer::plain(), renderer(ColorDepth::TrueColor, true)] {
+            for width in [0, 1, 2, 3, 7, 16, 40] {
+                for prefix in &prefixes {
+                    let mut cache = AppendOnlyTail::default();
+                    let mut stats = StreamingLayoutStats::default();
+                    let mut output = Vec::new();
+                    let mut frame = Vec::new();
+                    for end in std::iter::once(0)
+                        .chain(source.char_indices().map(|(i, c)| i + c.len_utf8()))
+                    {
+                        let mut content = prefix.clone();
+                        content.push(Inline::Raw(source[..end].to_owned()));
+                        let block = Block::Paragraph(content);
+                        let (stable, visible) = cache
+                            .update(&block, &renderer, width, &mut output, &mut stats)
+                            .unwrap();
+                        let stable = stable.min(frame.len());
+                        frame.truncate(stable);
+                        frame.extend_from_slice(&output[stable..visible]);
+                        let expected = renderer.render_unstable(&Document::new(vec![block]), width);
+                        assert_eq!(
+                            frame, expected.lines,
+                            "end={end} width={width} prefix={prefix:?}"
+                        );
+                        assert_eq!(output[..visible], expected.lines);
+                    }
+                    assert_eq!(stats.rich_prefix_layouts, 1);
+                    assert_eq!(stats.literal_transform_fallbacks, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rich_literal_transform_fallback_is_named_and_checked_once() {
+        for suffix in ["\t", "\r\n", "\x1b[31m", "\u{202e}"] {
+            let renderer = RichRenderer::plain();
+            let mut block =
+                Block::Paragraph(vec![Inline::strong("bold"), Inline::Raw(" prefix".into())]);
+            let mut cache = AppendOnlyTail::default();
+            let mut stats = StreamingLayoutStats::default();
+            let mut output = Vec::new();
+            cache
+                .update(&block, &renderer, 12, &mut output, &mut stats)
+                .unwrap();
+            let Block::Paragraph(content) = &mut block else {
+                unreachable!()
+            };
+            let Some(Inline::Raw(raw)) = content.last_mut() else {
+                unreachable!()
+            };
+            raw.push_str(suffix);
+            assert!(cache
+                .update(&block, &renderer, 12, &mut output, &mut stats)
+                .is_none());
+            assert_eq!(stats.literal_transform_fallbacks, 1);
+            let before = stats;
+            assert!(cache
+                .update(&block, &renderer, 12, &mut output, &mut stats)
+                .is_none());
+            assert_eq!(stats, before);
+        }
+    }
+
+    fn rich_stream_work(chunks: usize, rich: bool, width: u16, chunk: &str) -> u64 {
+        use crate::rich_text::stream::{StreamingMarkdown, StreamingRenderCache};
+        let renderer = renderer(ColorDepth::TrueColor, true);
+        let mut stream = StreamingMarkdown::new();
+        let mut cache = StreamingRenderCache::default();
+        let mut frame = Vec::new();
+        stream.push_str(&format!(
+            "{}{}",
+            if rich { "**rich**" } else { "ordinary" },
+            "x".repeat(8184)
+        ));
+        let mut replacement_bytes = 0;
+        for index in 0..=chunks {
+            if index > 0 {
+                stream.push_str(chunk);
+            }
+            let update = cache.render_line_update(&stream, &renderer, width, true);
+            assert!(update.stable_prefix <= frame.len());
+            frame.truncate(update.stable_prefix);
+            replacement_bytes += update.replacement.iter().map(String::len).sum::<usize>() as u64;
+            frame.extend(update.replacement);
+            // The oracle deliberately does full layout, outside measured work.
+            assert_eq!(
+                frame,
+                renderer
+                    .render_unstable(stream.preview(), width)
+                    .styled_lines()
+            );
+        }
+        let stats = cache.stats();
+        assert_eq!(stats.rich_prefix_layouts, u64::from(rich));
+        assert_eq!(stats.literal_transform_fallbacks, 0);
+        assert!(stats.full_tail_layouts <= 1, "{stats:?}");
+        assert!(stats.fallback_source_bytes <= 8192, "{stats:?}");
+        let parser = stream.stats();
+        let work = stats.checked_bytes
+            + stats.measured_bytes
+            + stats.laid_out_bytes
+            + stats.copied_bytes
+            + stats.encoded_rows
+            + stats.fallback_source_bytes
+            + replacement_bytes
+            + parser.preview_copied_bytes;
+        eprintln!(
+            "rich={rich} width={width} chunk={:?} n={chunks} work={work} {stats:?}",
+            &chunk[..chunk.len().min(20)]
+        );
+        work
+    }
+
+    #[test]
+    fn rich_and_literal_append_work_scales_linearly_with_exact_live_rows() {
+        for rich in [false, true] {
+            for width in [0, 40] {
+                for chunk in [
+                    " word".repeat(50),
+                    "word line\n".repeat(25),
+                    " ".repeat(250),
+                ] {
+                    let a = rich_stream_work(128, rich, width, &chunk);
+                    let b = rich_stream_work(256, rich, width, &chunk);
+                    assert!(b >= a * 3 / 2 && b <= a * 5 / 2, "{a} -> {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rich_stream_reflows_and_fallbacks_reconstruct_authoritative_rows_and_copy() {
+        use crate::rich_text::stream::{StreamingMarkdown, StreamingRenderCache};
+        let mut renderer = renderer(ColorDepth::TrueColor, true);
+        let mut stream = StreamingMarkdown::new();
+        let mut cache = StreamingRenderCache::default();
+        let mut frame = Vec::new();
+        let initial = format!(
+            "**bold** [docs](https://example.com) {}",
+            "word ".repeat(1500)
+        );
+        stream.push_str(&initial);
+        stream.push_str(&"more ".repeat(200));
+        for (step, suffix) in [
+            "e", "\u{301}", "👩", "\u{200d}", "💻", "\n", "after", "\t", "tab", "\r", "\n", "\x1b",
+            "[31m", "\u{202e}", " end",
+        ]
+        .iter()
+        .enumerate()
+        {
+            stream.push_str(suffix);
+            let width = [40, 0, 1, 7, 16][step % 5];
+            if step % 3 == 0 {
+                renderer.theme_mut().override_style(
+                    TextRole::Strong,
+                    TextStyle::plain().foreground(Color::Rgb(step as u8, 10, 90)),
+                );
+            }
+            let styled = step % 2 == 0;
+            let update = cache.render_line_update(&stream, &renderer, width, styled);
+            assert_eq!(update.stable_prefix, 0, "resize must invalidate");
+            frame.truncate(update.stable_prefix);
+            frame.extend(update.replacement);
+            let expected = renderer.render_unstable(stream.preview(), width);
+            assert_eq!(
+                frame,
+                if styled {
+                    expected.styled_lines()
+                } else {
+                    expected.plain_lines()
+                }
+            );
+            assert_eq!(
+                cache.render(&stream, &renderer, width).copy_text,
+                renderer.sanitize_copy(&stream.copy_text())
+            );
+        }
+        assert!(cache.stats().literal_transform_fallbacks > 0);
+        let finalized = markdown::parse(stream.raw_text());
+        assert_eq!(stream.finish(), &finalized);
+        let update = cache.render_line_update(&stream, &renderer, 40, true);
+        assert_eq!(update.stable_prefix, 0);
+        assert_eq!(
+            update.replacement,
+            renderer.render(stream.committed(), 40).styled_lines()
+        );
     }
 
     #[test]

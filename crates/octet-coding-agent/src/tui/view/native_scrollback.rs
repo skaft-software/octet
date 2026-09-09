@@ -8,7 +8,74 @@ use super::shell_chrome::{
 };
 use super::transcript_commit::transcript_pinned_frame;
 use super::viewport::{overlay_lines, transcript_lines};
-use super::ShellState;
+use super::{ShellState, TranscriptBlock};
+
+/// Live tool output is replaceable telemetry, not a final result. Keep a
+/// trailing pending call wholly addressable until its authoritative result
+/// arrives. In particular, a five-line preview in an eight-row terminal must
+/// not push the mutable tool heading into saved lines. Final results are never
+/// clipped by this policy; they flow into native history in their entirety
+/// (subject only to the existing explicit disclosure policy).
+///
+/// This intentionally handles only an ordinary trailing call. Historical live
+/// calls/rosters and Markdown finalization still need a separate emitted-
+/// presentation policy; silently freezing those rows would lose real updates.
+fn pending_tool_tail(
+    state: &ShellState,
+    chrome: &ShellChrome,
+    width: u16,
+) -> Option<(usize, Vec<String>)> {
+    let index = state.transcript.len().checked_sub(1)?;
+    let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
+        return None;
+    };
+    if panel.finished || panel.subagent_activity.is_some() {
+        return None;
+    }
+    let cache = state.transcript_cache.borrow();
+    let start = cache.block_starts[index];
+    let rows = &cache.lines[start..];
+    let budget =
+        usize::from(state.size.1).saturating_sub(shell_chrome_rows(chrome).saturating_add(1));
+    if rows.len() <= budget {
+        return Some((start, rows.to_vec()));
+    }
+    // Keep the intent heading and the newest output, never the oldest preview
+    // rows. The source/copy cache remains complete and independent of this
+    // ephemeral terminal projection.
+    let mut preview = rows
+        .iter()
+        .filter(|row| !sexy_tui_rs::strip_terminal_sequences(row).trim().is_empty())
+        .take(budget.min(1))
+        .cloned()
+        .collect::<Vec<_>>();
+    if budget > 1 {
+        preview.push(super::fit_line(
+            &state.theme.fg(
+                "muted",
+                &format!(
+                    "  {} live preview (result pending)",
+                    state.theme.glyph("ellipsis")
+                ),
+            ),
+            width,
+        ));
+        let tail = budget.saturating_sub(2);
+        preview.extend_from_slice(&rows[rows.len().saturating_sub(tail)..]);
+    }
+    Some((start, preview))
+}
+
+fn record_native_animation_viewport(state: &ShellState, rows: usize) {
+    let top = rows.saturating_sub(usize::from(state.size.1));
+    state.native_animation_viewport_top.set(Some(
+        state
+            .native_animation_viewport_top
+            .get()
+            .unwrap_or(0)
+            .max(top),
+    ));
+}
 
 fn native_overlay_prefix_len(transcript_len: usize, chrome: &ShellChrome) -> usize {
     let chrome_rows = shell_chrome_rows(chrome);
@@ -66,6 +133,9 @@ fn render_native_overlay_suffix(
 /// paints only its visible tail; committed rows naturally move into native
 /// scrollback and are never sliced into an application-owned viewport.
 pub(super) fn render_shell_at(state: &ShellState, width: u16, now: Instant) -> Vec<String> {
+    // A complete Pi paint (including resize/session replacement) establishes a
+    // new physical seam, unlike the monotonic differential append path.
+    state.native_animation_viewport_top.set(None);
     let chrome = shell_chrome(state, width, now);
     let transcript = transcript_lines(state, width);
     if state.overlay.is_some() {
@@ -74,7 +144,12 @@ pub(super) fn render_shell_at(state: &ShellState, width: u16, now: Instant) -> V
     } else {
         let mut lines = transcript.clone();
         drop(transcript);
+        if let Some((start, preview)) = pending_tool_tail(state, &chrome, width) {
+            lines.truncate(start);
+            lines.extend(preview);
+        }
         append_chrome(&mut lines, chrome, 0);
+        record_native_animation_viewport(state, lines.len());
         lines
     }
 }
@@ -99,6 +174,16 @@ pub(super) fn synchronize_shell_frame(state: &ShellState, width: u16, frame: &mu
     frame.overlay_active = state.overlay.is_some();
     frame.application_viewport = false;
     frame.overlay_prefix_len = overlay_prefix_len;
+    let chrome = shell_chrome(state, width, Instant::now());
+    let pending = state
+        .overlay
+        .is_none()
+        .then(|| pending_tool_tail(state, &chrome, width))
+        .flatten();
+    frame.pending_tool_start = pending.as_ref().map(|(start, _)| *start);
+    if let Some((start, preview)) = pending {
+        frame.transcript_len = start + preview.len();
+    }
 }
 
 /// Build only the mutable suffix of the native-scrollback frame. Historic
@@ -148,6 +233,9 @@ fn render_shell_update_inner(
     // Hydrating `/new` (or another session) replaces the logical transcript.
     // Visual row counts alone cannot identify that transition: a streaming
     // Markdown table routinely shrinks while incomplete syntax reparses.
+    let pending = (!include_commit_metadata && state.overlay.is_none())
+        .then(|| pending_tool_tail(state, &chrome, width))
+        .flatten();
     let cache = state.transcript_cache.borrow();
     let generation = cache.generation;
     let transcript_replaced = frame.initialized
@@ -173,6 +261,13 @@ fn render_shell_update_inner(
     };
     if frame.overlay_active {
         requested_stable_prefix = requested_stable_prefix.min(frame.overlay_prefix_len);
+    }
+
+    if let Some(start) = frame.pending_tool_start {
+        requested_stable_prefix = requested_stable_prefix.min(start);
+    }
+    if let Some((start, _)) = pending.as_ref() {
+        requested_stable_prefix = requested_stable_prefix.min(*start);
     }
 
     if state.overlay.is_some() {
@@ -204,6 +299,7 @@ fn render_shell_update_inner(
         frame.overlay_active = true;
         frame.application_viewport = false;
         frame.overlay_prefix_len = overlay_prefix_len;
+        frame.pending_tool_start = None;
         return FrameUpdate {
             stable_prefix,
             replacement,
@@ -217,9 +313,19 @@ fn render_shell_update_inner(
     }
 
     let stable_prefix = requested_stable_prefix;
-    let mut replacement = cache.lines[stable_prefix..].to_vec();
+    let mut replacement = if let Some((start, preview)) = pending.as_ref() {
+        let mut rows = cache.lines[stable_prefix..*start].to_vec();
+        rows.extend_from_slice(preview);
+        rows
+    } else {
+        cache.lines[stable_prefix..].to_vec()
+    };
+    let projected_transcript_len = stable_prefix + replacement.len();
     drop(cache);
     append_chrome(&mut replacement, chrome, stable_prefix);
+    if !include_commit_metadata {
+        record_native_animation_viewport(state, stable_prefix + replacement.len());
+    }
     let pinned = include_commit_metadata.then(|| {
         transcript_pinned_frame(
             state,
@@ -240,6 +346,8 @@ fn render_shell_update_inner(
     frame.overlay_active = false;
     frame.application_viewport = false;
     frame.overlay_prefix_len = 0;
+    frame.pending_tool_start = pending.as_ref().map(|(start, _)| *start);
+    frame.transcript_len = projected_transcript_len;
     FrameUpdate {
         stable_prefix,
         replacement,

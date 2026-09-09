@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
 
 try:
     from .helpers import (
@@ -13,7 +14,76 @@ except ImportError:
     from helpers import RunningExtension, initialize_request, rpc_request, tool_context
 
 from fake_agent_sessions import FakeHostState, fake_session_reference
-from octet_subagents.runtime import create_runtime
+from octet_subagents.model import Owner
+from octet_subagents.orchestrator import Orchestrator
+from octet_subagents.runtime import PresentationPublisher, create_runtime
+
+
+class PresentationPublisherTests(unittest.TestCase):
+    def test_inverted_publication_preserves_terminal_snapshot_and_allows_resume(self):
+        for terminal_state in ("done", "failed"):
+            with self.subTest(terminal_state=terminal_state):
+                host = FakeHostState()
+                client = host.client()
+                owner = Owner.from_context(tool_context())
+                captured = []
+                orchestrator = Orchestrator(publish=captured.append, now_ms=host.clock)
+                extension = Mock(initialized=True)
+                publisher = PresentationPublisher(extension)
+                agent_id = orchestrator.spawn(
+                    client, owner, {"name": "audit", "task": "Inspect ordering."}
+                )["worker"]["id"]
+                host.start(agent_id, tool_name="search")
+                orchestrator.status(client, owner, {})
+                running = captured[-1]
+                if terminal_state == "done":
+                    host.complete(agent_id, "Final audit evidence.")
+                else:
+                    host.fail(agent_id, "Authoritative provider failure.")
+                orchestrator.status(client, owner, {"target": agent_id})
+                terminal = captured[-1]
+
+                # Hold the earlier running capture until after terminal publication.
+                # No timing or SDK revision rejection can mask a publisher regression.
+                publisher(terminal)
+                accepted = extension.publish_presentation.call_args.args[0]
+                publisher(running)
+                publisher(terminal)
+                self.assertEqual(extension.publish_presentation.call_count, 1)
+                self.assertEqual(accepted["activities"], terminal["activities"])
+                self.assertEqual(accepted["collection"], terminal["collection"])
+                self.assertEqual(accepted["status"], terminal["status"])
+                self.assertIn("State: %s" % terminal_state, accepted["collection"]["detail"]["body"])
+                self.assertEqual(
+                    extension.publish_presentation.call_args.kwargs["resource_owner"],
+                    tool_context()["resource_owner"],
+                )
+                self.assertNotIn("_resource_owner", accepted)
+                self.assertLess(running["revision"], terminal["revision"])
+
+                # A genuinely new host run must not be blocked by a terminal latch.
+                continued = orchestrator.continue_worker(
+                    client, owner, {"target": agent_id, "message": "Inspect the follow-up."}
+                )
+                self.assertEqual(continued["action"], "resumed")
+                host.start(agent_id)
+                orchestrator.status(client, owner, {})
+                resumed = captured[-1]
+                publisher(resumed)
+                self.assertEqual(extension.publish_presentation.call_count, 2)
+                accepted = extension.publish_presentation.call_args.args[0]
+                self.assertEqual(accepted["collection"]["nodes"][0]["state"], "running")
+                self.assertEqual(accepted["activities"][0]["state"], "running")
+                self.assertNotIn("completed_at_ms", accepted["activities"][0])
+                self.assertIn("State: running", accepted["collection"]["detail"]["body"])
+                self.assertGreater(accepted["revision"], terminal["revision"])
+                self.assertEqual(
+                    accepted["collection"]["nodes"][0]["references"],
+                    terminal["collection"]["nodes"][0]["references"],
+                )
+                publisher(terminal)
+                self.assertEqual(extension.publish_presentation.call_count, 2)
+                self.assertEqual(host.follow_ups, [(agent_id, "Inspect the follow-up.")])
 
 
 class ServiceResponder:
@@ -278,6 +348,25 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertTrue(resumed["result"]["metadata"]["accepted"])
         self.assertEqual(self.responder.follow_ups, [("agent-1", "Follow up: also inspect the config.")])
         self.assertEqual(self.responder.steers, [("agent-1", "Adjust scope: also check docs/.")])
+        self.responder.host.start("agent-1", tool_name="search")
+        self.running.reader.feed(
+            rpc_request(
+                33,
+                "tool/call",
+                {"name": "subagent_status", "arguments": {}, "context": tool_context()},
+            )
+        )
+        status = self.running.writer.wait_for(lambda message: message.get("id") == 33)
+        text = status["result"]["content"][0]["text"]
+        self.assertIn("audit [agent-1] · running", text)
+        self.assertNotIn("search", text)
+        presentations = self.running.writer.matching(
+            lambda message: message.get("method") == "presentation/update"
+        )
+        latest = presentations[-1]["params"]["snapshot"]
+        self.assertEqual(latest["activities"][0]["summary"], "audit · running")
+        self.assertNotIn("completed_at_ms", latest["activities"][0])
+        self.assertIn("Current phase/tool: search", latest["collection"]["detail"]["body"])
 
     def test_continue_rejects_orphaned_worker_with_stable_error(self):
         self.running.start()

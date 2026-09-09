@@ -228,18 +228,28 @@ The bundled manifest declares:
 presentation = true
 ```
 
-The extension emits complete monotonic `presentation/update` snapshots using the generic host contract:
+The extension emits complete monotonic `presentation/update` snapshots using the generic host contract.
+The process revision is assigned while capturing state under the orchestrator lock,
+not when a callback happens to arrive. Publication is serialized outside that lock;
+a delayed older capture cannot overwrite a newer state, selected detail, or owner.
+A genuinely resumed run receives a newer capture and remains visible—terminal states
+are not latched.
+
+Snapshots contain:
 
 - compact status counts;
 - content-free activity rows;
 - stable list/tree nodes and parentage;
 - queued/running/waiting/done/failed/stopped/cancelled/timed-out/orphaned/restarted distinctions;
-- elapsed time, inherited model/profile, current structured phase/tool, turns, token/cost budgets, session/artifact references;
+- elapsed time, inherited model/profile, turns, token/cost budgets, session/artifact references;
+- current structured phase/tool and bounded recent tool arguments in explicit inspector detail, not compact rows;
 - selected detail with `parent > worker` breadcrumb, policy provenance, inherited cwd/sandbox/approval/environment facts, the host-observed terminal summary (unsafe controls visibly escaped), artifacts, bounded error, and restart state;
 - declared inspect, stop, and stop-all actions routed only to the manifest command.
 
 Prompts, tool arguments/results, and running model prose never appear in the
-worker list or composer-adjacent activity block. The host returns per-worker
+worker list or composer-adjacent activity block. Transient tool identities and
+phases also stay out of compact summaries so the lifecycle/usage columns do not
+shift on each child tool start or finish. The host returns per-worker
 structured phase/current tool, host-observed tool calls, disjoint provider token
 buckets, turn count, and priced cost. The extension places those values in
 generic activity `metrics`; it never supplies terminal rows or footer text. In

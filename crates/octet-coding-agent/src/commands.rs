@@ -586,16 +586,6 @@ pub fn model_pricing_text(model: &Model) -> String {
     }
 }
 
-/// Complete model comparison row used by `/model` and the model picker.
-pub fn model_selection_text(model: &Model) -> String {
-    format!(
-        "{} — {} — {} ctx",
-        model.spec.id.0,
-        model_pricing_text(model),
-        token_count(model.spec.limits.context_window),
-    )
-}
-
 fn grouped(value: u64) -> String {
     let digits = value.to_string();
     let mut output = String::with_capacity(digits.len() + digits.len() / 3);
