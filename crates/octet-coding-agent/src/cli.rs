@@ -14,6 +14,7 @@ use octet_ai::ModelId;
 use serde::Deserialize;
 
 use crate::app::bootstrap::resolve_model_id;
+use crate::batch::BatchCommand;
 use crate::config::{
     self, ColorMode, CompactionMode, CompactionPolicy, Config, Mode, ResumeSelector, SandboxPolicy,
     ToolPolicy,
@@ -111,6 +112,11 @@ pub enum TopLevelCommand {
         /// Only report whether a newer release is available.
         #[arg(long)]
         check: bool,
+    },
+    /// Submit and inspect asynchronous OpenRouter Batch API jobs.
+    Batch {
+        #[command(subcommand)]
+        command: BatchCommand,
     },
     /// Check local prerequisites, configured providers, and model visibility.
     Doctor,

@@ -38,6 +38,9 @@ pub enum AiError {
     /// Authentication or credential resolution error.
     #[error("Auth error: {0}")]
     Auth(#[from] AuthError),
+    /// OpenRouter Batch API request or query validation error.
+    #[error("Batch error: {0}")]
+    Batch(#[from] crate::batch::BatchError),
     /// Input validation error.
     #[error("Validation error: {0}")]
     Validation(#[from] ValidationError),

@@ -54,6 +54,7 @@ installed copy. Continue with [getting started](docs/getting-started.md).
 ## More
 
 [Benchmarks and performance](docs/benchmarks/README.md) ·
+[OpenRouter Batch API](docs/openrouter-batches.md) ·
 [Download benchmark results](docs/assets/evidence/README.md) ·
 [Brand Kit](docs/assets/octet/README.md) ·
 [Roadmap](https://github.com/orgs/skaft-software/projects/5) ·

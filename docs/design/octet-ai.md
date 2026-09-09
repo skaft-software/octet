@@ -149,6 +149,22 @@ tokens, and is used as a fallback for discovered built-in routes; explicit
 `CatalogConfig` pricing remains authoritative. Runtime discovery is a
 coding-product concern and can be disabled with `--offline`/`OCTET_OFFLINE=true`.
 
+## OpenRouter Batch API
+
+`AiClient` also exposes OpenRouter's asynchronous Batch API as a provider-specific
+operation rather than extending the canonical interactive `Request` or
+`ResponseStream` contract. `OpenRouterBatchRequest` preserves the provider's
+stream-parser field order (`endpoint`, `model`, `requests`), validates unique
+`custom_id` values and JSON object bodies, and supports the Chat, Responses,
+Anthropic Messages, and embeddings endpoint paths. `submit_openrouter_batch`,
+`get_openrouter_batch`, and `list_openrouter_batches` reuse endpoint
+authentication, no-redirect transport, bounded response reads, timeout phases,
+and diagnostic redaction. Batch results are inline only after asynchronous
+completion and remain mapped to caller ids; the client does not retry a
+submission or run octet's tool loop. The coding-agent `batch` command owns file
+input, model/catalog selection, polling, and JSON output. See
+[`../openrouter-batches.md`](../openrouter-batches.md) for the user contract.
+
 ## Cost accounting
 
 Usage buckets remain disjoint and pricing uses integer picodollar arithmetic. A response carries exact provider usage and optional cost; the agent decides when that completed operation becomes durable session accounting.

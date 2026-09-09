@@ -682,6 +682,36 @@ where
     }
 }
 
+fn cached_provider_inventory_offline(
+    provider_id: &'static str,
+    inventory_url: String,
+    credential: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    cached_provider_inventory_offline_at(
+        provider_inventory_cache_path(provider_id),
+        provider_id,
+        inventory_url,
+        credential,
+    )
+}
+
+fn cached_provider_inventory_offline_at(
+    path: PathBuf,
+    provider_id: &'static str,
+    inventory_url: String,
+    credential: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let fingerprint = credential_fingerprint(credential);
+    match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
+        Ok(Some(CachedProviderInventory::Available(body))) => Ok(Some(body)),
+        Ok(Some(CachedProviderInventory::Unavailable)) | Ok(None) => Ok(None),
+        Err(error) => {
+            crate::output::stderr!("warning: {provider_id} model cache unavailable: {error}");
+            Ok(None)
+        }
+    }
+}
+
 /// Use an existing inventory immediately, but never make startup wait for a
 /// cold supplemental catalog. This is used by providers such as OpenCode that
 /// already have a substantial embedded model set; discovery fills the cache for
@@ -1887,7 +1917,45 @@ fn register_openrouter_models(
     else {
         return Ok(());
     };
-    for model in openrouter_models_from_response(declaration, &body)? {
+    register_openrouter_models_from_response(catalog, declaration, &body)
+}
+
+fn openrouter_declaration() -> &'static ProviderDeclaration {
+    BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "openrouter")
+        .expect("built-in OpenRouter declaration")
+}
+
+fn register_cached_openrouter_models_offline(catalog: &mut ModelCatalog) -> anyhow::Result<()> {
+    let declaration = openrouter_declaration();
+    let Some(credential) = crate::providers::resolve_environment(declaration)? else {
+        return Ok(());
+    };
+    crate::providers::register_environment_endpoints(
+        catalog,
+        declaration,
+        &credential,
+        PROVIDER_RESPONSE_HEADER_TIMEOUT,
+    )?;
+    let models_url = url::Url::parse(declaration.base_url)?.join("models")?;
+    let Some(body) = cached_provider_inventory_offline(
+        declaration.id,
+        models_url.to_string(),
+        credential.value(),
+    )?
+    else {
+        return Ok(());
+    };
+    register_openrouter_models_from_response(catalog, declaration, &body)
+}
+
+fn register_openrouter_models_from_response(
+    catalog: &mut ModelCatalog,
+    declaration: &ProviderDeclaration,
+    body: &serde_json::Value,
+) -> anyhow::Result<()> {
+    for model in openrouter_models_from_response(declaration, body)? {
         if !has_model_id(catalog, &model.id.0) {
             catalog.register_model(model)?;
         }
@@ -3625,9 +3693,9 @@ const CODEX_PRO_CONTEXT_WINDOW: u64 = 1_000_000;
 const CODEX_CONTEXT_WINDOW_CAP: u64 = 272_000;
 const CODEX_MAX_OUTPUT_TOKENS: u64 = 128_000;
 /// Codex retains the provider-advertised maximum as discovery metadata, while
-/// octet deliberately budgets requests against Pi's 272K working window. Smaller
-/// advertised windows remain authoritative.
-const CODEX_MODEL_CACHE_VERSION: u8 = 5;
+/// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
+/// Luna uses its 372K default; smaller advertised windows remain authoritative.
+const CODEX_MODEL_CACHE_VERSION: u8 = 6;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
@@ -3799,7 +3867,7 @@ fn codex_models_from_response(
             default_context_window = default_context_window.min(max_context_window);
         }
         let context_window =
-            codex_context_window_for_plan(default_context_window, max_context_window, plan);
+            codex_context_window_for_plan(id, default_context_window, max_context_window, plan);
         let max_output_tokens =
             positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
                 .unwrap_or(CODEX_MAX_OUTPUT_TOKENS)
@@ -3872,7 +3940,16 @@ fn codex_model_context_limits(model_id: &str) -> (u64, u64) {
     }
 }
 
+fn codex_context_window_cap(model_id: &str) -> u64 {
+    if model_id == "gpt-5.6-luna" {
+        CODEX_5_6_CONTEXT_WINDOW
+    } else {
+        CODEX_CONTEXT_WINDOW_CAP
+    }
+}
+
 fn codex_context_window_for_plan(
+    model_id: &str,
     default_context_window: u64,
     max_context_window: u64,
     plan: Option<&crate::auth::codex::ChatGptPlan>,
@@ -3882,7 +3959,7 @@ fn codex_context_window_for_plan(
     } else {
         default_context_window
     };
-    selected.min(CODEX_CONTEXT_WINDOW_CAP)
+    selected.min(codex_context_window_cap(model_id))
 }
 
 fn codex_model_limits(
@@ -3893,6 +3970,7 @@ fn codex_model_limits(
     (
         ModelLimits {
             context_window: codex_context_window_for_plan(
+                model_id,
                 default_context_window,
                 max_context_window,
                 plan,
@@ -4248,6 +4326,73 @@ fn register_openai_codex(
     Ok(())
 }
 
+pub(crate) fn register_offline_openrouter_model(
+    catalog: &mut ModelCatalog,
+    raw_model: &str,
+) -> anyhow::Result<bool> {
+    let raw_model = raw_model.trim();
+    let api_name = raw_model.strip_prefix("openrouter/").unwrap_or(raw_model);
+    let mut components = api_name.split('/');
+    let Some(provider) = components.next() else {
+        return Ok(false);
+    };
+    let Some(model_name) = components.next() else {
+        return Ok(false);
+    };
+    if provider.is_empty()
+        || model_name.is_empty()
+        || components.next().is_some()
+        || !api_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
+    {
+        return Ok(false);
+    }
+
+    let declaration = openrouter_declaration();
+    let Some(route) = declaration.route_for_model(api_name) else {
+        return Ok(false);
+    };
+    let endpoint_id = EndpointId(route.endpoint_id.into());
+    if !catalog.has_endpoint(&endpoint_id) {
+        return Ok(false);
+    }
+    let catalog_id = ModelId(format!("{}/{api_name}", declaration.id));
+    if catalog.resolve(&catalog_id).is_ok() {
+        return Ok(true);
+    }
+
+    // Batch submission only needs the provider slug and protocol. Keep this
+    // conservative synthetic spec out of the interactive catalog; it is used
+    // when an explicit offline batch model cannot be found in the inventory
+    // cache, where the provider remains the authority on actual availability.
+    catalog.register_model(ModelSpec {
+        id: catalog_id,
+        endpoint: endpoint_id,
+        api_name: api_name.to_owned(),
+        display_name: None,
+        protocol: route.protocol,
+        capabilities: Capabilities {
+            input_modalities: ModalitySet::none(),
+            output_modalities: ModalitySet::none(),
+            tools: false,
+            parallel_tool_calls: false,
+            reasoning: None,
+            responses_lite: false,
+            agent_delegation: None,
+            structured_output: false,
+            deferred_tool_loading: false,
+        },
+        limits: ModelLimits {
+            context_window: 131_072,
+            max_output_tokens: 16_384,
+        },
+        pricing: None,
+        cache: octet_ai::CacheCompatibility::default(),
+    })?;
+    Ok(true)
+}
+
 fn base_model_catalog_with_custom_store(
     offline: bool,
     explicit_custom_store: Option<&crate::auth::custom::CredentialStore>,
@@ -4277,7 +4422,11 @@ fn base_model_catalog_with_custom_store(
             PROVIDER_RESPONSE_HEADER_TIMEOUT,
         )?;
         register_deepseek_v4_pro(&mut catalog, declaration)?;
-    } else if !offline {
+    } else if offline {
+        if let Err(error) = register_cached_openrouter_models_offline(&mut catalog) {
+            crate::output::stderr!("warning: OpenRouter model cache unavailable: {error}");
+        }
+    } else {
         register_configured_presets_parallel(&mut catalog);
     }
 

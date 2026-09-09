@@ -944,6 +944,94 @@ fn write_codex_credential(path: &std::path::Path, localhost: bool, plan: &str) {
     octet_agent::secure_fs::write_private_atomic(path, &bytes, 1024 * 1024).unwrap();
 }
 
+fn register_test_openrouter_endpoint(catalog: &mut ModelCatalog) {
+    let credential = crate::providers::EnvironmentCredential::for_test(
+        "OPENROUTER_API_KEY",
+        "test-openrouter-key",
+    );
+    crate::providers::register_environment_endpoints(
+        catalog,
+        openrouter_declaration(),
+        &credential,
+        PROVIDER_RESPONSE_HEADER_TIMEOUT,
+    )
+    .unwrap();
+}
+
+#[test]
+fn offline_explicit_openrouter_model_uses_conservative_fallback_metadata() {
+    let mut catalog = ModelCatalog::builtin().unwrap();
+    register_test_openrouter_endpoint(&mut catalog);
+    assert!(catalog.has_endpoint(&EndpointId("openrouter".into())));
+
+    assert!(register_offline_openrouter_model(&mut catalog, "openrouter/openai/gpt-4o").unwrap());
+    let model = catalog
+        .resolve(&ModelId("openrouter/openai/gpt-4o".into()))
+        .unwrap();
+    assert_eq!(model.spec.api_name, "openai/gpt-4o");
+    assert_eq!(model.spec.protocol, Protocol::OpenAiChat);
+    assert_eq!(model.spec.limits.context_window, 131_072);
+    assert!(
+        !register_offline_openrouter_model(&mut catalog, "openrouter/openai/gpt-4o/extra").unwrap()
+    );
+}
+
+#[test]
+fn offline_openrouter_catalog_resolves_a_matching_cached_inventory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("openrouter-models.json");
+    let declaration = openrouter_declaration();
+    let inventory_url = url::Url::parse(declaration.base_url)
+        .unwrap()
+        .join("models")
+        .unwrap()
+        .to_string();
+    let credential = "cached-openrouter-key";
+    let body = serde_json::json!({
+        "data": [{
+            "id": "cache-test/model",
+            "context_length": 64_000,
+            "top_provider": {"max_completion_tokens": 8_000},
+            "pricing": {"prompt": "0.000001", "completion": "0.000002"}
+        }]
+    });
+    save_provider_inventory_cache(
+        &path,
+        declaration.id,
+        &inventory_url,
+        &credential_fingerprint(credential),
+        Some(&body),
+    )
+    .unwrap();
+
+    let cached = cached_provider_inventory_offline_at(
+        path.clone(),
+        declaration.id,
+        inventory_url.clone(),
+        credential,
+    )
+    .unwrap()
+    .expect("matching cache should be available offline");
+    let mut catalog = ModelCatalog::builtin().unwrap();
+    register_test_openrouter_endpoint(&mut catalog);
+    register_openrouter_models_from_response(&mut catalog, declaration, &cached).unwrap();
+
+    let model = catalog
+        .resolve(&ModelId("openrouter/cache-test/model".into()))
+        .unwrap();
+    assert_eq!(model.spec.api_name, "cache-test/model");
+    assert_eq!(model.spec.limits.context_window, 64_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 8_000);
+    assert!(cached_provider_inventory_offline_at(
+        path,
+        declaration.id,
+        inventory_url,
+        "a-different-key",
+    )
+    .unwrap()
+    .is_none());
+}
+
 #[test]
 fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
     let directory = tempfile::tempdir().unwrap();
@@ -972,7 +1060,14 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
         let model = catalog.resolve(&ModelId(catalog_id.into())).unwrap();
         assert_eq!(model.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
         assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
-        assert_eq!(model.spec.limits.context_window, 272_000);
+        assert_eq!(
+            model.spec.limits.context_window,
+            if *model_id == "gpt-5.6-luna" {
+                CODEX_5_6_CONTEXT_WINDOW
+            } else {
+                CODEX_CONTEXT_WINDOW_CAP
+            }
+        );
         assert_eq!(model.spec.limits.max_output_tokens, 128_000);
         assert!(model.spec.pricing.is_some());
         if *model_id == "gpt-6-astra" {
@@ -1152,6 +1247,7 @@ fn offline_codex_registration_uses_cached_inventory_without_dynamic_capabilities
     let luna = fallback_catalog
         .resolve(&ModelId("gpt-5.6-luna".into()))
         .unwrap();
+    assert_eq!(luna.spec.limits.context_window, CODEX_5_6_CONTEXT_WINDOW);
     let luna_pricing = luna.spec.pricing.as_ref().expect("codex luna pricing");
     assert_eq!(luna_pricing.input, octet_ai::TokenRate(200_000));
     assert_eq!(luna_pricing.output, octet_ai::TokenRate(1_200_000));
@@ -1229,7 +1325,7 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 #[test]
 fn codex_catalog_query_uses_astra_compatible_client_and_cache_versions() {
     assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.153.2");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 5);
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 6);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -1267,7 +1363,7 @@ fn codex_discovery_accepts_account_catalog_and_caps_live_context() {
         .iter()
         .find(|model| model.id == "gpt-5.6-luna")
         .unwrap();
-    assert_eq!(luna.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    assert_eq!(luna.context_window, CODEX_5_6_CONTEXT_WINDOW);
     assert_eq!(luna.max_context_window, 400_000);
     assert_eq!(luna.max_output_tokens, 150_000);
     assert_eq!(luna.min_effort, octet_ai::ReasoningEffort::Low);
@@ -1426,6 +1522,28 @@ fn codex_discovery_caps_default_and_max_plan_windows_at_272k() {
     assert_eq!(
         codex_models_from_response(&smaller_body, Some(&pro)).unwrap()[0].context_window,
         200_000
+    );
+}
+
+#[test]
+fn codex_discovery_uses_372k_window_for_luna() {
+    let body = serde_json::json!({
+        "models": [{
+            "slug": "gpt-5.6-luna",
+            "context_window": 400_000,
+            "max_context_window": 1_000_000
+        }]
+    });
+    let plus = crate::auth::codex::ChatGptPlan::Plus;
+    let pro = crate::auth::codex::ChatGptPlan::Pro;
+
+    assert_eq!(
+        codex_models_from_response(&body, Some(&plus)).unwrap()[0].context_window,
+        CODEX_5_6_CONTEXT_WINDOW
+    );
+    assert_eq!(
+        codex_models_from_response(&body, Some(&pro)).unwrap()[0].context_window,
+        CODEX_5_6_CONTEXT_WINDOW
     );
 }
 

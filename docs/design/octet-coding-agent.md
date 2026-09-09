@@ -158,13 +158,15 @@ instructions use labelled blocks with stable IDs and hashes.
 
 Before installing the agent policy, bootstrap combines the generic fractional
 threshold with an optional absolute active-context ceiling. Codex request
-budgeting caps the plan-selected provider window at 272,000 tokens; smaller
-provider windows remain authoritative. Larger advertised maxima remain discovery
-metadata. An explicit `compaction.max_active_tokens` further constrains the
-working set; zero or unset removes only that additional absolute ceiling, not the
-Codex route cap. `threshold_fraction` remains authoritative. The lower effective threshold is
-applied on initial construction, rebuild, interactive reconfiguration, and RPC
-toggles, and `/context` reports that same effective capacity.
+budgeting caps most models, including Astra, at 272,000 tokens; GPT-5.6 Luna may
+use up to 372,000 tokens. Smaller provider windows remain authoritative, while
+larger advertised maxima remain discovery metadata. An explicit
+`compaction.max_active_tokens` further constrains the working set; zero or unset
+removes only that additional absolute ceiling, not the model-specific Codex
+route cap. `threshold_fraction` remains authoritative. The lower effective
+threshold is applied on initial construction, rebuild, interactive
+reconfiguration, and RPC toggles, and `/context` reports that same effective
+capacity.
 
 The product pre-request gate and `octet-agent` overflow recovery share one
 Pi-compatible summarization implementation. Conversation messages are first
@@ -342,16 +344,18 @@ closed.
 
 Authenticated Codex discovery sends compatibility client version `0.153.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 5 invalidates inventories
-queried with older compatibility versions, preserves those fields and the 272K
-Codex request-window cap, and is scoped to the authenticated account context.
-Only fresh, complete, account-matched metadata is registered. Stale or
-future-dated cache entries are refreshed synchronously before online catalog
-construction; malformed, incomplete, duplicate, or inconsistent entries fail
-closed. Offline launches may retain fresh cached model identities and limits but
-strip Ultra, Responses Lite, and delegation. octet never infers those dynamic
-capabilities from model names or OAuth plans. Astra additionally retains its
-872K advertised input maximum while ordinary request budgeting stays at 272K.
+`multi_agent_version: "v2"`. Cache schema version 6 invalidates inventories
+queried with older compatibility or context-window policies. It preserves those
+fields, uses a 372K working window for GPT-5.6 Luna and 272K for other Codex
+models, and remains scoped to the authenticated account context. Only fresh,
+complete, account-matched metadata is registered. Stale or future-dated cache
+entries are refreshed synchronously before online catalog construction;
+malformed, incomplete, duplicate, or inconsistent entries fail closed. Offline
+launches may retain fresh cached model identities and limits but strip Ultra,
+Responses Lite, and delegation. octet never infers those dynamic capabilities
+from model names or OAuth plans. Astra additionally retains its 872K advertised
+input maximum as discovery metadata while ordinary request budgeting stays at
+272K.
 
 Ultra is selectable only when a complete live-derived reasoning range
 explicitly includes `ultra`, V2 delegation is present, and the linked
@@ -371,6 +375,23 @@ Routes advertising Responses Lite use the transport contract implemented by
 parallel-tool-call bit. This product layer only discovers and propagates the
 capability; it does not reconstruct the wire format or infer support from the
 endpoint identity.
+
+## OpenRouter Batch API
+
+The top-level `octet batch` command is a non-interactive product boundary for
+OpenRouter's asynchronous Batch API. It builds ordinary layered configuration
+only to resolve invocation, provider, and offline policy, then selects an
+OpenRouter model, reads bounded JSON from a file or stdin, submits native request
+bodies, and emits sanitized JSON metadata or results. `batch get --wait` polls
+until a terminal provider status; `batch list` exposes cursor, status, and
+creation-time filters.
+
+Online startup uses the provider inventory. Offline startup may reuse only a
+fresh cache bound to the OpenRouter inventory URL and credential fingerprint;
+an explicitly named OpenRouter slug can otherwise receive conservative
+batch-only metadata. Batch requests never enter session persistence, the
+interactive tool loop, or automatic submission retries. See
+[`../openrouter-batches.md`](../openrouter-batches.md).
 
 ## Host-owned GitHub Copilot
 
