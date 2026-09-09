@@ -130,10 +130,43 @@ fn ansi256_rgb(index: u8) -> (u8, u8, u8) {
     (gray, gray, gray)
 }
 
-fn nearest_ansi256(red: u8, green: u8, blue: u8) -> u8 {
-    (0u8..=255)
+/// Approximate RGB using the fixed xterm palette while retaining lightness.
+pub fn nearest_ansi256(red: u8, green: u8, blue: u8) -> u8 {
+    // The first sixteen entries belong to the user's terminal theme. Their
+    // nominal RGB values cannot safely approximate an explicit RGB colour.
+    // Indexed/Ansi16 inputs retain their intentional palette semantics above.
+    // RGB distance alone can round every channel down and erase foreground
+    // contrast (or round a dark surface up). Bound the contrast-luminance
+    // error in either direction before choosing the closest remaining hue.
+    // Cache palette luminances; animated rendering only linearizes its input.
+    static LUMINANCES: std::sync::OnceLock<[f64; 240]> = std::sync::OnceLock::new();
+    let luminances = LUMINANCES.get_or_init(|| {
+        std::array::from_fn(|offset| relative_luminance(ansi256_rgb((offset + 16) as u8)) + 0.05)
+    });
+    let source = relative_luminance((red, green, blue)) + 0.05;
+    (16u8..=255)
+        .filter(|index| {
+            let candidate = luminances[usize::from(*index - 16)];
+            source.max(candidate) / source.min(candidate) <= 1.2
+        })
         .min_by_key(|index| color_distance((red, green, blue), ansi256_rgb(*index)))
-        .unwrap_or(7)
+        .unwrap_or_else(|| {
+            (16u8..=255)
+                .min_by_key(|index| color_distance((red, green, blue), ansi256_rgb(*index)))
+                .unwrap_or(16)
+        })
+}
+
+fn relative_luminance((red, green, blue): (u8, u8, u8)) -> f64 {
+    let linear = |channel: u8| {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
 }
 
 /// Compatibility helper: apply a `#RRGGBB` truecolour foreground.
@@ -188,5 +221,65 @@ mod tests {
             assert!(rendered.contains("text"));
         }
         assert_eq!(apply_foreground(color, ColorDepth::None, "text"), "text");
+    }
+
+    #[test]
+    fn fixed_palette_roundtrips_and_rgb_approximation_retains_lightness() {
+        for index in 16..=255 {
+            let (r, g, b) = ansi256_rgb(index);
+            assert_eq!(ansi256_rgb(nearest_ansi256(r, g, b)), (r, g, b));
+        }
+        for r in (0..=255).step_by(17) {
+            for g in (0..=255).step_by(17) {
+                for b in (0..=255).step_by(17) {
+                    let source = relative_luminance((r, g, b)) + 0.05;
+                    let index = nearest_ansi256(r, g, b);
+                    let emitted = relative_luminance(ansi256_rgb(index)) + 0.05;
+                    assert!(index >= 16);
+                    assert!(
+                        source.max(emitted) / source.min(emitted) <= 1.2,
+                        "{r}/{g}/{b} -> {index}"
+                    );
+                }
+            }
+        }
+        let mut last = 0.0;
+        for gray in 0..=255 {
+            let emitted = relative_luminance(ansi256_rgb(nearest_ansi256(gray, gray, gray)));
+            assert!(emitted >= last, "gray ramp reversed at {gray}");
+            last = emitted;
+        }
+    }
+
+    #[test]
+    fn rgb_approximation_avoids_theme_owned_palette_entries() {
+        for (red, green, blue) in ANSI16_RGB {
+            let index = nearest_ansi256(red, green, blue);
+            assert!(
+                index >= 16,
+                "RGB ({red}, {green}, {blue}) selected theme slot {index}"
+            );
+        }
+        assert_eq!(
+            foreground_sequence(Color::Rgb(0, 0, 0), ColorDepth::Ansi256).as_deref(),
+            Some("\x1b[38;5;16m")
+        );
+        assert_eq!(
+            background_sequence(Color::Rgb(255, 255, 255), ColorDepth::Ansi256).as_deref(),
+            Some("\x1b[48;5;231m")
+        );
+        // Explicit indexed colours still express the caller's palette choice.
+        assert_eq!(
+            foreground_sequence(Color::Indexed(1), ColorDepth::Ansi256).as_deref(),
+            Some("\x1b[38;5;1m")
+        );
+        assert_eq!(
+            foreground_sequence(Color::Ansi16(1), ColorDepth::Ansi16).as_deref(),
+            Some("\x1b[31m")
+        );
+        assert_eq!(
+            foreground_sequence(Color::Rgb(205, 49, 49), ColorDepth::TrueColor).as_deref(),
+            Some("\x1b[38;2;205;49;49m")
+        );
     }
 }
