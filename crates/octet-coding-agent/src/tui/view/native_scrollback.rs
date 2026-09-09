@@ -104,12 +104,34 @@ pub(super) fn synchronize_shell_frame(state: &ShellState, width: u16, frame: &mu
 /// Build only the mutable suffix of the native-scrollback frame. Historic
 /// transcript strings are neither cloned nor compared on streaming/status
 /// ticks; sexy-tui reuses the committed prefix already retained in its frame.
+pub(super) fn render_shell_update_without_cursor(
+    state: &ShellState,
+    width: u16,
+    now: Instant,
+    frame: &mut ShellFrameState,
+) -> FrameUpdate {
+    render_shell_update_inner(state, width, now, frame, None, false)
+}
+
+/// The extended/pinned renderer needs a commit handshake even before it has
+/// acknowledged its first boundary. A missing cursor is not an opt-out.
 pub(super) fn render_shell_update_with_cursor(
     state: &ShellState,
     width: u16,
     now: Instant,
     frame: &mut ShellFrameState,
     acknowledged: Option<CommitCursor>,
+) -> FrameUpdate {
+    render_shell_update_inner(state, width, now, frame, acknowledged, true)
+}
+
+fn render_shell_update_inner(
+    state: &ShellState,
+    width: u16,
+    now: Instant,
+    frame: &mut ShellFrameState,
+    acknowledged: Option<CommitCursor>,
+    include_commit_metadata: bool,
 ) -> FrameUpdate {
     let repaint_theme = frame.initialized && frame.theme_epoch != state.theme_epoch;
     let resized = frame.initialized && (frame.width != width || frame.height != state.size.1);
@@ -167,7 +189,8 @@ pub(super) fn render_shell_update_with_cursor(
                 &cache.lines,
                 requested_stable_prefix,
             );
-        let pinned = transcript_pinned_frame(state, total_rows, acknowledged, viewport_surface);
+        let pinned = include_commit_metadata
+            .then(|| transcript_pinned_frame(state, total_rows, acknowledged, viewport_surface));
         drop(cache);
 
         frame.initialized = true;
@@ -184,7 +207,7 @@ pub(super) fn render_shell_update_with_cursor(
         return FrameUpdate {
             stable_prefix,
             replacement,
-            pinned: Some(pinned),
+            pinned,
             resize_replay,
             reanchor_viewport: repaint_theme || resized || entering_overlay,
             // Overlay rows are a temporary screen surface. Presentation changes
@@ -197,12 +220,14 @@ pub(super) fn render_shell_update_with_cursor(
     let mut replacement = cache.lines[stable_prefix..].to_vec();
     drop(cache);
     append_chrome(&mut replacement, chrome, stable_prefix);
-    let pinned = transcript_pinned_frame(
-        state,
-        stable_prefix.saturating_add(replacement.len()),
-        acknowledged,
-        viewport_surface,
-    );
+    let pinned = include_commit_metadata.then(|| {
+        transcript_pinned_frame(
+            state,
+            stable_prefix.saturating_add(replacement.len()),
+            acknowledged,
+            viewport_surface,
+        )
+    });
 
     frame.initialized = true;
     frame.width = width;
@@ -218,10 +243,10 @@ pub(super) fn render_shell_update_with_cursor(
     FrameUpdate {
         stable_prefix,
         replacement,
-        // A theme swap cannot restyle rows already owned by native
-        // scrollback. Keep the semantic commit handshake and repaint only the
-        // visible tail; terminal-owned history retains its original palette.
-        pinned: Some(pinned),
+        // In pinned mode, a theme swap keeps the semantic commit handshake
+        // and repaints only the visible tail. Pi instead owns its replay policy
+        // and consumes no semantic commit metadata.
+        pinned,
         resize_replay: None,
         reanchor_viewport: repaint_theme || resized || leaving_overlay || transcript_replaced,
         rebuild_scrollback: presentation_changed,

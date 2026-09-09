@@ -44,6 +44,7 @@
 - [Examples and their compatibility status](../examples/README.md)
 - Architecture: [model clients](design/octet-ai.md), [agent runtime](design/octet-agent.md),
   [application](design/octet-coding-agent.md), [terminal renderer](design/octet-tui.md)
+- [Performance philosophy and execution contract](design/performance.md)
 - [Build profiles](build-profiles.md)
 - [Distribution](distribution.md)
 - [Contributing](../CONTRIBUTING.md)

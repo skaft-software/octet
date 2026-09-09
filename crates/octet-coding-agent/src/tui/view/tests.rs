@@ -3378,6 +3378,67 @@ fn duplicate_hydrated_tool_call_ids_never_leave_a_running_card() {
 }
 
 #[test]
+fn streaming_prose_diff_classification_never_searches_the_growing_first_line() {
+    use super::tool_render::take_diff_classification_line_bytes;
+
+    let shell = InteractiveShell::test_shell();
+    let mut state = shell.state.borrow_mut();
+    state.push_block(TranscriptBlock::Assistant(Box::new(
+        AssistantBlock::streaming("word xyz "),
+    )));
+    take_diff_classification_line_bytes();
+    for _ in 0..1000 {
+        let TranscriptBlock::Assistant(assistant) = &mut state.transcript[0] else {
+            unreachable!()
+        };
+        assistant.append("word xyz ");
+        state.touch_block(0);
+        let _ = state.rendered_transcript(80);
+    }
+    assert_eq!(take_diff_classification_line_bytes(), 0);
+    assert!(looks_like_diff(
+        "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new"
+    ));
+    assert!(take_diff_classification_line_bytes() > 0);
+}
+
+#[test]
+fn diff_prefix_rejection_preserves_first_nonblank_line_semantics() {
+    fn reference(text: &str) -> bool {
+        let mut lines = text.lines().map(str::trim_start);
+        let Some(first) = lines.find(|line| !line.is_empty()) else {
+            return false;
+        };
+        first.starts_with("diff --git ")
+            || (first.starts_with("--- ")
+                && lines.any(|line| line.starts_with("+++ "))
+                && text.lines().any(|line| line.trim_start().starts_with("@@")))
+    }
+    for prefix in ["", " ", "\n\t", "\r\n  ", "\u{85}\n\u{2003}"] {
+        for first in [
+            "",
+            "normal prose",
+            "diff --git ",
+            "--- a/file",
+            "---",
+            "```diff",
+        ] {
+            for suffix in [
+                "",
+                "\n+++ b/file",
+                "\n@@",
+                "\n+++ b/file\n@@",
+                "\r\n@@\r\n+++ b/file",
+                "\n```diff\n--- a/file\n+++ b/file\n@@",
+            ] {
+                let text = format!("{prefix}{first}{suffix}");
+                assert_eq!(looks_like_diff(&text), reference(&text), "{text:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn streaming_assistant_cache_replaces_only_the_mutable_block_suffix() {
     const WIDTH: u16 = 80;
     let shell = InteractiveShell::test_shell();
@@ -5086,7 +5147,9 @@ fn keyboard_page_navigation_claims_the_semantic_viewport_without_mouse_capture()
 
     let component = ShellComponent::new(shell.state.clone(), false);
     let native = sexy_tui_rs::Component::render_update(&component, WIDTH).expect("native frame");
-    assert!(native.pinned.is_some());
+    // The text-only renderer needs native rows, not the pinned commit handshake.
+    assert!(native.pinned.is_none());
+    assert!(native.replacement.len() > 14);
 
     shell.scroll(-1);
     assert!(shell.state.borrow().application_viewport_requested);

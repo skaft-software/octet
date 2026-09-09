@@ -50,7 +50,6 @@ use crate::session::{
     DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
     ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, UsageRecordKind,
 };
-use crate::speculation::is_speculatable_recon_bash;
 use crate::tool::{
     content_hash, CancellationToken, ReplaySafety, Tool, ToolConcurrency, ToolContext, ToolError,
     ToolOutput, ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
@@ -1356,192 +1355,6 @@ async fn execute_parallel_tool_call(
         started_unix_ms,
         finished_unix_ms: Some(crate::session::now_unix_millis()),
     }
-}
-
-/// A bash call whose execution started while the provider response was still
-/// streaming. The result is only consumed if the authoritative tool call
-/// matches the speculated arguments exactly; otherwise it is cancelled and
-/// the call re-executes serially.
-struct SpeculativeExecution {
-    arguments: serde_json::Value,
-    handle: tokio::task::JoinHandle<CompletedToolExecution>,
-    cancellation: CancellationToken,
-}
-
-/// A bash tool call observed mid-stream, with its argument deltas
-/// accumulated from `ToolCallArgsDelta` events. This shadow copy exists only
-/// to decide speculation; the authoritative parsed call always comes from the
-/// finished response.
-struct PartialSpeculativeCall {
-    id: octet_ai::ToolCallId,
-    args_json: String,
-}
-
-/// Per-run speculative bash state. Tracks partially streamed calls during a
-/// provider turn and in-flight speculative executions, reconciling them at
-/// the normal commit point. Dropping the state cancels every in-flight
-/// execution; leaked tasks then observe cancellation and finish promptly.
-#[derive(Default)]
-struct SpeculativeBash {
-    partial: HashMap<usize, PartialSpeculativeCall>,
-    active: HashMap<octet_ai::ToolCallId, SpeculativeExecution>,
-}
-
-impl SpeculativeBash {
-    /// Cancels leftovers from a previous provider turn and forgets partial
-    /// accumulation. Called at every turn boundary so a retried stream never
-    /// collides with stale indexes or identifiers.
-    fn begin_turn(&mut self) {
-        self.partial.clear();
-        for (_, entry) in self.active.drain() {
-            entry.cancellation.cancel();
-        }
-    }
-
-    fn note_start(&mut self, index: usize, id: octet_ai::ToolCallId, name: String) {
-        if name == "bash" {
-            self.partial.insert(
-                index,
-                PartialSpeculativeCall {
-                    id,
-                    args_json: String::new(),
-                },
-            );
-        } else {
-            // A different tool invalidates nothing else; only bash calls are
-            // tracked, keyed by their own part index.
-            self.partial.remove(&index);
-        }
-    }
-
-    fn note_args_delta(&mut self, index: usize, delta: &str) {
-        if let Some(partial) = self.partial.get_mut(&index) {
-            partial.args_json.push_str(delta);
-        }
-    }
-
-    /// Drops an unchecked or schema-rejected partial call before it can enter
-    /// the speculative execution path.
-    fn discard(&mut self, index: usize) {
-        self.partial.remove(&index);
-    }
-
-    /// Completes a tracked call: parses the accumulated arguments and removes
-    /// the partial entry. Returns `None` when the JSON does not parse (the
-    /// authoritative path will surface the same failure later).
-    fn complete(&mut self, index: usize) -> Option<(octet_ai::ToolCallId, serde_json::Value)> {
-        let partial = self.partial.remove(&index)?;
-        let arguments = serde_json::from_str(&partial.args_json).ok()?;
-        Some((partial.id, arguments))
-    }
-
-    fn insert_active(
-        &mut self,
-        id: octet_ai::ToolCallId,
-        arguments: serde_json::Value,
-        handle: tokio::task::JoinHandle<CompletedToolExecution>,
-        cancellation: CancellationToken,
-    ) {
-        self.active.insert(
-            id,
-            SpeculativeExecution {
-                arguments,
-                handle,
-                cancellation,
-            },
-        );
-    }
-
-    /// Consumes the speculative execution for `id` when its arguments match
-    /// the authoritative parsed call. On mismatch — or when no speculation
-    /// exists — returns `None` so the caller executes serially; mismatched
-    /// executions are cancelled, never surfaced.
-    async fn take_matched(
-        &mut self,
-        id: &octet_ai::ToolCallId,
-        authoritative: Option<&serde_json::Value>,
-    ) -> Option<CompletedToolExecution> {
-        let entry = self.active.remove(id)?;
-        match authoritative {
-            Some(value) if *value == entry.arguments => {
-                // A panicked task falls back to full serial execution.
-                entry.handle.await.ok()
-            }
-            _ => {
-                entry.cancellation.cancel();
-                None
-            }
-        }
-    }
-}
-
-impl Drop for SpeculativeBash {
-    fn drop(&mut self) {
-        for (_, entry) in self.active.drain() {
-            entry.cancellation.cancel();
-        }
-    }
-}
-
-/// Spawns one speculative bash execution with its own cancellation token so
-/// it can be discarded independently of the run's abort flag while still
-/// observing run aborts.
-#[allow(clippy::too_many_arguments)]
-fn spawn_speculative_execution(
-    tool: Arc<dyn Tool>,
-    broker: EffectBroker,
-    run_id: String,
-    generation: u64,
-    request_id: octet_ai::ToolCallId,
-    name: String,
-    arguments: serde_json::Value,
-    sandbox: SandboxConfig,
-    tool_scope: String,
-    resource_owner: String,
-    abort: Arc<AbortFlag>,
-) -> (
-    tokio::task::JoinHandle<CompletedToolExecution>,
-    CancellationToken,
-) {
-    let cancellation = CancellationToken::default();
-    let execution_token = cancellation.clone();
-    let hooks: Vec<Arc<dyn ToolCallHook>> = Vec::new();
-    let handle = tokio::spawn(async move {
-        tokio::select! {
-            biased;
-            _ = abort.wait() => {
-                let (progress_tx, progress_rx) =
-                    mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
-                CompletedToolExecution {
-                    result: Err(cancelled_tool_error()),
-                    policy_decision: None,
-                    progress_rx,
-                    progress_sink: ToolProgressSink::live(progress_tx),
-                    cancellation_won: true,
-                    duration: std::time::Duration::ZERO,
-                    started_unix_ms: None,
-                    finished_unix_ms: None,
-                }
-            }
-            execution = execute_parallel_tool_call(
-                tool,
-                &hooks,
-                &broker,
-                &run_id,
-                generation,
-                &request_id,
-                &name,
-                arguments,
-                &sandbox,
-                &tool_scope,
-                &resource_owner,
-                &[],
-                &[],
-                execution_token.clone(),
-            ) => execution,
-        }
-    });
-    (handle, cancellation)
 }
 
 fn bounded_gate_text(text: &str, max_chars: usize) -> String {
@@ -5418,15 +5231,10 @@ impl Agent {
             let mut context_retries = 0usize;
             let mut run_usage = Usage::default();
             let mut run_cost = CostAccumulator::default();
-            let mut speculative_bash = SpeculativeBash::default();
             let mut recent_tool_calls: VecDeque<(String, String)> =
                 VecDeque::with_capacity(MAX_RECENT_TOOL_CALLS);
 
             let mut reason: FinishReason = 'run: loop {
-                // Cancel any speculative bash executions left over from a
-                // previous provider turn; every surviving call of a completed
-                // turn was consumed or discarded at its commit point.
-                speculative_bash.begin_turn();
                 // ── Drain control at the turn boundary ─────────────────────
                 while control_open {
                     match control_rx.try_recv() {
@@ -6050,11 +5858,6 @@ impl Agent {
                                     Ok(Some(stream)) => {
                                         response_stream = stream;
                                         attempt_saw_generation = false;
-                                        // The retried stream re-emits every
-                                        // event; drop shadow state from the
-                                        // failed attempt so part indexes
-                                        // cannot collide.
-                                        speculative_bash.begin_turn();
                                         continue 'consume;
                                     }
                                     Ok(None) => break 'consume Err(FinishReason::Aborted),
@@ -6092,68 +5895,13 @@ impl Agent {
                                 notify_observers(&observers, &ev);
                                 yield ev;
                             }
-                            // `octet-ai`'s ResponseBuilder assembles the message
-                            // and validates the stream; the agent does not
-                            // duplicate that parser. Raw tool-argument deltas
-                            // are deliberately not exposed. The speculative
-                            // shadow copy below is never authoritative: it
-                            // only pre-runs shallow recon bash calls whose
-                            // exact arguments are later re-verified against
-                            // the finished response before any result is used.
-                            StreamEvent::ToolCallStart { index, id, name } => {
+                            // `octet-ai` assembles and validates the complete
+                            // message. Tool deltas are provisional: execute only
+                            // after the assistant turn is durably persisted.
+                            StreamEvent::ToolCallStart { .. }
+                            | StreamEvent::ToolCallArgsDelta { .. }
+                            | StreamEvent::ToolCallEnd { .. } => {
                                 attempt_saw_generation = true;
-                                if tool_call_hooks.is_empty() {
-                                    speculative_bash.note_start(index, id, name);
-                                }
-                            }
-                            StreamEvent::ToolCallArgsDelta { index, delta } => {
-                                attempt_saw_generation = true;
-                                speculative_bash.note_args_delta(index, &delta);
-                            }
-                            StreamEvent::ToolCallEnd {
-                                index,
-                                argument_error,
-                            } => {
-                                attempt_saw_generation = true;
-                                // `octet-ai` validates completed parseable calls
-                                // against the immutable request snapshot before
-                                // emitting this event. A rejected call must
-                                // never reach even read-only speculation.
-                                if argument_error.is_some() {
-                                    speculative_bash.discard(index);
-                                // Speculative bash: start shallow read-only
-                                // commands while generation continues, so
-                                // their latency hides inside streaming time.
-                                } else if !answer_only && tool_call_hooks.is_empty() {
-                                    if let Some((call_id, arguments)) =
-                                        speculative_bash.complete(index)
-                                    {
-                                        if is_speculatable_recon_bash(&arguments) {
-                                            if let Some(tool) = tool_map.get("bash").cloned() {
-                                                let (handle, cancellation) =
-                                                    spawn_speculative_execution(
-                                                        tool,
-                                                        effect_broker.clone(),
-                                                        effect_run_id.clone(),
-                                                        tool_revision,
-                                                        call_id.clone(),
-                                                        "bash".to_string(),
-                                                        arguments.clone(),
-                                                        sandbox.clone(),
-                                                        tool_scope.clone(),
-                                                        resource_owner.clone(),
-                                                        Arc::clone(&abort),
-                                                    );
-                                                speculative_bash.insert_active(
-                                                    call_id,
-                                                    arguments,
-                                                    handle,
-                                                    cancellation,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
                             }
                             StreamEvent::MediaCompleted { index, media } => {
                                 attempt_saw_generation = true;
@@ -6653,7 +6401,7 @@ impl Agent {
                     });
                     let should_annotate_repetition =
                         repeated_recently >= REPEATED_TOOL_CALL_THRESHOLD;
-                    let mut preexecuted = parallel_results.as_mut().and_then(Iterator::next);
+                    let preexecuted = parallel_results.as_mut().and_then(Iterator::next);
                     if preexecuted.is_none() {
                         stream_context.tool_started();
                         let ev = AgentEvent::ToolStarted {
@@ -6666,19 +6414,6 @@ impl Agent {
                         };
                         notify_observers(&observers, &ev);
                         yield ev;
-
-                        // Reconcile speculative bash: consume the pre-run
-                        // result only on an exact argument match with the
-                        // authoritative call; otherwise cancel it and fall
-                        // through to normal serial execution.
-                        preexecuted = if output_truncated || argument_error.is_some() {
-                            let _ = speculative_bash.take_matched(&call.id, None).await;
-                            None
-                        } else {
-                            speculative_bash
-                                .take_matched(&call.id, parsed.as_ref().ok())
-                                .await
-                        };
                     }
                     let CompletedToolExecution {
                         result,
@@ -7388,61 +7123,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn speculative_bash_reconciles_exact_match_and_discards_drift() {
-        let mut speculative = SpeculativeBash::default();
-        let id = octet_ai::ToolCallId("call_spec".into());
-
-        speculative.note_start(0, id.clone(), "bash".into());
-        speculative.note_args_delta(0, r#"{"command":"#);
-        speculative.note_args_delta(0, r#""ls"}"#);
-        let (completed_id, arguments) = speculative.complete(0).unwrap();
-        assert_eq!(completed_id, id);
-
-        fn completed_execution(text: &str) -> CompletedToolExecution {
-            let (progress_tx, progress_rx) =
-                mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
-            CompletedToolExecution {
-                result: Ok(ToolOutput::new(text)),
-                policy_decision: None,
-                duration: std::time::Duration::ZERO,
-                started_unix_ms: None,
-                finished_unix_ms: None,
-                progress_rx,
-                progress_sink: ToolProgressSink::live(progress_tx),
-                cancellation_won: false,
-            }
-        }
-        let handle = tokio::spawn(async { completed_execution("listed") });
-        speculative.insert_active(
-            id.clone(),
-            arguments.clone(),
-            handle,
-            CancellationToken::default(),
-        );
-
-        // Exact argument match consumes the speculative execution.
-        let matched = speculative.take_matched(&id, Some(&arguments)).await;
-        assert_eq!(matched.unwrap().result.unwrap().text, "listed");
-
-        // Drifted authoritative arguments cancel the speculation instead of
-        // surfacing its result, so the caller executes serially.
-        speculative.note_start(1, id.clone(), "bash".into());
-        speculative.note_args_delta(1, r#"{"command":"ls -la"}"#);
-        let (_, drifted_arguments) = speculative.complete(1).unwrap();
-        let handle = tokio::spawn(async { completed_execution("wrong branch") });
-        speculative.insert_active(
-            id.clone(),
-            drifted_arguments.clone(),
-            handle,
-            CancellationToken::default(),
-        );
-        let authoritative = serde_json::json!({ "command": "ls" });
-        assert!(speculative
-            .take_matched(&id, Some(&authoritative))
-            .await
-            .is_none());
-    }
     #[test]
     fn provisional_delivery_rolls_back_when_generic_tool_output_limiting_truncates_it() {
         use std::sync::atomic::{AtomicI8, Ordering};

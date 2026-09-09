@@ -9,7 +9,7 @@
 1. Streaming deltas are provisional and never enter the session. Opt-in provider lifecycle feedback is likewise forwarded only as transient `AgentEvent` telemetry; it does not mutate context, assembled assistant content, durable telemetry, or session records.
 2. A complete assistant message is persisted before any emitted tool is executed.
 3. Each tool result is persisted immediately after its execution outcome is committed.
-4. A completed call marked schema-invalid by `octet-ai`'s request snapshot receives a static bounded paired error; it never reaches speculative execution, effect classification, hooks, or the tool implementation.
+4. A completed call marked schema-invalid by `octet-ai`'s request snapshot receives a static bounded paired error; it never reaches effect classification, hooks, or the tool implementation.
 5. Crash replay requires both `ReplaySafety::Safe` and an exact host classification of `Pure` or `WorkspaceRead`. Every other unresolved call becomes an indeterminate error and is not executed.
 6. One level-triggered abort signal is selected against provider open/body consumption, retries, tools, and autonomous compaction. Cancellation wins same-poll races. A cancelled compaction persists neither usage nor summary.
 7. Every driven run emits exactly one `RunFinished` and one durable checkpoint.
@@ -24,6 +24,16 @@
    an already-open provider request are paired with synthetic errors rather than
    executed. Effects already admitted at the time of the control settle under
    the ordinary cancellation and commit rules.
+
+Streamed tool-call start/delta/end events describe provisional generation; they
+never execute a tool. Automatic speculative Bash execution is removed: shell
+command spelling, broker admission, and later argument equality cannot establish
+read-only effects, independence from earlier mutations, or durable ordering.
+Cancellation cannot undo an early observation or effect. Mixed/dependent tool
+batches retain emitted execution order; eligible independent observations may
+still overlap through the effect-checked **post-persistence** parallel path.
+This deliberately gives up unsafe overlap rather than promising equivalent
+latency. See the [performance contract](performance.md).
 
 ## Effect admission boundary
 
