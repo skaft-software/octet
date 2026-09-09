@@ -1,9 +1,9 @@
 # Distribution channels
 
-Signed octet 0.7.2 native assets, Serve and four executable bundles are published
-on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.2).
-Public-install verification passed. See [installation](installation.md) for
-native installation or a source build, and [release notes](releases/v0.7.2.md)
+Octet 0.7.3 native assets, Serve and four executable bundles are distributed
+on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.3).
+Public-install results are recorded there. See [installation](installation.md) for
+native installation or a source build, and [release notes](releases/v0.7.3.md)
 for verification evidence.
 npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.
 The repository is now `skaft-software/octet`. The immutable v0.7.0 assets retain
@@ -14,11 +14,11 @@ Do not recreate the old name.
 ## Package identities
 
 These are the current source and signed GitHub package identities. The
-`0.7.2` distribution version does not establish registry availability or change
-independent API and schema versions. See the [0.7.2 release](releases/v0.7.2.md)
+`0.7.3` distribution version does not establish registry availability or change
+independent API and schema versions. See the [0.7.3 release](releases/v0.7.3.md)
 for verified assets and channel boundaries.
 
-| Surface | 0.7.2 source identity |
+| Surface | 0.7.3 source identity |
 | --- | --- |
 | Product and native commands | lowercase octet; `octet`, `octet-host` |
 | Core crates | `octet-ai`, `octet-agent`, `octet-coding-agent`, `octet-migrate-types` |
@@ -27,7 +27,7 @@ for verified assets and channel boundaries.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and first-party extension distribution versions | `0.7.2`; installed compatibility `requires_octet = "=0.7.2"` |
+| Product, SDK and first-party extension distribution versions | `0.7.3`; installed compatibility `requires_octet = "=0.7.3"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
@@ -63,10 +63,10 @@ Cargo can build the published canonical tag's exact source
 (Rust 1.86+ and ripgrep):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.2 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.3 --bins octet-coding-agent
 ```
 
-The public `v0.7.2` tag must exist before using this command. `cargo install octet`
+The public `v0.7.3` tag must exist before using this command. `cargo install octet`
 and registry-based `cargo install octet-coding-agent` are not the supported
 Cargo path.
 
@@ -74,7 +74,7 @@ The npm channel remains unpublished pending functional first-package bootstrap,
 trusted publishers and registry provenance verification. Its future command is:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.2
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.3
 ```
 
 ## Homebrew
@@ -130,7 +130,7 @@ release alias.
 
 ## Other channels
 
-The v0.7.2 version-pinned shell installer is published and verified on macOS
+The v0.7.3 version-pinned shell installer targets macOS
 arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
 platforms but remains unavailable through npm. See
 the [npm release contract](release/npm-trusted-publishing.md) for platform-first

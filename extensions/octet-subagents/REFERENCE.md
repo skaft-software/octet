@@ -1,8 +1,8 @@
 # octet-subagents reference
 
 [Usage guide](README.md). This is the bundled API `0.2` runtime contract, not a
-current extension-authoring example. Distribution `0.7.2` targets exactly octet
-`0.7.2`; the API remains `0.2`.
+current extension-authoring example. Distribution `0.7.3` targets exactly octet
+`0.7.3`; the API remains `0.2`.
 
 The executable launches named, single-purpose child conversations through the
 host-owned `agent_sessions` service. It is not an agent team, graph/recipe runtime,
@@ -84,7 +84,7 @@ use the graph/recipe spike, built-in team mailboxes, or another scheduler.
 
 ## Install, enable, and trust
 
-The bundle requires [octet 0.7.2](../../docs/installation.md) and
+The bundle requires [octet 0.7.3](../../docs/installation.md) and
 has one root directory named `octet-subagents`. Once the matching signed public
 bundle is published, install it with:
 
@@ -93,7 +93,7 @@ octet extension install octet-subagents
 ```
 
 For a reviewed local archive instead, use
-`octet extension install --path ./octet-subagents-0.7.2.tar.gz`.
+`octet extension install --path ./octet-subagents-0.7.3.tar.gz`.
 
 Installation/discovery is inert: it never enables, persists a trust grant, or
 starts the process. The bundle is disabled by default. Default full access
