@@ -261,6 +261,7 @@ class Orchestrator:
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._owners: "OrderedDict[Tuple[str, str], OwnerState]" = OrderedDict()
         self._lock = threading.RLock()
+        self._next_snapshot_revision = 0
         self._shutting_down = False
 
     def set_publisher(
@@ -1420,6 +1421,10 @@ class Orchestrator:
                 now_ms=self._now_ms(),
             )
         )
+        # Capture order, not callback arrival order, owns the process revision.
+        # Publication remains outside the state lock and may arrive out of order.
+        snapshot["revision"] = self._next_snapshot_revision
+        self._next_snapshot_revision += 1
         snapshot["_resource_owner"] = {
             "session_id": state.owner.session_id,
             "extension_instance_id": state.owner.extension_instance_id,

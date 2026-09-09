@@ -887,6 +887,7 @@ impl OctetTheme {
                 code_borders: !self.is_compiled_default(),
                 syntax_highlighting: true,
                 tables: true,
+                stable_block_geometry: true,
                 unordered_list_marker: UnorderedListMarker::Dash,
                 ..RenderOptions::default()
             },

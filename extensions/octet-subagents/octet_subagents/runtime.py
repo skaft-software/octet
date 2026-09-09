@@ -219,28 +219,27 @@ class SdkAgentSessions:
 
 
 class PresentationPublisher:
-    """Assign one monotonic process-generation revision to complete snapshots."""
+    """Serialize publication and discard snapshots older than the latest capture sent."""
 
     def __init__(self, extension: Extension) -> None:
         self.extension = extension
         self._lock = threading.Lock()
-        self._next_revision = 0
+        self._last_revision = -1
         self._closed = False
 
     def __call__(self, snapshot: Mapping[str, Any]) -> None:
         if not self.extension.initialized:
             return
         with self._lock:
-            if self._closed:
+            if self._closed or snapshot["revision"] <= self._last_revision:
                 return
             value = dict(snapshot)
             owner = value.pop("_resource_owner", None)
-            value["revision"] = self._next_revision
             if isinstance(owner, Mapping):
                 self.extension.publish_presentation(value, resource_owner=owner)
             else:
                 self.extension.publish_presentation(value)
-            self._next_revision += 1
+            self._last_revision = value["revision"]
 
     def close(self) -> None:
         with self._lock:
@@ -315,10 +314,9 @@ def _worker_line(worker: Mapping[str, Any]) -> str:
     name = str(worker.get("name", "worker"))
     identifier = str(worker.get("id", "unknown"))
     state = str(worker.get("state", "unknown"))
-    phase = str(worker.get("phase", state))
     elapsed = worker.get("elapsed_ms")
     elapsed_text = "%dms" % elapsed if isinstance(elapsed, int) else "elapsed unknown"
-    return "%s [%s] · %s · %s · %s" % (name, identifier, state, phase, elapsed_text)
+    return "%s [%s] · %s · %s" % (name, identifier, state, elapsed_text)
 
 
 def _result_text(operation: str, result: Mapping[str, Any]) -> str:

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use octet_agent::{InputPart, UserInput};
 use octet_ai::{AudioFormat, Media, Modality, ModalitySet};
+use sexy_tui_rs::TextEditor;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A paste larger than either bound collapses to a placeholder chip.
 pub const LARGE_PASTE_LINES: usize = 10;
@@ -355,6 +357,54 @@ impl AttachmentLedger {
     /// Discard every pending attachment while preserving the monotonic chip ID.
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Handle Backspace on a registered chip, removing its mask and payload.
+    /// Returns false without mutation when ordinary editor Backspace should run.
+    ///
+    /// Any exact occurrence of a registered chip is eligible, including a copied
+    /// duplicate. Removing one revokes its ledger entry, so remaining copies are
+    /// literal text and cannot unexpectedly submit the deleted payload.
+    pub fn backspace_chip(&mut self, editor: &mut TextEditor) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
+        let text = editor.text();
+        let cursor = editor.cursor();
+        let Some((target, _)) = text[..cursor].grapheme_indices(true).next_back() else {
+            return false;
+        };
+        let Some((index, start, end)) =
+            self.entries.iter().enumerate().find_map(|(index, entry)| {
+                text.match_indices(&entry.chip).find_map(|(start, _)| {
+                    let end = start + entry.chip.len();
+                    (start < cursor && target < end).then_some((index, start, end))
+                })
+            })
+        else {
+            return false;
+        };
+
+        // A neighboring combining mark can share a grapheme with a bracket.
+        // Replace complete graphemes as required by TextEditor, but preserve
+        // every byte outside the chip rather than deleting neighboring text.
+        let mut range_start = 0;
+        let mut range_end = text.len();
+        for (boundary, _) in text.grapheme_indices(true) {
+            if boundary <= start {
+                range_start = boundary;
+            }
+            if boundary >= end {
+                range_end = boundary;
+                break;
+            }
+        }
+        let replacement = format!("{}{}", &text[range_start..start], &text[end..range_end]);
+        if !editor.replace_range(range_start..range_end, &replacement) {
+            return false;
+        }
+        self.entries.remove(index);
+        true
     }
 
     /// Collapse a large paste into a chip; the text returns at compose time.
@@ -1022,6 +1072,255 @@ mod tests {
         assert!(
             matches!(&composed.parts[0], octet_agent::InputPart::Text(t) if t == &format!("context: {pasted}"))
         );
+    }
+
+    #[test]
+    fn backspace_chip_removes_large_and_multiline_pastes_at_every_interior_cursor() {
+        for pasted in [
+            "private line\n".repeat(LARGE_PASTE_LINES + 1),
+            "秘".repeat(LARGE_PASTE_CHARS + 1),
+        ] {
+            assert_eq!(classify_paste(&pasted), PasteKind::LargeText);
+            let mut original = AttachmentLedger::default();
+            let chip = original.attach_pasted_text(pasted);
+            let kept = original.attach_pasted_text("kept payload".into());
+            let prefix = "é👩‍💻前\n";
+            let suffix = format!("後e\u{301}{kept}");
+            let draft = format!("{prefix}{chip}{suffix}");
+            for offset in 1..=chip.len() {
+                let mut ledger = original.clone();
+                let mut editor = TextEditor::with_text(&draft);
+                editor.set_cursor(prefix.len() + offset);
+                let revision = editor.text_revision();
+
+                assert!(ledger.backspace_chip(&mut editor), "offset {offset}");
+                assert_eq!(editor.text(), format!("{prefix}{suffix}"));
+                assert_eq!(editor.cursor(), prefix.len());
+                assert!(editor.cursor_is_valid());
+                assert_eq!(editor.text_revision(), revision + 1);
+                assert_eq!(ledger.entries.len(), 1);
+                assert_eq!(ledger.entries[0].chip, kept);
+
+                let composed = compose(editor.take_text(), &mut ledger);
+                let expected = format!("{prefix}後e\u{301}kept payload");
+                assert_eq!(composed.transcript_text, expected);
+                assert!(
+                    matches!(composed.parts.as_slice(), [InputPart::Text(text)] if text == &expected)
+                );
+                assert_eq!(composed.attachments.len(), 1);
+                assert_eq!(composed.attachments[0].chip, kept);
+            }
+        }
+    }
+
+    #[test]
+    fn backspace_chip_removes_only_the_target_image_audio_or_pdf() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        let audio = dir.path().join("memo.wav");
+        let pdf = dir.path().join("brief.pdf");
+        fs::write(&image, b"pngbytes").unwrap();
+        fs::write(&audio, b"wavbytes").unwrap();
+        fs::write(&pdf, b"%PDF-1.7").unwrap();
+        let mut original = AttachmentLedger::default();
+        let chips = [
+            original.attach_media(&image, all_modalities()).unwrap(),
+            original.attach_media(&audio, all_modalities()).unwrap(),
+            original.attach_file_reference(&pdf).unwrap(),
+        ];
+        let kept = original.attach_pasted_text("kept payload".into());
+        let prefix = "前👩‍💻";
+        let suffix = format!("{kept}後");
+        let draft = format!("{prefix}{}{suffix}", chips.concat());
+
+        for (target, chip) in chips.iter().enumerate() {
+            for offset in 1..=chip.len() {
+                let mut ledger = original.clone();
+                let mut editor = TextEditor::with_text(&draft);
+                let start = draft.find(chip).unwrap();
+                editor.set_cursor(start + offset);
+                assert!(ledger.backspace_chip(&mut editor));
+                assert_eq!(editor.text(), draft.replacen(chip, "", 1));
+                assert_eq!(editor.cursor(), start);
+                assert!(editor.cursor_is_valid());
+                assert_eq!(ledger.entries.len(), 3);
+                assert!(!ledger.entries.iter().any(|entry| &entry.chip == chip));
+
+                let composed = compose(editor.take_text(), &mut ledger);
+                let expected_chips = original
+                    .entries
+                    .iter()
+                    .filter(|entry| &entry.chip != chip)
+                    .map(|entry| entry.chip.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    composed
+                        .attachments
+                        .iter()
+                        .map(|entry| entry.chip.as_str())
+                        .collect::<Vec<_>>(),
+                    expected_chips
+                );
+                let images = composed
+                    .parts
+                    .iter()
+                    .filter(|part| matches!(part, InputPart::Media(Media::Image(_))))
+                    .count();
+                let audios = composed
+                    .parts
+                    .iter()
+                    .filter(|part| matches!(part, InputPart::Media(Media::Audio(_))))
+                    .count();
+                assert_eq!(images, usize::from(target != 0));
+                assert_eq!(audios, usize::from(target != 1));
+                let text = composed
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        InputPart::Text(text) => Some(text.as_str()),
+                        InputPart::Media(_) => None,
+                    })
+                    .collect::<String>();
+                assert!(text.starts_with(prefix));
+                assert!(text.ends_with("kept payload後"));
+                assert_eq!(text.contains(pdf.to_str().unwrap()), target != 2);
+                assert!(!composed.display_text.contains(chip));
+            }
+        }
+    }
+
+    #[test]
+    fn backspace_chip_deletes_adjacent_masks_one_at_a_time_and_does_not_reuse_ids() {
+        let mut ledger = AttachmentLedger::default();
+        let chips = (0..3)
+            .map(|_| ledger.attach_pasted_text("same payload".into()))
+            .collect::<Vec<_>>();
+        let mut editor = TextEditor::with_text(chips.concat());
+        // At the shared boundary, Backspace owns the left chip, not the right.
+        editor.set_cursor(chips[0].len());
+        assert!(ledger.backspace_chip(&mut editor));
+        assert_eq!(editor.text(), chips[1..].concat());
+        assert_eq!(editor.cursor(), 0);
+        assert_eq!(ledger.entries.len(), 2);
+        assert!(!ledger.backspace_chip(&mut editor));
+        editor.move_to_end();
+        assert!(ledger.backspace_chip(&mut editor));
+        assert_eq!(editor.text(), chips[1]);
+        assert!(ledger.backspace_chip(&mut editor));
+        assert!(editor.is_empty());
+        assert!(ledger.is_empty());
+        assert!(!ledger.backspace_chip(&mut editor));
+        let composed = compose(editor.take_text(), &mut ledger);
+        assert!(composed.is_empty());
+        assert!(composed.attachments.is_empty());
+        assert!(ledger
+            .attach_pasted_text("new payload".into())
+            .contains("#4:"));
+    }
+
+    #[test]
+    fn backspace_chip_revokes_payload_when_either_duplicate_mask_is_deleted() {
+        let mut original = AttachmentLedger::default();
+        let chip = original.attach_pasted_text("deleted payload".into());
+        let kept = original.attach_pasted_text("kept payload".into());
+        for cursor in [chip.len(), chip.len() + 1, chip.len() * 2] {
+            let mut ledger = original.clone();
+            let mut editor = TextEditor::with_text(format!("{chip}{chip}{kept}"));
+            editor.set_cursor(cursor);
+            assert!(ledger.backspace_chip(&mut editor));
+            assert_eq!(editor.text(), format!("{chip}{kept}"));
+            assert_eq!(ledger.entries.len(), 1);
+            editor.set_cursor(chip.len());
+            assert!(!ledger.backspace_chip(&mut editor));
+            let composed = compose(editor.take_text(), &mut ledger);
+            assert!(
+                matches!(composed.parts.as_slice(), [InputPart::Text(text)] if text == &format!("{chip}kept payload"))
+            );
+            assert_eq!(composed.attachments.len(), 1);
+            assert_eq!(composed.attachments[0].chip, kept);
+        }
+    }
+
+    #[test]
+    fn backspace_chip_leaves_unregistered_and_damaged_masks_to_the_editor() {
+        use crate::tui::keymap::EditAction;
+
+        let mut original = AttachmentLedger::default();
+        let registered = original.attach_pasted_text("hidden payload".into());
+        let damaged = &registered[..registered.len() - 1];
+        for ordinary in [
+            "[ordinary]",
+            "[Image #1]",
+            "[Audio #2]",
+            "[PDF #3]",
+            "[Pasted text #99: 11 lines]",
+            damaged,
+            "é",
+            "👩‍💻",
+            "e\u{301}",
+        ] {
+            let mut ledger = original.clone();
+            let mut editor = TextEditor::with_text(format!("{registered}{ordinary}"));
+            let text = editor.text().to_owned();
+            let revision = editor.revision();
+            assert!(!ledger.backspace_chip(&mut editor), "{ordinary:?}");
+            assert_eq!(editor.text(), text);
+            assert_eq!(editor.revision(), revision);
+            assert_eq!(ledger.entries.len(), 1);
+            editor.apply(EditAction::Backspace, 80);
+            let last = ordinary.grapheme_indices(true).next_back().unwrap().0;
+            assert_eq!(editor.text(), format!("{registered}{}", &ordinary[..last]));
+            assert!(editor.cursor_is_valid());
+        }
+        let mut ledger = AttachmentLedger::default();
+        let mut editor = TextEditor::with_text(registered);
+        assert!(!ledger.backspace_chip(&mut editor));
+        editor.apply(EditAction::Backspace, 80);
+        assert!(editor.text().ends_with("lines"));
+    }
+
+    #[test]
+    fn backspace_chip_at_start_preserves_the_chip_and_edits_preceding_unicode_normally() {
+        use crate::tui::keymap::EditAction;
+
+        let mut ledger = AttachmentLedger::default();
+        let chip = ledger.attach_pasted_text("kept payload".into());
+        let mut editor = TextEditor::with_text(format!("é👩‍💻{chip}"));
+        editor.set_cursor("é👩‍💻".len());
+        assert!(!ledger.backspace_chip(&mut editor));
+        editor.apply(EditAction::Backspace, 80);
+        assert_eq!(editor.text(), format!("é{chip}"));
+        assert_eq!(editor.cursor(), "é".len());
+        assert_eq!(ledger.entries.len(), 1);
+    }
+
+    #[test]
+    fn backspace_chip_preserves_unicode_sharing_a_grapheme_with_its_brackets() {
+        for (prefix, suffix) in [("é", "\u{301}後"), ("\u{600}", "\u{301}")] {
+            let mut original = AttachmentLedger::default();
+            let chip = original.attach_pasted_text("deleted payload".into());
+            let draft = format!("{prefix}{chip}{suffix}");
+            let cursors = draft
+                .grapheme_indices(true)
+                .filter(|(start, grapheme)| {
+                    *start < prefix.len() + chip.len() && start + grapheme.len() > prefix.len()
+                })
+                .map(|(start, grapheme)| start + grapheme.len());
+            for cursor in cursors {
+                let mut ledger = original.clone();
+                let mut editor = TextEditor::with_text(&draft);
+                editor.set_cursor(cursor);
+                assert!(ledger.backspace_chip(&mut editor));
+                assert_eq!(editor.text(), format!("{prefix}{suffix}"));
+                assert!(editor.cursor_is_valid());
+                assert!(ledger.is_empty());
+                let composed = compose(editor.take_text(), &mut ledger);
+                assert!(
+                    matches!(composed.parts.as_slice(), [InputPart::Text(text)] if text == &format!("{prefix}{suffix}"))
+                );
+                assert!(composed.attachments.is_empty());
+            }
+        }
     }
 
     #[test]

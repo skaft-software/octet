@@ -10,7 +10,7 @@ use std::str;
 use super::markdown;
 pub use super::render::StreamingLayoutStats;
 use super::render::{AppendOnlyTail, RenderOptions, RenderedDocument, RenderedLine, RichRenderer};
-use super::{Block, CodeBlock, Document};
+use super::{Block, CodeBlock, Document, Inline};
 
 /// Maximum suffix considered by the CommonMark parser during an active stream.
 pub const MAX_UNSTABLE_PARSE_BYTES: usize = 64 * 1024;
@@ -25,6 +25,8 @@ pub struct StreamingStats {
     pub fence_scanned_bytes: u64,
     /// Bytes copied/appended into literal and open-code previews (not parser allocations).
     pub preview_copied_bytes: u64,
+    /// Newly accepted bytes classified for provisional structural-line visibility.
+    pub preview_scanned_bytes: u64,
     /// Bytes covered by lexical blank-boundary searches and marker-prefix checks.
     /// Separate from fence scanning, parser input, and preview copying.
     pub lexical_scanned_bytes: u64,
@@ -49,11 +51,107 @@ struct FenceScanner {
     searched: usize,
     scanned_bytes: u64,
     open: Option<FenceState>,
+    pending: PendingPresentation,
+    completed_table_header: bool,
+    completed_fence_end: Option<usize>,
+}
+
+/// Incremental classification of just the unfinished source line. Once it is
+/// ordinary payload, later bytes cannot turn its prefix into a block marker.
+#[derive(Clone, Debug, Default)]
+struct PendingPresentation {
+    start: usize,
+    checked: usize,
+    kind: PendingLineKind,
+}
+
+#[derive(Clone, Debug, Default)]
+enum PendingLineKind {
+    #[default]
+    Start,
+    Indent(usize),
+    Marker(char, usize),
+    FenceInfo(char),
+    ClosingSpace,
+    Visible,
+}
+
+impl PendingPresentation {
+    fn end(
+        &mut self,
+        source: &str,
+        start: usize,
+        open: Option<&FenceState>,
+        scanned: &mut u64,
+    ) -> usize {
+        if self.start != start {
+            *self = Self {
+                start,
+                checked: start,
+                ..Self::default()
+            };
+        }
+        for ch in source[self.checked..].chars() {
+            if matches!(
+                self.kind,
+                PendingLineKind::Visible | PendingLineKind::FenceInfo('~')
+            ) {
+                break;
+            }
+            *scanned += ch.len_utf8() as u64;
+            self.kind = match self.kind {
+                PendingLineKind::Start | PendingLineKind::Indent(_) => {
+                    let indent = match self.kind {
+                        PendingLineKind::Indent(n) => n,
+                        _ => 0,
+                    };
+                    if ch == ' ' && indent < 3 {
+                        PendingLineKind::Indent(indent + 1)
+                    } else if open.map_or(matches!(ch, '`' | '~' | '-' | '=' | '*' | '_'), |f| {
+                        ch == f.marker
+                    }) {
+                        PendingLineKind::Marker(ch, 1)
+                    } else {
+                        PendingLineKind::Visible
+                    }
+                }
+                PendingLineKind::Marker(marker, count) if ch == marker => {
+                    PendingLineKind::Marker(marker, count + 1)
+                }
+                PendingLineKind::Marker(marker, count) => {
+                    if let Some(open) = open {
+                        if count >= open.count && ch.is_whitespace() {
+                            PendingLineKind::ClosingSpace
+                        } else {
+                            PendingLineKind::Visible
+                        }
+                    } else if matches!(marker, '`' | '~') && count >= 3 {
+                        PendingLineKind::FenceInfo(marker)
+                    } else {
+                        PendingLineKind::Visible
+                    }
+                }
+                PendingLineKind::FenceInfo('`') if ch != '`' => PendingLineKind::FenceInfo('`'),
+                PendingLineKind::ClosingSpace if ch.is_whitespace() => {
+                    PendingLineKind::ClosingSpace
+                }
+                _ => PendingLineKind::Visible,
+            };
+        }
+        self.checked = source.len();
+        if matches!(self.kind, PendingLineKind::Visible) {
+            source.len()
+        } else {
+            start
+        }
+    }
 }
 
 impl FenceScanner {
     fn scan(&mut self, source: &str) -> bool {
         let mut completed_fence = false;
+        self.completed_table_header = false;
+        self.completed_fence_end = None;
         while self.offset < source.len() {
             let remaining = &source[self.searched..];
             let found = remaining.find('\n');
@@ -70,6 +168,7 @@ impl FenceScanner {
                 if is_closing_fence(line, open.marker, open.count) {
                     self.open = None;
                     completed_fence = true;
+                    self.completed_fence_end = Some(end);
                 }
             } else if let Some((marker, count, info)) = opening_fence(line) {
                 self.open = Some(FenceState {
@@ -80,6 +179,14 @@ impl FenceScanner {
                     language: info,
                 });
             }
+            if self.open.is_none() && line.trim_start().starts_with(['|', '-', ':']) {
+                self.scanned_bytes += line.len() as u64;
+                self.completed_table_header |= line.contains('|')
+                    && line.contains("---")
+                    && line
+                        .chars()
+                        .all(|ch| matches!(ch, '|' | '-' | ':' | ' ' | '\t' | '\r'));
+            }
             self.offset = end;
         }
         completed_fence
@@ -88,6 +195,8 @@ impl FenceScanner {
     fn drain_prefix(&mut self, bytes: usize) {
         self.offset = self.offset.saturating_sub(bytes);
         self.searched = self.searched.saturating_sub(bytes);
+        self.pending.start = self.pending.start.saturating_sub(bytes);
+        self.pending.checked = self.pending.checked.saturating_sub(bytes);
         if let Some(open) = &mut self.open {
             open.start = open.start.saturating_sub(bytes);
             open.code_start = open.code_start.saturating_sub(bytes);
@@ -114,6 +223,9 @@ pub struct StreamingMarkdown {
     preview_epoch: u64,
     next_parse_at: usize,
     tail_semantic_parsed: bool,
+    // Raw tail bytes represented by the preview; any withheld suffix remains
+    // immediately available to raw and semantic-copy consumers.
+    preview_source_len: usize,
     stats: StreamingStats,
 }
 
@@ -151,20 +263,27 @@ impl StreamingMarkdown {
             || decoded_chunk.contains("\n\n")
             || (self.tail.ends_with('\n') && decoded_chunk.starts_with('\n'));
         self.tail.push_str(&decoded_chunk);
-        if had_open_fence {
-            if let [Block::CodeBlock(code)] = self.preview.blocks.as_mut_slice() {
-                code.code.push_str(&decoded_chunk);
-                self.stats.preview_copied_bytes += decoded_chunk.len() as u64;
-            }
-        }
         let completed_fence = self.scanner.scan(&self.tail);
+        let before = (
+            self.preview_source_len,
+            self.preview_epoch,
+            self.committed_revision,
+        );
         self.stabilize(
             had_open_fence,
             decoded_chunk.contains('\n'),
             completed_fence,
             proven_boundary,
         );
-        self.tail_revision = self.tail_revision.saturating_add(1);
+        if before
+            != (
+                self.preview_source_len,
+                self.preview_epoch,
+                self.committed_revision,
+            )
+        {
+            self.tail_revision = self.tail_revision.saturating_add(1);
+        }
     }
 
     pub fn raw_bytes(&self) -> &[u8] {
@@ -188,8 +307,8 @@ impl StreamingMarkdown {
         &self.preview
     }
 
-    /// Current semantic copy text. Incomplete delimiters in the mutable tail
-    /// remain visible until they become valid syntax.
+    /// Current semantic copy text, including accepted source withheld from the
+    /// live preview while a structural line is incomplete.
     pub fn copy_text(&self) -> String {
         let mut output = self.committed.plain_text();
         let tail = self.preview.plain_text();
@@ -197,6 +316,9 @@ impl StreamingMarkdown {
             output.push('\n');
         }
         output.push_str(&tail);
+        if !self.finished {
+            output.push_str(&self.tail[self.preview_source_len..]);
+        }
         output
     }
 
@@ -262,40 +384,62 @@ impl StreamingMarkdown {
                 // Prefix draining adjusts the scanner's offsets.
                 let open = self.scanner.open.as_ref().expect("open fence retained");
                 self.preview_epoch += 1;
-                self.stats.preview_copied_bytes += (self.tail.len() - open.code_start) as u64;
                 self.preview = Document::new(vec![Block::CodeBlock(CodeBlock {
                     language: open.language.clone(),
-                    code: self.tail[open.code_start..].to_owned(),
+                    code: String::new(),
                 })]);
+                self.preview_source_len = open.code_start;
                 self.tail_semantic_parsed = true;
+            }
+            let end = self.presentation_end();
+            if let [Block::CodeBlock(code)] = self.preview.blocks.as_mut_slice() {
+                code.code.push_str(&self.tail[self.preview_source_len..end]);
+                self.stats.preview_copied_bytes += (end - self.preview_source_len) as u64;
+                self.preview_source_len = end;
             }
             return;
         }
 
-        if had_open_fence {
-            // The close marker may be present in `open_code`; discard the
-            // incremental preview and parse the now-complete fenced block once.
+        if completed_fence && self.tail.len() > MAX_UNSTABLE_PARSE_BYTES {
+            // The closed fence is a proven boundary, not an oversized mutable
+            // parse opportunity. Commit once instead of showing closing syntax
+            // as literal payload after the preview budget has been exhausted.
+            if let Some(end) = self.scanner.completed_fence_end {
+                self.commit_prefix(end);
+            }
         }
-
+        let table = matches!(self.preview.blocks.first(), Some(Block::Table(_)));
+        if table && !saw_newline {
+            // A partial cell must not repeatedly reshape a previously painted
+            // table. Raw/copy ingestion remains immediate.
+            return;
+        }
+        if (table && self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES)
+            || (self.tail.len() <= MAX_LIVE_INLINE_PREVIEW_BYTES
+                && (self.tail_semantic_parsed || likely_complete_inline(&self.tail)))
+        {
+            // Scheduling a newline is not a reason to demote an already-rich
+            // preview to raw Markdown. Only publish a new semantic preview.
+            self.parse_and_commit_stable_tail();
+            return;
+        }
         if !saw_newline {
-            // Reasoning summaries and short answers often contain complete
-            // inline Markdown but no newline (for example `**Planning**`).
-            // Promote those tails immediately, then keep their bounded preview
-            // current as more tokens arrive. Huge paragraphs still use the
-            // geometric fallback below and never incur unbounded reparsing.
-            let live_inline = self.tail.len() <= MAX_LIVE_INLINE_PREVIEW_BYTES
-                && (self.tail_semantic_parsed || likely_complete_inline(&self.tail));
-            if live_inline {
-                self.record_parse(self.tail.len());
-                self.preview_epoch += 1;
-                self.preview = markdown::parse(&self.tail);
-                self.tail_semantic_parsed = true;
-            } else {
-                self.append_plain_preview();
-            }
+            self.append_preview();
             return;
         }
 
+        if self.tail_semantic_parsed
+            && matches!(self.preview.blocks.as_slice(), [Block::Paragraph(_)])
+            && !proven_boundary
+            && !completed_fence
+            && !had_open_fence
+        {
+            // Once the inline budget is exhausted, keep the interpretation of
+            // the prefix until a real block boundary. Geometric parser ticks
+            // must not fold an already visible literal continuation into spaces.
+            self.append_preview();
+            return;
+        }
         let parse_threshold = self.next_parse_at.max(1024);
         let structural_line = self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES
             && self.tail.lines().next().is_some_and(|line| {
@@ -313,6 +457,7 @@ impl StreamingMarkdown {
             });
         if self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES
             && (had_open_fence
+                || self.scanner.completed_table_header
                 || completed_fence
                 || proven_boundary
                 || ((structural_line || structural_tail) && !self.tail_semantic_parsed)
@@ -325,7 +470,7 @@ impl StreamingMarkdown {
                 .saturating_mul(2)
                 .clamp(1024, MAX_UNSTABLE_PARSE_BYTES);
         } else if self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES {
-            self.append_plain_preview();
+            self.append_preview();
         } else if proven_boundary {
             if let Some(offset) = lexical_stable_offset(
                 &self.tail,
@@ -335,27 +480,53 @@ impl StreamingMarkdown {
                 self.commit_prefix(offset);
                 self.parse_and_commit_stable_tail();
             } else {
-                self.append_plain_preview();
+                self.append_preview();
             }
         } else {
             // An enormous single paragraph/list remains mutable. Display it as
             // safe literal text and parse it only once on completion.
-            self.append_plain_preview();
+            self.append_preview();
         }
     }
 
     fn parse_and_commit_stable_tail(&mut self) {
-        self.record_parse(self.tail.len());
-        let starts = markdown::top_level_block_starts(&self.tail);
+        let end = self.presentation_end();
+        self.record_parse(end);
+        let starts = markdown::top_level_block_starts(&self.tail[..end]);
         if starts.len() >= 2 {
             if let Some(offset) = starts.last().copied().filter(|offset| *offset > 0) {
                 self.commit_prefix(offset);
             }
         }
-        self.record_parse(self.tail.len());
-        self.preview_epoch += 1;
-        self.preview = markdown::parse(&self.tail);
-        self.tail_semantic_parsed = true;
+        let mut end = self.presentation_end();
+        self.record_parse(end);
+        let mut preview = markdown::parse(&self.tail[..end]);
+        if matches!(preview.blocks.last(), Some(Block::Table(_))) && end > self.scanner.offset {
+            // Interpret only complete table rows; the next cell is provisional.
+            end = self.scanner.offset;
+            self.record_parse(end);
+            preview = markdown::parse(&self.tail[..end]);
+        }
+        // A geometric parser pass discovers block boundaries, not permission
+        // to collapse literal source lines into soft-wrapped prose for a frame.
+        let rich = preview.blocks.iter().any(|block| match block {
+            Block::Paragraph(content) => content.iter().any(|inline| {
+                !matches!(
+                    inline,
+                    Inline::Text(_) | Inline::SoftBreak | Inline::HardBreak
+                )
+            }),
+            Block::Plain(_) => false,
+            _ => true,
+        });
+        if rich {
+            self.preview_epoch += 1;
+            self.preview = preview;
+            self.preview_source_len = end;
+            self.tail_semantic_parsed = true;
+        } else {
+            self.append_preview();
+        }
     }
 
     fn commit_prefix(&mut self, offset: usize) {
@@ -375,6 +546,7 @@ impl StreamingMarkdown {
         self.preview = Document::default();
         self.next_parse_at = 1024;
         self.tail_semantic_parsed = false;
+        self.preview_source_len = 0;
         self.committed_revision = self.committed_revision.saturating_add(1);
     }
 
@@ -383,23 +555,44 @@ impl StreamingMarkdown {
         self.stats.reparsed_bytes = self.stats.reparsed_bytes.saturating_add(bytes as u64);
     }
 
-    fn append_plain_preview(&mut self) {
-        match self.preview.blocks.as_mut_slice() {
-            [Block::Plain(text)] if text.len() <= self.tail.len() => {
-                // Literal tails change only by append; `commit_prefix` clears
-                // the preview before draining. Trust that invariant instead of
-                // comparing the complete accumulated paragraph on every token.
-                if text.len() < self.tail.len() {
-                    self.stats.preview_copied_bytes += (self.tail.len() - text.len()) as u64;
-                    text.push_str(&self.tail[text.len()..]);
+    fn presentation_end(&mut self) -> usize {
+        self.scanner.pending.end(
+            &self.tail,
+            self.scanner.offset,
+            self.scanner.open.as_ref(),
+            &mut self.stats.preview_scanned_bytes,
+        )
+    }
+
+    fn append_preview(&mut self) {
+        let mut end = self.presentation_end();
+        if matches!(self.preview.blocks.first(), Some(Block::Table(_))) {
+            end = end.min(self.scanner.offset);
+        }
+        if end <= self.preview_source_len {
+            return;
+        }
+        let suffix = &self.tail[self.preview_source_len..end];
+        self.stats.preview_copied_bytes += suffix.len() as u64;
+        match self.preview.blocks.last_mut() {
+            Some(Block::Plain(text)) => text.push_str(suffix),
+            Some(Block::Paragraph(content)) => {
+                // Exhausting an inline parse budget must not restore Markdown
+                // delimiters in the entire paragraph. Keep interpreted spans
+                // and append a literal continuation until the next parse.
+                if let Some(Inline::Raw(text)) = content.last_mut() {
+                    text.push_str(suffix);
+                } else {
+                    content.push(Inline::Raw(suffix.to_owned()));
+                    self.preview_epoch += 1;
                 }
             }
             _ => {
                 self.preview_epoch += 1;
-                self.stats.preview_copied_bytes += self.tail.len() as u64;
-                self.preview = Document::new(vec![Block::Plain(self.tail.clone())]);
+                self.preview.blocks.push(Block::Plain(suffix.to_owned()));
             }
         }
+        self.preview_source_len = end;
     }
 }
 
@@ -731,7 +924,7 @@ fn opening_fence(line: &str) -> Option<(char, usize, Option<String>)> {
         .chars()
         .take_while(|character| *character == marker)
         .count();
-    if count < 3 {
+    if count < 3 || (marker == '`' && line[count..].contains('`')) {
         return None;
     }
     let info = line[count..]
@@ -1444,5 +1637,190 @@ mod tests {
         assert!(wide.contains("second"));
         let narrow = cache.render(&stream, &renderer, 10).plain_text();
         assert!(narrow.lines().all(|line| line.len() <= 10));
+    }
+    #[test]
+    fn parser_thresholds_do_not_publish_one_frame_prose_reflows() {
+        let mut stream = StreamingMarkdown::new();
+        let mut cache = StreamingRenderCache::default();
+        for line in 1..=400 {
+            stream.push_str("word line\n");
+            let rows = cache.render_lines(&stream, &RichRenderer::plain(), 40, false);
+            assert_eq!(rows.len(), line, "source line {line}");
+        }
+        assert_eq!(
+            stream.finish(),
+            &markdown::parse(&"word line\n".repeat(400))
+        );
+    }
+
+    #[test]
+    fn semantic_preview_does_not_demote_at_newlines_or_inline_budget() {
+        let mut stream = StreamingMarkdown::from_text("**bold**");
+        for chunk in ["\n", "next", "\n", "more"] {
+            stream.push_str(chunk);
+            assert!(!stream.preview().plain_text().contains("**"));
+        }
+        stream.push_str(&"x".repeat(MAX_LIVE_INLINE_PREVIEW_BYTES));
+        for chunk in ["z", "\n", "after"] {
+            stream.push_str(chunk);
+            assert!(!stream.preview().plain_text().contains("**"));
+            assert!(stream.preview().plain_text().contains(chunk.trim()));
+        }
+        let expected = markdown::parse(stream.raw_text());
+        assert_eq!(stream.finish(), &expected);
+    }
+
+    #[test]
+    fn ambiguous_fence_lines_are_withheld_but_raw_and_copy_remain_complete() {
+        for fence in ["```", "~~~"] {
+            for indent in ["", " ", "  ", "   "] {
+                let opening = format!("{indent}{fence}rust");
+                let mut stream = StreamingMarkdown::new();
+                for byte in opening.as_bytes() {
+                    stream.push_bytes(&[*byte]);
+                    assert!(stream.preview().is_empty());
+                    assert_eq!(stream.copy_text(), stream.raw_text());
+                }
+                stream.push_str("\r\nbody\n");
+                let before = stream.preview().clone();
+                for byte in format!("{indent}{fence}").as_bytes() {
+                    stream.push_bytes(&[*byte]);
+                    assert_eq!(stream.preview(), &before);
+                    assert!(stream
+                        .copy_text()
+                        .ends_with(&stream.unstable_source()[stream.preview_source_len..]));
+                }
+                stream.push_str("\r\n");
+                let expected = markdown::parse(stream.raw_text());
+                assert_eq!(stream.finish(), &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn structural_candidate_classification_is_append_local_and_disambiguates() {
+        for opening in ["", "```\n"] {
+            let mut stream = StreamingMarkdown::from_text(opening);
+            for _ in 0..1024 {
+                stream.push_str("````````");
+            }
+            assert!(stream.stats().preview_scanned_bytes <= stream.raw_bytes().len() as u64);
+            stream.push_str("x");
+            if !opening.is_empty() {
+                assert!(stream.preview().plain_text().contains('x'));
+            }
+            let expected = markdown::parse(stream.raw_text());
+            assert_eq!(stream.finish(), &expected);
+        }
+    }
+
+    #[test]
+    fn completed_table_rows_and_code_geometry_remain_stable() {
+        let mut renderer = RichRenderer::plain();
+        let mut options = renderer.options();
+        options.stable_block_geometry = true;
+        options.code_borders = true;
+        options.code_overflow = super::super::render::CodeOverflow::Wrap;
+        renderer.set_options(options);
+        let mut table =
+            StreamingMarkdown::from_text("| A | B |\n|---|---|\n| x | abcdefghijklmnop |\n");
+        let before = renderer.render_unstable(table.preview(), 30).plain_lines();
+        table.push_str("| supercalifragilistic");
+        assert_eq!(
+            renderer.render_unstable(table.preview(), 30).plain_lines(),
+            before
+        );
+        assert!(table.copy_text().contains("supercalifragilistic"));
+        table.push_str(" | z |\n");
+        let after = renderer.render_unstable(table.preview(), 30).plain_lines();
+        assert_eq!(&before[..before.len() - 1], &after[..before.len() - 1]);
+
+        let mut code = StreamingMarkdown::from_text("```rust\nx\n");
+        let mut cache = StreamingRenderCache::default();
+        let before = cache.render_lines(&code, &renderer, 30, false);
+        code.push_str("a much longer code line");
+        let after = cache.render_lines(&code, &renderer, 30, false);
+        assert_eq!(&before[..before.len() - 1], &after[..before.len() - 1]);
+    }
+    #[test]
+    fn completed_backtick_inline_code_disambiguates_a_possible_fence() {
+        let mut stream = StreamingMarkdown::new();
+        for chunk in ["```", "hello", "```"] {
+            stream.push_str(chunk);
+        }
+        assert_eq!(stream.preview().plain_text(), "hello\n");
+        stream.push_str("\n");
+        assert_eq!(stream.preview().plain_text(), "hello\n");
+    }
+
+    #[test]
+    fn withheld_table_cells_do_not_invalidate_layout() {
+        let mut stream = StreamingMarkdown::from_text("| A | B |\n|---|---|\n");
+        let renderer = RichRenderer::plain();
+        let mut cache = StreamingRenderCache::default();
+        cache.render_lines(&stream, &renderer, 80, false);
+        let stats = cache.stats();
+        for _ in 0..100 {
+            stream.push_str("x");
+            cache.render_lines(&stream, &renderer, 80, false);
+        }
+        assert_eq!(stats, cache.stats());
+        assert!(cache
+            .render(&stream, &renderer, 80)
+            .copy_text
+            .contains(&"x".repeat(100)));
+    }
+    #[test]
+    fn oversized_closed_code_commits_without_painting_fence_syntax() {
+        let mut stream = StreamingMarkdown::from_text("```text\n");
+        stream.push_str(&"payload\n".repeat(10_000));
+        stream.push_str("`");
+        stream.push_str("``\n");
+        assert!(!stream.copy_text().contains("```"));
+        assert!(stream.committed().plain_text().contains("payload"));
+        stream.push_str("next answer");
+        assert!(stream.copy_text().contains("next answer"));
+        let expected = markdown::parse(stream.raw_text());
+        assert_eq!(stream.finish(), &expected);
+    }
+    #[test]
+    fn rich_literal_continuation_retains_rows_and_append_local_layout() {
+        let run = |chunks: usize, newlines: bool| {
+            let mut stream = StreamingMarkdown::from_text(&format!("**rich**{}", "x".repeat(8184)));
+            let renderer = RichRenderer::plain();
+            let mut cache = StreamingRenderCache::default();
+            let mut frame = cache.render_lines(&stream, &renderer, 40, false);
+            for _ in 0..chunks {
+                let previous_len = frame.len();
+                stream.push_str(if newlines {
+                    "word line\n"
+                } else {
+                    "abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz "
+                });
+                let update = cache.render_line_update(&stream, &renderer, 40, false);
+                assert!(update.stable_prefix <= frame.len());
+                frame.truncate(update.stable_prefix);
+                frame.extend(update.replacement);
+                assert!(frame.len() >= previous_len, "rich continuation collapsed");
+            }
+            assert_eq!(
+                frame,
+                renderer.render_unstable(stream.preview(), 40).plain_lines()
+            );
+            let stats = cache.stats();
+            assert_eq!(stats.rich_prefix_layouts, 1);
+            assert_eq!(stats.full_tail_layouts, 1);
+            let raw = stream.raw_text().to_owned();
+            assert_eq!(stream.finish(), &markdown::parse(&raw));
+            stats
+        };
+        for newlines in [false, true] {
+            let small = run(512, newlines);
+            let large = run(1024, newlines);
+            let work = |s: StreamingLayoutStats| {
+                s.checked_bytes + s.laid_out_bytes + s.copied_bytes + s.fallback_source_bytes
+            };
+            assert!(work(large) <= work(small) * 5 / 2, "{small:?} -> {large:?}");
+        }
     }
 }

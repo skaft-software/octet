@@ -60,7 +60,11 @@ nested detail begins at column 4. Narrow pickers collapse to compact rows,
 regular terminals stack labels over metadata, and genuinely wide terminals may
 use columns. The composer keeps stable full-width top and bottom rules and no
 side borders, so copied draft text cannot include frame characters. Its height
-grows proportionally but remains bounded by terminal height.
+grows proportionally but remains bounded by terminal height. Default tool/shell
+headers and output share a two-cell right gutter (reduced safely in tiny panes);
+this is layout space, never part of source or semantic copy text. Code surfaces and
+table columns use viewport-derived geometry so growing payloads do not repeatedly
+resize earlier rows.
 
 There is exactly one breathing row between transcript content and the composer.
 The composer does not animate or recolour merely because work starts or draft

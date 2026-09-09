@@ -103,8 +103,8 @@ fn render_subagent_activity_panel(
     };
     let label = theme.bold(&theme.fg("foreground", "Subagents"));
     let mut lines = vec![label];
-    // A subagents event is already a bounded roster, so keep every child
-    // visible even when ordinary tool output is collapsed.
+    // A subagents event is already an owner-bounded roster, so keep every
+    // retained child visible even when ordinary tool output is collapsed.
     let unicode = theme.unicode();
     let separator = if unicode { " · " } else { " - " };
     let render_row = |text: &str, last: bool| {
@@ -152,12 +152,8 @@ fn render_subagent_activity_panel(
                 child.state.as_str()
             };
             let mut detail = status.to_owned();
-            if matches!(child.state.as_str(), "pending" | "running") {
-                if let Some(tool) = child.current_tool.as_deref() {
-                    detail.push_str(separator);
-                    detail.push_str(&sanitize_for_terminal(tool));
-                }
-            }
+            // Short child tools belong in the inspector, not between the
+            // compact state and usage columns where they flash in and out.
             // Input buckets are disjoint; reasoning is already in output.
             // Tool-call counts remain in telemetry, not the transcript row.
             let input = child

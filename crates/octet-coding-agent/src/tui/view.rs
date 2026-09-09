@@ -648,6 +648,50 @@ pub(crate) struct SubagentActivityView {
     pub(crate) include_cost_in_session_total: bool,
 }
 
+impl SubagentActivityView {
+    /// Retain complete telemetry independently of the compact projection. Tool
+    /// phases, elapsed clocks, and call counts must not invalidate roster rows.
+    fn same_presentation(&self, next: &Self) -> bool {
+        self.status_label == next.status_label
+            && self.activities.len() == next.activities.len()
+            && self.activities.iter().zip(&next.activities).all(|(a, b)| {
+                let usage = |metrics: Option<octet_agent::ExtensionPresentationMetrics>| {
+                    metrics.map(|m| {
+                        (
+                            m.input_tokens
+                                .saturating_add(m.cache_read_tokens)
+                                .saturating_add(m.cache_write_tokens),
+                            m.output_tokens,
+                            m.cost_microdollars,
+                        )
+                    })
+                };
+                a.id == b.id
+                    && a.state == b.state
+                    && a.summary == b.summary
+                    && usage(a.metrics) == usage(b.metrics)
+            })
+            && self.failure_class == next.failure_class
+            && self.failure_reason == next.failure_reason
+            && self.telemetry.len() == next.telemetry.len()
+            && self.telemetry.iter().zip(&next.telemetry).all(|(a, b)| {
+                let input = |child: &octet_agent::DelegationTelemetryChild| {
+                    child
+                        .input_tokens
+                        .saturating_add(child.cache_read_tokens)
+                        .saturating_add(child.cache_write_tokens)
+                };
+                a.child_id == b.child_id
+                    && a.task_name == b.task_name
+                    && a.state == b.state
+                    && input(a) == input(b)
+                    && a.output_tokens == b.output_tokens
+                    && a.cost_microdollars == b.cost_microdollars
+                    && a.failure_reason == b.failure_reason
+            })
+    }
+}
+
 fn subagent_activity_is_active(view: &SubagentActivityView) -> bool {
     if !view.telemetry.is_empty() {
         return view
@@ -833,6 +877,9 @@ pub(crate) struct ShellState {
     /// activity pulse. Keeping it explicit makes each tick O(active work)
     /// instead of O(total session history).
     active_event_blocks: Vec<usize>,
+    /// First addressable native row from the last emitted frame. Animation is
+    /// optional; never invalidate a historical heading just to pulse its style.
+    native_animation_viewport_top: Cell<Option<usize>>,
     /// Snapshot backing an intentionally tail-only first paint. The complete
     /// branch is materialized on scroll or before a destructive resize replay,
     /// so resume readiness does not scale with old history.
@@ -1333,9 +1380,13 @@ impl ShellState {
         self.subagent_activity = Some(view.clone());
         if let Some(index) = self.subagent_activity_block {
             if let Some(TranscriptBlock::Tool(panel)) = self.transcript.get_mut(index) {
-                if panel.subagent_activity.is_some() {
+                if let Some(previous) = panel.subagent_activity.as_ref() {
+                    let same_presentation = previous.same_presentation(&view);
                     let was_active = !panel.finished;
                     panel.update_subagent_activity(&view);
+                    if same_presentation {
+                        return;
+                    }
                     let is_active = !panel.finished;
                     if was_active && !is_active {
                         self.unregister_active_event(index);
@@ -1852,6 +1903,17 @@ impl ShellState {
         }
     }
 
+    fn animation_block_is_addressable(&self, index: usize) -> bool {
+        let Some(top) = self.native_animation_viewport_top.get() else {
+            return true;
+        };
+        self.transcript_cache
+            .borrow()
+            .block_starts
+            .get(index)
+            .is_none_or(|start| *start >= top)
+    }
+
     fn has_active_event_dot(&self) -> bool {
         let markers_enabled = self.theme.resolve::<bool>("margin_markers").unwrap_or(true);
         let thinking_spinner = self
@@ -1860,9 +1922,12 @@ impl ShellState {
             .unwrap_or(false);
         self.active_event_blocks
             .iter()
+            .filter(|index| self.animation_block_is_addressable(**index))
             .any(|index| match self.transcript.get(*index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
-                Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
+                Some(TranscriptBlock::Tool(panel)) => {
+                    markers_enabled && !panel.finished && panel.subagent_activity.is_none()
+                }
                 Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
                 _ => false,
             })
@@ -1891,13 +1956,16 @@ impl ShellState {
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
-        self.active_event_blocks.iter().any(|index| {
-            matches!(
-                self.transcript.get(*index),
-                Some(TranscriptBlock::Reasoning(reasoning))
-                    if self.status_shimmer_active(reasoning)
-            )
-        })
+        self.active_event_blocks
+            .iter()
+            .filter(|index| self.animation_block_is_addressable(**index))
+            .any(|index| {
+                matches!(
+                    self.transcript.get(*index),
+                    Some(TranscriptBlock::Reasoning(reasoning))
+                        if self.status_shimmer_active(reasoning)
+                )
+            })
     }
 
     pub(crate) fn advance_status_shimmer(&mut self) {
@@ -1909,6 +1977,7 @@ impl ShellState {
             .active_event_blocks
             .iter()
             .copied()
+            .filter(|index| self.animation_block_is_addressable(*index))
             .filter(|index| {
                 matches!(
                     self.transcript.get(*index),
@@ -1923,13 +1992,16 @@ impl ShellState {
     }
 
     pub(crate) fn has_active_status_timer(&self) -> bool {
-        self.active_event_blocks.iter().any(|index| {
-            matches!(
-                self.transcript.get(*index),
-                Some(TranscriptBlock::Reasoning(reasoning))
-                    if !reasoning.finished && reasoning.activity_started_at.is_some()
-            )
-        })
+        self.active_event_blocks
+            .iter()
+            .filter(|index| self.animation_block_is_addressable(**index))
+            .any(|index| {
+                matches!(
+                    self.transcript.get(*index),
+                    Some(TranscriptBlock::Reasoning(reasoning))
+                        if !reasoning.finished && reasoning.activity_started_at.is_some()
+                )
+            })
     }
 
     pub(crate) fn advance_status_timer(&mut self) {
@@ -1940,6 +2012,7 @@ impl ShellState {
             .active_event_blocks
             .iter()
             .copied()
+            .filter(|index| self.animation_block_is_addressable(*index))
             .filter(|index| {
                 matches!(
                     self.transcript.get(*index),
@@ -1963,13 +2036,17 @@ impl ShellState {
             .unwrap_or(false);
         thinking_spinner
             && !self.verbose_tools
-            && self.active_event_blocks.iter().any(|index| {
-                matches!(
-                    self.transcript.get(*index),
-                    Some(TranscriptBlock::Reasoning(reasoning))
-                        if !reasoning.finished && !reasoning.reasoning_expanded
-                )
-            })
+            && self
+                .active_event_blocks
+                .iter()
+                .filter(|index| self.animation_block_is_addressable(**index))
+                .any(|index| {
+                    matches!(
+                        self.transcript.get(*index),
+                        Some(TranscriptBlock::Reasoning(reasoning))
+                            if !reasoning.finished && !reasoning.reasoning_expanded
+                    )
+                })
     }
 
     /// Advance only the braille thinking spinner. Unlike the shared event-dot
@@ -1984,6 +2061,7 @@ impl ShellState {
             .active_event_blocks
             .iter()
             .copied()
+            .filter(|index| self.animation_block_is_addressable(*index))
             .filter(|index| {
                 matches!(
                     self.transcript.get(*index),
@@ -2008,11 +2086,13 @@ impl ShellState {
             let markers_enabled = self.theme.resolve::<bool>("margin_markers").unwrap_or(true);
             let visible = match self.transcript.get(index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
-                Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
+                Some(TranscriptBlock::Tool(panel)) => {
+                    markers_enabled && !panel.finished && panel.subagent_activity.is_none()
+                }
                 Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
                 _ => false,
             };
-            if visible {
+            if visible && self.animation_block_is_addressable(index) {
                 self.touch_block(index);
             }
         }
@@ -3161,6 +3241,14 @@ impl InteractiveShell {
                     state
                         .editor
                         .apply(EditAction::Paste(inserted), geometry.text_width());
+                }
+                EditAction::Backspace => {
+                    let state = &mut *state;
+                    if !state.ledger.backspace_chip(&mut state.editor) {
+                        state
+                            .editor
+                            .apply(EditAction::Backspace, geometry.text_width());
+                    }
                 }
                 action => {
                     state.editor.apply(action, geometry.text_width());
@@ -5501,6 +5589,9 @@ mod ordinary_surface_contract_tests;
 mod path_completion_tests;
 #[cfg(test)]
 mod startup_readiness_tests;
+#[cfg(test)]
+#[path = "view/subagent_stability_tests.rs"]
+mod subagent_stability_tests;
 #[cfg(test)]
 mod tests;
 

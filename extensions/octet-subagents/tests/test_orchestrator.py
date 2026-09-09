@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 
 try:
@@ -112,6 +113,48 @@ class OrchestrationTests(unittest.TestCase):
         self.assertTrue(self.snapshots)
         self.assertEqual(self.snapshots[-1]["collection"]["nodes"][0]["id"], "worker:agent-1")
 
+    def test_capture_revisions_precede_publication_without_holding_state_lock(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        captured = threading.Event()
+        release = threading.Event()
+        delayed = []
+        timed_out = []
+        results = []
+
+        def publish(snapshot):
+            if not captured.is_set():
+                delayed.append(snapshot)
+                captured.set()
+                if not release.wait(timeout=3):
+                    timed_out.append(True)
+            self.snapshots.append(snapshot)
+
+        self.orchestrator.set_publisher(publish)
+        thread = threading.Thread(
+            target=lambda: results.append(self.orchestrator.status(self.client, self.owner, {})),
+            daemon=True,
+        )
+        thread.start()
+        try:
+            self.assertTrue(captured.wait(timeout=3))
+            # This acquires the state lock while the older callback is blocked.
+            self.orchestrator.session_settled(
+                {"session_id": "parent-session", "outcome": "cancelled"}
+            )
+            terminal = self.snapshots[-1]
+            self.assertEqual(terminal["activities"][0]["state"], "cancelled")
+            self.assertEqual(delayed[0]["activities"][0]["state"], "running")
+            self.assertLess(delayed[0]["revision"], terminal["revision"])
+        finally:
+            release.set()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(timed_out)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["workers"][0]["state"], "cancelled")
+        self.assertGreater(self.snapshots[-1]["revision"], terminal["revision"])
+
     def test_concurrency_is_enforced_and_children_inherit_no_token_ceiling(self):
         for number in range(1, 9):
             self.spawn("worker-%02d" % number)
@@ -212,7 +255,9 @@ class OrchestrationTests(unittest.TestCase):
         tree = self.snapshots[-1]
         encoded = str(tree)
         self.assertNotIn("Inspect the requested evidence", encoded)
-        self.assertIn("explore-auth · search", encoded)
+        self.assertEqual(tree["activities"][0]["summary"], "explore-auth · running")
+        self.assertNotIn("search", tree["collection"]["nodes"][0]["secondary"])
+        self.assertIn("Current phase/tool: search", tree["collection"]["detail"]["body"])
 
     def test_terminal_summary_usage_artifacts_and_export_are_inspectable(self):
         agent_id = self.spawn()["worker"]["id"]

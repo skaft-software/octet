@@ -252,7 +252,16 @@ impl PtyOctet {
                 let base_url = api.unwrap_or("http://127.0.0.1:9/v1/");
                 let record = serde_json::json!({
                     "base_url": base_url, "api_key": "", "api_name": model,
-                    "headers": [], "models": [], "auto_discover": false,
+                    "headers": [], "auto_discover": false,
+                    // The composed-redraw fixture needs genuinely distinct status
+                    // values now that successful changes do not append notices.
+                    "models": if model == "qwen-3.8-27b" {
+                        vec![serde_json::json!({
+                            "api_name": model,
+                            "reasoning": true, "reasoning_values": ["off", "low", "high"],
+                            "reasoning_default": "off",
+                        })]
+                    } else { vec![] },
                 });
                 fs::write(&credential, record.to_string()).expect("loopback provider fixture");
             }
@@ -1909,15 +1918,16 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                     columns,
                     &format!("{label}-startup"),
                 );
-                // Shift+Tab updates a local setting, appends a note and restarts
-                // model-colour animation. No provider/model request or resize.
-                for step in 0..2 {
+                // Shift+Tab updates a local setting and restarts model-colour
+                // animation, without a redundant transcript success notice.
+                // Wait for the actual new chrome: persistence precedes the
+                // lifecycle rebuild and is not an input-readiness barrier.
+                for (step, level) in ["low", "high"].into_iter().enumerate() {
                     let redraw_start = octet.pty.output.len();
                     octet.pty.write_input(b"\x1b[Z");
-                    // Reconfiguration is asynchronous, and a differential
-                    // frame can retain an unchanged notice without emitting
-                    // its text again. Await a new complete composed frame,
-                    // checking every intervening frame rather than sleeping.
+                    // Reconfiguration is asynchronous. Await the changed
+                    // complete composed frame, checking every intervening
+                    // frame rather than sleeping past potential logo artifacts.
                     let deadline = Instant::now() + STARTUP_TIMEOUT;
                     loop {
                         octet.pty.read_available();
@@ -1929,12 +1939,18 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                             &format!("{label}-setting{step}"),
                         );
                         let screen = parser.screen().contents();
-                        if consumed > redraw_start && screen.contains("thinking changed to off") {
+                        assert!(
+                            !screen.contains("thinking changed to"),
+                            "{label}-setting{step}: redundant thinking notice\n{screen}"
+                        );
+                        if consumed > redraw_start
+                            && screen.contains(&format!("Qwen 3.8 27B / {level}"))
+                        {
                             break;
                         }
                         assert!(
                             Instant::now() < deadline,
-                            "{label}-setting{step}: thinking notice timed out\n{screen}"
+                            "{label}-setting{step}: thinking status/redraw timed out\n{screen}"
                         );
                         assert!(
                             octet.child.try_wait().unwrap().is_none(),

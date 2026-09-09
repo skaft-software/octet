@@ -1278,9 +1278,26 @@ pub async fn optional_model_picker(
     input: &mut EventStream,
     catalog: &ModelCatalog,
 ) -> anyhow::Result<Option<ModelId>> {
-    let mut presentation = model_picker_presentation(catalog);
+    let selected = pick_model_choice(shell, input, catalog).await?;
+    if let Some(id) = &selected {
+        if let Err(e) = crate::cli::persist_model(&id.0) {
+            shell.error(format!("failed to save model preference: {e}"));
+        }
+    }
+    Ok(selected)
+}
+
+async fn pick_model_choice<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    catalog: &ModelCatalog,
+) -> anyhow::Result<Option<ModelId>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let (current, _) = shell.selected_identity();
-    let initial = mark_current_choice(
+    let mut presentation = model_picker_presentation(catalog);
+    mark_current_choice(
         &mut presentation.labels,
         presentation.ids.iter().position(|id| id.0 == current),
     );
@@ -1294,7 +1311,8 @@ pub async fn optional_model_picker(
         ),
         presentation.labels,
         presentation.descriptions,
-        initial,
+        // Current is an annotation, not the initial viewport or keyboard focus.
+        0,
         PanelAction::SelectGroupedModel {
             models: presentation.ids.clone(),
             providers: presentation.providers,
@@ -1304,11 +1322,7 @@ pub async fn optional_model_picker(
     else {
         return Ok(None);
     };
-    let selected_id = presentation.ids[index].0.clone();
-    if let Err(e) = crate::cli::persist_model(&selected_id) {
-        shell.error(format!("failed to save model preference: {e}"));
-    }
-    Ok(Some(ModelId(selected_id)))
+    Ok(Some(presentation.ids[index].clone()))
 }
 
 /// Ask the user to select one model from the active catalog.
@@ -1441,6 +1455,76 @@ mod tests {
         assert_eq!(selected, Some(1));
         assert_eq!(shell.theme().background(), original.background());
         assert_eq!(shell.theme().capabilities(), original.capabilities());
+    }
+
+    #[tokio::test]
+    async fn model_choice_starts_at_first_result_on_every_open_and_keeps_current_marker() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let presentation = model_picker_presentation(&catalog);
+        let current = presentation.ids.last().unwrap().clone();
+        assert_ne!(current, presentation.ids[0]);
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_identity("test", &current.0, "high");
+
+        // Exercise the real model driver, without the user-config persistence
+        // boundary. Provider headings never occupy a selectable index.
+        for size in [(46, 8), (80, 24), (120, 40)] {
+            shell.set_size(size.0, size.1);
+            for (keys, expected) in [
+                (vec![KeyCode::Enter], Some(presentation.ids[0].clone())),
+                (
+                    vec![KeyCode::Down, KeyCode::Enter],
+                    Some(presentation.ids[1].clone()),
+                ),
+                (
+                    "(current)"
+                        .chars()
+                        .map(KeyCode::Char)
+                        .chain([KeyCode::Enter])
+                        .collect(),
+                    Some(current.clone()),
+                ),
+                (vec![KeyCode::Esc], None),
+                // Reopening clears the previous filter and navigation state.
+                (vec![KeyCode::Enter], Some(presentation.ids[0].clone())),
+            ] {
+                let mut input = tokio_stream::iter(
+                    keys.into_iter()
+                        .map(|key| Ok(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)))),
+                );
+                assert_eq!(
+                    pick_model_choice(&mut shell, &mut input, &catalog)
+                        .await
+                        .unwrap(),
+                    expected,
+                    "model selection at {size:?}"
+                );
+                assert!(!shell.has_panel());
+                assert_eq!(
+                    shell.selected_identity(),
+                    (current.0.clone(), "high".into())
+                );
+                assert!(shell.debug_snapshot().is_empty());
+                assert_eq!(shell.debug_error(), None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_model_choice_retains_the_availability_error() {
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        assert_eq!(
+            pick_model_choice(&mut shell, &mut input, &ModelCatalog::default())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            shell.debug_error().as_deref(),
+            Some("nothing is available to select")
+        );
+        assert!(!shell.has_panel());
     }
 
     #[tokio::test]

@@ -220,7 +220,11 @@ pub(super) fn event_margin_marker_with_frame(
         TranscriptBlock::Reasoning(_) => None,
         TranscriptBlock::Assistant(_) if markers_enabled => Some(theme.fg("foreground", event_dot)),
         TranscriptBlock::Tool(panel) if markers_enabled && !panel.finished => {
-            Some(active_phase_dot())
+            Some(if panel.subagent_activity.is_some() {
+                theme.fg("foreground", event_dot)
+            } else {
+                active_phase_dot()
+            })
         }
         TranscriptBlock::Tool(panel) if markers_enabled => Some(if panel.is_error {
             theme.settled_event_dot("error", event_dot)

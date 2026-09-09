@@ -151,6 +151,9 @@ pub(super) fn render_loop(
     clear_on_start: bool,
 ) {
     let mut tui = TUI::new(Box::new(terminal));
+    // Removing bounded live activity must not clear saved lines merely because
+    // the frame contracted. Offscreen semantic mutations still use Pi's replay.
+    tui.set_clear_on_shrink(false);
     // octet's composer uses the terminal cursor itself; unlike Pi's editor, it
     // does not paint a separate inverted cursor cell around CURSOR_MARKER.
     // Restore visibility after panels, resize replays, and renderer resumes.
@@ -360,6 +363,9 @@ pub(super) struct ShellFrameState {
     /// overlay surface. This bounds lazy diffs when mutable chrome changes the
     /// overlay's seam with terminal-owned history.
     pub(super) overlay_prefix_len: usize,
+    /// The native pending-tool preview diverges from canonical cached rows at
+    /// this seam; even a status-only update must replace that bounded suffix.
+    pub(super) pending_tool_start: Option<usize>,
 }
 
 /// The retained root component. It reads the shell state at render time, while
@@ -396,6 +402,7 @@ impl Component for ShellComponent {
             return render_startup_surface(&state, width);
         }
         if self.uses_application_viewport(&state) {
+            state.native_animation_viewport_top.set(None);
             let lines = render_shell_viewport_at(&state, width, Instant::now());
             let mut frame = self.frame.borrow_mut();
             frame.initialized = true;
@@ -416,6 +423,7 @@ impl Component for ShellComponent {
     fn render_update(&self, width: u16) -> Option<FrameUpdate> {
         let state = self.state.borrow();
         Some(if self.uses_application_viewport(&state) {
+            state.native_animation_viewport_top.set(None);
             render_shell_viewport_update(
                 &state,
                 width,
@@ -455,6 +463,7 @@ impl Component for ShellComponent {
             });
         }
         Some(if self.uses_application_viewport(&state) {
+            state.native_animation_viewport_top.set(None);
             render_shell_viewport_update(
                 &state,
                 width,
