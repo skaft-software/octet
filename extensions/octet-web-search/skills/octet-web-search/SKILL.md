@@ -1,7 +1,7 @@
 ---
 name: octet-web-search
 description: Retrieve bounded public web evidence through octet-web-search and cite stable source IDs.
-version: 0.7.2
+version: 0.7.3
 required-tools:
   - web_search
   - web_fetch

@@ -1,7 +1,7 @@
 name = "octet-web-search"
-version = "0.7.2"
+version = "0.7.3"
 api_version = "0.2"
-requires_octet = "=0.7.2"
+requires_octet = "=0.7.3"
 description = "Selectable Brave Search or SearXNG web search with bounded public-page retrieval and stable citations"
 
 [entrypoint]
