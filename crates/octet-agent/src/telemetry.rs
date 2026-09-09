@@ -74,9 +74,50 @@ struct AttemptState {
     attempt: u64,
     step_index: u64,
     started: Instant,
+    // Agent-observed nonempty deltas, not provider-header or terminal-paint times.
     ttft: Option<Duration>,
+    first_text_delta: Option<Duration>,
+    first_reasoning_delta: Option<Duration>,
     text_bytes: u64,
     reasoning_bytes: u64,
+}
+
+impl AttemptState {
+    fn observe_output(&mut self, channel: crate::events::OutputChannel, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let elapsed = self.started.elapsed();
+        self.ttft.get_or_insert(elapsed);
+        match channel {
+            crate::events::OutputChannel::Text => {
+                self.first_text_delta.get_or_insert(elapsed);
+                self.text_bytes = self.text_bytes.saturating_add(text.len() as u64);
+            }
+            crate::events::OutputChannel::Reasoning => {
+                self.first_reasoning_delta.get_or_insert(elapsed);
+                self.reasoning_bytes = self.reasoning_bytes.saturating_add(text.len() as u64);
+            }
+        }
+    }
+
+    fn add_output_timings(&self, fields: &mut Map<String, Value>) {
+        // Keep the established ttft_ms field, but make its observation boundary
+        // explicit. A reasoning delta must never stand in for answer text.
+        fields.insert(
+            "output_timing_scope".into(),
+            Value::String("agent_delta".into()),
+        );
+        for (name, duration) in [
+            ("ttft_ms", self.ttft),
+            ("first_text_delta_ms", self.first_text_delta),
+            ("first_reasoning_delta_ms", self.first_reasoning_delta),
+        ] {
+            if let Some(duration) = duration {
+                fields.insert(name.into(), Value::Number(duration_ms(duration).into()));
+            }
+        }
+    }
 }
 
 struct ActiveTool {
@@ -295,18 +336,7 @@ impl EventObserver for TelemetryObserver {
                 let Some(attempt) = state.current_attempt.as_mut() else {
                     return;
                 };
-                if attempt.ttft.is_none() {
-                    attempt.ttft = Some(attempt.started.elapsed());
-                }
-                match channel {
-                    crate::events::OutputChannel::Text => {
-                        attempt.text_bytes = attempt.text_bytes.saturating_add(text.len() as u64)
-                    }
-                    crate::events::OutputChannel::Reasoning => {
-                        attempt.reasoning_bytes =
-                            attempt.reasoning_bytes.saturating_add(text.len() as u64)
-                    }
-                }
+                attempt.observe_output(*channel, text);
             }
             AgentEvent::TurnStarted => {
                 // ToolStarted events for one assistant response arrive after
@@ -340,6 +370,8 @@ impl EventObserver for TelemetryObserver {
                     step_index: state.step_index,
                     started: Instant::now(),
                     ttft: None,
+                    first_text_delta: None,
+                    first_reasoning_delta: None,
                     text_bytes: 0,
                     reasoning_bytes: 0,
                 });
@@ -363,12 +395,7 @@ impl EventObserver for TelemetryObserver {
             } => {
                 state.awaiting_retry = true;
                 state.requests_discarded = state.requests_discarded.saturating_add(1);
-                let timing = state.current_attempt.take().map(|attempt_state| {
-                    (
-                        attempt_state.started.elapsed().as_millis() as u64,
-                        attempt_state.ttft.map(duration_ms),
-                    )
-                });
+                let timing = state.current_attempt.take();
                 let mut fields = Map::new();
                 fields.insert(
                     "retry_attempt".into(),
@@ -383,11 +410,12 @@ impl EventObserver for TelemetryObserver {
                     Value::Number((delay.as_millis().min(u64::MAX as u128) as u64).into()),
                 );
                 fields.insert("error".into(), Value::String(bounded_text(error)));
-                if let Some((elapsed, ttft)) = timing {
-                    fields.insert("elapsed_ms".into(), Value::Number(elapsed.into()));
-                    if let Some(ttft) = ttft {
-                        fields.insert("ttft_ms".into(), Value::Number(ttft.into()));
-                    }
+                if let Some(timing) = timing {
+                    fields.insert(
+                        "elapsed_ms".into(),
+                        Value::Number(duration_ms(timing.started.elapsed()).into()),
+                    );
+                    timing.add_output_timings(&mut fields);
                 }
                 inner.emit(
                     Some(resource_owner),
@@ -614,7 +642,7 @@ impl EventObserver for TelemetryObserver {
                     ttft,
                     text_bytes,
                     reasoning_bytes,
-                ) = attempt.map_or(
+                ) = attempt.as_ref().map_or(
                     (
                         state.turn_index,
                         state.request_attempts,
@@ -645,8 +673,10 @@ impl EventObserver for TelemetryObserver {
                 fields.insert("attempt".into(), Value::Number(attempt_number.into()));
                 fields.insert("step".into(), Value::Number(step.into()));
                 fields.insert("elapsed_ms".into(), Value::Number(elapsed.into()));
+                if let Some(attempt) = attempt {
+                    attempt.add_output_timings(&mut fields);
+                }
                 if let Some(ttft) = ttft {
-                    fields.insert("ttft_ms".into(), Value::Number(ttft.into()));
                     fields.insert(
                         "generation_ms".into(),
                         Value::Number(elapsed.saturating_sub(ttft).into()),
@@ -1073,6 +1103,103 @@ mod tests {
     }
 
     #[test]
+    fn output_timing_ignores_empty_deltas_and_distinguishes_channels() {
+        let mut attempt = AttemptState {
+            logical_turn: 1,
+            attempt: 1,
+            step_index: 1,
+            started: Instant::now(),
+            ttft: None,
+            first_text_delta: None,
+            first_reasoning_delta: None,
+            text_bytes: 0,
+            reasoning_bytes: 0,
+        };
+        attempt.observe_output(OutputChannel::Text, "");
+        attempt.observe_output(OutputChannel::Reasoning, "");
+        assert!(attempt.ttft.is_none());
+        attempt.observe_output(OutputChannel::Reasoning, "thinking");
+        let first_reasoning = attempt.first_reasoning_delta;
+        assert_eq!(attempt.ttft, first_reasoning);
+        assert!(attempt.first_text_delta.is_none());
+        attempt.observe_output(OutputChannel::Text, "answer");
+        let first_text = attempt.first_text_delta;
+        assert!(first_text >= first_reasoning);
+        attempt.observe_output(OutputChannel::Text, " more");
+        attempt.observe_output(OutputChannel::Reasoning, " more");
+        assert_eq!(attempt.first_text_delta, first_text);
+        assert_eq!(attempt.first_reasoning_delta, first_reasoning);
+        assert_eq!(attempt.text_bytes, 11);
+        assert_eq!(attempt.reasoning_bytes, 13);
+
+        // Distinct values make accidental first-text/first-reasoning aliasing
+        // observable without sleeps or timing thresholds in a unit test.
+        attempt.ttft = Some(Duration::from_millis(7));
+        attempt.first_reasoning_delta = Some(Duration::from_millis(7));
+        attempt.first_text_delta = Some(Duration::from_millis(29));
+        let mut fields = Map::new();
+        attempt.add_output_timings(&mut fields);
+        assert_eq!(fields["ttft_ms"], 7);
+        assert_eq!(fields["first_reasoning_delta_ms"], 7);
+        assert_eq!(fields["first_text_delta_ms"], 29);
+        assert_eq!(fields["output_timing_scope"], "agent_delta");
+    }
+
+    #[test]
+    fn output_timings_reset_between_attempts_and_do_not_infer_text_from_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.jsonl");
+        let observer = TelemetryObserver::new(&path, "test").unwrap();
+        observer.on_run_started_for_owner("entry", &UserInput::from("task"), &model(), "owner");
+        for attempt in 1..=2 {
+            observer.on_event_for_owner(&AgentEvent::TurnStarted, "owner");
+            observer.on_event_for_owner(
+                &AgentEvent::OutputDelta {
+                    channel: OutputChannel::Reasoning,
+                    text: if attempt == 1 {
+                        "thinking".into()
+                    } else {
+                        String::new()
+                    },
+                },
+                "owner",
+            );
+            observer.on_event_for_owner(
+                &AgentEvent::ToolStarted {
+                    id: ToolCallId(format!("call-{attempt}")),
+                    name: "read".into(),
+                    args: serde_json::json!({"path": "fixture"}),
+                },
+                "owner",
+            );
+            observer.on_event_for_owner(
+                &AgentEvent::ProviderRetry {
+                    attempt,
+                    max_attempts: 3,
+                    delay: Duration::ZERO,
+                    error: "fixture".into(),
+                },
+                "owner",
+            );
+        }
+        let records = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|record| record["record"] == "provider_retry")
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert!(records[0]["first_reasoning_delta_ms"].is_u64());
+        assert!(records[0].get("first_text_delta_ms").is_none());
+        for field in ["ttft_ms", "first_text_delta_ms", "first_reasoning_delta_ms"] {
+            assert!(
+                records[1].get(field).is_none(),
+                "missing timing was invented: {field}"
+            );
+        }
+    }
+
+    #[test]
     fn writes_bounded_machine_readable_records_without_raw_arguments() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("trace.jsonl");
@@ -1161,6 +1288,10 @@ mod tests {
         assert_eq!(request["cache_read_tokens"], 4);
         assert_eq!(request["provider_input_tokens"], 7);
         assert_eq!(request["usage_scope"], "request");
+        assert_eq!(request["output_timing_scope"], "agent_delta");
+        assert_eq!(request["ttft_ms"], request["first_text_delta_ms"]);
+        assert!(request["first_text_delta_ms"].is_u64());
+        assert!(request.get("first_reasoning_delta_ms").is_none());
         let run = records
             .iter()
             .find(|record| record["record"] == "run_finished")

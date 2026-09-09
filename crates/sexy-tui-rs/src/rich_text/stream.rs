@@ -8,7 +8,8 @@
 use std::str;
 
 use super::markdown;
-use super::render::{RenderOptions, RenderedDocument, RenderedLine, RichRenderer};
+pub use super::render::StreamingLayoutStats;
+use super::render::{AppendOnlyTail, RenderOptions, RenderedDocument, RenderedLine, RichRenderer};
 use super::{Block, CodeBlock, Document};
 
 /// Maximum suffix considered by the CommonMark parser during an active stream.
@@ -20,6 +21,13 @@ const MAX_LIVE_INLINE_PREVIEW_BYTES: usize = 8 * 1024;
 /// Streaming work counters for performance regression tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StreamingStats {
+    /// Bytes searched for line endings, plus completed lines classified as fences.
+    pub fence_scanned_bytes: u64,
+    /// Bytes copied/appended into literal and open-code previews (not parser allocations).
+    pub preview_copied_bytes: u64,
+    /// Bytes covered by lexical blank-boundary searches and marker-prefix checks.
+    /// Separate from fence scanning, parser input, and preview copying.
+    pub lexical_scanned_bytes: u64,
     pub parse_passes: u64,
     pub reparsed_bytes: u64,
     pub committed_blocks: usize,
@@ -38,6 +46,8 @@ struct FenceState {
 #[derive(Clone, Debug, Default)]
 struct FenceScanner {
     offset: usize,
+    searched: usize,
+    scanned_bytes: u64,
     open: Option<FenceState>,
 }
 
@@ -45,10 +55,16 @@ impl FenceScanner {
     fn scan(&mut self, source: &str) -> bool {
         let mut completed_fence = false;
         while self.offset < source.len() {
-            let Some(relative_end) = source[self.offset..].find('\n') else {
+            let remaining = &source[self.searched..];
+            let found = remaining.find('\n');
+            let searched = found.map_or(remaining.len(), |end| end + 1);
+            self.scanned_bytes += searched as u64;
+            self.searched += searched;
+            if found.is_none() {
                 break;
-            };
-            let end = self.offset + relative_end + 1;
+            }
+            let end = self.searched;
+            self.scanned_bytes += (end - self.offset) as u64;
             let line = source[self.offset..end].trim_end_matches(['\r', '\n']);
             if let Some(open) = &self.open {
                 if is_closing_fence(line, open.marker, open.count) {
@@ -71,6 +87,7 @@ impl FenceScanner {
 
     fn drain_prefix(&mut self, bytes: usize) {
         self.offset = self.offset.saturating_sub(bytes);
+        self.searched = self.searched.saturating_sub(bytes);
         if let Some(open) = &mut self.open {
             open.start = open.start.saturating_sub(bytes);
             open.code_start = open.code_start.saturating_sub(bytes);
@@ -89,9 +106,12 @@ pub struct StreamingMarkdown {
     tail: String,
     preview: Document,
     scanner: FenceScanner,
+    lexical_first: Option<LexicalLinePrefix>,
     finished: bool,
     committed_revision: u64,
     tail_revision: u64,
+    // Changes only when the preview ceases to be an append of its old value.
+    preview_epoch: u64,
     next_parse_at: usize,
     tail_semantic_parsed: bool,
     stats: StreamingStats,
@@ -134,6 +154,7 @@ impl StreamingMarkdown {
         if had_open_fence {
             if let [Block::CodeBlock(code)] = self.preview.blocks.as_mut_slice() {
                 code.code.push_str(&decoded_chunk);
+                self.stats.preview_copied_bytes += decoded_chunk.len() as u64;
             }
         }
         let completed_fence = self.scanner.scan(&self.tail);
@@ -193,6 +214,7 @@ impl StreamingMarkdown {
 
     pub fn stats(&self) -> StreamingStats {
         StreamingStats {
+            fence_scanned_bytes: self.scanner.scanned_bytes,
             committed_blocks: self.committed.blocks.len(),
             pending_utf8_bytes: self.pending_utf8.len(),
             ..self.stats
@@ -232,13 +254,15 @@ impl StreamingMarkdown {
         completed_fence: bool,
         proven_boundary: bool,
     ) {
-        if let Some(open) = self.scanner.open.clone() {
-            if !had_open_fence {
+        if let Some(open) = self.scanner.open.as_ref() {
+            if !had_open_fence || completed_fence {
                 if open.start > 0 {
                     self.commit_prefix(open.start);
                 }
                 // Prefix draining adjusts the scanner's offsets.
                 let open = self.scanner.open.as_ref().expect("open fence retained");
+                self.preview_epoch += 1;
+                self.stats.preview_copied_bytes += (self.tail.len() - open.code_start) as u64;
                 self.preview = Document::new(vec![Block::CodeBlock(CodeBlock {
                     language: open.language.clone(),
                     code: self.tail[open.code_start..].to_owned(),
@@ -263,6 +287,7 @@ impl StreamingMarkdown {
                 && (self.tail_semantic_parsed || likely_complete_inline(&self.tail));
             if live_inline {
                 self.record_parse(self.tail.len());
+                self.preview_epoch += 1;
                 self.preview = markdown::parse(&self.tail);
                 self.tail_semantic_parsed = true;
             } else {
@@ -272,17 +297,20 @@ impl StreamingMarkdown {
         }
 
         let parse_threshold = self.next_parse_at.max(1024);
-        let structural_line = self.tail.lines().next().is_some_and(|line| {
-            let line = line.trim_start();
-            line.starts_with('#')
-                || line.starts_with('>')
-                || is_list_marker(line)
-                || matches!(line, "---" | "***" | "___")
-        });
-        let structural_tail = self.tail.lines().next_back().is_some_and(|line| {
-            let line = line.trim();
-            matches!(line, "---" | "***" | "___") || (line.contains('|') && line.contains("---"))
-        });
+        let structural_line = self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES
+            && self.tail.lines().next().is_some_and(|line| {
+                let line = line.trim_start();
+                line.starts_with('#')
+                    || line.starts_with('>')
+                    || is_list_marker(line, &mut self.stats.lexical_scanned_bytes)
+                    || matches!(line, "---" | "***" | "___")
+            });
+        let structural_tail = self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES
+            && self.tail.lines().next_back().is_some_and(|line| {
+                let line = line.trim();
+                matches!(line, "---" | "***" | "___")
+                    || (line.contains('|') && line.contains("---"))
+            });
         if self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES
             && (had_open_fence
                 || completed_fence
@@ -299,7 +327,11 @@ impl StreamingMarkdown {
         } else if self.tail.len() <= MAX_UNSTABLE_PARSE_BYTES {
             self.append_plain_preview();
         } else if proven_boundary {
-            if let Some(offset) = lexical_stable_offset(&self.tail) {
+            if let Some(offset) = lexical_stable_offset(
+                &self.tail,
+                &mut self.lexical_first,
+                &mut self.stats.lexical_scanned_bytes,
+            ) {
                 self.commit_prefix(offset);
                 self.parse_and_commit_stable_tail();
             } else {
@@ -308,7 +340,7 @@ impl StreamingMarkdown {
         } else {
             // An enormous single paragraph/list remains mutable. Display it as
             // safe literal text and parse it only once on completion.
-            self.preview = Document::new(vec![Block::Plain(self.tail.clone())]);
+            self.append_plain_preview();
         }
     }
 
@@ -321,6 +353,7 @@ impl StreamingMarkdown {
             }
         }
         self.record_parse(self.tail.len());
+        self.preview_epoch += 1;
         self.preview = markdown::parse(&self.tail);
         self.tail_semantic_parsed = true;
     }
@@ -335,8 +368,10 @@ impl StreamingMarkdown {
         self.committed.blocks.append(&mut document.blocks);
         self.tail.drain(..offset);
         self.scanner.drain_prefix(offset);
+        self.lexical_first = None;
         // A drained tail invalidates any literal preview prefix. Callers either
         // replace it immediately with a semantic render or append afresh.
+        self.preview_epoch += 1;
         self.preview = Document::default();
         self.next_parse_at = 1024;
         self.tail_semantic_parsed = false;
@@ -355,10 +390,15 @@ impl StreamingMarkdown {
                 // the preview before draining. Trust that invariant instead of
                 // comparing the complete accumulated paragraph on every token.
                 if text.len() < self.tail.len() {
+                    self.stats.preview_copied_bytes += (self.tail.len() - text.len()) as u64;
                     text.push_str(&self.tail[text.len()..]);
                 }
             }
-            _ => self.preview = Document::new(vec![Block::Plain(self.tail.clone())]),
+            _ => {
+                self.preview_epoch += 1;
+                self.stats.preview_copied_bytes += self.tail.len() as u64;
+                self.preview = Document::new(vec![Block::Plain(self.tail.clone())]);
+            }
         }
     }
 }
@@ -371,8 +411,9 @@ pub struct StreamingLineUpdate {
     pub replacement: Vec<String>,
 }
 
-/// Incremental line-layout cache. At a stable width, only newly committed
-/// blocks and the bounded mutable tail are rendered.
+/// Incremental line-layout cache. At a stable width, newly committed blocks
+/// and changed tail rows are rendered. Literal/open-code tails retain proven
+/// visual rows; semantic promotion, reflow, and finalization may replace them.
 #[derive(Clone, Debug, Default)]
 pub struct StreamingRenderCache {
     width: Option<u16>,
@@ -388,6 +429,11 @@ pub struct StreamingRenderCache {
     committed_block_ends: Vec<usize>,
     tail_revision: u64,
     tail_lines: Vec<RenderedLine>,
+    tail_visible: usize,
+    append_tail: AppendOnlyTail,
+    preview_epoch: u64,
+    layout_stats: StreamingLayoutStats,
+    selected_styled: Option<bool>,
     /// Pre-built merged result, invalidated when either committed or tail changes.
     merged_lines: Vec<RenderedLine>,
     merged_revision: Option<u64>,
@@ -395,6 +441,11 @@ pub struct StreamingRenderCache {
 }
 
 impl StreamingRenderCache {
+    /// Tail layout inputs and encoded-row work, not allocation or parser totals.
+    pub const fn stats(&self) -> StreamingLayoutStats {
+        self.layout_stats
+    }
+
     /// Rows produced by parser-committed blocks at the current width. These
     /// rows are byte-stable across later token deltas and may safely cross a
     /// native-scrollback commit boundary.
@@ -430,6 +481,8 @@ impl StreamingRenderCache {
     fn update(&mut self, stream: &StreamingMarkdown, renderer: &RichRenderer, width: u16) -> usize {
         let prior_committed_rows = self.committed_lines.len();
         let prior_committed_blocks = self.committed_blocks;
+        let prior_tail_visible = self.tail_visible;
+        let mut stable_tail = prior_tail_visible;
         let full_reflow = self.width != Some(width)
             || self.options != Some(renderer.options())
             || self.theme_revision != renderer.theme().revision()
@@ -450,15 +503,35 @@ impl StreamingRenderCache {
             self.committed_blocks = stream.committed().blocks.len();
         }
 
-        if full_reflow || self.tail_revision != stream.tail_revision() {
-            self.tail_lines = if stream.is_finished() {
-                Vec::new()
-            } else {
-                // Unclosed code is intentionally rendered without syntax work
-                // in the mutable tail. It is highlighted once committed/final.
-                renderer.render_unstable(stream.preview(), width).lines
-            };
+        if full_reflow || self.preview_epoch != stream.preview_epoch {
+            self.append_tail = AppendOnlyTail::default();
+            stable_tail = 0;
         }
+        if full_reflow || self.tail_revision != stream.tail_revision() {
+            if stream.is_finished() {
+                self.tail_lines.clear();
+                self.tail_visible = 0;
+                stable_tail = 0;
+            } else if let [block] = stream.preview().blocks.as_slice() {
+                if let Some((stable, visible)) = self.append_tail.update(
+                    block,
+                    renderer,
+                    width,
+                    &mut self.tail_lines,
+                    &mut self.layout_stats,
+                ) {
+                    self.tail_visible = visible;
+                    stable_tail = stable.min(prior_tail_visible);
+                } else {
+                    self.render_general_tail(stream, renderer, width);
+                    stable_tail = 0;
+                }
+            } else {
+                self.render_general_tail(stream, renderer, width);
+                stable_tail = 0;
+            }
+        }
+        self.preview_epoch = stream.preview_epoch;
 
         self.width = Some(width);
         self.options = Some(renderer.options());
@@ -478,8 +551,22 @@ impl StreamingRenderCache {
             prior_committed_rows
         } else {
             self.committed_lines.len()
-                + usize::from(!self.committed_lines.is_empty() && !self.tail_lines.is_empty())
+                + usize::from(!self.committed_lines.is_empty() && self.tail_visible > 0)
+                + stable_tail
         }
+    }
+
+    fn render_general_tail(
+        &mut self,
+        stream: &StreamingMarkdown,
+        renderer: &RichRenderer,
+        width: u16,
+    ) {
+        self.layout_stats.full_tail_layouts += 1;
+        self.layout_stats.fallback_source_bytes += stream.unstable_source().len() as u64;
+        self.tail_lines = renderer.render_unstable_lines(stream.preview(), width);
+        self.tail_visible = self.tail_lines.len();
+        self.layout_stats.encoded_rows += self.tail_visible as u64;
     }
 
     fn merged_lines(&mut self) -> &[RenderedLine] {
@@ -489,20 +576,21 @@ impl StreamingRenderCache {
             .wrapping_add(self.tail_revision);
         if self.merged_revision != Some(merge_rev) {
             let total = self.committed_lines.len()
-                + if self.committed_lines.is_empty() || self.tail_lines.is_empty() {
+                + if self.committed_lines.is_empty() || self.tail_visible == 0 {
                     0
                 } else {
                     1
                 }
-                + self.tail_lines.len();
+                + self.tail_visible;
             self.merged_lines.clear();
             self.merged_lines.reserve(total);
             self.merged_lines
                 .extend(self.committed_lines.iter().cloned());
-            if !self.committed_lines.is_empty() && !self.tail_lines.is_empty() {
+            if !self.committed_lines.is_empty() && self.tail_visible > 0 {
                 self.merged_lines.push(RenderedLine::default());
             }
-            self.merged_lines.extend(self.tail_lines.iter().cloned());
+            self.merged_lines
+                .extend(self.tail_lines[..self.tail_visible].iter().cloned());
             self.merged_revision = Some(merge_rev);
         }
         &self.merged_lines
@@ -523,9 +611,8 @@ impl StreamingRenderCache {
     }
 
     fn selected_lines_from(&self, start: usize, styled: bool) -> Vec<String> {
-        let separator =
-            usize::from(!self.committed_lines.is_empty() && !self.tail_lines.is_empty());
-        let total = self.committed_lines.len() + separator + self.tail_lines.len();
+        let separator = usize::from(!self.committed_lines.is_empty() && self.tail_visible > 0);
+        let total = self.committed_lines.len() + separator + self.tail_visible;
         let start = start.min(total);
         let mut lines = Vec::with_capacity(total.saturating_sub(start));
 
@@ -543,7 +630,7 @@ impl StreamingRenderCache {
         }
         let tail_start = start.saturating_sub(self.committed_lines.len() + separator);
         lines.extend(
-            self.tail_lines[tail_start.min(self.tail_lines.len())..]
+            self.tail_lines[tail_start.min(self.tail_visible)..self.tail_visible]
                 .iter()
                 .map(|line| {
                     if styled {
@@ -557,7 +644,9 @@ impl StreamingRenderCache {
     }
 
     /// Render only the mutable suffix while reporting the unchanged physical
-    /// prefix from the previous call at the same width/theme.
+    /// prefix from the previous call at the same width/theme. Visual stability
+    /// within the preview is not a parser commit; use `committed_rows()` when
+    /// deciding which rows may cross a native-scrollback commit boundary.
     pub fn render_line_update(
         &mut self,
         stream: &StreamingMarkdown,
@@ -565,7 +654,11 @@ impl StreamingRenderCache {
         width: u16,
         styled: bool,
     ) -> StreamingLineUpdate {
-        let stable_prefix = self.update(stream, renderer, width);
+        let mut stable_prefix = self.update(stream, renderer, width);
+        if self.selected_styled != Some(styled) {
+            stable_prefix = 0;
+        }
+        self.selected_styled = Some(styled);
         StreamingLineUpdate {
             stable_prefix,
             replacement: self.selected_lines_from(stable_prefix, styled),
@@ -584,6 +677,7 @@ impl StreamingRenderCache {
         styled: bool,
     ) -> Vec<String> {
         self.update(stream, renderer, width);
+        self.selected_styled = Some(styled);
         self.selected_lines_from(0, styled)
     }
 }
@@ -672,39 +766,69 @@ fn likely_complete_inline(source: &str) -> bool {
             .is_some_and(|start| source[start.saturating_add(2)..].contains(')'))
 }
 
-fn lexical_stable_offset(source: &str) -> Option<usize> {
-    let offset = source.rfind("\n\n")?.saturating_add(2);
+#[derive(Clone, Copy, Debug)]
+struct LexicalLinePrefix {
+    list: bool,
+    quote: bool,
+    html: bool,
+}
+
+fn lexical_line_prefix(source: &str, scanned_bytes: &mut u64) -> LexicalLinePrefix {
+    // Equivalent to lines().next().unwrap_or_default().trim_start() for
+    // prefix checks, without finding the end of a potentially enormous line.
+    // LF must stop trimming: whitespace on the next line is not indentation.
+    let line = source.trim_start_matches(|ch: char| {
+        *scanned_bytes += ch.len_utf8() as u64;
+        ch != '\n' && ch.is_whitespace()
+    });
+    let marker = line.as_bytes().first().copied();
+    *scanned_bytes += u64::from(marker.is_some());
+    LexicalLinePrefix {
+        list: is_list_marker(line, scanned_bytes),
+        quote: marker == Some(b'>'),
+        html: marker == Some(b'<'),
+    }
+}
+
+fn lexical_stable_offset(
+    source: &str,
+    first: &mut Option<LexicalLinePrefix>,
+    scanned_bytes: &mut u64,
+) -> Option<usize> {
+    let boundary = source.rfind("\n\n");
+    *scanned_bytes += boundary.map_or(source.len(), |start| source.len() - start) as u64;
+    let offset = boundary?.saturating_add(2);
     if offset >= source.len() {
         return None;
     }
-    let first = source.lines().next().unwrap_or_default().trim_start();
-    let candidate = source[offset..]
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim_start();
-    let source_is_list = is_list_marker(first);
-    let candidate_is_list = is_list_marker(candidate);
-    let same_quote = first.starts_with('>') && candidate.starts_with('>');
-    let possible_list_continuation = source_is_list
-        && (candidate_is_list || candidate.starts_with("  ") || candidate.starts_with('\t'));
-    let possible_indented_code = (first.starts_with("    ") || first.starts_with('\t'))
-        && (candidate.starts_with("    ") || candidate.starts_with('\t'));
-    let possible_html_block = first.starts_with('<');
-    if same_quote || possible_list_continuation || possible_indented_code || possible_html_block {
+    // A blank boundary proves the first line is complete. Cache its marker
+    // classification until prefix draining changes that line; even unbounded
+    // leading whitespace or ordered-list digits are then inspected only once.
+    let first = *first.get_or_insert_with(|| lexical_line_prefix(source, scanned_bytes));
+    let candidate = lexical_line_prefix(&source[offset..], scanned_bytes);
+    // The existing heuristic trims indentation before testing these markers;
+    // its old space/tab continuation checks were therefore always false. Keep
+    // that lexical interpretation rather than introducing new Markdown rules.
+    if (first.quote && candidate.quote) || (first.list && candidate.list) || first.html {
         None
     } else {
         Some(offset)
     }
 }
 
-fn is_list_marker(line: &str) -> bool {
-    line.starts_with("- ")
-        || line.starts_with("* ")
-        || line.starts_with("+ ")
-        || line
-            .split_once(". ")
-            .is_some_and(|(number, _)| number.chars().all(|character| character.is_ascii_digit()))
+fn is_list_marker(line: &str, scanned_bytes: &mut u64) -> bool {
+    let mut bytes = line.bytes().inspect(|_| *scanned_bytes += 1);
+    let first = bytes.next();
+    if matches!(first, Some(b'-' | b'*' | b'+')) {
+        return bytes.next() == Some(b' ');
+    }
+    let mut marker = first;
+    while marker.is_some_and(|byte| byte.is_ascii_digit()) {
+        marker = bytes.next();
+    }
+    // Preserve the previous split_once(". ") behavior, including its empty
+    // numeric prefix (". "), but never search an ordinary line's full body.
+    marker == Some(b'.') && bytes.next() == Some(b' ')
 }
 
 #[cfg(test)]
@@ -714,6 +838,339 @@ mod tests {
     use crate::{ColorDepth, TerminalCapabilities, Theme};
 
     const ADVERSARIAL: &str = "# Heading\n\nA **strong** link to [docs](https://example.com) and `code`.\n\n- first\n  - nested\n- second\n\n```rust\nfn main() {\n    println!(\"界\");\n}\n```\n";
+
+    fn prior_list_marker(line: &str) -> bool {
+        line.starts_with("- ")
+            || line.starts_with("* ")
+            || line.starts_with("+ ")
+            || line.split_once(". ").is_some_and(|(number, _)| {
+                number.chars().all(|character| character.is_ascii_digit())
+            })
+    }
+
+    fn prior_lexical_stable_offset(source: &str) -> Option<usize> {
+        let offset = source.rfind("\n\n")?.saturating_add(2);
+        if offset >= source.len() {
+            return None;
+        }
+        let first = source.lines().next().unwrap_or_default().trim_start();
+        let candidate = source[offset..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start();
+        let same_quote = first.starts_with('>') && candidate.starts_with('>');
+        let possible_list_continuation = prior_list_marker(first)
+            && (prior_list_marker(candidate)
+                || candidate.starts_with("  ")
+                || candidate.starts_with('\t'));
+        let possible_indented_code = (first.starts_with("    ") || first.starts_with('\t'))
+            && (candidate.starts_with("    ") || candidate.starts_with('\t'));
+        let possible_html_block = first.starts_with('<');
+        if same_quote || possible_list_continuation || possible_indented_code || possible_html_block
+        {
+            None
+        } else {
+            Some(offset)
+        }
+    }
+
+    #[test]
+    fn lexical_prefix_checks_preserve_prior_semantics_without_scanning_line_bodies() {
+        let cases = [
+            "",
+            " ",
+            "\t\u{2003}",
+            "\n- x",
+            "\r\n> x",
+            "\u{2003}\n<tag>",
+            "> quote",
+            "<tag>",
+            "- item",
+            "* item",
+            "+ item",
+            ". item",
+            "1. item",
+            "12345678901234567890. item",
+            "1.. item",
+            "  plain text",
+            "\t- item",
+            "1.\n item",
+        ];
+        for first in cases {
+            assert_eq!(is_list_marker(first, &mut 0), prior_list_marker(first));
+            for candidate in cases {
+                let mut source = format!("{first}\n\n{candidate}");
+                let mut cache = None;
+                for suffix in [
+                    "",
+                    " more",
+                    "\n\n- item",
+                    "\n\n. item",
+                    "\n\n\t> quote",
+                    "\n\n",
+                ] {
+                    source.push_str(suffix);
+                    assert_eq!(
+                        lexical_stable_offset(&source, &mut cache, &mut 0),
+                        prior_lexical_stable_offset(&source),
+                        "{source:?}"
+                    );
+                }
+            }
+        }
+        let mut seed = 71u64;
+        let alphabet = [
+            'a', '1', '9', '.', ' ', '\t', '\n', '\r', '\u{2003}', '-', '*', '+', '>', '<', '界',
+        ];
+        for _ in 0..2_000 {
+            let mut source = String::new();
+            for _ in 0..40 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                source.push(alphabet[seed as usize % alphabet.len()]);
+            }
+            assert_eq!(is_list_marker(&source, &mut 0), prior_list_marker(&source));
+            source.push_str("\n\n- item");
+            assert_eq!(
+                lexical_stable_offset(&source, &mut None, &mut 0),
+                prior_lexical_stable_offset(&source)
+            );
+        }
+        // A rejected marker must not search a long ordinary line for a later
+        // '. '. An empty numeric prefix remains accepted, matching the old rule.
+        let ordinary = format!("word{}. item", "a".repeat(100_000));
+        let mut scanned = 0;
+        assert!(!is_list_marker(&ordinary, &mut scanned));
+        assert_eq!(scanned, 1);
+        assert!(is_list_marker(". item", &mut 0));
+    }
+
+    #[test]
+    fn huge_lexical_first_line_is_classified_once_including_whitespace_and_digits() {
+        for first in [
+            format!("- {}", "a".repeat(100_000)),
+            format!("{}- item", "\u{2003}".repeat(40_000)),
+            format!("{}. item", "1".repeat(100_000)),
+            format!(". {}", "a".repeat(100_000)),
+        ] {
+            let mut stream = StreamingMarkdown::from_text(&first);
+            for step in 0..1_000 {
+                let before = stream.stats().lexical_scanned_bytes;
+                stream.push_str("\n\n- x");
+                let work = stream.stats().lexical_scanned_bytes - before;
+                if step > 0 {
+                    assert_eq!(work, 9, "step={step}");
+                } else {
+                    assert!(work <= first.len() as u64 + 16);
+                }
+            }
+            let stats = stream.stats();
+            assert!(
+                stats.lexical_scanned_bytes <= first.len() as u64 + 9_016,
+                "{stats:?}"
+            );
+            assert!(stream.committed().blocks.is_empty());
+            let expected = first + &"\n\n- x".repeat(1_000);
+            assert_eq!(stream.raw_bytes(), expected.as_bytes());
+            let [Block::Plain(text)] = stream.preview().blocks.as_slice() else {
+                panic!("literal preview");
+            };
+            assert_eq!(text, &expected);
+            assert_eq!(stream.copy_text(), expected.clone() + "\n");
+            assert_eq!(stream.finish(), &markdown::parse(&expected));
+            eprintln!(
+                "lexical source={} scan_bytes={}",
+                expected.len(),
+                stats.lexical_scanned_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_first_line_cache_is_reset_when_the_tail_prefix_commits() {
+        let mut stream = StreamingMarkdown::from_text(&format!("- {}", "a".repeat(100_000)));
+        stream.push_str("\n\n- x");
+        assert!(stream.lexical_first.is_some());
+        stream.push_str("\n\nordinary");
+        assert!(stream.lexical_first.is_none());
+        let committed = stream.committed().blocks.len();
+        stream.push_str(&"b".repeat(100_000));
+        stream.push_str("\n\n- new list");
+        assert!(stream.committed().blocks.len() > committed);
+        let expected = markdown::parse(stream.raw_text());
+        assert_eq!(stream.finish(), &expected);
+    }
+
+    #[test]
+    fn fence_search_and_literal_preview_copy_are_append_local() {
+        for chunk in ["abcdefgh", "word line\n", "界 e\u{301} "] {
+            let mut stream = StreamingMarkdown::new();
+            let mut total = 0;
+            for _ in 0..30_000 {
+                stream.push_str(chunk);
+                total += chunk.len();
+            }
+            let stats = stream.stats();
+            assert!(stats.fence_scanned_bytes <= 2 * total as u64, "{stats:?}");
+            assert!(stats.preview_copied_bytes <= 3 * total as u64, "{stats:?}");
+            assert_eq!(stream.raw_bytes(), chunk.repeat(30_000).as_bytes());
+            let [Block::Plain(text)] = stream.preview().blocks.as_slice() else {
+                panic!("expected literal preview");
+            };
+            assert_eq!(text, stream.unstable_source());
+            assert_eq!(stream.finish(), &markdown::parse(&chunk.repeat(30_000)));
+        }
+    }
+
+    fn tail_work(chunks: usize, fence: bool, multiline: bool, wrap: bool) -> StreamingLayoutStats {
+        let mut stream = StreamingMarkdown::new();
+        let mut renderer = RichRenderer::plain();
+        let mut options = renderer.options();
+        options.code_overflow = if wrap {
+            super::super::render::CodeOverflow::Wrap
+        } else {
+            super::super::render::CodeOverflow::Clip
+        };
+        renderer.set_options(options);
+        let mut cache = StreamingRenderCache::default();
+        if fence {
+            stream.push_str("```rust\n");
+        }
+        let chunk = if multiline {
+            "some words and source text\n"
+        } else {
+            "word xyz "
+        };
+        let mut frame = Vec::new();
+        for _ in 0..chunks {
+            stream.push_str(chunk);
+            let update = cache.render_line_update(&stream, &renderer, 40, false);
+            assert!(update.stable_prefix <= frame.len());
+            frame.truncate(update.stable_prefix);
+            frame.extend(update.replacement);
+        }
+        let stats = cache.stats();
+        let expected = renderer.render_unstable(stream.preview(), 40).plain_lines();
+        assert_eq!(frame, expected);
+        assert_eq!(
+            stream.raw_text(),
+            format!(
+                "{}{}",
+                if fence { "```rust\n" } else { "" },
+                chunk.repeat(chunks)
+            )
+        );
+        let copy = cache.render(&stream, &renderer, 40).copy_text;
+        assert_eq!(copy, renderer.sanitize_copy(&stream.copy_text()));
+        assert!(copy.contains(chunk.trim()));
+        let raw = stream.raw_text().to_owned();
+        assert_eq!(stream.finish(), &markdown::parse(&raw));
+        let final_update = cache.render_line_update(&stream, &renderer, 40, false);
+        assert_eq!(final_update.stable_prefix, 0);
+        assert_eq!(
+            final_update.replacement,
+            renderer.render(stream.committed(), 40).plain_lines()
+        );
+        stats
+    }
+
+    #[test]
+    fn long_plain_and_open_code_layout_work_grows_linearly() {
+        for fence in [false, true] {
+            for multiline in [false, true] {
+                for wrap in [false, true] {
+                    let small = tail_work(4_000, fence, multiline, wrap);
+                    let large = tail_work(8_000, fence, multiline, wrap);
+                    let work = |s: StreamingLayoutStats| {
+                        s.checked_bytes
+                            + s.measured_bytes
+                            + s.laid_out_bytes
+                            + s.fallback_source_bytes
+                    };
+                    assert!(
+                        work(large) <= work(small) * 5 / 2,
+                        "{fence} {multiline} {wrap}: {small:?} -> {large:?}"
+                    );
+                    assert!(large.encoded_rows < 8_000 * 12, "{large:?}");
+                    assert!(large.laid_out_bytes < 8_000 * 256, "{large:?}");
+                    eprintln!("tail_work fence={fence} multiline={multiline} wrap={wrap}: {small:?} -> {large:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn random_byte_chunks_resize_theme_and_finalization_match_authoritative_rows() {
+        use crate::rich_text::render::CodeOverflow;
+        let cases = [
+            "plain 界 words e\u{301} 👩\u{200d}💻 with wraps and more ordinary text ".repeat(8),
+            format!("```rust\n{}", "  let 界 = e\u{301}; // 👩\u{200d}💻\n\n".repeat(12)),
+            "# head\n\nplain\ttext\r\n\x1b[31m\u{202e} more\n\n```text\nhello\tworld\r\n\n```\n\nend".to_owned(),
+            "```text\nold\n```\n```rust\nnew\n".to_owned(),
+        ];
+        for source in cases {
+            for seed in 1..=4u64 {
+                let caps = TerminalCapabilities::interactive(ColorDepth::TrueColor, true);
+                let mut renderer = RichRenderer::new(
+                    Theme::with_capabilities(caps),
+                    caps,
+                    RenderOptions::default(),
+                );
+                let mut stream = StreamingMarkdown::new();
+                let mut cache = StreamingRenderCache::default();
+                let mut frame = Vec::new();
+                let mut rng = seed;
+                let mut offset = 0;
+                let mut step = 0;
+                while offset < source.len() {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let end = (offset + 1 + (rng as usize % 23)).min(source.len());
+                    stream.push_bytes(&source.as_bytes()[offset..end]);
+                    offset = end;
+                    step += 1;
+                    let width = [1, 13, 40, 0, 80][step / 11 % 5];
+                    if step % 17 == 0 {
+                        renderer
+                            .theme_mut()
+                            .set_accent(crate::Color::Rgb(1, step as u8, 90));
+                    }
+                    let mut options = renderer.options();
+                    options.code_overflow = if step / 13 % 2 == 0 {
+                        CodeOverflow::Clip
+                    } else {
+                        CodeOverflow::Wrap
+                    };
+                    options.code_borders = step / 19 % 2 == 0;
+                    renderer.set_options(options);
+                    let styled = step / 7 % 2 == 0;
+                    let update = cache.render_line_update(&stream, &renderer, width, styled);
+                    assert!(update.stable_prefix <= frame.len());
+                    frame.truncate(update.stable_prefix);
+                    frame.extend(update.replacement);
+                    let mut expected =
+                        renderer.render_blocks_only(&stream.committed().blocks, width);
+                    let tail = renderer.render_unstable(stream.preview(), width).lines;
+                    if !expected.is_empty() && !tail.is_empty() {
+                        expected.push(RenderedLine::default());
+                    }
+                    expected.extend(tail);
+                    let expected: Vec<_> = expected
+                        .into_iter()
+                        .map(|line| if styled { line.styled } else { line.plain })
+                        .collect();
+                    assert_eq!(frame, expected, "seed={seed} step={step} source={source:?}");
+                }
+                assert_eq!(stream.raw_bytes(), source.as_bytes());
+                assert_eq!(stream.finish(), &markdown::parse(&source));
+                let final_update = cache.render_line_update(&stream, &renderer, 40, true);
+                assert_eq!(final_update.stable_prefix, 0);
+                assert_eq!(
+                    final_update.replacement,
+                    renderer.render(stream.committed(), 40).styled_lines()
+                );
+            }
+        }
+    }
 
     #[test]
     fn committed_blocks_are_a_monotonic_prefix_of_the_final_document() {
@@ -892,6 +1349,42 @@ mod tests {
 
         let resized = cache.render_line_update(&stream, &renderer, 20, false);
         assert_eq!(resized.stable_prefix, 0);
+    }
+
+    #[test]
+    fn full_lines_then_incremental_update_retains_the_selected_prefix() {
+        let capabilities = TerminalCapabilities::interactive(ColorDepth::TrueColor, true);
+        let renderer = RichRenderer::new(
+            Theme::with_capabilities(capabilities),
+            capabilities,
+            RenderOptions::default(),
+        );
+        for styled in [false, true] {
+            let mut stream = StreamingMarkdown::from_text("# Stable heading\n\nmutable");
+            let mut cache = StreamingRenderCache::default();
+            let mut frame = cache.render_lines(&stream, &renderer, 40, styled);
+            stream.push_str(" tail");
+            let update = cache.render_line_update(&stream, &renderer, 40, styled);
+            assert!(update.stable_prefix > 0, "{update:?}");
+            frame.truncate(update.stable_prefix);
+            frame.extend(update.replacement);
+            let mut reference = StreamingRenderCache::default();
+            assert_eq!(
+                frame,
+                reference.render_lines(&stream, &renderer, 40, styled)
+            );
+
+            // A full render also establishes which representation the next
+            // delta must preserve. Switching it still invalidates every row.
+            cache.render_lines(&stream, &renderer, 40, !styled);
+            stream.push_str(" again");
+            let changed = cache.render_line_update(&stream, &renderer, 40, styled);
+            assert_eq!(changed.stable_prefix, 0);
+            assert_eq!(
+                changed.replacement,
+                reference.render_lines(&stream, &renderer, 40, styled)
+            );
+        }
     }
 
     #[test]

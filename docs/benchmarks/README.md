@@ -7,7 +7,10 @@ exclusions are retained.
 The current methods below cover [optional telemetry](#optional-agent-telemetry),
 [systems measurements](#systems-measurements), and [usability checks](#usability-checks).
 The [Pi runtime fixture](#pi-runtime-fixture-evidence) is hold-only, not a published
-performance result. For planning, see the [project](https://github.com/orgs/skaft-software/projects/5).
+performance result. The [performance philosophy and execution contract](../design/performance.md)
+defines work budgets, distinct latency clocks, qualification stages, and the
+remaining ownership work. For project tracking, see the
+[project](https://github.com/orgs/skaft-software/projects/5).
 
 ## Historical results
 
@@ -66,9 +69,18 @@ normalized sum, not a promise that an overlapping or omitted provider wire
 `total_tokens` was preserved. Records with usage include `usage_scope`:
 `request`, `operation`, or `run_cumulative`; never sum cumulative snapshots.
 
+Output timing is attempt-scoped and labelled `output_timing_scope: "agent_delta"`.
+`ttft_ms` retains its established meaning: time to the first nonempty text **or
+reasoning** delta observed by the agent. `first_text_delta_ms` and
+`first_reasoning_delta_ms` report those channels independently. Empty deltas and
+tool notifications do not establish either timestamp. Unobserved timings are
+omitted, not zero. Neither delta timing nor `generation_ms` measures terminal
+presentation; a client can receive text before it displays it.
+
 Telemetry is an observer, not a wire capture. It does not currently expose
 provider request IDs, exact response-header timing for compaction/gate calls,
-or raw context bodies. Those limitations must be stated in reports.
+raw context bodies, or PTY/terminal paint timestamps. Those limitations must be
+stated in reports.
 
 Do not ask users to enable telemetry for a report. If they volunteer diagnostics,
 `octet --telemetry ./octet-telemetry.jsonl` produces a redacted operational trace;
@@ -110,12 +122,71 @@ operating system exposes it; RSS is not a PSS substitute. Direct children are
 measured, so an inference server must be reported separately and excluded from
 the agent-overhead number.
 
+The current report schema is `octet.systems-benchmark.v2`. `version_command`
+measures process creation through `--version` exit; idle/concurrency `launch_ms`
+ends at `Popen` return, not application readiness. Timeouts use monotonic seconds
+across launch, settling, and observation (OS probes can overrun; cleanup is
+separate). Failed/short windows remain in raw runs, outside completed-window
+resource summaries. Peak distributions use one sampled peak per independent
+run; pooled sample summaries are identified separately. CPU/PSS/RSS availability
+is independent, and missing values remain null with observation counts.
+Descendants and external servers are **not** measured. Commands inherit the
+operator's configuration/environment; this script does not enforce isolation or
+network policy. V2 does not revise the historical V1 campaign.
+
 The command adapter deliberately does not pretend to measure UI rendering,
 provider-to-tool scheduling, or resume latency from a generic `--version` case.
 Those cases require a harness-specific driver and should be supplied with
 `--command` or an additional checked-in adapter. A comparison must use the
 same task, endpoint, model weights, context limit, timeout, hardware, and
 concurrency for every harness.
+
+## Credential-free Markdown replay
+
+Build the generic renderer driver once, outside the measured process:
+
+```console
+cargo build --offline --locked --profile profiling -p sexy-tui-rs \
+  --example render_bench --features benchmarks
+python3 scripts/bench-render.py \
+  --binary target/profiling/examples/render_bench \
+  --build-profile profiling --label candidate \
+  --output /tmp/octet-render-candidate.json -- \
+  --workload all --mode tail --bytes 131072 --chunk-bytes 1024 \
+  --width 80 --warmup 1 --repetitions 9
+python3 -m unittest discover -s scripts/tests -p 'test_bench_*.py'
+```
+
+The driver includes prose, a huge newline-free paragraph, many small blocks, an
+open code fence, Unicode, and a table. It uses fresh parser/cache state per trial
+and reports per-trial ingestion, rendering, canonical finalization, and final
+render costs; summaries use independent-trial p50/p95, not individual deltas as
+independent runs. Static/document/full-lines modes expose their broader API
+materialization costs separately from mutable-tail updates. The same driver can
+be copied into an isolated older source snapshot for a matched before/after
+comparison; record that driver replacement and both exact build identities.
+Use a **different, initially empty `CARGO_TARGET_DIR` for each source snapshot**.
+An archived tree can retain older source mtimes and reuse another tree's Cargo
+artifacts in a shared target directory; an executable hash alone does not prove
+which source was compiled. Retain build logs and source/driver hashes.
+
+Each case checks incremental replay, exact raw input, final semantic document,
+copy text, and rendered output. Correctness checks and fixture creation occur
+outside timed phases. API result destruction and terminal output are not timed.
+Allocation fields count allocation/reallocation calls and cumulative requested
+bytes, **not** RSS, retained/peak live memory, or actual copied bytes. The added
+stream/layout work counters have narrower documented meanings and are exercised
+by library regression tests; the driver uses only baseline-compatible parser
+stats. None of this measures the complete interactive shell, PTY, provider,
+input latency, or terminal paint.
+
+The wrapper clears credentials/configuration through an isolated environment,
+records executable/fixture identities and raw trials, validates summaries,
+retains failures, and refuses to overwrite an evidence file. Its build-profile
+label and observed checkout/compiler do not alone establish binary provenance.
+Use a release qualification manifest before making comparative timing claims.
+See the [performance contract](../design/performance.md) for the next real-shell
+and matched-client replay stages and currently unmeasured targets.
 
 ## Usability checks
 

@@ -675,8 +675,10 @@ impl<'a> TUI<'a> {
         }
         let (new_lines, logical_cursor_position) =
             if !self.first_render && !width_changed && !height_changed {
-                let update = self.root_render_update(width_u16, None).filter(|update| {
-                    update.stable_prefix <= previous_len
+                let update = self
+                    .root_render_update_without_cursor(width_u16)
+                    .filter(|update| {
+                        update.stable_prefix <= previous_len
                         // The normal Pi renderer owns its own scrollback ledger;
                         // these flags describe the extended/pinned renderer's
                         // physical reanchor contract and are not safe to reuse as
@@ -690,7 +692,7 @@ impl<'a> TUI<'a> {
                         // coverage, keep image-bearing frames on that path.
                         && !self.previous_frame_has_kitty
                         && !update.replacement.iter().any(|line| is_image_line(line))
-                });
+                    });
                 if let Some(update) = update {
                     let stable_prefix = update.stable_prefix;
                     let mut replacement = update.replacement;
@@ -2316,6 +2318,14 @@ impl<'a> TUI<'a> {
             self.terminal.write(line);
             self.terminal.write("\n");
         }
+    }
+
+    fn root_render_update_without_cursor(&self, width: u16) -> Option<FrameUpdate> {
+        // Pi does not consume a semantic commit handshake. None passed to the
+        // cursor-aware API means bootstrap, not opt-out of that metadata work.
+        (self.children.len() == 1)
+            .then(|| self.children[0].render_update(width))
+            .flatten()
     }
 
     fn root_render_update(&self, width: u16, cursor: Option<CommitCursor>) -> Option<FrameUpdate> {

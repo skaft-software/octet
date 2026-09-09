@@ -11,6 +11,16 @@ use super::{ShellState, ToolPanel, TranscriptBlock, COMPACT_EXEC_OUTPUT_ROWS};
 
 pub(super) const FINAL_COMMIT_SEGMENT: u64 = u64::MAX;
 
+#[cfg(test)]
+thread_local! {
+    static COMMIT_METADATA_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_commit_metadata_visits() -> usize {
+    COMMIT_METADATA_VISITS.with(|visits| visits.replace(0))
+}
+
 fn transcript_block_is_final(block: &TranscriptBlock) -> bool {
     match block {
         TranscriptBlock::Assistant(block) | TranscriptBlock::Reasoning(block) => block.finished,
@@ -146,6 +156,8 @@ fn transcript_stable_rows(state: &ShellState, acknowledged: Option<CommitCursor>
 
     let cache = state.transcript_cache.borrow();
     for (index, block) in state.transcript.iter().enumerate().skip(start_block) {
+        #[cfg(test)]
+        COMMIT_METADATA_VISITS.with(|visits| visits.set(visits.get() + 1));
         let Some(block_start) = cache.block_starts.get(index).copied() else {
             break;
         };
@@ -211,6 +223,8 @@ fn transcript_commit_target(
         });
 
     for (index, block) in state.transcript.iter().enumerate().skip(start_block) {
+        #[cfg(test)]
+        COMMIT_METADATA_VISITS.with(|visits| visits.set(visits.get() + 1));
         let Some(block_start) = cache.block_starts.get(index).copied() else {
             break;
         };
@@ -240,6 +254,8 @@ fn transcript_commit_target(
                 .saturating_add(geometry.leading_rows);
             let layout = markdown.layout.borrow();
             for (segment, content_end) in layout.committed_block_ends().iter().enumerate() {
+                #[cfg(test)]
+                COMMIT_METADATA_VISITS.with(|visits| visits.set(visits.get() + 1));
                 let row = content_start.saturating_add(*content_end).min(block_end);
                 if row > maximum_row {
                     break;

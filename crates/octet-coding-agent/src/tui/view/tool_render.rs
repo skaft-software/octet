@@ -10,20 +10,48 @@ use super::{
 };
 use crate::tui::theme::OctetTheme;
 
-/// Only promote complete, bare unified diffs into the dedicated diff renderer.
+#[cfg(test)]
+thread_local! {
+    // Upper bound on bytes searched for line endings by diff classification,
+    // not total CPU work; whitespace trimming and fixed header checks are separate.
+    static DIFF_CLASSIFICATION_LINE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_diff_classification_line_bytes() -> usize {
+    DIFF_CLASSIFICATION_LINE_BYTES.with(|bytes| bytes.replace(0))
+}
+
+/// Only promote bare unified diffs into the dedicated diff renderer.
 pub(super) fn looks_like_diff(text: &str) -> bool {
-    let mut lines = text.lines().map(str::trim_start);
-    let Some(first) = lines.find(|line| !line.is_empty()) else {
-        return false;
-    };
-    if first.starts_with("diff --git ") {
+    // Reject ordinary prose from its prefix, without searching an arbitrarily
+    // long first line for a newline on every streaming frame. Leading whitespace
+    // is still examined; this is not a cache for unbounded whitespace prefixes.
+    let leading = text.trim_start();
+    if leading.starts_with("diff --git ") {
         return true;
     }
     // Explanatory Markdown that happens to contain a fenced `diff` block must
     // stay in the Markdown renderer so its prose and fence structure survive.
-    first.starts_with("--- ")
-        && lines.any(|line| line.starts_with("+++ "))
-        && text.lines().any(|line| line.trim_start().starts_with("@@"))
+    if !leading.starts_with("--- ") {
+        return false;
+    }
+    let mut added_file = false;
+    let mut hunk = false;
+    for (index, line) in leading.lines().enumerate() {
+        #[cfg(test)]
+        DIFF_CLASSIFICATION_LINE_BYTES.with(|bytes| bytes.set(bytes.get() + line.len() + 2));
+        if index == 0 {
+            continue;
+        }
+        let line = line.trim_start();
+        added_file |= line.starts_with("+++ ");
+        hunk |= line.starts_with("@@");
+        if added_file && hunk {
+            return true;
+        }
+    }
+    false
 }
 
 fn looks_like_legacy_write_creation(text: &str) -> bool {

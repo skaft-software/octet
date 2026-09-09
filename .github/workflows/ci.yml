@@ -74,6 +74,10 @@ jobs:
           scripts/build-octet-image.sh --context "$RUNNER_TEMP/octet-container-context"
           test "$(cat "$RUNNER_TEMP/octet-container-context/.octet-container-source")" = "$(git rev-parse HEAD)"
           test ! -e "$RUNNER_TEMP/octet-container-context/.git"
+      - name: Test performance measurement contracts (no live clients)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s scripts/tests -p 'test_bench_*.py'
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --doc --profile ci-test --locked

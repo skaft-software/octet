@@ -289,6 +289,18 @@ impl RichRenderer {
         self.render_document(document, width, false)
     }
 
+    pub(super) fn render_unstable_lines(
+        &self,
+        document: &Document,
+        width: u16,
+    ) -> Vec<RenderedLine> {
+        let width = usize::from(width);
+        self.render_blocks(&document.blocks, width, false, false)
+            .into_iter()
+            .map(|line| self.encode_line(line, width))
+            .collect()
+    }
+
     fn render_document(
         &self,
         document: &Document,
@@ -666,14 +678,6 @@ impl RichRenderer {
         width: usize,
         syntax_highlighting: bool,
     ) -> Vec<RichLine> {
-        let style = self.theme.block_style(BlockRole::Code);
-        let mut code_text_style = style.text;
-        let mut padding_style = TextStyle::plain();
-        if let Some(background) = style.background {
-            code_text_style.background = background;
-            padding_style.background = background;
-        }
-
         // CommonMark includes the line ending immediately before a closing
         // fence in the code payload. It terminates the final source row; it is
         // not an additional blank row. Removing exactly one line ending keeps
@@ -691,11 +695,7 @@ impl RichRenderer {
         // Generic prose-fence tags add no information and look like a stray
         // badge. Preserve meaningful language labels and the original code
         // metadata used for highlighting/copy behavior.
-        let language = code.language.as_deref().map(str::trim).filter(|language| {
-            !language.is_empty()
-                && !language.eq_ignore_ascii_case("text")
-                && !language.eq_ignore_ascii_case("plaintext")
-        });
+        let language = visible_code_language(code);
 
         // A code surface should fit its content rather than painting the full
         // terminal width for a short snippet. Long rows still use all available
@@ -705,72 +705,12 @@ impl RichRenderer {
             .map(|line| self.options.width.line_width(&self.sanitize(line)))
             .max()
             .unwrap_or(0);
-        let bordered = self.options.code_borders && width >= 3;
-        let frame_width = usize::from(bordered) * 2;
-        let configured_left = usize::from(style.padding_left);
-        let configured_right = usize::from(style.padding_right);
         let language_width = language
             .map(|label| self.options.width.line_width(&self.sanitize(label)))
             .unwrap_or(0);
-        let required_for_content = natural_content_width
-            .saturating_add(configured_left)
-            .saturating_add(configured_right)
-            .saturating_add(frame_width);
-        let required_for_label = if bordered {
-            language_width.saturating_add(5)
-        } else {
-            language_width
-                .saturating_add(configured_left)
-                .saturating_add(configured_right)
-        };
-        let minimum_width = if bordered { 3 } else { 1 };
-        let block_width = required_for_content
-            .max(required_for_label)
-            .max(minimum_width)
-            .min(width);
-        let inner_width = block_width.saturating_sub(frame_width);
-        let left_padding = configured_left.min(inner_width.saturating_sub(1));
-        let right_padding =
-            configured_right.min(inner_width.saturating_sub(left_padding).saturating_sub(1));
-        let content_width = inner_width
-            .saturating_sub(left_padding)
-            .saturating_sub(right_padding);
-
-        let mut output = Vec::new();
-        if bordered {
-            output.push(self.code_border_line(block_width, language, true, style.border));
-        } else if let Some(language) = language {
-            let mut label_style = self.theme.style(TextRole::Muted);
-            if let Some(background) = style.background {
-                label_style.background = background;
-            }
-            let mut label = RichLine::default();
-            label.push(" ".repeat(left_padding), padding_style, None);
-            label.push(self.sanitize(language), label_style, None);
-            if style.background.is_some() {
-                let label_width = self.line_width(&label);
-                label.push(
-                    " ".repeat(block_width.saturating_sub(label_width)),
-                    padding_style,
-                    None,
-                );
-            }
-            output.push(self.clip_line(label, block_width));
-        }
-
-        for _ in 0..style.padding_top {
-            output.push(self.code_content_line(
-                RichLine::default(),
-                block_width,
-                content_width,
-                left_padding,
-                right_padding,
-                bordered,
-                padding_style,
-                style.border,
-                style.background.is_some(),
-            ));
-        }
+        let layout = self.code_layout(language_width, width, natural_content_width);
+        let code_text_style = layout.code_text_style;
+        let mut output = self.code_header(&layout, language);
 
         let highlighted = syntax_highlighting
             .then(|| self.highlighted(code))
@@ -801,25 +741,112 @@ impl RichRenderer {
                 runs.push(RichRun::new(String::new(), code_text_style, None));
             }
             let rows = match self.options.code_overflow {
-                CodeOverflow::Clip => vec![self.clip_runs(&runs, content_width)],
-                CodeOverflow::Wrap => self.hard_wrap_runs(&runs, content_width),
+                CodeOverflow::Clip => vec![self.clip_runs(&runs, layout.content_width)],
+                CodeOverflow::Wrap => self.hard_wrap_runs(&runs, layout.content_width),
             };
             for row in rows {
-                output.push(self.code_content_line(
-                    row,
-                    block_width,
-                    content_width,
-                    left_padding,
-                    right_padding,
-                    bordered,
-                    padding_style,
-                    style.border,
-                    style.background.is_some(),
-                ));
+                output.push(layout.row(self, row));
             }
         }
 
-        for _ in 0..style.padding_bottom {
+        output.extend(self.code_footer(&layout));
+        output
+    }
+
+    fn code_layout(
+        &self,
+        language_width: usize,
+        width: usize,
+        natural_content_width: usize,
+    ) -> CodeLayout {
+        let style = self.theme.block_style(BlockRole::Code);
+        let mut code_text_style = style.text;
+        let mut padding_style = TextStyle::plain();
+        if let Some(background) = style.background {
+            code_text_style.background = background;
+            padding_style.background = background;
+        }
+        let bordered = self.options.code_borders && width >= 3;
+        let frame_width = usize::from(bordered) * 2;
+        let configured_left = usize::from(style.padding_left);
+        let configured_right = usize::from(style.padding_right);
+        let required_for_content = natural_content_width
+            .saturating_add(configured_left)
+            .saturating_add(configured_right)
+            .saturating_add(frame_width);
+        let required_for_label = if bordered {
+            language_width.saturating_add(5)
+        } else {
+            language_width
+                .saturating_add(configured_left)
+                .saturating_add(configured_right)
+        };
+        let minimum_width = if bordered { 3 } else { 1 };
+        let block_width = required_for_content
+            .max(required_for_label)
+            .max(minimum_width)
+            .min(width);
+        let inner_width = block_width.saturating_sub(frame_width);
+        let left_padding = configured_left.min(inner_width.saturating_sub(1));
+        let right_padding =
+            configured_right.min(inner_width.saturating_sub(left_padding).saturating_sub(1));
+        let content_width = inner_width
+            .saturating_sub(left_padding)
+            .saturating_sub(right_padding);
+
+        CodeLayout {
+            block_width,
+            content_width,
+            left_padding,
+            right_padding,
+            bordered,
+            padding_style,
+            code_text_style,
+            border_style: style.border,
+            background: style.background.is_some(),
+            background_color: style.background,
+            padding_top: style.padding_top,
+            padding_bottom: style.padding_bottom,
+        }
+    }
+
+    fn code_header(&self, layout: &CodeLayout, language: Option<&str>) -> Vec<RichLine> {
+        let CodeLayout {
+            block_width,
+            content_width,
+            left_padding,
+            right_padding,
+            bordered,
+            padding_style,
+            border_style,
+            background,
+            background_color,
+            padding_top,
+            ..
+        } = *layout;
+        let mut output = Vec::new();
+        if bordered {
+            output.push(self.code_border_line(block_width, language, true, border_style));
+        } else if let Some(language) = language {
+            let mut label_style = self.theme.style(TextRole::Muted);
+            if let Some(background) = background_color {
+                label_style.background = background;
+            }
+            let mut label = RichLine::default();
+            label.push(" ".repeat(left_padding), padding_style, None);
+            label.push(self.sanitize(language), label_style, None);
+            if background {
+                let label_width = self.line_width(&label);
+                label.push(
+                    " ".repeat(block_width.saturating_sub(label_width)),
+                    padding_style,
+                    None,
+                );
+            }
+            output.push(self.clip_line(label, block_width));
+        }
+
+        for _ in 0..padding_top {
             output.push(self.code_content_line(
                 RichLine::default(),
                 block_width,
@@ -828,12 +855,43 @@ impl RichRenderer {
                 right_padding,
                 bordered,
                 padding_style,
-                style.border,
-                style.background.is_some(),
+                border_style,
+                background,
+            ));
+        }
+
+        output
+    }
+
+    fn code_footer(&self, layout: &CodeLayout) -> Vec<RichLine> {
+        let CodeLayout {
+            block_width,
+            content_width,
+            left_padding,
+            right_padding,
+            bordered,
+            padding_style,
+            border_style,
+            background,
+            padding_bottom,
+            ..
+        } = *layout;
+        let mut output = Vec::new();
+        for _ in 0..padding_bottom {
+            output.push(self.code_content_line(
+                RichLine::default(),
+                block_width,
+                content_width,
+                left_padding,
+                right_padding,
+                bordered,
+                padding_style,
+                border_style,
+                background,
             ));
         }
         if bordered {
-            output.push(self.code_border_line(block_width, None, false, style.border));
+            output.push(self.code_border_line(block_width, None, false, border_style));
         }
         output
     }
@@ -1339,58 +1397,111 @@ impl RichRenderer {
                 output.push(RichLine::default());
                 continue;
             }
-            let mut start = 0usize;
-            while start < units.len() {
-                let mut end = start;
-                let mut cells = 0usize;
-                let mut last_space = None;
-                while end < units.len() {
-                    let unit = &units[end];
-                    if cells.saturating_add(unit.width) > width {
-                        break;
-                    }
-                    cells += unit.width;
-                    if unit.whitespace {
-                        last_space = Some(end);
-                    }
-                    end += 1;
-                }
-                if end == start {
-                    // A wide grapheme cannot fit at width one. A visible ASCII
-                    // fallback keeps the line within the promised cell bound.
-                    let mut replacement = RichLine::default();
-                    let source = &line_runs[units[start].run];
-                    replacement.push("?".into(), source.style, source.link.clone());
-                    output.push(replacement);
-                    start += 1;
-                    continue;
-                }
-
-                let mut next = end;
-                let line_end = if end < units.len() {
-                    if let Some(space) = last_space.filter(|space| *space > start) {
-                        next = space + 1;
-                        while next < units.len() && units[next].whitespace {
-                            next += 1;
-                        }
-                        space
-                    } else {
-                        end
-                    }
-                } else {
-                    end
-                };
-                while next < units.len() && units[next].whitespace {
-                    next += 1;
-                }
-                output.push(line_from_units(&line_runs, &units[start..line_end]));
-                start = next;
-            }
+            output.extend(self.wrap_literal_units(&line_runs, &units, width, true).0);
         }
         if output.is_empty() {
             output.push(RichLine::default());
         }
         output
+    }
+
+    // In addition to rows, report a prefix whose wrap decisions do not depend
+    // on the final (still extendable) grapheme. The caller keeps the source for
+    // the remaining one or two visual rows, not the entire logical paragraph.
+    fn wrap_literal_units(
+        &self,
+        line_runs: &[RichRun],
+        units: &[Unit],
+        width: usize,
+        prose: bool,
+    ) -> (Vec<RichLine>, usize, usize, bool) {
+        let mut output = Vec::new();
+        let mut stable_rows = 0;
+        let mut restart = 0;
+        let mut skip_space = false;
+        let mut start = 0usize;
+        while start < units.len() {
+            let mut end = start;
+            let mut cells = 0usize;
+            let mut last_space = None;
+            while end < units.len() {
+                let unit = &units[end];
+                if cells.saturating_add(unit.width) > width {
+                    break;
+                }
+                cells += unit.width;
+                if unit.whitespace {
+                    last_space = Some(end);
+                }
+                end += 1;
+            }
+            if end == start {
+                // A wide grapheme cannot fit at width one. A visible ASCII
+                // fallback keeps the line within the promised cell bound.
+                let mut replacement = RichLine::default();
+                let source = &line_runs[units[start].run];
+                replacement.push("?".into(), source.style, source.link.clone());
+                output.push(replacement);
+                start += 1;
+                if start + 1 < units.len() {
+                    stable_rows = output.len();
+                    restart = units[start].start;
+                }
+                continue;
+            }
+
+            let mut next = end;
+            let line_end = if end < units.len() {
+                if let Some(space) = last_space.filter(|space| prose && *space > start) {
+                    next = space + 1;
+                    while prose && next < units.len() && units[next].whitespace {
+                        next += 1;
+                    }
+                    space
+                } else {
+                    end
+                }
+            } else {
+                end
+            };
+            while prose && next < units.len() && units[next].whitespace {
+                next += 1;
+            }
+            output.push(line_from_units(line_runs, &units[start..line_end]));
+            if end + 1 < units.len() && next + 1 < units.len() {
+                stable_rows = output.len();
+                restart = units[next].start;
+                skip_space = false;
+            } else if prose
+                && end + 1 < units.len()
+                && next == units.len()
+                && units.last().is_some_and(|unit| unit.whitespace)
+            {
+                // The wrap is proven, but the skipped final whitespace
+                // grapheme can still acquire a combining suffix. Retain it
+                // and the skip state, not the whole growing whitespace run.
+                stable_rows = output.len();
+                restart = units.last().unwrap().start;
+                skip_space = true;
+            }
+            start = next;
+        }
+        (output, stable_rows, restart, skip_space)
+    }
+
+    fn literal_rows(
+        &self,
+        source: &str,
+        width: usize,
+        style: TextStyle,
+        prose: bool,
+    ) -> (Vec<RichLine>, usize, usize, bool) {
+        if width == 0 || source.is_empty() {
+            return (vec![RichLine::default()], 0, 0, false);
+        }
+        let runs = [RichRun::new(source.to_owned(), style, None)];
+        let units = units(&runs, self.options.width);
+        self.wrap_literal_units(&runs, &units, width, prose)
     }
 
     /// Render a unified-diff string through the semantic diff pipeline and
@@ -1994,6 +2105,318 @@ fn diff_language_hint(header: &str) -> Option<String> {
     .then(|| token.to_ascii_lowercase())
 }
 
+/// Actual active-tail work, independent of CommonMark parser counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamingLayoutStats {
+    /// Source bytes supplied to append eligibility/newline scans, including reflows.
+    pub checked_bytes: u64,
+    /// Source bytes inspected to measure content-fitting code geometry.
+    pub measured_bytes: u64,
+    /// Source bytes submitted to wrapping/clipping (including mutable-row replay).
+    pub laid_out_bytes: u64,
+    /// Rows encoded, including mutable rows subsequently replaced.
+    pub encoded_rows: u64,
+    /// Tail renders using the general semantic/sanitizing layout path.
+    pub full_tail_layouts: u64,
+    /// Raw unstable-source bytes supplied to general (nonincremental) tail renders.
+    pub fallback_source_bytes: u64,
+}
+
+/// An append-only literal preview retains source offsets, not a second copy of
+/// the growing text. Only complete logical rows and proven visual wraps become
+/// stable. These are NOT parser commits: semantic promotion may replace them.
+#[derive(Clone, Debug, Default)]
+pub(super) struct AppendOnlyTail {
+    checked: usize,
+    disabled: bool,
+    restart: usize,
+    stable_rows: usize,
+    stable_nonempty: usize,
+    measure_start: usize,
+    completed_width: usize,
+    code_layout: Option<CodeLayout>,
+    language_width: Option<usize>,
+    skip_space: bool,
+}
+
+impl AppendOnlyTail {
+    pub(super) fn update(
+        &mut self,
+        block: &Block,
+        renderer: &RichRenderer,
+        width: u16,
+        output: &mut Vec<RenderedLine>,
+        stats: &mut StreamingLayoutStats,
+    ) -> Option<(usize, usize)> {
+        let (source, code) = match block {
+            Block::Plain(source) => (source.as_str(), None),
+            Block::CodeBlock(code)
+                if !code.language.as_deref().is_some_and(|language| {
+                    language.eq_ignore_ascii_case("diff") || language.eq_ignore_ascii_case("patch")
+                }) =>
+            {
+                (code.code.as_str(), Some(code))
+            }
+            _ => return None,
+        };
+        if self.disabled {
+            return None;
+        }
+        let delta = &source[self.checked..];
+        stats.checked_bytes += delta.len() as u64;
+        // Tabs need original logical columns; CRLF and sanitization need source
+        // maps. Keep their authoritative general layout rather than guessing at
+        // offsets in transformed text. Eligibility checks inspect only the delta.
+        if delta.contains(['\t', '\r']) || renderer.sanitize(delta) != delta {
+            self.disabled = true;
+            return None;
+        }
+        let width = usize::from(width);
+        let mut newlines: Vec<usize> = delta
+            .match_indices('\n')
+            .map(|(offset, _)| self.checked + offset)
+            .collect();
+        let mut stable_prefix = self.stable_rows;
+        let mut reflow = self.checked == 0;
+        if let Some(code) = code {
+            for &end in &newlines {
+                let (_, cells) = measured_prefix(
+                    &source[self.measure_start..end],
+                    width,
+                    renderer.options.width,
+                    &mut stats.measured_bytes,
+                );
+                self.completed_width = self.completed_width.max(cells.min(width));
+                self.measure_start = end + 1;
+            }
+            let (_, cells) = measured_prefix(
+                &source[self.measure_start..],
+                width,
+                renderer.options.width,
+                &mut stats.measured_bytes,
+            );
+            let language_width = *self.language_width.get_or_insert_with(|| {
+                visible_code_language(code).map_or(0, |label| {
+                    stats.measured_bytes += label.len() as u64;
+                    renderer.options.width.line_width(&renderer.sanitize(label))
+                })
+            });
+            let layout = renderer.code_layout(
+                language_width,
+                width,
+                self.completed_width.max(cells.min(width)),
+            );
+            if self.code_layout != Some(layout) {
+                self.code_layout = Some(layout);
+                reflow = true;
+            }
+        }
+        if reflow {
+            self.restart = 0;
+            self.skip_space = false;
+            self.stable_rows = 0;
+            self.stable_nonempty = 0;
+            stable_prefix = 0;
+            if self.checked > 0 {
+                stats.checked_bytes += source.len() as u64;
+                newlines = source
+                    .match_indices('\n')
+                    .map(|(offset, _)| offset)
+                    .collect();
+            }
+            output.clear();
+            if let Some(layout) = &self.code_layout {
+                let header = renderer.code_header(layout, visible_code_language(code.unwrap()));
+                self.append_rows(header, renderer, width, output, stats);
+            }
+        }
+        output.truncate(self.stable_rows);
+        let mut visible = self.stable_nonempty;
+        for end in newlines {
+            let text = &source[self.restart..end];
+            let (rows, _, _, _) = self.rows(text, renderer, width, stats);
+            self.append_rows(rows, renderer, width, output, stats);
+            visible = self.stable_nonempty;
+            self.restart = end + 1;
+            self.skip_space = false;
+        }
+        // Code's final LF terminates the preceding row, unlike a Plain block's
+        // split('\n'). Empty code still has one body row beneath its label.
+        if code.is_none() || !source.ends_with('\n') || source.is_empty() {
+            let (rows, stable, restart, skip_space) =
+                self.rows(&source[self.restart..], renderer, width, stats);
+            let base = output.len();
+            for (index, row) in rows.into_iter().enumerate() {
+                if !row.is_empty() {
+                    visible = output.len() + 1;
+                }
+                stats.encoded_rows += 1;
+                output.push(renderer.encode_line(row, width));
+                if index < stable {
+                    self.stable_rows = base + index + 1;
+                    self.stable_nonempty = visible;
+                }
+            }
+            self.restart += restart;
+            self.skip_space = skip_space;
+        }
+        if let Some(layout) = &self.code_layout {
+            for row in renderer.code_footer(layout) {
+                if !row.is_empty() {
+                    visible = output.len() + 1;
+                }
+                stats.encoded_rows += 1;
+                output.push(renderer.encode_line(row, width));
+            }
+        }
+        // Retain trailing empty stable rows internally so a long blank suffix
+        // is not rescanned. Expose exactly render_blocks' trimmed physical view.
+        if output.is_empty() {
+            output.push(RenderedLine::default());
+        }
+        self.checked = source.len();
+        Some((stable_prefix, visible.max(1)))
+    }
+
+    fn rows(
+        &self,
+        source: &str,
+        renderer: &RichRenderer,
+        width: usize,
+        stats: &mut StreamingLayoutStats,
+    ) -> (Vec<RichLine>, usize, usize, bool) {
+        let mut leading = 0;
+        if self.skip_space {
+            let mut last = 0;
+            let mut nonspace = false;
+            for (offset, grapheme) in source.grapheme_indices(true) {
+                last = offset;
+                if !grapheme.chars().all(char::is_whitespace) {
+                    leading = offset;
+                    nonspace = true;
+                    break;
+                }
+            }
+            if !nonspace {
+                stats.laid_out_bytes += source.len() as u64;
+                return (Vec::new(), 0, last, true);
+            }
+        }
+        let source = &source[leading..];
+        stats.laid_out_bytes += leading as u64;
+        let (content_width, style) = self
+            .code_layout
+            .map_or((width, renderer.theme.style(TextRole::Text)), |layout| {
+                (layout.content_width, layout.code_text_style)
+            });
+        let (rows, stable, restart, skip_space) =
+            if self.code_layout.is_some() && renderer.options.code_overflow == CodeOverflow::Clip {
+                // Once overflow is proven, code clipping cannot depend on hidden
+                // suffix bytes. Keep every source byte for copy/final parsing, but
+                // submit only the exact visible prefix plus overflow witness.
+                let (prefix, _) = measured_prefix(
+                    source,
+                    content_width,
+                    renderer.options.width,
+                    &mut stats.measured_bytes,
+                );
+                stats.laid_out_bytes += prefix.len() as u64;
+                let runs = [RichRun::new(prefix.to_owned(), style, None)];
+                (vec![renderer.clip_runs(&runs, content_width)], 0, 0, false)
+            } else {
+                stats.laid_out_bytes += source.len() as u64;
+                renderer.literal_rows(source, content_width, style, self.code_layout.is_none())
+            };
+        let rows = rows
+            .into_iter()
+            .map(|row| match self.code_layout {
+                Some(layout) => layout.row(renderer, row),
+                None => row,
+            })
+            .collect();
+        (rows, stable, restart + leading, skip_space)
+    }
+
+    fn append_rows(
+        &mut self,
+        rows: Vec<RichLine>,
+        renderer: &RichRenderer,
+        width: usize,
+        output: &mut Vec<RenderedLine>,
+        stats: &mut StreamingLayoutStats,
+    ) {
+        for row in rows {
+            if !row.is_empty() {
+                self.stable_nonempty = output.len() + 1;
+            }
+            stats.encoded_rows += 1;
+            output.push(renderer.encode_line(row, width));
+        }
+        self.stable_rows = output.len();
+    }
+}
+
+fn visible_code_language(code: &CodeBlock) -> Option<&str> {
+    code.language.as_deref().map(str::trim).filter(|language| {
+        !language.is_empty()
+            && !language.eq_ignore_ascii_case("text")
+            && !language.eq_ignore_ascii_case("plaintext")
+    })
+}
+
+// Includes the first overflowing grapheme. Never splits the overflow witness:
+// a later combining/ZWJ suffix may still change that final grapheme's width.
+fn measured_prefix<'a>(
+    source: &'a str,
+    width: usize,
+    policy: WidthPolicy,
+    bytes: &mut u64,
+) -> (&'a str, usize) {
+    let mut end = 0;
+    let mut cells: usize = 0;
+    for (offset, grapheme) in source.grapheme_indices(true) {
+        cells = cells.saturating_add(policy.grapheme_width(grapheme, cells));
+        end = offset + grapheme.len();
+        if cells > width {
+            break;
+        }
+    }
+    *bytes += end as u64;
+    (&source[..end], cells)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CodeLayout {
+    block_width: usize,
+    content_width: usize,
+    left_padding: usize,
+    right_padding: usize,
+    bordered: bool,
+    padding_style: TextStyle,
+    code_text_style: TextStyle,
+    border_style: TextStyle,
+    background: bool,
+    background_color: Option<Color>,
+    padding_top: u16,
+    padding_bottom: u16,
+}
+
+impl CodeLayout {
+    fn row(&self, renderer: &RichRenderer, row: RichLine) -> RichLine {
+        renderer.code_content_line(
+            row,
+            self.block_width,
+            self.content_width,
+            self.left_padding,
+            self.right_padding,
+            self.bordered,
+            self.padding_style,
+            self.border_style,
+            self.background,
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct RichLine {
     runs: Vec<RichRun>,
@@ -2229,6 +2652,109 @@ mod tests {
             capabilities,
             RenderOptions::default(),
         )
+    }
+
+    #[test]
+    fn whitespace_and_blank_suffixes_keep_only_append_local_layout_work() {
+        let renderer = RichRenderer::plain();
+        for chunk in [" ", "\n", "abcdefgh"] {
+            let mut block = Block::Plain("start ".to_owned());
+            let mut cache = AppendOnlyTail::default();
+            let mut stats = StreamingLayoutStats::default();
+            let mut output = Vec::new();
+            let mut visible = 0;
+            for _ in 0..8_000 {
+                let Block::Plain(source) = &mut block else {
+                    unreachable!()
+                };
+                source.push_str(chunk);
+                (_, visible) = cache
+                    .update(&block, &renderer, 12, &mut output, &mut stats)
+                    .unwrap();
+            }
+            assert!(stats.laid_out_bytes < 8_000 * 40, "{chunk:?}: {stats:?}");
+            assert!(stats.encoded_rows < 8_000 * 4, "{chunk:?}: {stats:?}");
+            assert_eq!(
+                output[..visible],
+                renderer
+                    .render_unstable(&Document::new(vec![block.clone()]), 12)
+                    .lines
+            );
+            // A combining suffix can turn skipped whitespace into a visible
+            // grapheme. It must remain recoverable at the mutable checkpoint.
+            for suffix in ["\u{301}", "next", "\n", "after"] {
+                let Block::Plain(source) = &mut block else {
+                    unreachable!()
+                };
+                source.push_str(suffix);
+                (_, visible) = cache
+                    .update(&block, &renderer, 12, &mut output, &mut stats)
+                    .unwrap();
+                assert_eq!(
+                    output[..visible],
+                    renderer
+                        .render_unstable(&Document::new(vec![block.clone()]), 12)
+                        .lines
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn append_only_literal_rows_match_full_layout_at_every_scalar_boundary() {
+        let source = concat!(
+            "alpha beta gamma delta epsilon longidentifierabcdefghijklmno ",
+            "界界 e\u{301} 👩\u{200d}💻 🇦🇧 ",
+            "\n\nsecond line  with    spaces\n\n\n",
+            "ending \u{301}♥\u{fe0f} and more text for wrapping"
+        );
+        for width in [0, 1, 2, 3, 7, 16, 40] {
+            for code in [false, true] {
+                for borders in [false, true] {
+                    for overflow in [CodeOverflow::Clip, CodeOverflow::Wrap] {
+                        let capabilities =
+                            TerminalCapabilities::interactive(ColorDepth::TrueColor, true);
+                        let mut renderer = RichRenderer::new(
+                            Theme::with_capabilities(capabilities),
+                            capabilities,
+                            RenderOptions {
+                                code_borders: borders,
+                                code_overflow: overflow,
+                                ..RenderOptions::default()
+                            },
+                        );
+                        let mut style = renderer.theme().block_style(BlockRole::Code);
+                        style.background = Some(Color::Rgb(20, 30, 40));
+                        style.padding_top = 1;
+                        style.padding_bottom = 1;
+                        renderer
+                            .theme_mut()
+                            .override_block_style(BlockRole::Code, style);
+                        let mut cache = AppendOnlyTail::default();
+                        let mut stats = StreamingLayoutStats::default();
+                        let mut output = Vec::new();
+                        let mut prior: Vec<RenderedLine> = Vec::new();
+                        for end in source.char_indices().map(|(i, c)| i + c.len_utf8()) {
+                            let block = if code {
+                                Block::CodeBlock(CodeBlock::with_language("rust", &source[..end]))
+                            } else {
+                                Block::Plain(source[..end].to_owned())
+                            };
+                            let (stable, visible) = cache
+                                .update(&block, &renderer, width, &mut output, &mut stats)
+                                .unwrap();
+                            let expected = renderer
+                                .render_unstable(&Document::new(vec![block]), width)
+                                .lines;
+                            assert_eq!(output[..visible], expected, "end={end} width={width} code={code} borders={borders} overflow={overflow:?}");
+                            let stable = stable.min(prior.len());
+                            assert_eq!(prior[..stable], output[..stable]);
+                            prior = expected;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

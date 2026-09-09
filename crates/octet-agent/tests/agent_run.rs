@@ -5582,7 +5582,7 @@ impl Tool for SchemaMismatchBashProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
             name: "bash".into(),
-            description: "Records schema-rejected speculative calls".into(),
+            description: "Records schema-rejected Bash calls".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -5790,14 +5790,13 @@ const SCHEMA_MISMATCH_ERROR: &str =
     "tool call was not executed because its arguments do not satisfy the advertised schema; correct the arguments and try again";
 
 #[tokio::test]
-async fn schema_rejected_bash_is_never_speculated_or_executed() {
+async fn schema_rejected_bash_is_never_classified_or_executed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("messages"))
         .respond_with(Script {
-            // `ls` is otherwise a speculative reconnaissance command. The
-            // request schema accepts only `pwd`, so the stream marker must
-            // prevent both speculation and normal dispatch.
+            // Even a read-looking command must satisfy the request schema,
+            // which accepts only `pwd`, before classification or dispatch.
             bodies: vec![
                 tool_turn(&[(
                     "schema_rejected_bash",
@@ -6638,107 +6637,442 @@ async fn controlled_workspace_mutation_requires_and_consumes_exact_approval() {
     ));
 }
 
-// ── Speculative bash reconnaissance ────────────────────────────────────────
+// ── Tool execution waits for the durable assistant turn ────────────────────
 
-/// Serves two sequential HTTP responses over a raw listener. The first
-/// response streams its SSE body in two parts separated by `tail_delay`, so
-/// the agent observes a completed tool call long before the provider turn
-/// finishes. The second response is written and closed in one shot.
-async fn stalled_tool_turn_server(
-    head: String,
-    tail: String,
-    tail_delay: Duration,
-    second: String,
-) -> String {
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::TcpListener;
+const TOOL_TURN_PENDING: &str = "tool call ended; response still pending";
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let uri = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move {
-        for (index, body) in [(Some(head), Some(tail)), (None, Some(second))] {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .unwrap();
-            if let Some(head) = index {
-                let tail = body.expect("first turn carries a tail");
-                socket.write_all(head.as_bytes()).await.unwrap();
-                socket.flush().await.unwrap();
-                tokio::time::sleep(tail_delay).await;
-                socket.write_all(tail.as_bytes()).await.unwrap();
-            } else {
-                let body = body.expect("second turn carries a body");
-                socket.write_all(body.as_bytes()).await.unwrap();
-            }
-            socket.shutdown().await.unwrap();
-        }
-    });
-    uri
+/// The text marker follows ToolCallEnd on the wire. The response cannot finish
+/// until the test releases the gate, regardless of scheduler or process speed.
+struct GatedToolTurnServer {
+    uri: String,
+    finish: Option<tokio::sync::oneshot::Sender<()>>,
+    requests: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
 }
 
-/// A shallow read-only bash call whose arguments finish streaming before the
-/// rest of the provider response must be executed speculatively during the
-/// stall: the tool observes the file before the test rewrites it. A serial
-/// fallback would only run the command after the stall and would observe the
-/// rewritten content instead.
-#[tokio::test]
-async fn shallow_recon_bash_speculates_while_the_provider_stream_is_open() {
-    let turn1_head = msg_start()
+impl GatedToolTurnServer {
+    async fn start(head: String, tail: String) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let (finish, mut finish_rx) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let task = tokio::spawn(async move {
+            let head = head + &text_block(64, &[TOOL_TURN_PENDING]);
+            for (index, body) in [head, text_turn("done")].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let read = socket.read(&mut buf).await.unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&buf[..read]);
+                    let Some(header_end) = request.windows(4).position(|b| b == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or_default();
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                ).await.unwrap();
+                socket.write_all(body.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                if index == 0 {
+                    if (&mut finish_rx).await.is_err() {
+                        return;
+                    }
+                    socket.write_all(tail.as_bytes()).await.unwrap();
+                }
+                socket.shutdown().await.unwrap();
+            }
+        });
+        Self {
+            uri,
+            finish: Some(finish),
+            requests,
+            task,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.finish.take().unwrap().send(()).unwrap();
+    }
+}
+
+impl Drop for GatedToolTurnServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn recon_bash_head() -> String {
+    msg_start()
         + &tool_block(
             0,
-            "call_1",
+            "call_bash",
             "bash",
             &serde_json::json!({"command": "cat probe.txt"}),
-        );
-    let uri = stalled_tool_turn_server(
-        turn1_head,
-        msg_end("tool_use"),
-        Duration::from_millis(900),
-        text_turn("done"),
-    )
-    .await;
+        )
+}
 
+async fn observe_unfinished_tool_turn(run: &mut octet_agent::Run<'_>) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = run.next().await.expect("provider must reach the gate");
+            let reached_gate = matches!(
+                &event, AgentEvent::OutputDelta { text, .. } if text == TOOL_TURN_PENDING
+            );
+            assert!(!matches!(event, AgentEvent::ToolStarted { .. }));
+            events.push(event);
+            if reached_gate {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("provider must deliver ToolCallEnd and the following marker");
+    // Keep driving the agent and give any illegally spawned execution time to
+    // run. Unlike the old sleep-based fixture, this cannot release the response.
+    assert!(tokio::time::timeout(Duration::from_millis(25), run.next())
+        .await
+        .is_err());
+    events
+}
+
+struct DurableBashProbe {
+    effect: ToolEffect,
+    effect_calls: Arc<AtomicUsize>,
+    executions: Arc<AtomicUsize>,
+    session_path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Tool for DurableBashProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_agent::BashTool.definition()
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Sequential
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        self.effect_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.effect)
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        // Reopen the file, not the agent's in-memory view: successful dispatch
+        // must already have a complete durable assistant envelope and usage.
+        let session = Session::open_read_only(&self.session_path).unwrap();
+        assert!(session.entries().iter().any(|entry| matches!(
+            &entry.value,
+            EntryValue::Message(Message::Assistant(message)) if message.content.iter().any(|part|
+                matches!(part, AssistantPart::ToolCall(call)
+                    if call.name == "bash" && call.arguments_value().unwrap() == args)
+            )
+        )));
+        assert!(!session.usage_records().is_empty());
+        if self.effect == ToolEffect::WorkspaceMutation {
+            std::fs::write(ctx.workspace.join("mutation.txt"), "executed").unwrap();
+            Ok(ToolOutput::new("mutation executed"))
+        } else {
+            octet_agent::BashTool.execute(args, ctx).await
+        }
+    }
+}
+
+fn bash_probe_harness(
+    uri: &str,
+    effect: ToolEffect,
+    policy: EffectPolicy,
+) -> (Harness, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let workspace_dir = tempfile::tempdir().unwrap();
     let session_dir = tempfile::tempdir().unwrap();
     let workspace = workspace_dir.path().canonicalize().unwrap();
     std::fs::write(workspace.join("probe.txt"), "before").unwrap();
     let session_path = session_dir.path().join("session.jsonl");
-    let mut agent = build_agent(&uri, &workspace, &session_path, Some(8));
-
-    // Rewrite the probe file while the provider stall is still open. The
-    // speculative execution has already read (and returned) "before".
-    let rewrite = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        std::fs::write(workspace.join("probe.txt"), "after").unwrap();
+    let effect_calls = Arc::new(AtomicUsize::new(0));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut extensions = ExtensionHost::new();
+    // Deliberately register an arbitrary sequential implementation named bash,
+    // with no tool hooks that could suppress an unsafe streaming fast path.
+    extensions.tool(DurableBashProbe {
+        effect,
+        effect_calls: Arc::clone(&effect_calls),
+        executions: Arc::clone(&executions),
+        session_path: session_path.clone(),
     });
+    let mut sandbox = SandboxConfig::new(&workspace);
+    sandbox.allow_write = true;
+    sandbox.allow_process = true;
+    sandbox.allow_shell = true;
+    let agent = Agent::new(AgentConfig {
+        client: AiClient::new(),
+        model: scripted_model(uri),
+        session: Session::create(&session_path).unwrap(),
+        system: "tool ordering test".into(),
+        sandbox,
+        effect_broker: EffectBroker::new(policy),
+        extensions,
+        max_turns: Some(2),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    (
+        Harness {
+            agent,
+            server: None,
+            workspace,
+            session_path,
+            _dirs: (workspace_dir, session_dir),
+        },
+        effect_calls,
+        executions,
+    )
+}
 
-    let mut run = agent.prompt("probe").await.unwrap();
-    let events = collect(&mut run).await;
+#[tokio::test]
+async fn recon_bash_waits_for_complete_response_and_durable_assistant() {
+    for effect in [ToolEffect::WorkspaceMutation, ToolEffect::HostProcess] {
+        let mut server = GatedToolTurnServer::start(recon_bash_head(), msg_end("tool_use")).await;
+        let (mut h, effect_calls, executions) =
+            bash_probe_harness(&server.uri, effect, EffectPolicy::UnsafeHost);
+        let mut run = h.agent.prompt("probe").await.unwrap();
+        let mut events = observe_unfinished_tool_turn(&mut run).await;
+        assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert!(!h.workspace.join("mutation.txt").exists());
+        std::fs::write(h.workspace.join("probe.txt"), "after").unwrap();
+        server.finish();
+        events.extend(collect(&mut run).await);
+        drop(run);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(effect_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+                .count(),
+            1
+        );
+        let output = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolFinished { result, .. } => Some(result.as_ref().unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        if effect == ToolEffect::HostProcess {
+            assert!(output.text.contains("after"), "{}", output.text);
+            assert!(!output.text.contains("before"), "{}", output.text);
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(h.workspace.join("mutation.txt")).unwrap(),
+                "executed"
+            );
+        }
+        assert!(matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Completed
+        ));
+    }
+}
+
+#[tokio::test]
+async fn recon_bash_provider_error_or_eof_after_tool_end_never_executes() {
+    for tail in [
+        frame(
+            "error",
+            serde_json::json!({
+                "type": "error", "error": {"type": "overloaded_error", "message": "failed after tool end"}
+            }),
+        ),
+        String::new(),
+    ] {
+        let mut server = GatedToolTurnServer::start(recon_bash_head(), tail).await;
+        let (mut h, effect_calls, executions) = bash_probe_harness(
+            &server.uri,
+            ToolEffect::HostProcess,
+            EffectPolicy::UnsafeHost,
+        );
+        let mut run = h.agent.prompt("probe").await.unwrap();
+        let mut events = observe_unfinished_tool_turn(&mut run).await;
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        server.finish();
+        events.extend(collect(&mut run).await);
+        drop(run);
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            server.requests.load(Ordering::SeqCst),
+            1,
+            "generation must prevent retry"
+        );
+        assert!(matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Failed(_)
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
+        let session = Session::open_read_only(&h.session_path).unwrap();
+        // Failure may append a local synthetic assistant boundary, but never
+        // commit the provisional provider tool call.
+        assert!(!session.entries().iter().any(|entry| matches!(
+            &entry.value, EntryValue::Message(Message::Assistant(message))
+                if message.content.iter().any(|part| matches!(part, AssistantPart::ToolCall(_)))
+        )));
+    }
+}
+
+#[tokio::test]
+async fn recon_bash_assistant_append_failure_never_executes() {
+    let mut server = GatedToolTurnServer::start(recon_bash_head(), msg_end("tool_use")).await;
+    let (mut h, effect_calls, executions) = bash_probe_harness(
+        &server.uri,
+        ToolEffect::WorkspaceMutation,
+        EffectPolicy::UnsafeHost,
+    );
+    let mut run = h.agent.prompt("probe").await.unwrap();
+    let mut events = observe_unfinished_tool_turn(&mut run).await;
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    // A second valid append on this disposable session deterministically makes
+    // the agent handle stale. Its assistant append must fail before dispatch.
+    Session::open(&h.session_path)
+        .unwrap()
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("concurrent append".into())],
+        })))
+        .unwrap();
+    server.finish();
+    events.extend(collect(&mut run).await);
     drop(run);
-    rewrite.await.unwrap();
-
-    let finished = events
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Failed(octet_agent::AgentError::Session(
+            octet_agent::SessionError::ConcurrentModification
+        ))
+    ));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+    assert!(!h.workspace.join("mutation.txt").exists());
+    assert!(!events
         .iter()
-        .find_map(|e| match e {
-            AgentEvent::ToolFinished { result, .. } => Some(result),
+        .any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
+}
+
+#[tokio::test]
+async fn recon_bash_max_tokens_and_abort_never_execute() {
+    for abort in [false, true] {
+        let mut server = GatedToolTurnServer::start(recon_bash_head(), msg_end("max_tokens")).await;
+        let (mut h, effect_calls, executions) = bash_probe_harness(
+            &server.uri,
+            ToolEffect::WorkspaceMutation,
+            EffectPolicy::UnsafeHost,
+        );
+        let mut run = h.agent.prompt("probe").await.unwrap();
+        let mut events = observe_unfinished_tool_turn(&mut run).await;
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        if abort {
+            run.control().abort();
+        } else {
+            server.finish();
+        }
+        events.extend(collect(&mut run).await);
+        drop(run);
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+        assert!(!h.workspace.join("mutation.txt").exists());
+        if abort {
+            assert!(matches!(
+                assert_single_run_finished(&events),
+                FinishReason::Aborted
+            ));
+        } else {
+            assert!(matches!(
+                assert_single_run_finished(&events),
+                FinishReason::Completed
+            ));
+            assert!(events.iter().any(|event| matches!(
+                event, AgentEvent::ToolFinished { result: Err(error), .. }
+                    if error.message.contains("output token limit")
+            )));
+        }
+    }
+}
+
+#[tokio::test]
+async fn recon_bash_obeys_per_turn_call_limit() {
+    let mut head = msg_start();
+    for index in 0..35 {
+        head += &tool_block(
+            index,
+            &format!("call_{index}"),
+            "bash",
+            &serde_json::json!({"command": "ls"}),
+        );
+    }
+    let mut server = GatedToolTurnServer::start(head, msg_end("tool_use")).await;
+    let (mut h, effect_calls, executions) = bash_probe_harness(
+        &server.uri,
+        ToolEffect::WorkspaceMutation,
+        EffectPolicy::UnsafeHost,
+    );
+    let mut run = h.agent.prompt("probe").await.unwrap();
+    let mut events = observe_unfinished_tool_turn(&mut run).await;
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    server.finish();
+    events.extend(collect(&mut run).await);
+    drop(run);
+    assert_eq!(executions.load(Ordering::SeqCst), 32);
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 32);
+    let results: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolFinished { id, result, .. } => Some((id, result)),
             _ => None,
         })
-        .expect("ToolFinished for bash");
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, AgentEvent::ToolStarted { id, .. } if id.0 == "call_1"))
-            .count(),
-        1,
-        "speculative calls still need one ToolStarted event"
-    );
-    let output = finished.as_ref().expect("bash must succeed");
-    assert!(output.text.contains("before"), "{}", output.text);
-    assert!(!output.text.contains("after"), "{}", output.text);
+        .collect();
+    assert_eq!(results.len(), 35);
+    for (index, (id, result)) in results.iter().enumerate() {
+        assert_eq!(id.0, format!("call_{index}"));
+        if index < 32 {
+            assert!(result.is_ok());
+        } else {
+            assert!(result
+                .as_ref()
+                .unwrap_err()
+                .message
+                .contains("per-turn tool-call limit"));
+        }
+    }
     assert!(matches!(
         assert_single_run_finished(&events),
         FinishReason::Completed
@@ -6746,41 +7080,203 @@ async fn shallow_recon_bash_speculates_while_the_provider_stream_is_open() {
 }
 
 #[tokio::test]
-async fn non_recon_bash_still_executes_serially() {
-    let mut h = harness(
-        vec![
-            tool_turn(&[(
-                "call_1",
-                "bash",
-                serde_json::json!({"command": "echo speculative-serial-check"}),
-            )]),
-            text_turn("done"),
-        ],
-        Some(8),
-    )
-    .await;
-
-    let mut run = h.agent.prompt("run echo").await.unwrap();
-    let events = collect(&mut run).await;
-    drop(run);
-
-    let finished = events
-        .iter()
-        .find_map(|e| match e {
-            AgentEvent::ToolFinished { result, .. } => Some(result),
-            _ => None,
-        })
-        .expect("ToolFinished for bash");
-    let output = finished.as_ref().expect("echo must succeed");
-    assert!(
-        output.text.contains("speculative-serial-check"),
-        "{}",
-        output.text
+async fn recon_bash_approval_is_requested_after_persistence_without_cached_denial() {
+    let mut server = GatedToolTurnServer::start(recon_bash_head(), msg_end("tool_use")).await;
+    let (mut h, effect_calls, executions) = bash_probe_harness(
+        &server.uri,
+        ToolEffect::HostProcess,
+        EffectPolicy::ControlledBashApproval,
     );
+    let mut run = h.agent.prompt("probe").await.unwrap();
+    let mut events = observe_unfinished_tool_turn(&mut run).await;
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    server.finish();
+    let mut approvals = 0;
+    while let Some(event) = run.next().await {
+        if let AgentEvent::ToolProgress {
+            progress: octet_agent::ToolProgress::Confirmation(request),
+            ..
+        } = &event
+        {
+            approvals += 1;
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+            let session = Session::open_read_only(&h.session_path).unwrap();
+            assert!(session
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.value, EntryValue::Message(Message::Assistant(_)))));
+            request.clone().respond(true);
+        }
+        events.push(event);
+    }
+    drop(run);
+    assert_eq!(approvals, 1);
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ToolFinished { result: Ok(_), .. })));
     assert!(matches!(
         assert_single_run_finished(&events),
         FinishReason::Completed
     ));
+}
+
+#[tokio::test]
+async fn write_then_recon_bash_observes_new_contents_and_preserves_result_order() {
+    let head = msg_start()
+        + &tool_block(
+            0,
+            "call_write",
+            "write",
+            &serde_json::json!({"path": "probe.txt", "content": "after"}),
+        )
+        + &tool_block(
+            1,
+            "call_bash",
+            "bash",
+            &serde_json::json!({"command": "cat probe.txt"}),
+        );
+    let mut server = GatedToolTurnServer::start(head, msg_end("tool_use")).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_path = sessions.path().join("session.jsonl");
+    std::fs::write(workspace.path().join("probe.txt"), "before").unwrap();
+    let mut agent = build_agent(&server.uri, workspace.path(), &session_path, Some(2));
+    let mut run = agent.prompt("write then read").await.unwrap();
+    let mut events = observe_unfinished_tool_turn(&mut run).await;
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("probe.txt")).unwrap(),
+        "before"
+    );
+    server.finish();
+    events.extend(collect(&mut run).await);
+    drop(run);
+    let order: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolStarted { id, .. } => Some(format!("start:{}", id.0)),
+            AgentEvent::ToolFinished { id, result, .. } => {
+                let output = result.as_ref().unwrap();
+                if id.0 == "call_bash" {
+                    assert!(output.text.contains("after"), "{}", output.text);
+                    assert!(!output.text.contains("before"), "{}", output.text);
+                }
+                Some(format!("finish:{}", id.0))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "start:call_write",
+            "finish:call_write",
+            "start:call_bash",
+            "finish:call_bash"
+        ]
+    );
+    let session = Session::open_read_only(&session_path).unwrap();
+    let results: Vec<_> = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.value {
+            EntryValue::Message(Message::User(user)) => {
+                user.content.iter().find_map(|part| match part {
+                    UserPart::ToolResult(result) => Some(result.tool_call_id.0.as_str()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, ["call_write", "call_bash"]);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+}
+
+// PATH belongs to this subprocess alone: never mutate the concurrent test
+// runner's environment to simulate a read-looking command with side effects.
+#[cfg(unix)]
+#[test]
+fn recon_bash_path_override_waits_for_complete_response() {
+    const CHILD_ENV: &str = "OCTET_TEST_RECON_BASH_PATH_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("cat");
+        std::fs::write(
+            &program,
+            concat!(
+                "#!/bin/sh\n",
+                "printf executed > mutation.txt\n",
+                "printf shadowed\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut paths = vec![dir.path().to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "recon_bash_path_override_waits_for_complete_response",
+                "--nocapture",
+            ])
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env(CHILD_ENV, "1")
+            .env_remove("BASH_ENV")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut server =
+                GatedToolTurnServer::start(recon_bash_head(), msg_end("tool_use")).await;
+            let workspace = tempfile::tempdir().unwrap();
+            let marker = workspace.path().join("mutation.txt");
+            let sessions = tempfile::tempdir().unwrap();
+            let mut agent = build_agent(
+                &server.uri,
+                workspace.path(),
+                &sessions.path().join("session.jsonl"),
+                Some(2),
+            );
+            let mut run = agent.prompt("probe").await.unwrap();
+            let mut events = observe_unfinished_tool_turn(&mut run).await;
+            assert!(
+                !marker.exists(),
+                "PATH override must not run during generation"
+            );
+            server.finish();
+            events.extend(collect(&mut run).await);
+            drop(run);
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), "executed");
+            assert!(events.iter().any(|event| matches!(
+                event, AgentEvent::ToolFinished { result: Ok(output), .. }
+                    if output.text.contains("shadowed")
+            )));
+            assert!(matches!(
+                assert_single_run_finished(&events),
+                FinishReason::Completed
+            ));
+        });
 }
 
 // Valid synthetic one-pixel PNG, not an attachment or a provider fixture.

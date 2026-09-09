@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Reproducible, dependency-free systems measurements for local coding agents.
 
-The default case measures cold process launch.  Additional commands can be
-provided as ``NAME=ARGV`` values (parsed with :mod:`shlex`, never a shell), and
-an arbitrary long-lived command can be measured for RSS/PSS and CPU with
-``--idle-command``.  The same runner can therefore be used for another agent
-without pretending that a octet-specific command is a competitor comparison.
+The default case measures subprocess creation through ``--version`` exit, not
+cold-cache startup, UI readiness, or model TTFT. Additional commands are
+``NAME=ARGV`` values (parsed with :mod:`shlex`, never a shell). Long-lived
+commands supplied with ``--idle-command`` are sampled for direct-process
+RSS/PSS and CPU; descendants and independently running servers are not sampled.
+Commands inherit the caller's environment and configuration: isolation and
+network policy are the campaign operator's responsibility.
 
 Examples:
 
@@ -36,20 +38,26 @@ import time
 from pathlib import Path
 from typing import Any
 
-SCHEMA = "octet.systems-benchmark.v1"
+SCHEMA = "octet.systems-benchmark.v2"
 DEFAULT_REPETITIONS = 9
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_IDLE_SECONDS = 1.0
 DEFAULT_SETTLE_SECONDS = 0.25
+SAMPLE_INTERVAL_SECONDS = 0.05
 
 
 def parse_named_command(raw: str) -> tuple[str, list[str]]:
     name, separator, command = raw.partition("=")
     if not separator or not name.strip():
         raise argparse.ArgumentTypeError("expected NAME=COMMAND")
-    argv = shlex.split(command)
-    if not argv:
+    try:
+        argv = shlex.split(command)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if not argv or not argv[0]:
         raise argparse.ArgumentTypeError(f"command for {name!r} is empty")
+    if any("\0" in argument for argument in argv):
+        raise argparse.ArgumentTypeError("command arguments cannot contain NUL")
     return name.strip(), argv
 
 
@@ -142,26 +150,33 @@ def read_memory(pid: int) -> dict[str, float | int | None]:
 
 
 def terminate_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        if process.stdin is not None:
+    """Close input and reap the child; clean its owned POSIX group as well.
+
+    A group can outlive its leader, including after a zero exit. Detached
+    descendants are not discoverable here; non-POSIX cleanup is direct-only.
+    """
+    if process.stdin is not None:
+        try:
             process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+    try:
         process.wait(timeout=1)
-        return
-    except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
         pass
     try:
         if os.name == "posix":
             os.killpg(process.pid, signal.SIGTERM)
-        else:
+        elif process.poll() is None:
             process.terminate()
         process.wait(timeout=5)
     except (ProcessLookupError, subprocess.TimeoutExpired):
+        pass
+    finally:
         try:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGKILL)
-            else:
+            elif process.poll() is None:
                 process.kill()
         except ProcessLookupError:
             pass
@@ -199,47 +214,154 @@ def benchmark_startup(
     errors: list[str] = []
     runs: list[dict[str, Any]] = []
     for _ in range(repetitions):
-        started = time.perf_counter_ns()
+        started = time.monotonic()
+        process: subprocess.Popen[bytes] | None = None
+        return_code: int | None = None
+        error_name: str | None = None
         try:
-            result = subprocess.run(
-                argv,
-                **launch_kwargs(),
-                timeout=timeout_seconds,
-                check=False,
-            )
-            elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
-            return_codes.append(result.returncode)
-            runs.append(
-                {
-                    "duration_ms": elapsed_ms,
-                    "return_code": result.returncode,
-                    "error": None,
-                }
-            )
-            if result.returncode == 0:
-                durations.append(elapsed_ms)
+            process = subprocess.Popen(argv, **launch_kwargs())
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout_seconds)
+            return_code = process.wait(timeout=remaining)
         except (OSError, subprocess.TimeoutExpired) as error:
             error_name = type(error).__name__
-            return_codes.append(None)
             errors.append(error_name)
-            runs.append(
-                {
-                    "duration_ms": (time.perf_counter_ns() - started) / 1_000_000,
-                    "return_code": None,
-                    "error": error_name,
-                }
-            )
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            if process is not None:
+                terminate_process(process)
+        return_codes.append(return_code)
+        runs.append({
+            "duration_ms": elapsed_ms,
+            "return_code": return_code,
+            "error": error_name,
+        })
+        if return_code == 0 and error_name is None:
+            durations.append(elapsed_ms)
     return {
         "kind": "startup",
+        "phase": "command_completion",
+        "summary_population": "zero-exit runs only; all attempts retained in runs",
+        "timeout_seconds": timeout_seconds,
         "name": name,
         "argv": argv,
         "repetitions": repetitions,
         "successful_runs": len(durations),
+        "failed_runs": repetitions - len(durations),
         "duration_ms": summarize(durations),
         "return_codes": return_codes,
         "errors": errors,
         "runs": runs,
     }
+
+
+def measure_resources(
+    argv: list[str],
+    count: int,
+    idle_seconds: float,
+    settle_seconds: float,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """One sampling window; one monotonic seconds clock for every deadline.
+
+    The timeout includes launch, settle and observation, but not cleanup. OS
+    process creation and a resource probe cannot be interrupted by this loop;
+    overruns are retained as failed trials, never successful measurements.
+    """
+    started = time.monotonic()
+    timeout_deadline = started + timeout_seconds
+    processes: list[subprocess.Popen[bytes]] = []
+    samples: list[dict[str, Any]] = []
+    errors: list[str] = []
+    launch_ms: float | None = None
+    status = "completed"
+    exit_codes: list[int | None] = []
+    try:
+        for _ in range(count):
+            if time.monotonic() >= timeout_deadline:
+                status = "timeout"
+                break
+            processes.append(subprocess.Popen(argv, **idle_launch_kwargs()))
+        if status == "completed":
+            launch_ms = (time.monotonic() - started) * 1000
+            time.sleep(min(settle_seconds, max(0.0, timeout_deadline - time.monotonic())))
+            sample_deadline = time.monotonic() + idle_seconds
+            while True:
+                now = time.monotonic()
+                if now >= timeout_deadline:
+                    status = "timeout"
+                    break
+                exit_codes = [process.poll() for process in processes]
+                if any(code is not None for code in exit_codes):
+                    status = "early_exit"
+                    errors.append("process_exited_before_window_end")
+                    break
+                if now >= sample_deadline:
+                    break
+                process_samples = [
+                    {"pid": process.pid, **read_memory(process.pid)}
+                    for process in processes
+                ]
+                sample: dict[str, Any] = {
+                    "elapsed_ms": (now - started) * 1000,
+                    "sample_finished_ms": (time.monotonic() - started) * 1000,
+                    "processes": process_samples,
+                }
+                for source, target, divisor in (
+                    ("rss_bytes", "rss_total_kib", 1024),
+                    ("pss_bytes", "pss_total_kib", 1024),
+                    ("cpu_percent", "cpu_total_percent", 1),
+                ):
+                    values = [item[source] for item in process_samples]
+                    sample[target] = (
+                        sum(values) / divisor if all(value is not None for value in values) else None
+                    )
+                samples.append(sample)
+                remaining = min(sample_deadline, timeout_deadline) - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(SAMPLE_INTERVAL_SECONDS, remaining))
+        if status == "timeout":
+            errors.append("measurement_timeout")
+    except OSError as error:
+        status = "launch_error"
+        errors.append(type(error).__name__)
+    finally:
+        exit_codes = [process.poll() for process in processes]
+        observation_ms = (time.monotonic() - started) * 1000
+        for process in processes:
+            terminate_process(process)
+    run = {
+        "launch_ms": launch_ms,
+        "observation_ms": observation_ms,
+        "status": status,
+        "launched_processes": len(processes),
+        "sample_count": len(samples),
+        "exit_codes_before_cleanup": exit_codes,
+        "errors": errors,
+        "samples": samples,
+    }
+    for metric, peak in (
+        ("rss_total_kib", "rss_peak_kib"),
+        ("pss_total_kib", "pss_peak_kib"),
+        ("cpu_total_percent", "cpu_peak_percent"),
+    ):
+        values = [sample[metric] for sample in samples if sample[metric] is not None]
+        run[peak] = max(values) if values else None
+    return run
+
+
+def resource_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    completed = [run for run in runs if run["status"] == "completed"]
+    result: dict[str, Any] = {
+        "completed_runs": len(completed),
+        "failed_runs": len(runs) - len(completed),
+        "summary_population": "resource summaries: completed windows only; launch_ms: all fully launched trials; failed trials retained in runs",
+        "launch_ms": summarize([run["launch_ms"] for run in runs if run["launch_ms"] is not None]),
+    }
+    for metric in ("rss_peak_kib", "pss_peak_kib", "cpu_peak_percent"):
+        result[metric] = summarize([run[metric] for run in completed if run[metric] is not None])
+    return result
 
 
 def benchmark_idle(
@@ -250,100 +372,42 @@ def benchmark_idle(
     settle_seconds: float,
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    samples: list[dict[str, float | int | None]] = []
-    startup_ms: list[float] = []
-    exit_codes: list[int | None] = []
-    errors: list[str] = []
-    runs: list[dict[str, Any]] = []
-    for _ in range(repetitions):
-        started = time.perf_counter_ns()
-        run_errors: list[str] = []
-        run_samples: list[dict[str, float | int | None]] = []
-        try:
-            process = subprocess.Popen(argv, **idle_launch_kwargs())
-        except OSError as error:
-            error_name = type(error).__name__
-            errors.append(error_name)
-            runs.append({"error": error_name, "samples": []})
-            continue
-        launch_ms = (time.perf_counter_ns() - started) / 1_000_000
-        startup_ms.append(launch_ms)
-        time.sleep(max(0.0, settle_seconds))
-        deadline = time.monotonic() + max(0.0, idle_seconds)
-        while time.monotonic() < deadline and process.poll() is None:
-            sample = {
-                "elapsed_ms": (time.perf_counter_ns() - started) / 1_000_000,
-                **read_memory(process.pid),
-            }
-            run_samples.append(sample)
-            if sample["rss_bytes"] is not None:
-                samples.append(sample)
-            time.sleep(0.05)
-        exit_code = process.poll()
-        exit_codes.append(exit_code)
-        if exit_code is None:
-            terminate_process(process)
-        elif exit_code != 0:
-            run_errors.append(f"exit:{exit_code}")
-        if time.monotonic() - started > timeout_seconds:
-            run_errors.append("measurement_timeout")
-            terminate_process(process)
-        errors.extend(run_errors)
-
-        run_rss = [
-            float(sample["rss_bytes"]) / 1024
-            for sample in run_samples
-            if sample["rss_bytes"] is not None
-        ]
-        run_pss = [
-            float(sample["pss_bytes"]) / 1024
-            for sample in run_samples
-            if sample["pss_bytes"] is not None
-        ]
-        run_cpu = [
-            float(sample["cpu_percent"])
-            for sample in run_samples
-            if sample["cpu_percent"] is not None
-        ]
-        runs.append(
+    runs = [
+        measure_resources(argv, 1, idle_seconds, settle_seconds, timeout_seconds)
+        for _ in range(repetitions)
+    ]
+    # Preserve the single-process sample shape; concurrency retains each PID and
+    # the complete total so missing members cannot masquerade as lower overhead.
+    for run in runs:
+        run["exit_code_before_cleanup"] = next(iter(run.pop("exit_codes_before_cleanup")), None)
+        run["samples"] = [
             {
-                "launch_ms": launch_ms,
-                "sample_count": len(run_samples),
-                "rss_peak_kib": max(run_rss) if run_rss else None,
-                "pss_peak_kib": max(run_pss) if run_pss else None,
-                "cpu_peak_percent": max(run_cpu) if run_cpu else None,
-                "exit_code_before_cleanup": exit_code,
-                "errors": run_errors,
-                "samples": run_samples,
+                "elapsed_ms": sample["elapsed_ms"],
+                "sample_finished_ms": sample["sample_finished_ms"],
+                **sample["processes"][0],
             }
-        )
-
-    rss = [float(sample["rss_bytes"]) / 1024 for sample in samples if sample["rss_bytes"] is not None]
-    pss = [float(sample["pss_bytes"]) / 1024 for sample in samples if sample["pss_bytes"] is not None]
-    cpu = [float(sample["cpu_percent"]) for sample in samples if sample["cpu_percent"] is not None]
+            for sample in run["samples"]
+        ]
+    samples = [sample for run in runs if run["status"] == "completed" for sample in run["samples"]]
     return {
         "kind": "idle_memory",
+        "phase": "settled_direct_process_sampling",
+        "resource_scope": "direct_process_only",
         "name": name,
         "argv": argv,
         "repetitions": repetitions,
-        "startup_ms": summarize(startup_ms),
+        "idle_seconds": idle_seconds,
+        "settle_seconds": settle_seconds,
+        "timeout_seconds": timeout_seconds,
+        **resource_summary(runs),
         "sample_count": len(samples),
-        "rss_kib": summarize(rss),
-        "pss_kib": summarize(pss),
-        "cpu_percent": summarize(cpu),
-        "rss_peak_kib": summarize(
-            [float(run["rss_peak_kib"]) for run in runs if run.get("rss_peak_kib") is not None]
-        ),
-        "pss_peak_kib": summarize(
-            [float(run["pss_peak_kib"]) for run in runs if run.get("pss_peak_kib") is not None]
-        ),
-        "cpu_peak_percent": summarize(
-            [float(run["cpu_peak_percent"]) for run in runs if run.get("cpu_peak_percent") is not None]
-        ),
-        "exit_codes": exit_codes,
-        "errors": errors,
+        "rss_kib": summarize([sample["rss_bytes"] / 1024 for sample in samples if sample["rss_bytes"] is not None]),
+        "pss_kib": summarize([sample["pss_bytes"] / 1024 for sample in samples if sample["pss_bytes"] is not None]),
+        "cpu_percent": summarize([sample["cpu_percent"] for sample in samples if sample["cpu_percent"] is not None]),
+        "exit_codes": [run["exit_code_before_cleanup"] for run in runs],
+        "errors": [error for run in runs for error in run["errors"]],
         "runs": runs,
-        "memory_metric_notes": "RSS is resident bytes; PSS is Linux smaps_rollup when available; direct child only. Peak summaries are computed over per-run peaks.",
+        "memory_metric_notes": "RSS/PSS/CPU sample summaries pool available samples independently; peak summaries use one peak per completed run. PSS is not RSS. Descendants are excluded.",
     }
 
 
@@ -354,165 +418,162 @@ def benchmark_concurrency(
     repetitions: int,
     idle_seconds: float,
     settle_seconds: float,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     measurements: list[dict[str, Any]] = []
     for level in levels:
-        runs: list[dict[str, Any]] = []
-        for _ in range(repetitions):
-            processes: list[subprocess.Popen[bytes]] = []
-            started = time.perf_counter_ns()
-            errors: list[str] = []
-            launch_ms: float | None = None
-            raw_samples: list[dict[str, float | int | None]] = []
-            rss_samples: list[float] = []
-            pss_samples: list[float] = []
-            cpu_samples: list[float] = []
-            try:
-                for _ in range(level):
-                    processes.append(subprocess.Popen(argv, **idle_launch_kwargs()))
-                launch_ms = (time.perf_counter_ns() - started) / 1_000_000
-                time.sleep(max(0.0, settle_seconds))
-                deadline = time.monotonic() + max(0.0, idle_seconds)
-                while time.monotonic() < deadline:
-                    rss_total = 0.0
-                    pss_total = 0.0
-                    cpu_total = 0.0
-                    rss_complete = True
-                    pss_complete = True
-                    cpu_complete = True
-                    for process in processes:
-                        sample = read_memory(process.pid)
-                        if sample["rss_bytes"] is None:
-                            rss_complete = False
-                        else:
-                            rss_total += float(sample["rss_bytes"]) / 1024
-                        if sample["pss_bytes"] is None:
-                            pss_complete = False
-                        else:
-                            pss_total += float(sample["pss_bytes"]) / 1024
-                        if sample["cpu_percent"] is None:
-                            cpu_complete = False
-                        else:
-                            cpu_total += float(sample["cpu_percent"])
-                    rss_value = rss_total if rss_complete else None
-                    pss_value = pss_total if pss_complete else None
-                    cpu_value = cpu_total if cpu_complete else None
-                    raw_samples.append(
-                        {
-                            "elapsed_ms": (time.perf_counter_ns() - started) / 1_000_000,
-                            "rss_total_kib": rss_value,
-                            "pss_total_kib": pss_value,
-                            "cpu_total_percent": cpu_value,
-                        }
-                    )
-                    if rss_value is not None:
-                        rss_samples.append(rss_value)
-                    if pss_value is not None:
-                        pss_samples.append(pss_value)
-                    if cpu_value is not None:
-                        cpu_samples.append(cpu_value)
-                    time.sleep(0.05)
-            except OSError as error:
-                errors.append(type(error).__name__)
-            finally:
-                for process in processes:
-                    terminate_process(process)
-            runs.append(
-                {
-                    "launch_ms": launch_ms,
-                    "rss_peak_kib": max(rss_samples) if rss_samples else None,
-                    "pss_peak_kib": max(pss_samples) if pss_samples else None,
-                    "cpu_peak_percent": max(cpu_samples) if cpu_samples else None,
-                    "errors": errors,
-                    "samples": raw_samples,
-                }
-            )
-        measurements.append(
-            {
-                "sessions": level,
-                "repetitions": repetitions,
-                "launch_ms": summarize([float(run["launch_ms"]) for run in runs if run.get("launch_ms") is not None]),
-                "rss_peak_kib": summarize([float(run["rss_peak_kib"]) for run in runs if run.get("rss_peak_kib") is not None]),
-                "pss_peak_kib": summarize([float(run["pss_peak_kib"]) for run in runs if run.get("pss_peak_kib") is not None]),
-                "cpu_peak_percent": summarize([float(run["cpu_peak_percent"]) for run in runs if run.get("cpu_peak_percent") is not None]),
-                "runs": runs,
-            }
-        )
+        runs = [
+            measure_resources(argv, level, idle_seconds, settle_seconds, timeout_seconds)
+            for _ in range(repetitions)
+        ]
+        measurements.append({
+            "sessions": level,
+            "repetitions": repetitions,
+            **resource_summary(runs),
+            "runs": runs,
+        })
     return {
         "kind": "concurrency_memory",
+        "phase": "settled_direct_process_sampling",
+        "resource_scope": "direct_processes_only",
         "name": name,
         "argv": argv,
+        "idle_seconds": idle_seconds,
+        "settle_seconds": settle_seconds,
+        "timeout_seconds": timeout_seconds,
         "levels": measurements,
-        "memory_metric_notes": "Totals cover the directly launched processes, not descendants; incomplete RSS/PSS/CPU samples are unavailable rather than partial.",
+        "memory_metric_notes": "Totals cover directly launched processes, not descendants. Each sweep reads PIDs sequentially, not atomically. Incomplete RSS/PSS/CPU totals are unavailable, never partial.",
     }
+
+
+def telemetry_number(value: Any) -> float | None:
+    # JSON permits booleans and Python's decoder accepts NaN/Infinity. Neither
+    # is a measurement; missing or invalid metrics must not become fake zeros.
+    if type(value) not in (int, float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def telemetry_summary(paths: list[str]) -> dict[str, Any]:
     files: list[str] = []
+    seen: set[Path] = set()
     records: list[dict[str, Any]] = []
+    read_errors: list[dict[str, str]] = []
+    ignored_lines = 0
+    request_samples: list[dict[str, Any]] = []
+    tool_samples: list[dict[str, Any]] = []
+    request_metrics = ("elapsed_ms", "ttft_ms", "first_text_delta_ms", "first_reasoning_delta_ms")
     for pattern in paths:
         matches = sorted(glob.glob(pattern)) or [pattern]
         for match in matches:
             path = Path(match)
-            if not path.is_file():
+            try:
+                identity = path.resolve()
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if not path.is_file():
+                    read_errors.append({"file": str(path), "error": "not_regular_file"})
+                    continue
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError) as error:
+                read_errors.append({"file": str(path), "error": type(error).__name__})
                 continue
             files.append(str(path))
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeError):
-                continue
-            for line in lines:
+            for line_number, line in enumerate(lines, 1):
                 try:
                     value = json.loads(line)
                 except json.JSONDecodeError:
+                    ignored_lines += 1
                     continue
-                if isinstance(value, dict) and value.get("schema") == "octet.telemetry.v1":
-                    records.append(value)
-    request_latencies = [float(record["elapsed_ms"]) for record in records if record.get("record") == "model_request_finished" and isinstance(record.get("elapsed_ms"), (int, float))]
-    ttft = [float(record["ttft_ms"]) for record in records if record.get("record") == "model_request_finished" and isinstance(record.get("ttft_ms"), (int, float))]
-    tool_latencies = [float(record["elapsed_ms"]) for record in records if record.get("record") == "tool_finished" and isinstance(record.get("elapsed_ms"), (int, float))]
+                if not isinstance(value, dict) or value.get("schema") != "octet.telemetry.v1":
+                    ignored_lines += 1
+                    continue
+                records.append(value)
+                if value.get("record") == "model_request_finished":
+                    request_samples.append({
+                        "file": str(path), "line": line_number,
+                        **{key: telemetry_number(value.get(key)) for key in request_metrics},
+                    })
+                elif value.get("record") == "tool_finished":
+                    tool_samples.append({
+                        "file": str(path), "line": line_number,
+                        "elapsed_ms": telemetry_number(value.get("elapsed_ms")),
+                    })
     run_records = [record for record in records if record.get("record") == "run_finished"]
-    return {
+    tool_starts = [record for record in records if record.get("record") == "tool_started"]
+    repeated = [telemetry_number(record.get("repeated_recently")) for record in tool_starts]
+    result = {
         "kind": "agent_telemetry",
         "files": files,
+        "read_errors": read_errors,
+        "ignored_lines": ignored_lines,
         "records": len(records),
-        "model_requests": len([record for record in records if record.get("record") == "model_request_finished"]),
-        "tool_calls": len([record for record in records if record.get("record") == "tool_started"]),
-        "repeated_tool_calls": sum(int(record.get("repeated_recently", 0)) > 0 for record in records if record.get("record") == "tool_started"),
+        "model_requests": len(request_samples),
+        "tool_calls": len(tool_starts),
+        "repeated_tool_calls": (
+            sum(value > 0 for value in repeated)
+            if repeated and all(value is not None for value in repeated) else None
+        ),
         "runs": len(run_records),
         "completed_runs": sum(record.get("status") == "completed" for record in run_records),
-        "request_elapsed_ms": summarize(request_latencies),
-        "ttft_ms": summarize(ttft),
-        "tool_elapsed_ms": summarize(tool_latencies),
-        "usage_semantics": "uncached_input_tokens + cache_read_tokens + cache_write_tokens = provider_input_tokens; total_tokens is octet's normalized canonical total.",
+        "request_samples": request_samples,
+        "tool_samples": tool_samples,
+        "tool_elapsed_ms": summarize([sample["elapsed_ms"] for sample in tool_samples if sample["elapsed_ms"] is not None]),
+        "count_semantics": "Counts are observed records, not proof of complete runs or zero activity. Overlapping input paths are read once; copied records in different files are not deduplicated.",
+        "timing_semantics": {
+            "ttft_ms": "Agent observer: request-attempt start to first text OR reasoning output delta; not first visible text, wire TTFT, process startup, or UI readiness. Historical producers may count empty deltas.",
+            "first_text_delta_ms": "Agent observer: request-attempt start to first nonempty text delta; unavailable in older telemetry, never inferred from ttft_ms.",
+            "first_reasoning_delta_ms": "Agent observer: request-attempt start to first nonempty reasoning delta; unavailable when not emitted, never inferred from ttft_ms.",
+            "population": "model_request_finished records only; discarded/retried attempts are not included in timing summaries",
+        },
+        "usage_semantics": "No usage aggregation. uncached_input_tokens + cache_read_tokens + cache_write_tokens = provider_input_tokens; cache_write_1h_tokens is a cache-write subset; reasoning_tokens is an output subset. total_tokens is octet's canonical total. Never sum run_cumulative snapshots or equate these buckets to another harness's input_tokens without normalization.",
     }
+    for metric in request_metrics:
+        key = "request_elapsed_ms" if metric == "elapsed_ms" else metric
+        result[key] = summarize([sample[metric] for sample in request_samples if sample[metric] is not None])
+    return result
 
 
 def print_summary(report: dict[str, Any]) -> None:
+    def metric(summary: dict[str, Any], unit: str) -> str:
+        if not summary["count"]:
+            return "unavailable (n=0)"
+        return f"median {summary['median']} {unit}, p95 {summary['p95']} {unit} (n={summary['count']})"
+
     print(f"systems benchmark {report['schema']} on {report['environment']['platform']}")
     for measurement in report["measurements"]:
         if measurement["kind"] == "startup":
-            print(f"  {measurement['name']}: median {measurement['duration_ms']['median']} ms, p95 {measurement['duration_ms']['p95']} ms")
+            print(
+                f"  {measurement['name']}: command completion {metric(measurement['duration_ms'], 'ms')}; "
+                f"failed {measurement['failed_runs']}/{measurement['repetitions']}"
+            )
         elif measurement["kind"] == "idle_memory":
             print(
-                f"  {measurement['name']}: RSS peak median "
-                f"{measurement['rss_peak_kib']['median']} KiB, "
-                f"p95 {measurement['rss_peak_kib']['p95']} KiB"
+                f"  {measurement['name']}: direct-process RSS peak {metric(measurement['rss_peak_kib'], 'KiB')}; "
+                f"failed {measurement['failed_runs']}/{measurement['repetitions']}"
             )
         elif measurement["kind"] == "concurrency_memory":
             for level in measurement["levels"]:
                 print(
-                    f"  {measurement['name']} x{level['sessions']}: RSS peak median "
-                    f"{level['rss_peak_kib']['median']} KiB, "
-                    f"p95 {level['rss_peak_kib']['p95']} KiB"
+                    f"  {measurement['name']} x{level['sessions']}: direct-process RSS total peak "
+                    f"{metric(level['rss_peak_kib'], 'KiB')}; failed {level['failed_runs']}/{level['repetitions']}"
                 )
         elif measurement["kind"] == "agent_telemetry":
-            print(f"  telemetry: {measurement['runs']} runs, {measurement['model_requests']} model requests, {measurement['tool_calls']} tool calls")
+            print(
+                f"  telemetry observed: {measurement['runs']} run finishes, "
+                f"{measurement['model_requests']} request finishes, {measurement['tool_calls']} tool starts; "
+                f"read errors {len(measurement['read_errors'])}, ignored lines {measurement['ignored_lines']}"
+            )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="octet", help="default executable for the cold-launch case")
+    parser.add_argument("--binary", default="octet", help="default executable for the --version command-completion case")
     parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--idle-seconds", type=float, default=DEFAULT_IDLE_SECONDS)
@@ -528,12 +589,26 @@ def main() -> int:
     args = parser.parse_args()
     if args.repetitions < 1:
         parser.error("--repetitions must be positive")
-    if args.timeout_seconds <= 0 or args.idle_seconds < 0 or args.settle_seconds < 0:
-        parser.error("timeouts and durations must be non-negative; command timeout must be positive")
+    for option, value, positive in (
+        ("--timeout-seconds", args.timeout_seconds, True),
+        ("--idle-seconds", args.idle_seconds, True),
+        ("--settle-seconds", args.settle_seconds, False),
+    ):
+        if not math.isfinite(value) or value < 0 or (positive and value == 0):
+            parser.error(f"{option} must be finite and {'positive' if positive else 'non-negative'}")
+    if not args.binary or "\0" in args.binary:
+        parser.error("--binary must be a nonempty executable without NUL")
+    # Validate the entire invocation before launching even the version command.
+    try:
+        levels = [int(value) for value in args.concurrency.split(",")]
+    except ValueError:
+        parser.error("--concurrency must be comma-separated positive integers")
+    if any(level < 1 for level in levels):
+        parser.error("--concurrency values must be positive")
 
     measurements: list[dict[str, Any]] = []
     if not args.skip_startup:
-        command_cases = [("cold_launch", [args.binary, "--version"]), *args.command]
+        command_cases = [("version_command", [args.binary, "--version"]), *args.command]
         for name, argv in command_cases:
             measurements.append(benchmark_startup(name, argv, args.repetitions, args.timeout_seconds))
 
@@ -551,12 +626,6 @@ def main() -> int:
                 )
             )
         if not args.skip_concurrency:
-            try:
-                levels = [int(value) for value in args.concurrency.split(",") if value.strip()]
-            except ValueError as error:
-                parser.error(f"invalid --concurrency: {error}")
-            if not levels or any(level < 1 for level in levels):
-                parser.error("--concurrency values must be positive")
             measurements.append(
                 benchmark_concurrency(
                     name,
@@ -565,6 +634,7 @@ def main() -> int:
                     args.repetitions,
                     args.idle_seconds,
                     args.settle_seconds,
+                    args.timeout_seconds,
                 )
             )
 
@@ -586,14 +656,21 @@ def main() -> int:
         },
         "measurements": measurements,
         "methodology": {
-            "startup": "wall time around subprocess creation and exit; child stdout/stderr discarded; raw duration retained per run",
-            "memory": "sampled after a settle interval; RSS and best-effort Linux PSS; no inference server included; summaries over per-run peaks",
-            "cpu": "OS-reported process CPU percentage sampled with memory; summaries over per-run peaks",
-            "concurrency": "complete sums of directly launched agent processes at each level; raw samples and per-run peaks retained",
-            "telemetry": "reads octet.telemetry.v1 without raw prompts, arguments, or provider payloads",
+            "startup": "command_completion: subprocess creation through exit, stdout/stderr discarded; default version_command executes --version. No cold-cache, UI-readiness or TTFT claim.",
+            "launch_ms": "Popen return latency only (all Popen calls at concurrency); not application or UI readiness; includes all fully launched trials, even incomplete windows",
+            "memory": "direct launched PIDs only, never descendants or external servers; RSS and best-effort Linux PSS; inference in a measured PID cannot be separated automatically",
+            "cpu": "ps pcpu OS-defined percentage, not interval CPU time; precision/averaging varies by OS; observed 0 is not zero instructions",
+            "sampling": "settle then window; 50 ms sleep between sequential OS sweeps, shortened at deadlines; timestamps retain probe duration; this is sampled, not lifetime, peak memory/CPU",
+            "timeout": "monotonic seconds from launch through settle and observation; checked between launches/resource sweeps, which can overrun; not a hard real-time limit; cleanup excluded",
+            "cleanup": "stdin close then terminate/kill owned POSIX process groups; detached descendants are not discovered; non-POSIX cleanup is direct-process only",
+            "statistics": "linear interpolated p95 at (n-1)*0.95; resource peaks use completed runs only; null means unavailable, count is available observations, failed trials retained",
+            "concurrency": "complete sums of directly launched processes; missing any PID's metric makes that total unavailable; individual PID samples retained",
+            "telemetry": "octet.telemetry.v1 observer timings only, separated by text/reasoning where available; no cross-harness TTFT or token equivalence assumed",
+            "environment": "commands inherit environment/config; no cache reset, isolation, inference or network policy is enforced by this runner",
+            "history": "v2 methodology does not revise or validate previously captured v1 figures",
         },
     }
-    encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    encoded = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(encoded, encoding="utf-8")

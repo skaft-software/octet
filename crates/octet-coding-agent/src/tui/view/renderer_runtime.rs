@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use sexy_tui_rs::{CommitCursor, Component, FrameUpdate, TUI};
 
 use super::native_scrollback::{
-    render_shell, render_shell_update_with_cursor, synchronize_shell_frame,
+    render_shell, render_shell_update_with_cursor, render_shell_update_without_cursor,
+    synchronize_shell_frame,
 };
 use super::shell_chrome::render_startup_surface;
 use super::viewport::{render_shell_viewport_at, render_shell_viewport_update};
@@ -413,7 +414,25 @@ impl Component for ShellComponent {
     }
 
     fn render_update(&self, width: u16) -> Option<FrameUpdate> {
-        self.render_update_with_cursor(width, None)
+        let state = self.state.borrow();
+        Some(if self.uses_application_viewport(&state) {
+            render_shell_viewport_update(
+                &state,
+                width,
+                Instant::now(),
+                &mut self.frame.borrow_mut(),
+            )
+        } else {
+            // Pi owns its physical scrollback ledger. Its text-only lazy path
+            // consumes row replacements, not the extended renderer's semantic
+            // commit handshake; do not classify settled history for it.
+            render_shell_update_without_cursor(
+                &state,
+                width,
+                Instant::now(),
+                &mut self.frame.borrow_mut(),
+            )
+        })
     }
 
     fn render_update_with_cursor(
@@ -455,5 +474,256 @@ impl Component for ShellComponent {
 
     fn invalidate(&mut self) {
         *self.frame.get_mut() = ShellFrameState::default();
+    }
+}
+
+#[cfg(test)]
+mod commit_metadata_tests {
+    use super::super::transcript_commit::take_commit_metadata_visits;
+    use super::super::{
+        CompactionBlock, InteractiveShell, OutputChannel, ShellOverlay, TranscriptBlock,
+    };
+    use super::*;
+
+    fn history_shell(blocks: usize) -> InteractiveShell {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        {
+            let mut state = shell.state.borrow_mut();
+            for index in 0..blocks {
+                state.push_block(TranscriptBlock::Notice(format!("settled history {index}")));
+            }
+        }
+        shell
+    }
+
+    fn advance_live_shell(shell: &mut InteractiveShell, tick: usize) {
+        let mut state = shell.state.borrow_mut();
+        match tick % 3 {
+            0 => state.append_text_block(OutputChannel::Text, "more words "),
+            1 => state.advance_status_shimmer(),
+            _ => state.editor.set_text(format!("draft {tick}")),
+        }
+    }
+
+    #[test]
+    fn shell_component_lazy_updates_skip_history_metadata() {
+        let mut shell = history_shell(4096);
+        shell.begin_run("openai");
+        let component = ShellComponent::new(shell.state.clone(), false);
+        let initial = component.render(80);
+        assert!(initial.len() > 4096);
+        take_commit_metadata_visits();
+        for tick in 0..12 {
+            advance_live_shell(&mut shell, tick);
+            let update = component.render_update(80).unwrap();
+            assert!(update.pinned.is_none());
+            assert!(update.stable_prefix >= 4096);
+            assert!(update.replacement.len() <= 32);
+            assert_eq!(take_commit_metadata_visits(), 0, "tick {tick}");
+        }
+    }
+
+    struct InteractiveTerminal;
+
+    impl sexy_tui_rs::Terminal for InteractiveTerminal {
+        fn start_events(
+            &mut self,
+            _on_input: Box<dyn FnMut(sexy_tui_rs::TerminalInput)>,
+            _on_resize: Box<dyn FnMut()>,
+        ) {
+        }
+        fn stop(&mut self) {}
+        fn write(&mut self, _data: &str) {}
+        fn columns(&self) -> u16 {
+            80
+        }
+        fn rows(&self) -> u16 {
+            24
+        }
+        fn move_by(&mut self, _lines: i16) {}
+        fn hide_cursor(&mut self) {}
+        fn show_cursor(&mut self) {}
+        fn clear_line(&mut self) {}
+        fn clear_from_cursor(&mut self) {}
+        fn clear_screen(&mut self) {}
+        fn capabilities(&self) -> sexy_tui_rs::TerminalCapabilities {
+            sexy_tui_rs::TerminalCapabilities::interactive(sexy_tui_rs::ColorDepth::TrueColor, true)
+        }
+    }
+
+    #[test]
+    fn shell_pi_lazy_updates_skip_history_metadata() {
+        // Exercise the real TUI -> retained ShellComponent boundary, not just a
+        // generic LazyTail fixture or a direct call to the suffix builder.
+        let mut shell = history_shell(4096);
+        shell.begin_run("openai");
+        let mut tui = TUI::new(Box::new(InteractiveTerminal));
+        tui.add_child(Box::new(ShellComponent::new(shell.state.clone(), false)));
+        tui.start();
+        shell.tui = Some(tui);
+        take_commit_metadata_visits();
+        for tick in 0..12 {
+            advance_live_shell(&mut shell, tick);
+            shell.render();
+            assert_eq!(take_commit_metadata_visits(), 0, "Pi tick {tick}");
+        }
+    }
+
+    #[test]
+    fn shell_component_cursor_handshake_keeps_bootstrap_and_ack() {
+        let shell = history_shell(4096);
+        let component = ShellComponent::new(shell.state.clone(), false);
+        component.render(80);
+        take_commit_metadata_visits();
+        let initial = component.render_update_with_cursor(80, None).unwrap();
+        let pinned = initial
+            .pinned
+            .expect("None cursor still requests a handshake");
+        assert!(pinned.acknowledged.is_none());
+        assert!(pinned.stable_rows > 4000);
+        let target = pinned.target.expect("settled prefix has a commit target");
+        assert!(take_commit_metadata_visits() >= 4096);
+
+        let update = component
+            .render_update_with_cursor(80, Some(target.cursor))
+            .unwrap();
+        let pinned = update.pinned.unwrap();
+        assert_eq!(pinned.acknowledged, Some(target));
+        assert_eq!(pinned.target, Some(target));
+        assert!(take_commit_metadata_visits() < 64);
+    }
+
+    fn check_unpinned_update(
+        component: &ShellComponent,
+        retained: &mut Vec<String>,
+    ) -> FrameUpdate {
+        let width = component.state.borrow().size.0;
+        take_commit_metadata_visits();
+        let update = component.render_update(width).unwrap();
+        assert!(update.pinned.is_none());
+        assert_eq!(take_commit_metadata_visits(), 0);
+        retained.truncate(update.stable_prefix);
+        retained.extend(update.replacement.iter().cloned());
+        assert_eq!(*retained, render_shell(&component.state.borrow(), width));
+        update
+    }
+
+    #[test]
+    fn shell_component_unpinned_invalidations_match_full_frame() {
+        let shell = history_shell(256);
+        let component = ShellComponent::new(shell.state.clone(), false);
+        let mut retained = component.render(80);
+        let old_start = shell.state.borrow().transcript_cache.borrow().block_starts[3];
+        {
+            let mut state = shell.state.borrow_mut();
+            state.transcript[3] = TranscriptBlock::Notice("offscreen replacement".into());
+            state.touch_block(3);
+        }
+        let changed = check_unpinned_update(&component, &mut retained);
+        assert_eq!(changed.stable_prefix, old_start);
+
+        {
+            let mut state = shell.state.borrow_mut();
+            state.push_block(TranscriptBlock::Compaction(Box::new(CompactionBlock {
+                label: "Context compacted".into(),
+                summary: "retained disclosure detail\n\n".repeat(40),
+                expanded: false,
+            })));
+        }
+        check_unpinned_update(&component, &mut retained);
+        for verbose in [true, false] {
+            let mut state = shell.state.borrow_mut();
+            state.verbose_tools = verbose;
+            state.invalidate_disclosure();
+            drop(state);
+            let changed = check_unpinned_update(&component, &mut retained);
+            assert_eq!(changed.stable_prefix, 0);
+            assert!(changed.rebuild_scrollback);
+        }
+        {
+            let mut state = shell.state.borrow_mut();
+            state.theme_epoch += 1;
+            state.invalidate_rich_text();
+        }
+        assert!(check_unpinned_update(&component, &mut retained).reanchor_viewport);
+
+        shell.state.borrow_mut().overlay = Some(ShellOverlay::Text("temporary overlay".into()));
+        assert!(check_unpinned_update(&component, &mut retained).reanchor_viewport);
+        {
+            let mut state = shell.state.borrow_mut();
+            state.size = (64, 16);
+            state.invalidate_transcript_layout();
+        }
+        let resized = check_unpinned_update(&component, &mut retained);
+        assert!(resized.reanchor_viewport);
+        assert!(resized.resize_replay.is_some());
+        shell.state.borrow_mut().overlay = None;
+        assert!(check_unpinned_update(&component, &mut retained).reanchor_viewport);
+    }
+
+    #[test]
+    fn shell_component_unpinned_hydration_replaces_generation() {
+        use octet_agent::{EntryValue, Session};
+        use octet_ai::{Message, UserMessage, UserPart};
+
+        let mut shell = history_shell(256);
+        let component = ShellComponent::new(shell.state.clone(), false);
+        let mut retained = component.render(80);
+        let old_cursor = component
+            .render_update_with_cursor(80, None)
+            .unwrap()
+            .pinned
+            .unwrap()
+            .target
+            .unwrap()
+            .cursor;
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("replacement.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("hydrated replacement prompt".into())],
+            })))
+            .unwrap();
+        shell.hydrate(&session).unwrap();
+        let update = check_unpinned_update(&component, &mut retained);
+        assert!(update.reanchor_viewport);
+        assert_eq!(update.stable_prefix, 0);
+        assert!(!retained.iter().any(|line| line.contains("settled history")));
+        shell.select_all_transcript();
+        assert_eq!(
+            shell.copy_selected_plain_text().as_deref(),
+            Some("hydrated replacement prompt")
+        );
+        let pinned = component
+            .render_update_with_cursor(80, Some(old_cursor))
+            .unwrap()
+            .pinned
+            .unwrap();
+        assert_ne!(pinned.generation, old_cursor.generation);
+        assert!(pinned.acknowledged.is_none());
+    }
+
+    #[test]
+    fn shell_component_semantic_viewports_do_not_request_metadata() {
+        let mut shell = history_shell(4096);
+        let component = ShellComponent::new(shell.state.clone(), false);
+        component.render(80);
+        shell.scroll_lines(-12);
+        take_commit_metadata_visits();
+        let update = component.render_update(80).unwrap();
+        assert!(update.reanchor_viewport);
+        assert!(update.pinned.is_none());
+        assert!(update.replacement.len() <= 24);
+        assert_eq!(take_commit_metadata_visits(), 0);
+
+        let mouse = ShellComponent::new(shell.state.clone(), true);
+        assert!(mouse.render(80).len() <= 24);
+        assert!(mouse
+            .render_update_with_cursor(80, None)
+            .unwrap()
+            .pinned
+            .is_none());
+        assert_eq!(take_commit_metadata_visits(), 0);
     }
 }
