@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 
 from octet_browse.paths import BrowsePaths, PLAYWRIGHT_VERSION
@@ -90,11 +91,17 @@ class SetupTests(unittest.TestCase):
             self.assertFalse(paths.root.exists())
 
     def test_confirmed_background_style_install_is_atomic_and_idempotent(self) -> None:
-        with tempfile.TemporaryDirectory() as home:
+        with tempfile.TemporaryDirectory() as home, ExitStack() as cleanup:
             paths = BrowsePaths.for_home(Path(home))
             entered = threading.Event()
             release = threading.Event()
+            ready = threading.Event()
             events = []
+
+            def on_state(event) -> None:
+                events.append(event)
+                if event["state"] == "ready":
+                    ready.set()
 
             def installer(temporary: Path, stop: threading.Event, _log: object) -> None:
                 entered.set()
@@ -102,7 +109,9 @@ class SetupTests(unittest.TestCase):
                 self.assertFalse(stop.is_set())
                 create_fake_runtime(temporary)
 
-            manager = SetupManager(paths, installer_hook=installer, on_state=events.append)
+            manager = SetupManager(paths, installer_hook=installer, on_state=on_state)
+            cleanup.callback(manager.shutdown)
+            cleanup.callback(release.set)
             started_at = time.monotonic()
             first = manager.start()
             self.assertLess(time.monotonic() - started_at, 1.0)
@@ -117,6 +126,9 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(manager.status().state, "ready")
             manager.validate_runtime()
             self.assertEqual(manager.start().state, "ready")
+            # Runtime promotion precedes notification delivery. Polling status
+            # alone does not synchronize with the worker's callback.
+            self.assertTrue(ready.wait(3), "ready notification was not delivered")
             self.assertTrue(any(event["state"] == "ready" for event in events))
             self.assertIn(f"playwright=={PLAYWRIGHT_VERSION}", paths.install_log.read_text(encoding="utf-8"))
             manager.shutdown()
