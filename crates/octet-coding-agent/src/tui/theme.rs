@@ -1097,6 +1097,7 @@ fn nearest_ansi16_code(color: Rgb) -> u8 {
         .map_or(37, |(_, code)| *code)
 }
 
+#[cfg(test)]
 fn ansi256_rgb(index: u8) -> Rgb {
     if index < 16 {
         return ANSI16[usize::from(index)].0;
@@ -1119,9 +1120,7 @@ fn ansi256_rgb(index: u8) -> Rgb {
 }
 
 fn nearest_ansi256(color: Rgb) -> u8 {
-    (0u8..=255)
-        .min_by_key(|index| color_distance(color, ansi256_rgb(*index)))
-        .unwrap_or(7)
+    sexy_tui_rs::theme::palette::nearest_ansi256(color.red, color.green, color.blue)
 }
 
 const DEFAULT_ACCENT: &str = "#16876d";
@@ -2600,10 +2599,70 @@ mod tests {
             let dark_color =
                 parse_hex_color(&balance_foreground(source, TerminalBackground::Dark)).unwrap();
             assert!(contrast(dark_color, dark) >= 5.5, "{lab:?} on dark");
+            assert!(
+                contrast(ansi256_rgb(nearest_ansi256(dark_color)), dark) >= 4.5,
+                "{lab:?} quantized on dark: {dark_color:?} -> {:?}",
+                ansi256_rgb(nearest_ansi256(dark_color))
+            );
 
             let light_color =
                 parse_hex_color(&balance_foreground(source, TerminalBackground::Light)).unwrap();
             assert!(contrast(light_color, light) >= 5.5, "{lab:?} on light");
+            assert!(
+                contrast(ansi256_rgb(nearest_ansi256(light_color)), light) >= 4.5,
+                "{lab:?} quantized on light"
+            );
+        }
+    }
+
+    #[test]
+    fn ansi256_semantic_surfaces_and_model_accents_use_fixed_palette() {
+        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::Ansi256);
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            let mut theme = default_theme_for(background, capabilities);
+            for lab in [
+                ModelLab::OpenAi,
+                ModelLab::Anthropic,
+                ModelLab::Google,
+                ModelLab::Alibaba,
+                ModelLab::Kimi,
+            ] {
+                apply_model_lab_for(&mut theme, lab, background);
+                let mut samples = theme
+                    .semantic_styles
+                    .keys()
+                    .map(|role| theme.fg(role, "sample"))
+                    .collect::<Vec<_>>();
+                samples.push(theme.model_fg(Some(lab), "sample"));
+                samples.push(theme.prompt_color_cell(lab.source_color(), "sample"));
+                for (color, _) in ANSI16 {
+                    // These exact RGBs selected theme-owned slots before #382.
+                    samples.push(theme.color_text(color, "sample"));
+                }
+                for sample in samples {
+                    assert_eq!(sexy_tui_rs::strip_terminal_sequences(&sample), "sample");
+                    assert!(
+                        !sample.contains("38;2;") && !sample.contains("48;2;"),
+                        "{sample:?}"
+                    );
+                    for escape in sample.split("\x1b[").skip(1) {
+                        let Some((sgr, _)) = escape.split_once('m') else {
+                            continue;
+                        };
+                        let codes = sgr.split(';').collect::<Vec<_>>();
+                        for triple in codes.windows(3) {
+                            if matches!(triple[0], "38" | "48") && triple[1] == "5" {
+                                let index: u8 = triple[2].parse().unwrap();
+                                assert!(index >= 16, "{background:?}/{lab:?}: {sample:?}");
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
