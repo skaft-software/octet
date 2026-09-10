@@ -189,6 +189,40 @@ class HttpHardeningTests(unittest.TestCase):
                                  ["initialize", "notifications/initialized", "tools/list", "tools/list"])
                 self.assertTrue(all(r.header("authorization") == "Bearer " + secret for r in fixture.requests))
 
+    def test_initialization_and_modern_noneligible_methods_cannot_claim_mrtr(self):
+        from octet_mcp.http_2026 import McpHttp2026Client
+        from .test_protocol_2026 import DISCOVERY
+
+        for is_sse in (False, True):
+            for method in ("initialize", "server/discover", "tools/list", "resources/list", "resources/templates/list"):
+                with self.subTest(is_sse=is_sse, method=method):
+                    secret = "resultType"  # Redaction must not erase the discriminator before validation.
+                    discovery = {**DISCOVERY, "capabilities": {"tools": {}, "resources": {}}}
+                    def responder(request):
+                        if request.message()["method"] != method:
+                            return _json_result(request, discovery)
+                        result = {**(_initialize_result() if method == "initialize" else discovery),
+                                  "tools": [{**_tool(), "description": secret}], "resultType": "input_required"}
+                        if is_sse:
+                            return self.sse(_sse_event({"jsonrpc": "2.0", "id": request.message()["id"], "result": result}))
+                        return _json_result(request, result)
+                    config = _remote_config("http://127.0.0.1:9/mcp", auth=HttpAuthConfig(credential="fixture"))
+                    kind = http.McpStreamableHttpClient if method == "initialize" else McpHttp2026Client
+                    if method != "initialize":
+                        config = replace(config, protocol_version="2026-07-28")
+                    client = kind(config, limits(), credential_provider=_TokenProvider(secret))
+                    self.clients.append(client)
+                    with _memory_http(client, responder) as requests:
+                        with self.assertRaises(McpError) as raised:
+                            client.start()
+                            if method == "tools/list":
+                                client.list_tools()
+                            elif method.startswith("resources/"):
+                                client.request(method, {}, timeout_ms=1000)
+                        self.assertEqual(raised.exception.code, "unsupported_interaction")
+                        self.assertNotIn(secret, str(raised.exception))
+                    self.assertEqual(len(requests), 1 if method in {"initialize", "server/discover"} else 2)
+                    self.assertNotIn(secret, repr(client.server_info))
 
     def test_aggregate_body_budget_survives_post_to_resume(self):
         def responder(request):

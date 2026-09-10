@@ -108,6 +108,54 @@ class ConfigTests(unittest.TestCase):
                 "https://mcp.wix.com/mcp",
             )
 
+    def test_oauth_config_is_public_issuer_pinned_and_strict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            auth = {"type": "oauth", "credential": "remote_oauth",
+                    "issuer": "https://auth.example.test/tenant", "clientId": "public-client",
+                    "scopes": ["files:read", "files:write"], "redirectPort": 8765}
+            remote = {"transport": "streamable-http", "url": "https://mcp.example.test/mcp", "auth": auth}
+            self.write_json(path, {"version": 1, "servers": {"remote": remote}})
+            with self.assertRaisesRegex(ConfigError, "process owner"):
+                load_config(path)
+            parsed = load_config(path, experimental_streamable_http_mcp=True).servers[0].auth
+            self.assertEqual(parsed.type, "oauth")
+            self.assertEqual(parsed.issuer, auth["issuer"])
+            self.assertEqual(parsed.client_id, "public-client")
+            self.assertEqual(parsed.scopes, ("files:read", "files:write"))
+            self.assertEqual(parsed.redirect_port, 8765)
+            for bad in ({"token": "secret"}, {"clientSecret": "secret"}, {"headers": {}},
+                        {"issuer": "http://127.0.0.1/issuer"}, {"issuer": "https://user:pass@auth.test"},
+                        {"issuer": "https://auth.test?token=no"}, {"clientId": ""},
+                        {"clientId": "contains whitespace"}, {"scopes": ["duplicate", "duplicate"]},
+                        {"scopes": ["bad scope"]}, {"scopes": None}, {"redirectPort": True},
+                        {"redirectPort": 65536}, {"type": []}):
+                self.write_json(path, {"version": 1, "servers": {"remote": {**remote, "auth": {**auth, **bad}}}})
+                with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                    load_config(path, experimental_streamable_http_mcp=True)
+            for required in ("issuer", "clientId", "credential"):
+                missing = dict(auth)
+                del missing[required]
+                self.write_json(path, {"version": 1, "servers": {"remote": {**remote, "auth": missing}}})
+                with self.assertRaises(ConfigError):
+                    load_config(path, experimental_streamable_http_mcp=True)
+
+    def test_protocol_version_is_remote_only_explicit_and_never_defaulted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            remote = {"transport": "streamable-http", "url": "https://mcp.example.test/mcp"}
+            for descriptor, expected in ((remote, None), ({**remote, "protocolVersion": "2026-07-28"}, "2026-07-28")):
+                self.write_json(path, {"version": 1, "servers": {"remote": descriptor}})
+                parsed = load_config(path, experimental_streamable_http_mcp=True).servers[0]
+                self.assertEqual(parsed.protocol_version, expected)
+            for value in (None, True, "2025-03-26", "future"):
+                self.write_json(path, {"version": 1, "servers": {"remote": {**remote, "protocolVersion": value}}})
+                with self.assertRaises(ConfigError):
+                    load_config(path, experimental_streamable_http_mcp=True)
+            self.write_json(path, {"version": 1, "servers": {"local": {"command": "server", "protocolVersion": "2026-07-28"}}})
+            with self.assertRaises(ConfigError):
+                load_config(path)
+
     def test_remote_gate_is_visible_to_the_product_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"

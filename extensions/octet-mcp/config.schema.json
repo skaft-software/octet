@@ -100,12 +100,27 @@
           "format": "uri",
           "description": "Absolute HTTP(S) URL; cleartext HTTP is accepted only for numeric loopback addresses. Queries, fragments, and userinfo are rejected by the strict loader."
         },
-        "auth": {"$ref": "#/$defs/bearerAuth"},
+        "auth": {"oneOf": [{"$ref": "#/$defs/bearerAuth"}, {"$ref": "#/$defs/oauthAuth"}]},
+        "protocolVersion": {"const": "2026-07-28", "description": "Explicit opt-in to the 2026 remote wire; omission preserves legacy negotiation."},
         "enabled": {"type": "boolean"},
         "required": {"type": "boolean"},
         "startupTimeoutMs": {"type": "integer", "minimum": 10, "maximum": 30000},
         "requestTimeoutMs": {"type": "integer", "minimum": 10, "maximum": 120000},
         "maxRestarts": {"type": "integer", "minimum": 0, "maximum": 8}
+      }
+    },
+    "oauthAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "credential", "issuer", "clientId"],
+      "description": "Public pre-registered OAuth client, pinned to the exact HTTPS issuer. Tokens are collected only by explicit trusted user authentication, never from configuration or environment. Private storage is plaintext, not encrypted. DCR and confidential clients are not supported.",
+      "properties": {
+        "type": {"const": "oauth"},
+        "credential": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$"},
+        "issuer": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^https://", "format": "uri"},
+        "clientId": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[!-~]+$"},
+        "scopes": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[!#-\\[\\]-~]+$"}},
+        "redirectPort": {"type": "integer", "minimum": 0, "maximum": 65535, "default": 0, "description": "Registered numeric loopback callback port; zero selects an ephemeral native-client port."}
       }
     },
     "bearerAuth": {

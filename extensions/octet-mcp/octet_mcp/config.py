@@ -65,9 +65,14 @@ class Limits:
 
 @dataclass(frozen=True)
 class HttpAuthConfig:
-    """A non-secret reference resolved only by a runtime credential adapter."""
+    """Non-secret, issuer-pinned public-client settings; never token values."""
 
     credential: str
+    type: str = "bearer"
+    issuer: Optional[str] = None
+    client_id: Optional[str] = None
+    scopes: Optional[tuple[str, ...]] = None
+    redirect_port: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,7 @@ class ServerConfig:
     transport: str = "stdio"
     url: Optional[str] = field(default=None, repr=False)
     auth: Optional[HttpAuthConfig] = field(default=None, repr=False)
+    protocol_version: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +138,7 @@ _SERVER_FIELDS = {
     "env",
     "url",
     "auth",
+    "protocolVersion",
     "enabled",
     "required",
     "startupTimeoutMs",
@@ -139,6 +146,7 @@ _SERVER_FIELDS = {
     "maxRestarts",
 }
 _AUTH_FIELDS = {"type", "credential"}
+_OAUTH_FIELDS = _AUTH_FIELDS | {"issuer", "clientId", "scopes", "redirectPort"}
 
 
 def default_config_path() -> Path:
@@ -517,7 +525,7 @@ def _parse_servers(
         )
 
         if transport == "stdio":
-            _reject_transport_fields(descriptor, server_id, {"url", "auth"}, "stdio")
+            _reject_transport_fields(descriptor, server_id, {"url", "auth", "protocolVersion"}, "stdio")
             command = _bounded_text(
                 descriptor.get("command"),
                 f"server {server_id} command",
@@ -569,6 +577,10 @@ def _parse_servers(
                 else None
             )
 
+        protocol_version = descriptor.get("protocolVersion")
+        if "protocolVersion" in descriptor and protocol_version != "2026-07-28":
+            raise ConfigError(f"server {server_id} protocolVersion must be 2026-07-28")
+
         parsed.append(
             ServerConfig(
                 id=server_id,
@@ -586,6 +598,7 @@ def _parse_servers(
                 transport=transport,
                 url=url,
                 auth=auth,
+                protocol_version=protocol_version,
             )
         )
     return parsed
@@ -642,9 +655,11 @@ def _parse_streamable_http_url(value: Any, server_id: str) -> str:
 def _parse_http_auth(value: Any, server_id: str) -> HttpAuthConfig:
     if not isinstance(value, dict):
         raise ConfigError(f"server {server_id} auth must be an object")
-    _require_keys(value, _AUTH_FIELDS, f"server {server_id} auth")
-    if value.get("type") != "bearer":
-        raise ConfigError(f"server {server_id} auth type must be bearer")
+    kind = value.get("type")
+    if not isinstance(kind, str) or kind not in {"bearer", "oauth"}:
+        raise ConfigError(f"server {server_id} auth type must be bearer or oauth")
+    _require_keys(value, _OAUTH_FIELDS if kind == "oauth" else _AUTH_FIELDS,
+                  f"server {server_id} auth")
     credential = _bounded_text(
         value.get("credential"),
         f"server {server_id} auth credential",
@@ -654,7 +669,24 @@ def _parse_http_auth(value: Any, server_id: str) -> HttpAuthConfig:
         raise ConfigError(
             f"server {server_id} auth credential must be a bounded logical reference"
         )
-    return HttpAuthConfig(credential=credential)
+    if kind == "bearer":
+        return HttpAuthConfig(credential=credential)
+    issuer = _parse_streamable_http_url(value.get("issuer"), server_id)
+    if urlsplit(issuer).scheme != "https":
+        raise ConfigError(f"server {server_id} OAuth issuer must use https")
+    client_id = _bounded_text(value.get("clientId"), "OAuth public client ID", 1024)
+    if not client_id.isascii() or any(c.isspace() for c in client_id):
+        raise ConfigError("OAuth public client ID must be printable ASCII without whitespace")
+    scopes = value.get("scopes")
+    if "scopes" in value:
+        if (not isinstance(scopes, list) or len(scopes) > 32
+                or any(not isinstance(item, str) or not re.fullmatch(r'[\x21\x23-\x5b\x5d-\x7e]{1,128}', item)
+                       for item in scopes) or len(set(scopes)) != len(scopes)):
+            raise ConfigError("OAuth scopes must be at most 32 unique bounded scope tokens")
+    port = _bounded_integer(value.get("redirectPort", 0), "OAuth redirectPort", 0, 65535)
+    return HttpAuthConfig(credential=credential, type="oauth", issuer=issuer,
+                          client_id=client_id, scopes=tuple(scopes) if scopes is not None else None,
+                          redirect_port=port)
 
 
 def _parse_environment(value: Any, server_id: str) -> dict[str, str]:
