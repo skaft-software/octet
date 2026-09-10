@@ -10,12 +10,14 @@ import unittest
 from unittest import mock
 
 from octet_mcp.config import HttpAuthConfig
+from octet_mcp.http_2026 import McpHttp2026Client
 from octet_mcp.protocol import McpCancelled, McpError, McpStdioClient, SUPPORTED_PROTOCOL_VERSIONS
 from octet_mcp.streamable_http import McpStreamableHttpClient, _HttpOperation, _decode_json_message
 from .helpers import FakeCancellation, limits, server_config, wait_for
 from .test_interactions import FORM, URL, PrivateUI, handler_for
 from .test_streamable_http import _HttpReply, _LoopbackFixture, _json_bytes, _json_result, _remote_config, _sse_event, _tool, _TokenProvider
 from .test_streamable_http_hardening import _memory_http
+from .test_protocol_2026 import DISCOVERY
 
 
 class _LiveHandler(BaseHTTPRequestHandler):
@@ -262,6 +264,49 @@ class ElicitationProtocolTests(unittest.TestCase):
         decoded = _decode_json_message(json.dumps(value).encode(), ("credential-sentinel",))
         self.assertEqual(decoded["params"], {"message": "[redacted]"})
 
+    def test_modern_mrtr_preserves_exact_opaque_state_input_ids_and_fresh_request_ids(self):
+        secret = "credential-sentinel"
+        state = "opaque " + secret + " \n\x00"
+        input_id = "input-" + secret
+        for is_sse in (False, True):
+            for method in ("tools/call", "resources/read"):
+                with self.subTest(is_sse=is_sse, method=method):
+                    def responder(request):
+                        message = request.message()
+                        if message["method"] == "server/discover":
+                            return _json_result(request, {**DISCOVERY, "capabilities": {"tools": {}, "resources": {}}})
+                        if message["method"] == "tools/list":
+                            return _json_result(request, {"tools": [_tool()]})
+                        self.assertEqual(message["method"], method)
+                        params = message["params"]
+                        self.assertEqual(params.get("arguments", params.get("uri")), {"value": "original"} if method == "tools/call" else "opaque:original")
+                        if "requestState" not in params:
+                            result = {"resultType": "input_required", "requestState": state,
+                                      "inputRequests": {input_id: {"method": "elicitation/create", "params": URL}},
+                                      "_meta": {"echo": secret}}
+                        else:
+                            self.assertEqual(params["requestState"], state)
+                            self.assertEqual(params["inputResponses"], {input_id: {"action": "accept"}})
+                            result = {"content": [{"type": "text", "text": "done " + secret}]} if method == "tools/call" else {"contents": [{"uri": "opaque:original", "text": "done " + secret}]}
+                        if is_sse:
+                            return _HttpReply(headers={"Content-Type": "text/event-stream"}, body=_sse_event({"jsonrpc": "2.0", "id": message["id"], "result": result}))
+                        return _json_result(request, result)
+                    client = McpHttp2026Client(
+                        replace(_remote_config("http://127.0.0.1:9/mcp", auth=HttpAuthConfig(credential="fixture")), protocol_version="2026-07-28"),
+                        limits(), credential_provider=_TokenProvider(secret), enable_elicitation=True,
+                    )
+                    self.clients.append(client)
+                    with _memory_http(client, responder) as requests:
+                        client.start()
+                        client.list_tools()
+                        handler = handler_for(PrivateUI("accept"))
+                        if method == "tools/call":
+                            result = client.call_tool("echo", {"value": "original"}, interaction_handler=handler)
+                        else:
+                            result = client.request(method, {"uri": "opaque:original"}, timeout_ms=1000, interaction_handler=handler)
+                        self.assertNotIn(secret, json.dumps(result))
+                        self.assertEqual([r.message()["id"] for r in requests], [1, 2, 3, 4])
+                        self.assertEqual([r.message()["method"] for r in requests], ["server/discover", "tools/list", method, method])
 
     def test_bound_legacy_elicitation_preserves_schema_protocol_fields_under_auth_redaction(self):
         client, fixture = self.live(echo="string")
