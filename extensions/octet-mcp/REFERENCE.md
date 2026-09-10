@@ -14,10 +14,14 @@ octet <- API 0.2 JSON-RPC -> octet-mcp <- MCP JSON-RPC stdio -> local servers
                                  \-> MCP Streamable HTTP -> explicit remote endpoint
 ```
 
-Local stdio is the normal transport. Streamable HTTP is blocked-by-default and
-experimental, with the unresolved defects listed below. Legacy MCP SSE endpoints,
-OAuth/browser authorization, resources, prompts, sampling, elicitation, automatic
-server installation, and ambient discovery are unsupported.
+Local stdio is the normal transport. This is an **unreleased source candidate**;
+new behavior requires the matching source host and bundle, not a published
+`0.7.3` installation. Streamable HTTP remains blocked-by-default experimental.
+Tools, resources/templates/reads, explicit modern HTTP and private authentication
+have bounded implementations, not production qualification. Legacy standalone SSE,
+prompts, sampling, roots, automatic installation and ambient discovery remain
+unsupported. [QUALIFICATION](QUALIFICATION.md) retains the full compatibility scope,
+including remaining modern subscription/authorization/interaction gaps.
 
 ## Security and authority
 
@@ -48,10 +52,17 @@ An explicitly read-only tool may run without an additional prompt. Every
 `unknown` or `destructive` call goes through the negotiated host
 `policy/evaluate` service. If policy intents are unavailable, evaluation fails,
 or the host denies the intent, the bridge fails closed. It uses a one-use
-approval retry only when the host actually negotiates `approvals`; octet `0.7.3`'s
-coding product does not currently enable approval issuance, so those calls are
-denied with an explanatory tool error. An MCP tool call is never automatically
-replayed after timeout, cancellation, crash, or an ambiguous disconnect.
+approval retry only when the host actually negotiates `approvals`. The matching
+source coding host installs a generic exact-call adapter only for isolated API
+`0.2` `octet-mcp`. It can ask, never blanket-allow: complete host-authored tool,
+argument, catalog and owner/generation/parent evidence is bound into the short-lived
+one-use approval. Missing/noninteractive UI, stale/changed/cancelled calls and
+oversized or incompletely reviewable previews deny. The bridge rechecks captured
+catalog/connection authority at wire dispatch. Other extensions retain the default
+deny policy. This is not #383's typed app/origin/observation automation adapter;
+server annotations remain untrusted classifications, not automation safety proof.
+An MCP tool call is never automatically replayed after timeout, cancellation,
+crash, or an ambiguous disconnect.
 
 Server descriptions, schemas, logs, errors, and results are untrusted data.
 Descriptions and schema text are bounded and explicitly labeled untrusted;
@@ -101,37 +112,37 @@ URLs cannot contain userinfo, a query, or a fragment, preventing URL-auth and
 query credential fields as well as endpoint switching by redirect. The extension
 never synthesizes a browser `Origin` header or forwards browser credentials.
 
-Remote `auth` contains only a logical credential reference, never a token or
-header value. A host/application composition may inject the narrow
-`CredentialProvider.bearer_token(reference, server_id=...)` adapter; the bridge
-asks it at request time, uses the returned token only to form that request's
-`Authorization: Bearer` header, redacts it from parsed remote data, then drops
-it. The normal bundled runtime intentionally has no provider, so such a server
-parks with `authentication_unavailable`. OAuth discovery, browser redirects,
-token acquisition/refresh, persistent token stores, static config headers, and
-secret environment fallback are not implemented.
+Remote `auth` contains only logical references and reviewed public OAuth
+configuration, never a token or static header. The stock source runtime composes
+an owner-aware private credential provider with the existing bridge. A connection
+captures its exact host owner; discovery, reconnect, cancellation and background
+catalog reads cannot borrow another owner or the last caller's credentials.
+Tokens are resolved at request time, redacted from parsed remote data and omitted
+from status, presentation and tool diagnostics. See [private authentication](#private-authentication).
 
 ### Known Streamable HTTP defects
 
-The gate is a containment measure, not a claim that remote transport is safe.
-Do **not** enable it for production, privileged networks, or sensitive
-credentials. The known unresolved defects are:
+The gate is containment, not a production-safety claim. Do **not** enable remote
+MCP for production, privileged networks, or sensitive credentials. All nine
+original defect IDs remain in [the qualification ledger](qualification/baseline.json):
 
-1. HTTPS SSRF remains possible through DNS rebinding; connections are not pinned
-   to a reviewed address.
-2. Credential and session state can be shared across distinct resource owners.
-3. DNS workers can outlive cancellation and shutdown (they are not reliably
-   killable).
-4. Buffered SSE handling can confuse peer identity.
-5. Control-message fanout is unbounded.
-6. Aggregate budgets can reset across remote transport paths.
-7. Truncated framing can be accepted.
-8. An empty SSE event ID can produce an incorrect resume cursor.
-9. The startup deadline can be escaped.
+| ID | Candidate remediation / regression boundary |
+| --- | --- |
+| `D-HTTP-01` | Validate every DNS answer and connect to a checked numeric address; retain original TLS SNI/hostname and HTTP Host. Local real-TLS tests also reject wrong names/untrusted certificates. |
+| `D-HTTP-02` | One exact host owner/session per isolated bridge generation; per-connection credentials, sessions, callbacks, cancellation, historical handlers and presentation are fenced. |
+| `D-HTTP-03` | DNS runs in a killable, bounded subprocess, terminated and reaped on cancellation/shutdown. |
+| `D-HTTP-04` | SSE peer requests cannot masquerade as client responses; preserve exact peer identity while redacting data. |
+| `D-HTTP-05` | Four concurrent control operations, sixteen control messages per originating operation, bounded deadlines. |
+| `D-HTTP-06` | POST/resumption share aggregate byte/event/control budgets rather than resetting them. |
+| `D-HTTP-07` | Reject truncated lengths, chunks/trailers and unterminated SSE events, even after a terminal-looking payload. |
+| `D-HTTP-08` | Empty SSE IDs clear the cursor and forbid further stale-cursor resumptions. |
+| `D-HTTP-09` | One startup deadline covers initialization, initialized notification and initial catalog pagination/cleanup. |
 
-The only activation path is the process-owner opt-in above. These defects need
-remediation before general availability; the framing and recovery behavior
-below does not override this warning.
+Implementation and controlled regressions are not proof of live DNS/TLS,
+endpoint, authorization, frontend or platform qualification. The source matrix
+assesses the pinned input; candidate evidence is recorded separately. Keep the
+flag and #179 open until the applicable release gates and supported real-world
+journeys are qualified. None of the framing details below waive that boundary.
 
 ## Requirements and installation
 
@@ -142,8 +153,9 @@ below does not override this warning.
 The release bundle includes the dependency-free Python extension SDK under
 `vendor/`; startup never runs `pip`, a browser download, or install code.
 
-With [octet 0.7.3 installed](../../docs/installation.md), once the matching signed
-public bundle is published, install it, then explicitly enable it:
+For this candidate, build the matching source host and select the reviewed
+checkout as below. These managed-install commands apply only after a matching
+host/bundle release, not to the already published `0.7.3` implementation:
 
 ```console
 octet extension install octet-mcp
@@ -188,8 +200,9 @@ another user, files with explicit `env` values accessible by group/other users,
 duplicate server IDs, NUL/control characters, mutually incompatible transport
 fields, unsafe remote URLs, and values outside package ceilings. Commands are
 direct argument arrays and never pass through a shell. Remote endpoints are exact
-URL strings rather than discovery patterns; there is no raw `headers`, token,
-password, or OAuth configuration field.
+URL strings rather than discovery patterns; there is no raw `headers`, token or
+password field. OAuth configuration holds only a reviewed issuer, public client
+ID, optional scope ceiling and loopback redirect port.
 
 A minimal user file is:
 
@@ -247,12 +260,87 @@ absolute endpoint. It accepts `https`; `http` is accepted only for literal
 }
 ```
 
-`credential` is a bounded logical reference, not a secret. It requires an
-application-provided `CredentialProvider`; the stock executable fails closed
-without one. Omit `auth` for an endpoint that does not need authorization. Do
-not put tokens in a URL, label, argument, `env`, or any other config field. The
-parser rejects remote header/auth-value fields and this package deliberately does
-not offer static HTTP headers.
+`credential` is a bounded logical reference, not a secret. The source runtime's
+`/mcp auth login <server>` supplies its owner-private bearer value. Omit `auth`
+for an endpoint that does not need authorization. Never put tokens in a URL,
+label, argument, `env` or any other remote config field. Static HTTP headers are
+not supported. All hostname DNS answers must be globally routable; prohibited
+private/link-local/reserved destinations fail before connection. Explicit numeric
+loopback is only for reviewed local development.
+
+### Private authentication
+
+OAuth currently requires a reviewed **pre-registered public client** and exact
+issuer; it does not impersonate Codex's client identity. Replace the `auth`
+object with:
+
+```json
+{
+  "type": "oauth",
+  "credential": "reviewed_remote",
+  "issuer": "https://issuer.example.invalid",
+  "clientId": "YOUR_REVIEWED_PUBLIC_CLIENT_ID",
+  "scopes": ["reviewed-scope"],
+  "redirectPort": 0
+}
+```
+
+An omitted scope ceiling differs from explicit `[]`, which permits no additional
+scope. The client checks protected-resource and OAuth/OIDC metadata, exact
+resource/issuer/token-endpoint binding, public-client authentication, S256 PKCE,
+state, callback issuer and scope responses. Networking has bounded admission,
+DNS/TLS pinning, deadlines, no redirects/proxies/cookies and no ambient credentials.
+
+- `/mcp auth login <server>` requests bearer input privately or begins manual OAuth.
+  A bounded numeric-loopback callback uses a random path and port (or the reviewed
+  `redirectPort`). After secret-free initial consent, review the authorization URL
+  in private input and type `continue`. Open it manually and finish login after
+  the command returns. No browser is launched automatically; the URL/state never
+  enters ordinary confirmation details.
+- `/mcp auth poll <server>` finishes a received callback and token exchange.
+- `/mcp auth login-manual <server>` and `complete-manual` use private callback-URL
+  input for a separate browser; never paste a callback URL into chat or arguments.
+- `status` is observational; `cancel` retires a pending login; `logout` removes
+  local credentials and stops the bound MCP connection, without remote revocation.
+- After successful setup, explicitly `/mcp restart <server>`. No login, refresh or
+  transport error causes a tool replay. Credential replacement stops the old
+  connection first so an authenticated MCP session cannot silently change identity.
+
+The POSIX store is `~/.octet/mcp-auth`: no-follow path checks, private `0700`
+directories, regular single-link `0600` files, locked/atomic updates. It is
+**plaintext**, not an encrypted vault or protection against the same OS principal,
+root or backups. Deletion is not secure erasure. Persistent keys include durable
+host owner, server, exact endpoint/configuration, issuer/client and scopes;
+active flows additionally bind extension instance/generation. A fresh generation
+of the same durable owner can reuse credentials; other owners cannot.
+
+Refresh is serialized, expiry-aware and fail-closed on scope expansion, changed
+metadata, non-rotating refresh tokens or ambiguous exchanges. Local removal does
+not revoke a remote authorization grant; use the issuer's manual revocation UI.
+Dynamic registration, an Octet-published CIMD identity, enterprise authorization,
+client secrets, sender-constrained tokens and automatic scope escalation remain
+unimplemented. Transport `WWW-Authenticate` challenges are not yet carried into
+explicit login; configured issuer and standard well-known discovery are required.
+If every remote is disabled, explicitly restart the intended server to bind its
+owner before setup. A passing fake issuer is not live OAuth qualification.
+
+### Modern HTTP mode
+
+Only an explicitly configured remote `"protocolVersion": "2026-07-28"` selects
+this mode. Omission retains legacy initialization; no automatic negotiation
+fallback or failed-tool replay occurs. Modern mode uses `server/discover`,
+self-contained protocol/client capability metadata and matching `MCP-Protocol-Version`,
+`Mcp-Method`, applicable `Mcp-Name` and schema-derived `Mcp-Param-*` headers.
+`x-mcp-header` annotations are validated for placement, primitive types and
+case-insensitive collisions, and pinned to the tool's accepted epoch.
+
+Modern HTTP sends no initialize/initialized, legacy session header, GET resume,
+Last-Event-ID or DELETE. Cancellation closes its response stream. Modern errors
+and non-complete results are not interpreted as successful empty content. Tools
+and resource operations have explicit method admission; subscriptions/listen,
+automatic version fallback, and modern stdio are not implemented. Standard private
+interaction/MRTR bounds are described below; unsupported capabilities are not
+advertised merely because the protocol schema defines them.
 
 ### Digest-pinned trusted project configuration
 
@@ -352,22 +440,83 @@ activity. Cancellation requests cooperation and never claims rollback.
 Server-reported progress is reduced to bounded numeric progress; untrusted
 progress messages are not promoted to UI authority.
 
+MCP schemas are bounded and must preserve their accepted semantics. Local acyclic
+`$ref`/`$defs` are resolved with shared depth/node/expansion budgets; supported
+composition, enum/const, type and numeric/size constraints are validated. External,
+recursive/dynamic references, unsupported dialects/keywords (including `pattern`
+and `format`) and malformed schemas are rejected, never silently dropped into an
+unconstrained tool. This remains a supported subset, not unrestricted JSON Schema.
+
 MCP results cross the normal API `0.2` boundary:
 
 - text remains ordered model-visible text;
 - an MCP `structuredContent` paired with `outputSchema` becomes validated octet
   `structured_content`;
-- schema-less structured content is retained in bounded, non-model-visible
-  metadata because API `0.2` forbids `structured_content` without a declaration;
+- schema-less structured content is retained in bounded metadata because API
+  `0.2` forbids an undeclared `structured_content` field. When there is no nonempty
+  text, the extension explicitly renders bounded untrusted JSON as text so the
+  model receives the data; this is not a change to host metadata visibility;
+- resource links and embedded resource content are preserved as bounded untrusted
+  data, without dereferencing their URIs;
 - supported image/audio base64 is written to the generation scratch directory,
   published through `artifact/publish`, then removed locally; and
-- malformed, unsupported, or oversized content returns a bounded tool error.
+- malformed, unsupported or oversized content returns a bounded tool error,
+  never silent truncation or an empty success for `input_required`.
 
 Supported media matches the host artifact verifier: PNG, JPEG, GIF, WebP, WAV,
 MPEG audio, FLAC, Opus, AAC, and MP4 audio. Artifact IDs remain bound to the
 active host-derived session owner and process generation.
 
+## Resources and private interactions
+
+A server advertising `resources` receives three collision-safe bridge-authored
+catalog entries: `mcp_resources_<server>_list`, `_templates` and `_read` (hyphens
+in the configured server ID become underscores). They invoke resource protocol
+methods on the captured connection, never upstream `tools/call`. Listing is fresh,
+fully paginated under one deadline, bounded to 128 entries with cycle checks.
+Reads take one explicit opaque `uri`, retain bounded text or base64 binary JSON,
+and share ordinary call admission, owner/cancellation and stale-connection fences.
+They never open host files, fetch a URL, follow a link implicitly or cache across
+owners. Resource-change subscriptions are not implemented; refresh/relist is explicit.
+
+Private HTTP elicitation is opt-in at the client boundary and tied to an admitted
+operation. Only bounded flat primitive/enum form schemas are supported; unsupported
+or credential-like forms fail closed. URL mode presents a reviewed HTTPS URL in
+private UI for manual action, never automatically opens/fetches it. Unknown,
+unsolicited, stale, cancelled or unavailable private requests deny. Input/consent
+is not blanket action authority and does not perform OAuth login automatically.
+
+The matching TUI presents complete escaped private context ephemerally, not in
+transcript history. Raw and escaped prompts are bounded to 16 KiB, answers to
+4096 bytes; the entire context must fit the actual viewport without scrolling.
+Clipping, overflow, unsuitable resize and configured `OCTET_TUI_WRITE_LOG` deny
+rather than accept a blind answer. Secret answers remain hidden. Serve has no
+private prompt channel: tool input cancels without a public pending request, and
+headless commands deny setup. This is an explicit frontend limitation, not
+permission to send credentials through chat or ordinary public confirmations.
+Small-form/URL renderer fixtures are not combined live MCP/OAuth qualification.
+
+Modern `input_required` continuation is confined to `tools/call` and
+`resources/read`: original arguments remain fixed, each continuation gets a fresh
+request ID and exact operation-local opaque `requestState`, under one absolute
+deadline and aggregate budget. Limits include four continuations, four input
+requests per round, eight private interactions, 64 KiB state and 32 MiB aggregate
+operation data. Errors/loss are not retried. Unsupported result types and private
+requests cannot become successful empty content. Credential redaction remains
+active for catalogs and unrelated data; only the trusted, matched modern
+operation preserves its exact private continuation fields. A server-supplied
+`resultType` cannot disable generic redaction. Legacy stdio elicitation and
+modern subscription streams remain explicit qualification gaps.
+
 ## Lifecycle, health, and recovery
+
+Each isolated resident process admits at most one complete remote owner triple
+and its separately correlated host lifecycle session. Remote startup waits for
+`before_prompt` or an explicit action with that owner; observations alone never
+start servers. Missing, foreign, stale or settled owners fail closed. Settlement
+revokes the scope before queued handlers, removes catalogs, closes sockets and
+cancels reconnect/auth work. Another session needs host replacement/reload, not a
+mutable default owner. Local stdio retains its existing process lifetime.
 
 Servers transition through configured, connecting, ready, refreshing,
 degraded, backoff, parked, and stopped states. Transient crashes reconnect with
@@ -416,11 +565,17 @@ fixtures are frontend-neutral and are intended for both TUI and Serve reducers.
 
 ## Tests
 
-From the package root:
+From the package root (Python 3.11+ for the release manifest test's standard-library
+`tomllib`; the bridge runtime itself supports Python 3.9+):
 
 ```console
-python3 -m unittest discover -s tests -t . -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -v
+python3 qualification/check.py --verify-local-snapshot
 ```
+
+`qualification/check.py --require-qualified` intentionally fails while the ledger
+retains open gates. A source hash check, fixture success or protocol version
+constant does not establish runtime, frontend, live-provider or Codex parity.
 
 The dependency-free suite covers strict config/trust, real and adversarial stdio
 servers, deterministic loopback Streamable HTTP framing/session/auth/SSE fixtures,

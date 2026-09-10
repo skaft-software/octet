@@ -2,7 +2,7 @@ name = "octet-mcp"
 version = "0.7.3"
 api_version = "0.2"
 requires_octet = "=0.7.3"
-description = "Resident bridge for explicitly configured stdio and Streamable HTTP MCP tool servers"
+description = "Resident bridge for explicit MCP tools/resources, private authentication and experimental HTTP"
 
 [entrypoint]
 command = "octet-mcp"
@@ -14,5 +14,7 @@ network = true
 
 [contributes]
 commands = ["mcp"]
+hooks = ["before_prompt"]
 ui = ["status"]
+confirmations = true
 presentation = true

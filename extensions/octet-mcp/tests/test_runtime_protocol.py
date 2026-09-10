@@ -7,6 +7,10 @@ import subprocess
 import threading
 import time
 import unittest
+from unittest import mock
+
+from octet_mcp.config import BridgeConfig
+from octet_mcp.runtime import build_runtime
 
 from .helpers import FIXTURES, ROOT
 
@@ -95,6 +99,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                     "contributes": {
                         "tools": [],
                         "commands": ["mcp"],
+                        "hooks": ["before_prompt"],
                         "ui": ["status"],
                         "presentation": True,
                     },
@@ -113,6 +118,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                             "artifacts",
                             "policy_intents",
                             "dynamic_tools",
+                            "lifecycle_events",
                         ],
                         "limits": {"max_concurrent_requests": 4},
                     },
@@ -123,6 +129,11 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(initialized["id"], 1)
         self.assertEqual(initialized["result"]["tools"], [])
         self.assertIn("dynamic_tools", initialized["result"]["protocol"]["features"])
+        self.assertEqual(
+            initialized["result"]["protocol"]["lifecycle_events"],
+            ["session/settled", "session/started"],
+        )
+        self.send({"jsonrpc": "2.0", "method": "session/started", "params": {"session_id": "fixture-session"}})
 
         registered = None
         presentations = []
@@ -181,6 +192,9 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertTrue(all(set(item) <= {"revision", "status", "activities", "collection", "actions"} for item in presentations))
         self.assertTrue(any(item.get("collection", {}).get("nodes") for item in presentations))
 
+        self.send({"jsonrpc": "2.0", "method": "session/settled", "params": {
+            "session_id": "fixture-session", "outcome": "completed", "duration_ms": 1,
+        }})
         self.send({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}})
         shutdown = None
         deadline = time.monotonic() + 4
@@ -191,6 +205,57 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(shutdown["result"], {})
         self.process.wait(timeout=4)
         self.assertEqual(self.process.returncode, 0, "".join(self.stderr))
+
+
+class RuntimeOwnerDispatchTests(unittest.TestCase):
+    def runtime(self):
+        with mock.patch("octet_mcp.runtime.load_config", return_value=BridgeConfig.empty()):
+            extension, manager = build_runtime()
+        self.addCleanup(manager.shutdown)
+        return extension, manager
+
+    def test_session_fences_are_ordered_and_bypass_saturated_handler_admission(self):
+        extension, manager = self.runtime()
+        extension._features = frozenset({"lifecycle_events"})
+        extension._admission = mock.Mock()
+        extension._admission.acquire.return_value = False
+        extension._executor = mock.Mock()
+        extension._submit_notification("session/started", {"session_id": "host-id"})
+        self.assertEqual(manager._remote_session_id, "host-id")
+        extension._submit_notification("session/settled", {"session_id": "host-id"})
+        extension._submit_notification("session/started", {"session_id": "host-id"})
+        self.assertTrue(manager._remote_session_settled)
+        extension._admission.acquire.assert_not_called()
+        extension._executor.submit.assert_not_called()
+
+    def test_unnegotiated_lifecycle_cannot_authorize_remote_work(self):
+        extension, manager = self.runtime()
+        extension._submit_notification("session/started", {"session_id": "host-id"})
+        self.assertIsNone(manager._remote_session_id)
+
+    def test_before_prompt_activates_its_host_owner_but_observational_commands_are_inert(self):
+        extension, manager = self.runtime()
+        owner_context = {"resource_owner": {
+            "session_id": "durable-id", "extension_instance_id": "instance", "process_generation": 1,
+        }, "host": {"session_id": "host-id"}}
+        with mock.patch.object(manager, "activate_owner", return_value=True) as activate:
+            result = extension._hooks["before_prompt"]({"prompt": "untrusted owner-b"}, owner_context)
+            self.assertEqual(result, {"disposition": {"action": "continue"}})
+            for arguments in ([], ["status"], ["list"], ["snapshot"], ["show", "remote"]):
+                extension._commands["mcp"].handler(arguments, owner_context)
+        self.assertEqual(activate.call_args_list, [mock.call(owner_context)])
+        with mock.patch.object(manager, "activate_owner", side_effect=ValueError("stale")):
+            self.assertEqual(extension._hooks["before_prompt"]({}, {}), result)
+
+    def test_command_passes_host_context_without_accepting_argument_owner(self):
+        extension, manager = self.runtime()
+        owner_context = {"resource_owner": {
+            "session_id": "durable-id", "extension_instance_id": "instance", "process_generation": 1,
+        }, "host": {"session_id": "host-id"}}
+        with mock.patch.object(manager, "execute_command", return_value={"text": "ok"}) as execute:
+            result = extension._commands["mcp"].handler(["restart", "remote"], owner_context)
+        self.assertEqual(result, {"text": "ok"})
+        execute.assert_called_once_with(["restart", "remote"], owner_context)
 
 
 if __name__ == "__main__":

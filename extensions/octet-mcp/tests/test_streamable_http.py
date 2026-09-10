@@ -240,6 +240,26 @@ class _TokenProvider:
         return self.token
 
 
+def _owner_context() -> dict[str, Any]:
+    return {
+        "host": {"session_id": "fixture-host-session"},
+        "resource_owner": {
+            "session_id": "fixture-resource-session",
+            "extension_instance_id": "fixture-instance",
+            "process_generation": 1,
+        },
+    }
+
+
+class _OwnerTokenProvider(_TokenProvider):
+    def bearer_token(
+        self, credential: str, *, server_id: str, resource_owner: dict[str, Any],
+        deadline: Optional[float] = None, cancel: Callable[[], bool] = lambda: False,
+    ) -> Optional[str]:
+        assert resource_owner == _owner_context()["resource_owner"]
+        return super().bearer_token(credential, server_id=server_id, deadline=deadline, cancel=cancel)
+
+
 class StreamableHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self._fixtures: list[_LoopbackFixture] = []
@@ -676,7 +696,7 @@ class StreamableHttpTests(unittest.TestCase):
 
     def test_manager_wires_credential_adapter_and_preserves_remote_transport_status(self) -> None:
         token = "MANAGER_ADAPTER_TOKEN"
-        provider = _TokenProvider(token)
+        provider = _OwnerTokenProvider(token)
         session = "manager-session"
 
         def responder(request: _HttpRequest) -> _HttpReply:
@@ -709,6 +729,7 @@ class StreamableHttpTests(unittest.TestCase):
         fixture = self.fixture(responder)
         with tempfile.TemporaryDirectory() as directory:
             extension = FakeExtension(Path(directory))
+            extension.negotiated_features |= {"lifecycle_events"}
             manager = BridgeManager(
                 extension,
                 BridgeConfig(
@@ -725,13 +746,15 @@ class StreamableHttpTests(unittest.TestCase):
                 experimental_streamable_http_mcp=True,
             )
             try:
+                manager.observe_session("session/started", {"session_id": "fixture-host-session"})
                 manager.start()
+                manager.request_action("restart", "remote", context=_owner_context()).result(timeout=2)
                 wait_for(
                     lambda: _server_node(manager.snapshot(), "remote")["state"] == "active",
                     message="remote manager ready",
                 )
                 tool_name = next(iter(extension._tools))
-                result = extension._tools[tool_name]["handler"]({"value": "managed"}, {})
+                result = extension._tools[tool_name]["handler"]({"value": "managed"}, _owner_context())
                 self.assertFalse(result["is_error"])
                 self.assertEqual(result["structured_content"], {"echo": "managed"})
                 encoded = json.dumps(manager.snapshot())
@@ -742,12 +765,16 @@ class StreamableHttpTests(unittest.TestCase):
                 manager.shutdown()
 
         self.assertEqual(fixture.errors, ())
-        self.assertGreaterEqual(len(provider.calls), 5)
+        self.assertEqual(len(provider.calls), 4)
+        # Shutdown revokes the owner before cleanup; no credential is resolved
+        # for a post-revocation session DELETE.
+        self.assertFalse(any(request.method == "DELETE" for request in fixture.requests))
         self.assertTrue(all(request.header("authorization") == f"Bearer {token}" for request in fixture.requests))
 
     def test_manager_fails_closed_when_auth_has_no_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             extension = FakeExtension(Path(directory))
+            extension.negotiated_features |= {"lifecycle_events"}
             manager = BridgeManager(
                 extension,
                 BridgeConfig(
@@ -764,12 +791,14 @@ class StreamableHttpTests(unittest.TestCase):
                 experimental_streamable_http_mcp=True,
             )
             try:
+                manager.observe_session("session/started", {"session_id": "fixture-host-session"})
                 manager.start()
+                manager.request_action("restart", "remote", context=_owner_context()).result(timeout=2)
                 wait_for(
                     lambda: _server_node(manager.snapshot(), "remote")["state"] == "unavailable",
                     message="unavailable auth parked",
                 )
-                detail = manager.execute_command(["show", "remote"])["text"]
+                detail = manager.execute_command(["show", "remote"], context=_owner_context())["text"]
                 self.assertIn("authentication_unavailable", detail)
                 self.assertEqual(extension._tools, {})
             finally:
