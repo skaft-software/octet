@@ -978,7 +978,7 @@ pub(super) fn document_visual_row_count_styled(
 }
 
 fn is_confirmation_panel(action: &super::PanelAction) -> bool {
-    matches!(action, super::PanelAction::Confirmation)
+    action.is_confirmation()
 }
 
 fn confirmation_detail(descriptions: &[Option<String>]) -> Option<&str> {
@@ -1034,14 +1034,20 @@ fn append_confirmation_omission_marker(line: &mut String, content_width: usize, 
     );
 }
 
-fn confirmation_detail_lines(
+fn render_confirmation_detail(
     state: &ShellState,
     descriptions: &[Option<String>],
     width: u16,
     available_rows: usize,
-) -> Vec<String> {
-    let Some(detail) = confirmation_detail(descriptions) else {
-        return Vec::new();
+    require_complete: bool,
+) -> (Vec<String>, bool) {
+    let detail = if require_complete {
+        descriptions.iter().find_map(|detail| detail.as_deref())
+    } else {
+        confirmation_detail(descriptions)
+    };
+    let Some(detail) = detail else {
+        return (Vec::new(), false);
     };
     let plan = PresentationLayout::new(&state.theme, width);
     let terminal_width = usize::from(width);
@@ -1058,9 +1064,40 @@ fn confirmation_detail_lines(
     let content_width = terminal_width
         .saturating_sub(visible_width(&plain_prefix) + inset)
         .max(1);
-    let detail = bounded_confirmation_detail(detail, state.theme.unicode());
-    let mut wrapped = wrap_text_with_ansi(&detail, content_width);
-    let rendered_rows = available_rows.min(MAX_APPROVAL_DETAIL_ROWS);
+    let literal = !detail.is_empty()
+        && detail.len() <= 8 * 1024
+        && detail
+            .bytes()
+            .all(|byte| byte == b'\n' || (b' '..=b'~').contains(&byte));
+    let mut wrapped = if require_complete && literal {
+        detail
+            .split('\n')
+            .flat_map(|line| {
+                if line.is_empty() {
+                    vec![String::new()]
+                } else {
+                    line.as_bytes()
+                        .chunks(content_width)
+                        .map(|chunk| {
+                            std::str::from_utf8(chunk)
+                                .expect("ASCII preview")
+                                .to_owned()
+                        })
+                        .collect()
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        wrap_text_with_ansi(
+            &bounded_confirmation_detail(detail, state.theme.unicode()),
+            content_width,
+        )
+    };
+    let rendered_rows = if require_complete {
+        available_rows
+    } else {
+        available_rows.min(MAX_APPROVAL_DETAIL_ROWS)
+    };
     let omitted = wrapped.len() > rendered_rows;
     wrapped.truncate(rendered_rows);
     if omitted {
@@ -1068,7 +1105,8 @@ fn confirmation_detail_lines(
             append_confirmation_omission_marker(last, content_width, state.theme.unicode());
         }
     }
-    wrapped
+    let complete = literal && !omitted;
+    let lines = wrapped
         .into_iter()
         .enumerate()
         .map(|(index, line)| {
@@ -1086,7 +1124,8 @@ fn confirmation_detail_lines(
                 width,
             )
         })
-        .collect()
+        .collect();
+    (lines, complete)
 }
 
 struct PanelHeaderRender {
@@ -1444,6 +1483,8 @@ fn render_panel_item(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ConfirmationRenderMetadata {
     selected_action: Option<RenderedConfirmationAction>,
+    approving_index: Option<usize>,
+    preview_complete: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1461,11 +1502,12 @@ pub(super) fn confirmation_enter_allowed(
 ) -> bool {
     let sanitized_label = panel_cell(item_label, unicode);
     rendered.is_some_and(|rendered| {
-        rendered.selected_action.as_ref().is_some_and(|action| {
-            action.item_index == item_index
-                && action.sanitized_label == sanitized_label
-                && action.label_complete
-        })
+        (rendered.approving_index != Some(item_index) || rendered.preview_complete)
+            && rendered.selected_action.as_ref().is_some_and(|action| {
+                action.item_index == item_index
+                    && action.sanitized_label == sanitized_label
+                    && action.label_complete
+            })
     })
 }
 
@@ -1516,7 +1558,15 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
             let detail_rows = if confirmation {
                 let available_detail_rows =
                     max_panel.saturating_sub(1 + usize::from(!filtered.is_empty()));
-                confirmation_detail_lines(state, descriptions, width, available_detail_rows).len()
+                render_confirmation_detail(
+                    state,
+                    descriptions,
+                    width,
+                    available_detail_rows,
+                    matches!(action, PanelAction::CompleteConfirmation { .. }),
+                )
+                .0
+                .len()
             } else {
                 0
             };
@@ -1608,11 +1658,72 @@ pub(super) fn render_panel_with_limit(
     render_panel_output_with_limit(state, width, max_rows).lines
 }
 
+/// A private request is all-or-nothing, using the ordinary panel's available
+/// viewport rows. ASCII hard wrapping preserves spaces and every trailing byte;
+/// the setter has already escaped untrusted controls/Unicode and bounded bytes.
+pub(super) fn private_input_lines(
+    state: &ShellState,
+    width: u16,
+    max_rows: usize,
+) -> Option<Vec<String>> {
+    let prompt = state.tool_input_prompt.as_deref()?;
+    let plan = PresentationLayout::new(&state.theme, width);
+    let inset = " ".repeat(usize::from(plan.inset));
+    let content_width = usize::from(plan.content_width);
+    if content_width == 0 || inset.len() + content_width > usize::from(width) {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for source in std::iter::once("Private request (untrusted; non-ASCII/control text escaped):")
+        .chain(prompt.split('\n'))
+    {
+        if source.is_empty() {
+            lines.push(inset.clone());
+        } else {
+            for chunk in source.as_bytes().chunks(content_width) {
+                lines.push(format!(
+                    "{inset}{}",
+                    std::str::from_utf8(chunk).expect("escaped ASCII")
+                ));
+                if lines.len() > max_rows {
+                    return None;
+                }
+            }
+        }
+        if lines.len() > max_rows {
+            return None;
+        }
+    }
+    Some(lines)
+}
+
 fn render_panel_output_with_limit(
     state: &ShellState,
     width: u16,
     max_rows: usize,
 ) -> PanelRenderOutput {
+    if state.tool_input_prompt.is_some() {
+        return PanelRenderOutput::lines(
+            private_input_lines(state, width, max_rows)
+                .inspect(|_| {
+                    state.tool_input_rendered.set(Some((
+                        state.tool_input_revision,
+                        width,
+                        state.size.1,
+                    )));
+                })
+                .unwrap_or_else(|| {
+                    if max_rows == 0 {
+                        Vec::new()
+                    } else {
+                        vec![fit_line(
+                            "Private input unavailable: full context does not fit; esc cancels",
+                            width,
+                        )]
+                    }
+                }),
+        );
+    }
     let Some(ref panel) = state.panel else {
         return PanelRenderOutput::lines(Vec::new());
     };
@@ -1644,6 +1755,11 @@ fn render_panel_output_with_limit(
             );
             let mut confirmation_metadata = confirmation.then_some(ConfirmationRenderMetadata {
                 selected_action: None,
+                approving_index: match action {
+                    PanelAction::CompleteConfirmation { approve_index } => Some(*approve_index),
+                    _ => None,
+                },
+                preview_complete: false,
             });
             let header = header.line;
             let filter_line =
@@ -1705,12 +1821,28 @@ fn render_panel_output_with_limit(
             if confirmation {
                 let action_rows = usize::from(!filtered.is_empty());
                 let available_detail_rows = max_rows.saturating_sub(lines.len() + action_rows);
-                lines.extend(confirmation_detail_lines(
+                let require_complete = matches!(action, PanelAction::CompleteConfirmation { .. });
+                let (detail_lines, detail_complete) = render_confirmation_detail(
                     state,
                     descriptions,
                     width,
                     available_detail_rows,
-                ));
+                    require_complete,
+                );
+                if let Some(metadata) = confirmation_metadata.as_mut() {
+                    let safe_title = panel_cell(&surface.title, state.theme.unicode());
+                    let plan = PresentationLayout::new(&state.theme, width);
+                    metadata.preview_complete = detail_complete
+                        && descriptions
+                            .iter()
+                            .find_map(|detail| detail.as_ref())
+                            .is_some_and(|detail| {
+                                surface.title.len() + 2 + detail.len() <= 8 * 1024
+                            })
+                        && safe_title == surface.title
+                        && visible_width(&safe_title) <= usize::from(plan.content_width);
+                }
+                lines.extend(detail_lines);
             }
             let show_footer = !confirmation
                 && max_rows >= lines.len().saturating_add(2 + usize::from(show_borders));
@@ -1764,9 +1896,18 @@ fn render_panel_output_with_limit(
                         }
                     }
                     let is_selected = position == *selected;
+                    let preview_unavailable =
+                        confirmation_metadata.as_ref().is_some_and(|metadata| {
+                            metadata.approving_index == Some(index) && !metadata.preview_complete
+                        });
+                    let label = if preview_unavailable {
+                        format!("{} (preview incomplete; resize or deny)", items[index])
+                    } else {
+                        items[index].clone()
+                    };
                     let item_render = render_panel_item(
                         state,
-                        &items[index],
+                        &label,
                         (!confirmation)
                             .then(|| descriptions.get(index).and_then(|value| value.as_deref()))
                             .flatten(),

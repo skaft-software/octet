@@ -1801,6 +1801,7 @@ impl ExtensionSessionBinding {
             if config.agent_sessions
                 || config.session_lifecycle.is_some()
                 || config.approvals
+                || config.tool_approval_adapter.is_some()
                 || config.secret_broker.is_some()
             {
                 return Err(ExtensionRuntimeManagerError::SharedServiceUnsupported);
@@ -2447,6 +2448,49 @@ done
         let mut config = ExtensionRuntimeConfig::new(temporary.path());
         config.session_lifecycle = Some(service);
 
+        assert!(matches!(
+            binding.activate("workspace-service", config).await,
+            Err(ExtensionRuntimeManagerError::SharedServiceUnsupported)
+        ));
+        assert!(!temporary.path().join("starts").exists());
+        binding.release().await;
+        manager.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_runtime_rejects_exact_tool_approval_adapter_even_without_issuance() {
+        use crate::extension_policy::{
+            ExtensionActionIntent, ExtensionToolApprovalAdapter, ExtensionToolApprovalDecision,
+            ExtensionToolInvocation,
+        };
+        struct Deny;
+        impl ExtensionToolApprovalAdapter for Deny {
+            fn inspect(
+                &self,
+                _: &crate::extension_process::ExtensionIdentity,
+                _: &ExtensionToolInvocation,
+                _: &ExtensionActionIntent,
+            ) -> ExtensionToolApprovalDecision {
+                ExtensionToolApprovalDecision::Deny
+            }
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(
+            temporary.path(),
+            "workspace-service",
+            ExtensionLifecycleProfile::WorkspaceService,
+        );
+        let manager = ExtensionRuntimeManager::new(
+            ExtensionRuntimeDomain::ordinary(temporary.path()).unwrap(),
+        );
+        manager
+            .replace_catalog(ExtensionRuntimeCatalog::from_descriptors([descriptor]))
+            .await;
+        let binding = manager.bind_session("session-a").unwrap();
+        let mut config = ExtensionRuntimeConfig::new(temporary.path());
+        config.tool_approval_adapter = Some(Arc::new(Deny));
+        assert!(!config.approvals);
         assert!(matches!(
             binding.activate("workspace-service", config).await,
             Err(ExtensionRuntimeManagerError::SharedServiceUnsupported)

@@ -89,8 +89,10 @@ For existing API 0.2 machinery—live tool registration/removal, request-frozen
 catalogs, owner-bound child sessions, session/process ownership, artifacts,
 policy intents/one-use approvals, manifest-allowlisted secrets, and bounded
 post-handshake restart—keep the [legacy protocol reference](extensions/PROTOCOL-REFERENCE.md).
-The coding product does not configure approval issuance or secret brokerage:
-policy requests remain default-deny and `secrets` is not offered. This is not a
+The unreleased source coding product configures generic one-use exact-call
+approvals only for isolated API `0.2` `octet-mcp`, not blanket server permission
+or #383's typed automation policy. Other policy requests remain default-deny;
+no host secret broker is configured and `secrets` is not offered. This is not a
 promise that API 0.3 provides every legacy service. Discovery/trust/startup
 and reload rules remain in [resources](resources.md) and [extensions](extensions.md).
 

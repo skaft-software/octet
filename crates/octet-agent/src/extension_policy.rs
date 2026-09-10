@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::extension_process::ExtensionRequestId;
+use crate::extension_process::{ExtensionIdentity, ExtensionRequestId, ExtensionResourceOwner};
 
 /// Maximum number of live approval capabilities retained by one store.
 pub const MAX_EXTENSION_APPROVALS: usize = 256;
@@ -81,7 +81,7 @@ impl ExtensionActionIntent {
     }
 }
 
-fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+pub(crate) fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(values) => {
             serde_json::Value::Array(values.into_iter().map(canonicalize_json).collect())
@@ -169,6 +169,105 @@ impl ExtensionIntentPolicy {
     }
 }
 
+/// Complete, immutable host-side model-tool invocation offered to an approval adapter.
+/// It is never reconstructed from an extension's action intent.
+#[derive(Clone, PartialEq, Serialize)]
+pub struct ExtensionToolInvocation {
+    /// Original published tool name.
+    pub tool: String,
+    /// Original arguments, recursively canonicalized by the host.
+    pub arguments: serde_json::Value,
+    /// Original catalog epoch (absent for a static catalog).
+    pub catalog_revision: Option<u64>,
+    /// Host-derived durable owner, instance, and process-generation fences.
+    pub resource_owner: ExtensionResourceOwner,
+    /// Active model-tool parent, not a command or background operation.
+    pub parent_request_id: u64,
+}
+
+/// An exact-tool adapter cannot grant blanket or persistent permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionToolApprovalDecision {
+    /// Ask once using the host's complete original invocation preview.
+    Ask,
+    /// Dispatch no action.
+    Deny,
+}
+
+/// Optional trusted product composition for action-time tool approvals.
+/// Domain recognition belongs here, not in the generic process manager. Even
+/// `Ask` requires an exact target/argument match, live owner/catalog/parent,
+/// and a private one-shot frontend answer; extension hints grant no authority.
+pub trait ExtensionToolApprovalAdapter: Send + Sync {
+    /// Inspect the original invocation and non-authoritative proposed intent.
+    /// Called within the host's request/catalog admission fence; implementations
+    /// must return promptly and must not re-enter extension process APIs.
+    fn inspect(
+        &self,
+        extension: &ExtensionIdentity,
+        invocation: &ExtensionToolInvocation,
+        intent: &ExtensionActionIntent,
+    ) -> ExtensionToolApprovalDecision;
+}
+
+/// Complete approval UI byte bound, including the host-authored heading.
+pub const MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES: usize = 8 * 1024;
+/// Host-authored exact-call heading. Frontends must show the complete accompanying
+/// detail before permitting approval; an omitted or clipped action must deny.
+pub const EXTENSION_TOOL_APPROVAL_PROMPT: &str =
+    "Approve this exact tool call once? It may change external state.";
+
+impl ExtensionToolInvocation {
+    pub(crate) fn matches_target(&self, intent: &ExtensionActionIntent) -> bool {
+        intent
+            .target
+            .get("tool")
+            .and_then(serde_json::Value::as_str)
+            == Some(self.tool.as_str())
+            && intent.target.get("arguments") == Some(&self.arguments)
+    }
+
+    pub(crate) fn canonical_hash(&self) -> [u8; 32] {
+        let value = serde_json::to_value(self).expect("tool invocation is JSON");
+        let bytes = serde_json::to_vec(&canonicalize_json(value)).expect("tool invocation is JSON");
+        Sha256::digest(bytes).into()
+    }
+
+    pub(crate) fn approval_preview(&self, extension: &str) -> Option<String> {
+        use std::fmt::Write as _;
+        let value = canonicalize_json(serde_json::json!({
+            "extension": extension,
+            "tool": self.tool,
+            "arguments": self.arguments,
+            "catalog_revision": self.catalog_revision,
+        }));
+        let json = serde_json::to_string(&value).expect("tool invocation is JSON");
+        let mut preview = String::from("Untrusted tool data (complete JSON):\n");
+        // Keep the complete JSON reversible, but escape terminal controls,
+        // markup delimiters, Unicode direction controls, and invisible text.
+        // Never approve an ellipsis or any other truncated action preview.
+        for character in json.chars() {
+            if character.is_ascii()
+                && !character.is_control()
+                && !matches!(character, '<' | '>' | '&')
+            {
+                preview.push(character);
+            } else {
+                for unit in character.encode_utf16(&mut [0; 2]) {
+                    write!(preview, "\\u{unit:04x}").expect("write to String");
+                }
+            }
+            // Serve joins the heading and detail with two LF bytes.
+            if EXTENSION_TOOL_APPROVAL_PROMPT.len() + 2 + preview.len()
+                > MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES
+            {
+                return None;
+            }
+        }
+        Some(preview)
+    }
+}
+
 /// Shared zeroizing wire bytes retained by the token and bounded store.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ApprovalTokenBytes([u8; 64]);
@@ -236,6 +335,7 @@ impl Serialize for ExtensionApprovalToken {
 #[derive(Clone)]
 struct ApprovalGrant {
     intent_hash: [u8; 32],
+    tool_invocation_hash: Option<[u8; 32]>,
     generation: u64,
     parent_request_id: ExtensionRequestId,
     expires_at: Instant,
@@ -267,6 +367,32 @@ impl ExtensionApprovalStore {
         parent_request_id: ExtensionRequestId,
         ttl: Duration,
     ) -> Result<ExtensionApprovalToken, ExtensionPolicyError> {
+        self.issue_bound(intent, generation, parent_request_id, ttl, None)
+    }
+
+    pub(crate) fn issue_for_tool(
+        &self,
+        intent: &ExtensionActionIntent,
+        invocation: &ExtensionToolInvocation,
+        ttl: Duration,
+    ) -> Result<ExtensionApprovalToken, ExtensionPolicyError> {
+        self.issue_bound(
+            intent,
+            invocation.resource_owner.process_generation,
+            ExtensionRequestId::Number(invocation.parent_request_id),
+            ttl,
+            Some(invocation.canonical_hash()),
+        )
+    }
+
+    fn issue_bound(
+        &self,
+        intent: &ExtensionActionIntent,
+        generation: u64,
+        parent_request_id: ExtensionRequestId,
+        ttl: Duration,
+        tool_invocation_hash: Option<[u8; 32]>,
+    ) -> Result<ExtensionApprovalToken, ExtensionPolicyError> {
         if ttl.is_zero() || ttl > MAX_EXTENSION_APPROVAL_TTL {
             return Err(ExtensionPolicyError::InvalidTtl);
         }
@@ -292,6 +418,7 @@ impl ExtensionApprovalStore {
             token.clone(),
             ApprovalGrant {
                 intent_hash,
+                tool_invocation_hash,
                 generation,
                 parent_request_id,
                 expires_at,
@@ -309,9 +436,37 @@ impl ExtensionApprovalStore {
         generation: u64,
         parent_request_id: &ExtensionRequestId,
     ) -> Result<bool, ExtensionPolicyError> {
+        self.consume_bound(token, intent, generation, parent_request_id, None)
+    }
+
+    pub(crate) fn consume_for_tool(
+        &self,
+        token: &ExtensionApprovalToken,
+        intent: &ExtensionActionIntent,
+        invocation: &ExtensionToolInvocation,
+    ) -> Result<bool, ExtensionPolicyError> {
+        self.consume_bound(
+            token,
+            intent,
+            invocation.resource_owner.process_generation,
+            &ExtensionRequestId::Number(invocation.parent_request_id),
+            Some(invocation.canonical_hash()),
+        )
+    }
+
+    fn consume_bound(
+        &self,
+        token: &ExtensionApprovalToken,
+        intent: &ExtensionActionIntent,
+        generation: u64,
+        parent_request_id: &ExtensionRequestId,
+        tool_invocation_hash: Option<[u8; 32]>,
+    ) -> Result<bool, ExtensionPolicyError> {
         let intent_hash = intent.canonical_hash()?;
-        let now = Instant::now();
         let mut state = lock_state(&self.state);
+        // Contention must not freeze the expiry check before redemption owns
+        // the store. The decision linearizes inside this critical section.
+        let now = Instant::now();
         prune_expired(&mut state, now);
         let Some(grant) = state.grants.remove(&token.0) else {
             return Ok(false);
@@ -321,6 +476,7 @@ impl ExtensionApprovalStore {
             .retain(|candidate| candidate != &token.0);
         Ok(grant.expires_at > now
             && grant.intent_hash == intent_hash
+            && grant.tool_invocation_hash == tool_invocation_hash
             && grant.generation == generation
             && &grant.parent_request_id == parent_request_id)
     }
@@ -494,6 +650,157 @@ mod tests {
         store.invalidate_generation(4);
         assert!(!store.consume(&stale, &action, 4, &parent).unwrap());
         assert!(store.consume(&live, &action, 5, &parent).unwrap());
+    }
+
+    fn tool_invocation() -> ExtensionToolInvocation {
+        ExtensionToolInvocation {
+            tool: "fixture_tool".into(),
+            arguments: serde_json::json!({"text": "original"}),
+            catalog_revision: Some(4),
+            resource_owner: ExtensionResourceOwner {
+                session_id: "owner".into(),
+                extension_instance_id: "instance".into(),
+                process_generation: 2,
+            },
+            parent_request_id: 7,
+        }
+    }
+
+    #[test]
+    fn exact_tool_approval_tokens_bind_every_original_invocation_fence() {
+        let store = ExtensionApprovalStore::new();
+        let action = intent("fixture.tool.call");
+        let original = tool_invocation();
+        for field in [
+            "tool",
+            "arguments",
+            "catalog",
+            "owner",
+            "instance",
+            "generation",
+            "parent",
+        ] {
+            let token = store
+                .issue_for_tool(&action, &original, Duration::from_secs(30))
+                .unwrap();
+            let mut changed = original.clone();
+            match field {
+                "tool" => changed.tool = "other".into(),
+                "arguments" => changed.arguments = serde_json::json!({"unseen": true}),
+                "catalog" => changed.catalog_revision = Some(5),
+                "owner" => changed.resource_owner.session_id = "other".into(),
+                "instance" => changed.resource_owner.extension_instance_id = "other".into(),
+                "generation" => changed.resource_owner.process_generation = 3,
+                "parent" => changed.parent_request_id = 8,
+                _ => unreachable!(),
+            }
+            assert!(
+                !store.consume_for_tool(&token, &action, &changed).unwrap(),
+                "{field}"
+            );
+            assert!(
+                !store.consume_for_tool(&token, &action, &original).unwrap(),
+                "mismatch burns token"
+            );
+        }
+        let token = store
+            .issue_for_tool(&action, &original, Duration::from_secs(30))
+            .unwrap();
+        assert!(!store
+            .consume(&token, &action, 2, &ExtensionRequestId::Number(7))
+            .unwrap());
+        let token = store
+            .issue_for_tool(&action, &original, Duration::from_secs(30))
+            .unwrap();
+        assert!(store.consume_for_tool(&token, &action, &original).unwrap());
+        assert!(!store.consume_for_tool(&token, &action, &original).unwrap());
+        let expired = store
+            .issue_for_tool(&action, &original, Duration::from_nanos(1))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(!store
+            .consume_for_tool(&expired, &action, &original)
+            .unwrap());
+    }
+
+    #[test]
+    fn exact_tool_approval_concurrent_redemption_has_one_winner() {
+        let store = Arc::new(ExtensionApprovalStore::new());
+        let action = intent("fixture.tool.call");
+        let original = tool_invocation();
+        let token = store
+            .issue_for_tool(&action, &original, Duration::from_secs(30))
+            .unwrap();
+        let start = std::sync::Barrier::new(8);
+        let winners = std::thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        usize::from(store.consume_for_tool(&token, &action, &original).unwrap())
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .sum::<usize>()
+        });
+        assert_eq!(winners, 1);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn exact_tool_approval_expiry_is_checked_after_store_contention() {
+        let store = ExtensionApprovalStore::new();
+        let action = intent("fixture.tool.call");
+        let original = tool_invocation();
+        let token = store
+            .issue_for_tool(&action, &original, Duration::from_millis(100))
+            .unwrap();
+        let held = lock_state(&store.state);
+        let expires_at = held.grants.get(&token.0).unwrap().expires_at;
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let redemption = scope.spawn(|| {
+                start.wait();
+                store.consume_for_tool(&token, &action, &original).unwrap()
+            });
+            start.wait();
+            std::thread::sleep(
+                expires_at.saturating_duration_since(Instant::now()) + Duration::from_millis(25),
+            );
+            drop(held);
+            assert!(!redemption.join().unwrap());
+        });
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn exact_tool_approval_preview_is_complete_escaped_and_never_truncated() {
+        let mut original = tool_invocation();
+        original.arguments = serde_json::json!({"text": "\u{1b}[31m\n<>&\u{7f}\u{202e}\u{200b}😀"});
+        let preview = original.approval_preview("fixture").unwrap();
+        assert!(preview.is_ascii());
+        assert!(!preview.contains(['\u{1b}', '<', '>', '&', '\u{7f}']));
+        let decoded: serde_json::Value =
+            serde_json::from_str(preview.lines().last().unwrap()).unwrap();
+        assert_eq!(decoded["arguments"], original.arguments);
+        assert_eq!(decoded["tool"], original.tool);
+        original.arguments = serde_json::json!({"text": ""});
+        let overhead = EXTENSION_TOOL_APPROVAL_PROMPT.len()
+            + 2
+            + original.approval_preview("fixture").unwrap().len();
+        original.arguments = serde_json::json!({"text": "x".repeat(MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES - overhead)});
+        assert_eq!(
+            EXTENSION_TOOL_APPROVAL_PROMPT.len()
+                + 2
+                + original.approval_preview("fixture").unwrap().len(),
+            MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES
+        );
+        original.arguments["text"] =
+            serde_json::json!("x".repeat(MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES - overhead + 1));
+        assert!(original.approval_preview("fixture").is_none());
     }
 
     #[test]
