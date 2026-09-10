@@ -20,12 +20,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use crossterm::event::Event;
+use octet_agent::extension_policy::{
+    ExtensionActionIntent, ExtensionToolApprovalAdapter, ExtensionToolApprovalDecision,
+    ExtensionToolInvocation,
+};
 use octet_agent::extension_process::{
     ConfirmationRequest, ConfirmationResponse, ContextContribution, ContextPlacement,
     DiscoveredExtension, ExtensionAutocompleteRequest, ExtensionEditorRequest,
     ExtensionEditorResponse, ExtensionEvent, ExtensionFlag, ExtensionHealthSnapshot,
     ExtensionHealthState, ExtensionHook, ExtensionHookDisposition, ExtensionHostState,
-    ExtensionInputRequest, ExtensionInputResponse, ExtensionLifecycleEvent,
+    ExtensionIdentity, ExtensionInputRequest, ExtensionInputResponse, ExtensionLifecycleEvent,
     ExtensionLifecycleOutcome, ExtensionManifest, ExtensionPolicy,
     ExtensionPolicyEvaluationResponse, ExtensionProcess, ExtensionRequestId,
     ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionSessionLifecycleReceiver,
@@ -33,7 +37,7 @@ use octet_agent::extension_process::{
     ExtensionTerminalInput, ExtensionTerminalResize, ExtensionTrust, ExtensionUiContribution,
     ExtensionUiSurface, ExtensionWidgetPlacement, ShortcutDefinition, ToolRenderRequest,
     ToolRenderSegment, DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION_0_1,
-    EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_AGENT_SESSIONS,
+    EXTENSION_API_VERSION_0_2, EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_AGENT_SESSIONS,
     EXTENSION_FEATURE_DELEGATION_TELEMETRY, EXTENSION_FEATURE_DYNAMIC_TOOLS,
     EXTENSION_MANIFEST_FILENAME, MAX_EXTENSION_UI_ENTRIES, MAX_EXTENSION_UI_LINES,
 };
@@ -173,6 +177,45 @@ fn denied_policy_response() -> ExtensionPolicyEvaluationResponse {
     ExtensionPolicyEvaluationResponse {
         decision: ExtensionPolicyDecision::Deny,
         approval_token: None,
+    }
+}
+
+/// MCP recognition is product composition, not an agent-kernel MCP manager.
+/// This adapter never grants Allow, including for purported read-only hints.
+struct McpToolApprovalAdapter;
+
+impl ExtensionToolApprovalAdapter for McpToolApprovalAdapter {
+    fn inspect(
+        &self,
+        extension: &ExtensionIdentity,
+        invocation: &ExtensionToolInvocation,
+        intent: &ExtensionActionIntent,
+    ) -> ExtensionToolApprovalDecision {
+        if extension.name == MCP_EXTENSION_NAME
+            && intent.kind == "external_side_effect"
+            && intent.operation == "mcp.tool.call"
+            && intent.target.get("tool").and_then(Value::as_str) == Some(invocation.tool.as_str())
+            && intent.target.get("arguments") == Some(&invocation.arguments)
+        {
+            ExtensionToolApprovalDecision::Ask
+        } else {
+            ExtensionToolApprovalDecision::Deny
+        }
+    }
+}
+
+fn configure_tool_approvals(
+    runtime: &mut ExtensionRuntimeConfig,
+    descriptor: &DiscoveredExtension,
+) {
+    // Admission still requires the existing enablement/trust, safe-mode, and
+    // process-policy gates. Shared runtimes cannot retain owner-bound services.
+    if descriptor.manifest.name == MCP_EXTENSION_NAME
+        && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_2
+        && descriptor.manifest.runtime.sharing == ExtensionRuntimeSharing::Isolated
+    {
+        runtime.approvals = true;
+        runtime.tool_approval_adapter = Some(Arc::new(McpToolApprovalAdapter));
     }
 }
 
@@ -1958,6 +2001,7 @@ impl ExecutableExtensions {
                                     None
                                 };
                             runtime.provider_registry = Some(provider_registry.clone());
+                            configure_tool_approvals(&mut runtime, &entry.descriptor);
                             runtime
                         })
                         .await;
@@ -2296,6 +2340,8 @@ impl ExecutableExtensions {
                 handle.spawn(async move {
                     loop {
                         match events.recv().await {
+                            // Exact-call adapter requests never enter this broadcast
+                            // stream; the core owns their private one-shot UI.
                             Ok(ExtensionEvent::PolicyEvaluationRequested {
                                 request_id,
                                 generation,
@@ -3207,12 +3253,15 @@ impl ExecutableExtensions {
                         if process.confirmation_answered(&request_id, generation) {
                             continue;
                         }
-                        let confirmed = confirmations
-                            .confirm(&extension_name, &request)
-                            .await
-                            .with_context(|| {
-                                format!("confirmation UI failed for extension {extension_name:?}")
-                            })?;
+                        let confirmed = tokio::select! {
+                            biased;
+                            result = &mut execution => break result?,
+                            confirmed = confirmations.confirm(&extension_name, &request) => {
+                                confirmed.with_context(|| {
+                                    format!("confirmation UI failed for extension {extension_name:?}")
+                                })?
+                            }
+                        };
                         process
                             .respond_to_confirmation(
                                 request_id,
@@ -3233,12 +3282,18 @@ impl ExecutableExtensions {
                         if process.input_answered(&request_id, generation) {
                             continue;
                         }
-                        let value = confirmations
-                            .input(&extension_name, &request)
-                            .await
-                            .with_context(|| {
-                                format!("input UI failed for extension {extension_name:?}")
-                            })?;
+                        // Keep the owning operation and its deadline live while
+                        // input is pending. Settlement drops the private picker
+                        // future instead of waiting for a stale user answer.
+                        let value = tokio::select! {
+                            biased;
+                            result = &mut execution => break result?,
+                            value = confirmations.input(&extension_name, &request) => {
+                                value.with_context(|| {
+                                    format!("input UI failed for extension {extension_name:?}")
+                                })?
+                            }
+                        };
                         process
                             .respond_to_input(
                                 request_id,
@@ -4580,7 +4635,6 @@ impl ExecutableExtensions {
                     Ok(ExtensionEvent::InputRequested {
                         request_id,
                         generation,
-                        request,
                         ..
                     }) => {
                         if process
@@ -4591,10 +4645,7 @@ impl ExecutableExtensions {
                             receiver_budget -= 1;
                             continue;
                         }
-                        messages.push(format!(
-                            "[{name}] input cancelled (no active input owner): {}",
-                            request.prompt
-                        ));
+                        messages.push(format!("[{name}] input cancelled (no active input owner)"));
                         if let Some(process) = process.clone() {
                             self.queue_input_cancellation(PendingInputCancellation {
                                 process,
@@ -5270,6 +5321,33 @@ args = ["--keep", "--experimental-streamable-http-mcp"]
     }
 
     #[test]
+    fn orphan_private_input_never_exposes_review_or_url_in_drain_output() {
+        for secret in [false, true] {
+            let (sender, receiver) = broadcast::channel(4);
+            let mut extensions = ExecutableExtensions::default();
+            extensions.receivers.push(receiver);
+            sender.send(ExtensionEvent::InputRequested {
+                request_id: octet_agent::extension_process::ExtensionRequestId::String("orphan".into()),
+                generation: 1,
+                parent_request_id: 42,
+                request: ExtensionInputRequest {
+                    parent_request_id: 42,
+                    prompt: "Private review:\n{\"answer\":\"REVIEW-CANARY\"}\nhttps://example.test/?state=URL-CANARY".into(),
+                    secret,
+                },
+            }).unwrap();
+            assert_eq!(
+                extensions.drain_events(),
+                ["[extension] input cancelled (no active input owner)"]
+            );
+            assert!(extensions
+                .diagnostics
+                .iter()
+                .all(|line| !line.contains("CANARY") && !line.contains("example.test")));
+        }
+    }
+
+    #[test]
     fn status_contributions_never_become_ambient_messages() {
         let (sender, receiver) = broadcast::channel(4);
         let mut extensions = ExecutableExtensions::default();
@@ -5698,6 +5776,475 @@ flags = [{ name = "fixture-option", type = "boolean", default = false }]
 
         config.mode = crate::config::Mode::Rpc;
         assert!(!active_session_lifecycle_enabled(&config));
+    }
+
+    #[test]
+    fn mcp_tool_approval_adapter_only_asks_for_the_exact_original_invocation() {
+        let mut identity = ExtensionIdentity {
+            name: MCP_EXTENSION_NAME.into(),
+            version: "0.2.0".into(),
+            manifest_path: PathBuf::from("/fixture/extension.toml"),
+            source: ExtensionSource::Explicit,
+        };
+        let original = ExtensionToolInvocation {
+            tool: "mcp_demo_mutate".into(),
+            arguments: serde_json::json!({"value": 3}),
+            catalog_revision: Some(9),
+            parent_request_id: 7,
+            resource_owner: octet_agent::extension_process::ExtensionResourceOwner {
+                session_id: "owner".into(),
+                extension_instance_id: "instance".into(),
+                process_generation: 2,
+            },
+        };
+        let intent = ExtensionActionIntent {
+            kind: "external_side_effect".into(),
+            operation: "mcp.tool.call".into(),
+            target: serde_json::json!({"tool": "mcp_demo_mutate", "arguments": {"value": 3}, "server": "untrusted", "server_catalog_revision": 999}),
+            data_classes: vec!["tool_arguments".into()],
+            adapter_hints: Default::default(),
+        };
+        for read_only in [None, Some(false), Some(true)] {
+            for destructive in [None, Some(false), Some(true)] {
+                let mut proposed = intent.clone();
+                proposed.adapter_hints.read_only = read_only;
+                proposed.adapter_hints.destructive = destructive;
+                assert_eq!(
+                    McpToolApprovalAdapter.inspect(&identity, &original, &proposed),
+                    ExtensionToolApprovalDecision::Ask
+                );
+            }
+        }
+        for field in ["tool", "arguments", "operation", "kind"] {
+            let mut proposed = intent.clone();
+            match field {
+                "tool" => proposed.target["tool"] = serde_json::json!("mcp_other"),
+                "arguments" => proposed.target["arguments"] = serde_json::json!({"value": 4}),
+                "operation" => proposed.operation = "browser.submit".into(),
+                "kind" => proposed.kind = "credential_prompt".into(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                McpToolApprovalAdapter.inspect(&identity, &original, &proposed),
+                ExtensionToolApprovalDecision::Deny
+            );
+        }
+        identity.name = "other-extension".into();
+        assert_eq!(
+            McpToolApprovalAdapter.inspect(&identity, &original, &intent),
+            ExtensionToolApprovalDecision::Deny
+        );
+    }
+
+    #[test]
+    fn mcp_tool_approval_service_is_only_configured_for_isolated_legacy_mcp() {
+        let mut descriptor = DiscoveredExtension {
+            manifest: ExtensionManifest::parse(
+                r#"
+name = "octet-mcp"
+version = "0.2.0"
+api_version = "0.2"
+[entrypoint]
+command = "not-launched"
+"#,
+            )
+            .unwrap(),
+            manifest_path: PathBuf::from("/fixture/extension.toml"),
+            source: ExtensionSource::Explicit,
+            activation: octet_agent::extension_process::ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        };
+        for (name, version, sharing, expected) in [
+            (
+                MCP_EXTENSION_NAME,
+                "0.2",
+                ExtensionRuntimeSharing::Isolated,
+                true,
+            ),
+            (
+                MCP_EXTENSION_NAME,
+                "0.2",
+                ExtensionRuntimeSharing::Workspace,
+                false,
+            ),
+            (
+                MCP_EXTENSION_NAME,
+                "0.1",
+                ExtensionRuntimeSharing::Isolated,
+                false,
+            ),
+            (
+                MCP_EXTENSION_NAME,
+                "0.3",
+                ExtensionRuntimeSharing::Isolated,
+                false,
+            ),
+            (
+                "other-extension",
+                "0.2",
+                ExtensionRuntimeSharing::Isolated,
+                false,
+            ),
+        ] {
+            descriptor.manifest.name = name.into();
+            descriptor.manifest.api_version = version.into();
+            descriptor.manifest.runtime.sharing = sharing;
+            let mut runtime = ExtensionRuntimeConfig::new("/fixture");
+            configure_tool_approvals(&mut runtime, &descriptor);
+            assert_eq!(runtime.approvals, expected);
+            assert_eq!(runtime.tool_approval_adapter.is_some(), expected);
+            assert!(runtime.secret_broker.is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    fn mcp_approval_host_fixture() -> (
+        tempfile::TempDir,
+        Session,
+        ExtensionHost,
+        ExecutableExtensions,
+    ) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let extension_root = temp.path().join("extensions");
+        let extension_dir = extension_root.join(MCP_EXTENSION_NAME);
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(
+            extension_dir.join(EXTENSION_MANIFEST_FILENAME),
+            r#"
+name = "octet-mcp"
+version = "0.2.0"
+api_version = "0.2"
+[entrypoint]
+command = "exact-approval.py"
+args = ["mcp.tool.call"]
+[contributes]
+tools = ["fixture_tool"]
+commands = ["fixture_command"]
+"#,
+        )
+        .unwrap();
+        let fixture = extension_dir.join("exact-approval.py");
+        std::fs::write(
+            &fixture,
+            include_str!("../../octet-agent/tests/fixtures/exact_tool_approval.py"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config =
+            executable_extension_config(temp.path(), &extension_root, MCP_EXTENSION_NAME);
+        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        config.sandbox.allow_process = true;
+        let session = Session::create(temp.path().join("session.jsonl")).unwrap();
+        let model = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let sessions = SessionStore::new(&config.session_dir, temp.path());
+        let mut host = ExtensionHost::new();
+        let extensions = ExecutableExtensions::discover_and_start(
+            &config,
+            &session,
+            &model,
+            &ReasoningConfig::Off,
+            &sessions,
+            &mut host,
+        );
+        assert_eq!(
+            extensions.processes.len(),
+            1,
+            "{:?}",
+            extensions.diagnostics.iter().collect::<Vec<_>>()
+        );
+        host.finalize_tool_surface();
+        (temp, session, host, extensions)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_tool_approval_host_negotiates_and_denies_unbound_tools_and_commands() {
+        let (temp, session, _host, mut extensions) = mcp_approval_host_fixture();
+        let process = extensions.processes[0].clone();
+        assert!(process.negotiated_protocol().features.contains("approvals"));
+        let mut events = process.subscribe();
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            process.call_tool(
+                "fixture_tool",
+                serde_json::json!({}),
+                process.current_context(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(output.content, "executions=0");
+        let (progress, mut updates) = ToolProgressSink::bounded_channel();
+        let (started, _operation) = tokio::sync::oneshot::channel();
+        let context = process.current_context_for_resource_owner(session.resource_owner_key());
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            process.execute_command_controlled_with_progress(
+                "fixture_command",
+                Vec::new(),
+                context,
+                CancellationToken::default(),
+                progress,
+                started,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(output.text, "executions=0");
+        assert!(
+            updates.try_recv().is_err(),
+            "a command never owns an exact-tool approval UI"
+        );
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, ExtensionEvent::PolicyEvaluationRequested { .. }),
+                "configured policy must not reach the deny supervisor"
+            );
+        }
+        extensions.shutdown().await;
+        assert!(!temp.path().join("approval-executions").exists());
+    }
+
+    #[cfg(unix)]
+    struct ApprovalFixtureModel {
+        arguments: Value,
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for ApprovalFixtureModel {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            request: octet_ai::Request,
+            diagnostics: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, octet_ai::AiError> {
+            use octet_ai::{CanonicalStreamAssembler, StopReason, StreamEvent};
+            let mut assembler = CanonicalStreamAssembler::new(
+                model.id,
+                model.protocol,
+                model.pricing,
+                &request.tools,
+            )?;
+            assembler.add_host_diagnostics(diagnostics);
+            let mut events = vec![StreamEvent::Started {
+                response_id: Some("fixture".into()),
+            }];
+            let first = self
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0;
+            if first {
+                assert!(request.tools.iter().any(|tool| tool.name == "fixture_tool"));
+                events.extend([
+                    StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: ToolCallId("fixture-call".into()),
+                        name: "fixture_tool".into(),
+                    },
+                    StreamEvent::ToolCallArgsDelta {
+                        index: 0,
+                        delta: self.arguments.to_string(),
+                    },
+                    StreamEvent::ToolCallEnd {
+                        index: 0,
+                        argument_error: None,
+                    },
+                ]);
+            } else {
+                events.extend([
+                    StreamEvent::TextStart { index: 0 },
+                    StreamEvent::TextDelta {
+                        index: 0,
+                        delta: "done".into(),
+                    },
+                    StreamEvent::TextEnd { index: 0 },
+                ]);
+            }
+            for event in &events {
+                assembler.push(event.clone())?;
+            }
+            events.push(StreamEvent::Finished(assembler.finish(if first {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            })?));
+            Ok(Box::pin(futures_util::stream::iter(
+                events.into_iter().map(Ok),
+            )))
+        }
+    }
+
+    /// Real product discovery, MCP adapter, policy supervisor, Agent effect
+    /// gate and native tool-progress routing. Only the model is scripted; the
+    /// append-only fixture marker independently proves the dispatch count.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_tool_approval_coding_host_dispatches_once_only_after_exact_approval() {
+        use octet_agent::extension_policy::{
+            EXTENSION_TOOL_APPROVAL_PROMPT, MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES,
+        };
+        use octet_agent::{Agent, AgentConfig, AgentEvent, EffectBroker, EffectPolicy};
+        for case in [
+            "allow",
+            "deny",
+            "overflow",
+            "replace_catalog",
+            "drain",
+            "cancel",
+            "no_ui",
+            "headless",
+            "alter_tool",
+            "alter_arguments",
+            "alter_retry",
+        ] {
+            let (temp, session, host, mut extensions) = mcp_approval_host_fixture();
+            let process = extensions.processes[0].clone();
+            assert!(process.negotiated_protocol().features.contains("approvals"));
+            let mut events = process.subscribe();
+            let arguments = serde_json::json!({
+                "case": case,
+                "text": if case == "overflow" { "x".repeat(8192) }
+                    else { "original\u{1b}[31m\u{202e}<text>".into() },
+            });
+            let model = ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&ModelId("gpt-4o-mini".into()))
+                .unwrap();
+            let client = octet_ai::AiClient::new();
+            let scripted = Arc::new(ApprovalFixtureModel {
+                arguments: arguments.clone(),
+                requests: Default::default(),
+            });
+            client.register_host_stream_transport(model.endpoint.id.clone(), scripted.clone());
+            let mut agent = Agent::new(AgentConfig {
+                client,
+                model,
+                session,
+                system: "Local approval fixture".into(),
+                sandbox: octet_agent::SandboxConfig::new(temp.path()),
+                effect_broker: EffectBroker::new(EffectPolicy::UnsafeHost),
+                extensions: host.clone(),
+                max_turns: Some(2),
+                reasoning: ReasoningConfig::Off,
+                reasoning_mode: octet_ai::ReasoningMode::Standard,
+                cache_retention: octet_ai::CacheRetention::Short,
+                session_id: None,
+            })
+            .unwrap();
+            let mut prompts = 0;
+            let mut outputs = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                if case == "headless" {
+                    agent.complete("perform fixture call").await.unwrap();
+                    return;
+                }
+                let mut run = agent.prompt("perform fixture call").await.unwrap();
+                let control = run.control();
+                while let Some(event) = run.next().await {
+                    match event {
+                        AgentEvent::ToolProgress { progress: octet_agent::ToolProgress::Confirmation(confirmation), .. } => {
+                            if case == "no_ui" { drop(confirmation); continue; }
+                            prompts += 1;
+                            assert_eq!(prompts, 1, "{case}: no duplicate prompts");
+                            assert_eq!(confirmation.prompt, EXTENSION_TOOL_APPROVAL_PROMPT);
+                            assert!(confirmation.destructive);
+                            assert!(!confirmation.default);
+                            let detail = confirmation.detail.as_deref().unwrap();
+                            assert!(confirmation.prompt.len() + 2 + detail.len()
+                                <= MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES);
+                            assert!(detail.is_ascii());
+                            let preview: Value = serde_json::from_str(detail.lines().last().unwrap()).unwrap();
+                            assert_eq!(preview["extension"], MCP_EXTENSION_NAME);
+                            assert_eq!(preview["tool"], "fixture_tool");
+                            assert_eq!(preview["arguments"], arguments);
+                            assert_eq!(preview["catalog_revision"], 0);
+                            assert!(!detail.contains("untrusted-server"));
+                            assert!(process.respond_to_policy_evaluation(
+                                ExtensionRequestId::String("policy-1".into()),
+                                process.health_snapshot().generation,
+                                ExtensionPolicyEvaluationResponse {
+                                    decision: octet_agent::extension_policy::ExtensionPolicyDecision::Allow,
+                                    approval_token: None,
+                                },
+                            ).await.is_err(), "generic supervisor cannot race private approval");
+                            if case == "replace_catalog" {
+                                while host.tool_definitions()[0].description != "replacement catalog" {
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                            if case == "drain" { process.begin_drain(); }
+                            if case == "cancel" {
+                                control.abort();
+                                // The run control and progress receivers are
+                                // independent tasks; let host cancellation settle.
+                                while let Some(event) = run.next().await {
+                                    if let AgentEvent::ToolFinished { result, .. } = event { outputs.push(result); }
+                                }
+                                confirmation.respond(true);
+                                break;
+                            }
+                            confirmation.respond(case != "deny");
+                        }
+                        AgentEvent::ToolFinished { result, .. } => outputs.push(result),
+                        _ => {}
+                    }
+                }
+            }).await.unwrap_or_else(|_| panic!("{case}: coding-host approval timed out"));
+            if !matches!(case, "cancel" | "headless") {
+                assert_eq!(outputs.len(), 1, "{case}: exactly one tool invocation");
+                let output = outputs.pop().unwrap().unwrap();
+                assert_eq!(
+                    output.text,
+                    if case == "allow" {
+                        "executions=1"
+                    } else {
+                        "executions=0"
+                    },
+                    "{case}"
+                );
+                assert_eq!(output.is_error(), case != "allow", "{case}");
+            }
+            assert_eq!(
+                prompts,
+                usize::from(matches!(
+                    case,
+                    "allow" | "deny" | "replace_catalog" | "drain" | "cancel" | "alter_retry"
+                )),
+                "{case}"
+            );
+            assert_eq!(
+                scripted.requests.load(std::sync::atomic::Ordering::SeqCst),
+                if case == "cancel" { 1 } else { 2 },
+                "{case}: no model replay"
+            );
+            while let Ok(event) = events.try_recv() {
+                assert!(
+                    !matches!(
+                        event,
+                        ExtensionEvent::PolicyEvaluationRequested { .. }
+                            | ExtensionEvent::ConfirmationRequested { .. }
+                    ),
+                    "{case}: policy UI broadcast"
+                );
+            }
+            extensions.shutdown().await;
+            let marker = temp.path().join("approval-executions");
+            if case == "allow" {
+                assert_eq!(std::fs::read_to_string(marker).unwrap(), "executed\n");
+            } else {
+                assert!(!marker.exists(), "{case}: denied action dispatched");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -7168,6 +7715,167 @@ commands = ["configure"]
             vec![("input-fixture".to_owned(), "API key:".to_owned(), true)]
         );
         assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_settlement_and_timeout_drop_pending_private_input_and_confirmation_ui() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::time::Duration;
+
+        struct PendingCommandUi {
+            shell: InteractiveShell,
+            ready: PathBuf,
+        }
+        impl ExtensionConfirmationHandler for PendingCommandUi {
+            fn confirm<'a>(
+                &'a mut self,
+                extension: &'a str,
+                request: &'a ConfirmationRequest,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
+                Box::pin(async move {
+                    let mut input = futures_util::stream::pending();
+                    let mut picker = Box::pin(crate::tui::pickers::extension_confirmation_picker(
+                        &mut self.shell,
+                        &mut input,
+                        extension,
+                        request,
+                    ));
+                    assert!(futures_util::poll!(picker.as_mut()).is_pending());
+                    std::fs::write(&self.ready, b"ready")?;
+                    picker.await
+                })
+            }
+            fn input<'a>(
+                &'a mut self,
+                _extension: &'a str,
+                request: &'a ExtensionInputRequest,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + 'a>> {
+                Box::pin(async move {
+                    let mut input = futures_util::stream::pending();
+                    let mut picker = Box::pin(crate::tui::pickers::extension_input_picker(
+                        &mut self.shell,
+                        &mut input,
+                        request,
+                    ));
+                    assert!(futures_util::poll!(picker.as_mut()).is_pending());
+                    std::fs::write(&self.ready, b"ready")?;
+                    picker.await
+                })
+            }
+        }
+
+        for kind in ["input", "confirmation"] {
+            for outcome in ["settled", "timeout"] {
+                let temp = tempfile::tempdir().unwrap();
+                let fixture = temp.path().join("pending-ui.sh");
+                let ready = temp.path().join("ui-ready");
+                std::fs::write(&fixture, r#"#!/bin/sh
+ready="$1"
+outcome="$2"
+kind="$3"
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.2","tools":[],"commands":[{"name":"pending","description":"Wait with UI","usage":"/pending"}],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}'
+IFS= read -r command
+command_id=$(printf '%s\n' "$command" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+case "$kind" in
+  input)
+    printf '{"jsonrpc":"2.0","id":"pending-ui","method":"input/request","params":{"parent_request_id":%s,"prompt":"Private reply review:\\nREVIEW-CANARY\\nhttps://example.test/?state=URL-CANARY","secret":true}}\n' "$command_id"
+    ;;
+  confirmation)
+    printf '{"jsonrpc":"2.0","id":"pending-ui","method":"confirmation/request","params":{"parent_request_id":%s,"prompt":"Allow fixture?","default":false}}\n' "$command_id"
+    ;;
+esac
+while [ ! -f "$ready" ]; do sleep 0.01; done
+if [ "$outcome" = settled ]; then
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"text":"settled","notifications":[],"context":[]}}\n' "$command_id"
+fi
+while IFS= read -r request; do
+  case "$request" in
+    *'"method":"$/cancelRequest"'*)
+      if [ "$outcome" = timeout ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32800,"message":"cancelled"}}\n' "$command_id"
+        outcome=cancelled
+      fi
+      ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#).unwrap();
+                let mut permissions = std::fs::metadata(&fixture).unwrap().permissions();
+                permissions.set_mode(0o700);
+                std::fs::set_permissions(&fixture, permissions).unwrap();
+                let manifest = ExtensionManifest::parse(&format!(
+                    r#"
+name = "pending-ui"
+version = "0.1.0"
+api_version = "0.2"
+[entrypoint]
+command = "pending-ui.sh"
+args = ["{}", "{outcome}", "{kind}"]
+[contributes]
+commands = ["pending"]
+confirmations = true
+"#,
+                    ready.display()
+                ))
+                .unwrap();
+                let mut runtime = ExtensionRuntimeConfig::new(temp.path());
+                runtime.request_timeout = Duration::from_millis(500);
+                let process = ExtensionProcess::start(
+                    DiscoveredExtension {
+                        manifest,
+                        manifest_path: temp.path().join("extension.toml"),
+                        source: ExtensionSource::Explicit,
+                        activation: octet_agent::extension_process::ExtensionActivation {
+                            enabled: true,
+                            trust: ExtensionTrust::Trusted,
+                        },
+                    },
+                    runtime,
+                )
+                .await
+                .unwrap();
+                let mut extensions = ExecutableExtensions::default();
+                extensions.receivers.push(process.subscribe());
+                extensions.processes.push(process.clone());
+                let mut ui = PendingCommandUi {
+                    shell: InteractiveShell::test_shell(),
+                    ready,
+                };
+                let result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    extensions.execute_command_with_confirmation("pending", Vec::new(), &mut ui),
+                )
+                .await
+                .expect("command settlement must not wait for terminal input");
+                assert!(ui.ready.exists(), "the real picker must have been pending");
+                assert!(!ui.shell.tool_input_fits());
+                assert!(!ui.shell.has_panel());
+                assert!(ui.shell.pending_is_empty());
+                assert!(ui.shell.debug_snapshot().is_empty());
+                if outcome == "settled" {
+                    let output = result.unwrap().unwrap();
+                    assert!(output.contains("settled"));
+                    assert!(!output.contains("CANARY"));
+                } else {
+                    assert!(result.is_err(), "the command deadline must remain live");
+                }
+                assert!(extensions
+                    .drain_events()
+                    .iter()
+                    .all(|line| !line.contains("CANARY")));
+                assert!(extensions
+                    .diagnostics
+                    .iter()
+                    .all(|line| !line.contains("CANARY")));
+                assert!(process.shutdown().await);
+            }
+        }
     }
 
     #[cfg(unix)]

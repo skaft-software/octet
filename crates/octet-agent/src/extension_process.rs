@@ -51,7 +51,9 @@ use crate::extension::{
 };
 use crate::extension_api_v03 as api_v03;
 use crate::extension_policy::{
-    ExtensionActionIntent, ExtensionApprovalStore, ExtensionApprovalToken, ExtensionPolicyDecision,
+    canonicalize_json, ExtensionActionIntent, ExtensionApprovalStore, ExtensionApprovalToken,
+    ExtensionPolicyDecision, ExtensionToolApprovalAdapter, ExtensionToolApprovalDecision,
+    ExtensionToolInvocation, EXTENSION_TOOL_APPROVAL_PROMPT, MAX_EXTENSION_APPROVAL_TTL,
 };
 use crate::extension_presentation::ExtensionPresentationSnapshot;
 use crate::extension_provider::{
@@ -3250,24 +3252,53 @@ pub struct ConfirmationResponse {
 }
 
 /// Ephemeral input requested by an API `0.2` extension operation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionInputRequest {
     /// Originating host request whose cancellation owns this prompt.
     pub parent_request_id: u64,
-    /// Short frontend-visible prompt. Secret answers never appear here.
+    /// Complete private request/review context. Secret prompts may contain
+    /// previous answers or authorization URLs and are redacted from Debug.
     pub prompt: String,
     /// Whether the frontend should suppress echo and ordinary editor handling.
     #[serde(default)]
     pub secret: bool,
 }
 
+impl std::fmt::Debug for ExtensionInputRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionInputRequest")
+            .field("parent_request_id", &self.parent_request_id)
+            .field(
+                "prompt",
+                &if self.secret {
+                    "[REDACTED]"
+                } else {
+                    &self.prompt
+                },
+            )
+            .field("secret", &self.secret)
+            .finish()
+    }
+}
+
 /// Host answer to an API `0.2` input request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionInputResponse {
-    /// UTF-8 answer, or `null` when cancelled/unavailable.
+    /// UTF-8 answer, or `null` when cancelled/unavailable. Always redacted from
+    /// Debug because the response does not carry the request's secret flag.
     pub value: Option<String>,
+}
+
+impl std::fmt::Debug for ExtensionInputResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionInputResponse")
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// One semantic segment returned by a tool renderer.
@@ -4005,6 +4036,10 @@ pub struct ExtensionRuntimeConfig {
     /// Offer single-use approval redemption. A trusted frontend can issue a
     /// capability with [`ExtensionProcess::respond_to_policy_approval`].
     pub approvals: bool,
+    /// Optional exact model-tool approval adapter. Configured requests are
+    /// handled privately through the original tool's progress sink, never
+    /// broadcast to generic policy supervisors. Commands cannot use it.
+    pub tool_approval_adapter: Option<Arc<dyn ExtensionToolApprovalAdapter>>,
     /// Optional owner-scoped secret provider. The `secrets` feature is offered
     /// only when this is configured and the manifest declares secret names.
     /// The broker must not strongly retain this extension process.
@@ -4057,6 +4092,10 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
                 &self.session_lifecycle.is_some(),
             )
             .field("approvals", &self.approvals)
+            .field(
+                "tool_approval_adapter_configured",
+                &self.tool_approval_adapter.is_some(),
+            )
             .field("secret_broker_configured", &self.secret_broker.is_some())
             .field(
                 "provider_registry_configured",
@@ -4090,6 +4129,7 @@ impl ExtensionRuntimeConfig {
             agent_sessions: false,
             session_lifecycle: None,
             approvals: false,
+            tool_approval_adapter: None,
             secret_broker: None,
             provider_registry: None,
             provider_stream_buffer: DEFAULT_PROVIDER_STREAM_BUFFER,
@@ -5938,6 +5978,11 @@ impl ExtensionProcess {
                 "approval capabilities must be issued by respond_to_policy_approval".into(),
             ));
         }
+        if self.inner.config.tool_approval_adapter.is_some() {
+            return Err(ExtensionRuntimeError::Protocol(
+                "exact-tool policy responses belong to the private approval adapter".into(),
+            ));
+        }
         let connection = read_std_lock(&self.inner.connection).clone();
         if generation != connection.generation {
             return Err(ExtensionRuntimeError::Closed(format!(
@@ -7782,9 +7827,9 @@ struct ProcessConnection {
     api_v03_contract: Arc<StdRwLock<Option<api_v03::NegotiatedContract>>>,
     initialization_complete: Arc<AtomicBool>,
     initialization_changed: Arc<Notify>,
-    catalog_guard: StdRwLock<()>,
+    catalog_guard: Arc<StdRwLock<()>>,
     tool_catalog: Arc<StdRwLock<Vec<ToolDefinition>>>,
-    catalog_revision: AtomicU64,
+    catalog_revision: Arc<AtomicU64>,
     health: Arc<StdRwLock<ConnectionHealth>>,
     events: broadcast::Sender<ExtensionEvent>,
     generation: u64,
@@ -7838,8 +7883,38 @@ struct PendingRequest {
     /// Parent progress allowed to own child confirmation/input replies. Model
     /// tools use this; commands retain their existing confirmation receiver.
     child_interaction_progress: Option<ToolProgressSink>,
+    /// Captured only for a controlled model-tool call, never reverse-request JSON.
+    tool_invocation: Option<Arc<PendingToolInvocation>>,
     resource_owner: Option<ExtensionResourceOwner>,
     last_progress_sequence: Option<u64>,
+}
+
+struct PendingToolInvocation {
+    original: ExtensionToolInvocation,
+    cancellation: CancellationToken,
+    deadline: Instant,
+    approval_requested: AtomicBool,
+}
+
+impl PendingToolInvocation {
+    fn is_active(&self, pending: &HashMap<u64, PendingRequest>, catalog_revision: u64) -> bool {
+        !self.cancellation.is_cancelled()
+            && Instant::now() < self.deadline
+            && self
+                .original
+                .catalog_revision
+                .is_none_or(|revision| revision == catalog_revision)
+            && pending
+                .get(&self.original.parent_request_id)
+                .is_some_and(|parent| {
+                    parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
+                        && parent.resource_owner.as_ref() == Some(&self.original.resource_owner)
+                        && parent
+                            .tool_invocation
+                            .as_ref()
+                            .is_some_and(|original| std::ptr::eq(self, original.as_ref()))
+                })
+    }
 }
 
 type PendingRequests = Arc<StdMutex<HashMap<u64, PendingRequest>>>;
@@ -8456,6 +8531,8 @@ impl ProcessConnection {
 
         let cancellation_reason = Arc::new(StdMutex::new("request dropped".to_owned()));
         let operation_reason = Arc::clone(&cancellation_reason);
+        let tool_cancellation = cancellation.clone();
+        let deadline = Instant::now() + timeout;
         let connection = Arc::clone(self);
         let operation = async move {
             let _admission = if use_request_slot {
@@ -8478,6 +8555,35 @@ impl ProcessConnection {
                 ));
             }
             let id = connection.next_id.fetch_add(1, Ordering::Relaxed);
+            let tool_invocation = if method == methods::TOOL_CALL
+                && child_interaction_progress.is_some()
+                && read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_2
+            {
+                resource_owner
+                    .clone()
+                    .zip(tool_cancellation)
+                    .map(|(owner, cancellation)| {
+                        Arc::new(PendingToolInvocation {
+                            original: ExtensionToolInvocation {
+                                tool: params["name"]
+                                    .as_str()
+                                    .expect("host-authored tool name")
+                                    .to_owned(),
+                                arguments: canonicalize_json(params["arguments"].clone()),
+                                catalog_revision: params
+                                    .get("catalog_revision")
+                                    .and_then(serde_json::Value::as_u64),
+                                resource_owner: owner,
+                                parent_request_id: id,
+                            },
+                            cancellation,
+                            deadline,
+                            approval_requested: AtomicBool::new(false),
+                        })
+                    })
+            } else {
+                None
+            };
             let message = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -8501,6 +8607,7 @@ impl ProcessConnection {
                     cancellation_sent,
                     progress,
                     child_interaction_progress,
+                    tool_invocation,
                     resource_owner,
                     last_progress_sequence: None,
                 },
@@ -8867,6 +8974,9 @@ impl ProcessConnection {
     }
 
     fn begin_drain(&self) -> bool {
+        // Share the approval/catalog admission fence: drain cannot overtake an
+        // exact-call decision between final validation and response admission.
+        let _catalog = write_std_lock(&self.catalog_guard);
         if self.draining.swap(true, Ordering::AcqRel) {
             return false;
         }
@@ -9014,7 +9124,10 @@ impl ProcessConnection {
     }
 
     async fn terminate(&self) {
-        self.draining.store(true, Ordering::Release);
+        {
+            let _catalog = write_std_lock(&self.catalog_guard);
+            self.draining.store(true, Ordering::Release);
+        }
         self.cancel_all_provider_streams("terminated");
         self.remove_provider_owner();
         self.kill_process_group();
@@ -9728,6 +9841,8 @@ async fn spawn_connection(
         lifecycle_events: BTreeSet::new(),
     }));
     let tool_catalog = Arc::new(StdRwLock::new(Vec::new()));
+    let catalog_revision = Arc::new(AtomicU64::new(0));
+    let catalog_guard = Arc::new(StdRwLock::new(()));
     let health = Arc::new(StdRwLock::new(ConnectionHealth {
         state: ExtensionHealthState::Initializing,
         last_error: None,
@@ -9782,10 +9897,13 @@ async fn spawn_connection(
         provider_owner.clone(),
         Arc::clone(&provider_streams),
         Arc::clone(&tool_catalog),
+        Arc::clone(&catalog_revision),
+        Arc::clone(&catalog_guard),
         catalog_updates,
         delegation_service,
         session_lifecycle.clone(),
         approval_store,
+        config.tool_approval_adapter.clone(),
         config.secret_broker.clone(),
         ExtensionIdentity {
             name: descriptor.manifest.name.clone(),
@@ -9836,9 +9954,9 @@ async fn spawn_connection(
         api_v03_contract,
         initialization_complete: Arc::clone(&initialization_complete),
         initialization_changed: Arc::clone(&initialization_changed),
-        catalog_guard: StdRwLock::new(()),
+        catalog_guard,
         tool_catalog,
-        catalog_revision: AtomicU64::new(0),
+        catalog_revision,
         health,
         events: events.clone(),
         generation,
@@ -11535,10 +11653,13 @@ struct ProtocolReadState {
     provider_owner: ExtensionProviderOwner,
     provider_streams: ProviderStreams,
     tool_catalog: Arc<StdRwLock<Vec<ToolDefinition>>>,
+    catalog_revision: Arc<AtomicU64>,
+    catalog_guard: Arc<StdRwLock<()>>,
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
     delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
     approval_store: Arc<ExtensionApprovalStore>,
+    tool_approval_adapter: Option<Arc<dyn ExtensionToolApprovalAdapter>>,
     secret_broker: Option<Arc<dyn ExtensionSecretBroker>>,
     extension_identity: ExtensionIdentity,
     allowed_secrets: Arc<BTreeSet<String>>,
@@ -11552,6 +11673,193 @@ impl ProtocolReadState {
     fn max_message_bytes(&self) -> usize {
         self.frame_limit.max_message_bytes()
     }
+}
+
+fn queue_tool_policy_response(
+    state: &ProtocolReadState,
+    id: &ExtensionRequestId,
+    decision: ExtensionPolicyDecision,
+) -> Result<(), String> {
+    try_queue_child_response(
+        &state.child_requests,
+        id,
+        &state.writer,
+        state.max_message_bytes(),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": ExtensionPolicyEvaluationResponse { decision, approval_token: None },
+        }),
+    )
+    .map(|_| ())
+}
+
+/// The configured host adapter exclusively owns this request. In particular,
+/// neither a generic supervisor nor an extension confirmation event can answer
+/// the private prompt, and no extension-supplied text becomes its heading.
+fn handle_tool_policy_evaluation(
+    state: &ProtocolReadState,
+    id: ExtensionRequestId,
+    request: ExtensionPolicyEvaluationRequest,
+    registered: RegisteredChildRequest,
+    adapter: &dyn ExtensionToolApprovalAdapter,
+) -> Result<(), String> {
+    let catalog = read_std_lock(&state.catalog_guard);
+    let pending = lock_std_mutex(&state.pending);
+    let original = pending
+        .get(&request.parent_request_id)
+        .and_then(|parent| parent.tool_invocation.clone());
+    let active = |original: &PendingToolInvocation| {
+        !state.closed.load(Ordering::Acquire)
+            && !state.draining.load(Ordering::Acquire)
+            && original.is_active(&pending, state.catalog_revision.load(Ordering::Acquire))
+    };
+    let eligible = read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_APPROVALS)
+        && !state.closed.load(Ordering::Acquire)
+        && !state.draining.load(Ordering::Acquire)
+        && registered.progress.is_some()
+        && original.as_ref().is_some_and(|original| {
+            original.original.resource_owner.process_generation == state.generation
+                && original.original.resource_owner.extension_instance_id == state.instance_id
+                && active(original)
+                && original.original.matches_target(&request.intent)
+                && adapter.inspect(
+                    &state.extension_identity,
+                    &original.original,
+                    &request.intent,
+                ) == ExtensionToolApprovalDecision::Ask
+        });
+    if let Some(token) = &request.approval_token {
+        // Consume even a mismatched or now-ineligible token. The generic store
+        // path cannot redeem an exact-tool token, but does invalidate it.
+        let consumed = if let Some(original) = &original {
+            state
+                .approval_store
+                .consume_for_tool(token, &request.intent, &original.original)
+        } else {
+            state.approval_store.consume(
+                token,
+                &request.intent,
+                state.generation,
+                &ExtensionRequestId::Number(request.parent_request_id),
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        return queue_tool_policy_response(
+            state,
+            &id,
+            // Inspecting/hashing/waiting for the token store can take time.
+            // Recheck cancellation and the deadline at response admission, not
+            // merely before invoking the trusted adapter.
+            if eligible && consumed && original.as_ref().is_some_and(|original| active(original)) {
+                ExtensionPolicyDecision::Allow
+            } else {
+                ExtensionPolicyDecision::Deny
+            },
+        );
+    }
+    if !eligible || !original.as_ref().is_some_and(|original| active(original)) {
+        return queue_tool_policy_response(state, &id, ExtensionPolicyDecision::Deny);
+    }
+    let original = original.expect("eligible original model-tool invocation");
+    let Some(preview) = original
+        .original
+        .approval_preview(&state.extension_identity.name)
+    else {
+        return queue_tool_policy_response(state, &id, ExtensionPolicyDecision::Deny);
+    };
+    if original.approval_requested.swap(true, Ordering::AcqRel) {
+        return queue_tool_policy_response(state, &id, ExtensionPolicyDecision::Deny);
+    }
+    let Ok(worker) = state.child_work_slots.clone().try_acquire_owned() else {
+        return queue_tool_policy_response(state, &id, ExtensionPolicyDecision::Deny);
+    };
+    drop(pending);
+    drop(catalog);
+    let progress = registered
+        .progress
+        .expect("eligible original tool progress sink");
+    let response_state = registered.response_state;
+    let pending = Arc::clone(&state.pending);
+    let catalog_revision = Arc::clone(&state.catalog_revision);
+    let catalog_guard = Arc::clone(&state.catalog_guard);
+    let closed = Arc::clone(&state.closed);
+    let draining = Arc::clone(&state.draining);
+    let store = Arc::clone(&state.approval_store);
+    let child_requests = Arc::clone(&state.child_requests);
+    let writer = state.writer.clone();
+    let max_message_bytes = state.max_message_bytes();
+    let health = Arc::clone(&state.health);
+    let events = state.events.clone();
+    tokio::spawn(async move {
+        let confirmation = progress.confirmation_with_complete_preview(
+            EXTENSION_TOOL_APPROVAL_PROMPT.into(),
+            preview,
+            true,
+            false,
+        );
+        tokio::pin!(confirmation);
+        let approved = tokio::select! {
+            biased;
+            _ = child_response_settled(Arc::clone(&response_state)) => return,
+            _ = original.cancellation.cancelled() => false,
+            _ = tokio::time::sleep_until(original.deadline.into()) => false,
+            approved = &mut confirmation => approved,
+        };
+        // Parent settlement cannot interleave validation with response admission.
+        // Redemption repeats the same checks after the extension's token retry.
+        let _catalog = read_std_lock(&catalog_guard);
+        let parents = lock_std_mutex(&pending);
+        let active = !closed.load(Ordering::Acquire)
+            && !draining.load(Ordering::Acquire)
+            && original.is_active(&parents, catalog_revision.load(Ordering::Acquire));
+        let mut token = if approved && active {
+            let ttl = original
+                .deadline
+                .saturating_duration_since(Instant::now())
+                .min(MAX_EXTENSION_APPROVAL_TTL);
+            store
+                .issue_for_tool(&request.intent, &original.original, ttl)
+                .ok()
+        } else {
+            None
+        };
+        // Issuance itself hashes data and may contend on the store. Revoke
+        // before admission if cancellation, expiry or transport loss won there.
+        if closed.load(Ordering::Acquire)
+            || !original.is_active(&parents, catalog_revision.load(Ordering::Acquire))
+        {
+            if let Some(token) = token.take() {
+                let _ = store.consume_for_tool(&token, &request.intent, &original.original);
+            }
+        }
+        let response = try_queue_child_response(
+            &child_requests,
+            &id,
+            &writer,
+            max_message_bytes,
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": ExtensionPolicyEvaluationResponse {
+                    decision: if token.is_some() { ExtensionPolicyDecision::Ask }
+                        else { ExtensionPolicyDecision::Deny },
+                    approval_token: token.clone(),
+                },
+            }),
+        );
+        if !matches!(response, Ok(ChildResponseAdmission::Queued)) {
+            if let Some(token) = token {
+                let _ = store.consume_for_tool(&token, &request.intent, &original.original);
+            }
+        }
+        if let Err(error) = response {
+            update_health(&health, ExtensionHealthState::Degraded, Some(error.clone()));
+            let _ = events.send(ExtensionEvent::Diagnostic { message: error });
+            settle_child_request(&child_requests, &id);
+        }
+        drop(parents);
+        drop(worker);
+    });
+    Ok(())
 }
 
 enum AgentSessionOperation {
@@ -12179,10 +12487,13 @@ async fn read_protocol_stdout<R>(
     provider_owner: ExtensionProviderOwner,
     provider_streams: ProviderStreams,
     tool_catalog: Arc<StdRwLock<Vec<ToolDefinition>>>,
+    catalog_revision: Arc<AtomicU64>,
+    catalog_guard: Arc<StdRwLock<()>>,
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
     delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
     approval_store: Arc<ExtensionApprovalStore>,
+    tool_approval_adapter: Option<Arc<dyn ExtensionToolApprovalAdapter>>,
     secret_broker: Option<Arc<dyn ExtensionSecretBroker>>,
     extension_identity: ExtensionIdentity,
     allowed_secrets: Arc<BTreeSet<String>>,
@@ -12220,10 +12531,13 @@ async fn read_protocol_stdout<R>(
         provider_owner,
         provider_streams,
         tool_catalog,
+        catalog_revision,
+        catalog_guard,
         catalog_updates,
         delegation_service,
         session_lifecycle,
         approval_store,
+        tool_approval_adapter,
         secret_broker,
         extension_identity,
         allowed_secrets,
@@ -12926,29 +13240,50 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     methods::POLICY_EVALUATE,
                 )?
                 else {
+                    // A known token presented against a settled/foreign parent
+                    // is still burned, even though registration already queued
+                    // the cancellation error instead of a policy decision.
+                    if let Some(token) = &request.approval_token {
+                        let _ = state.approval_store.consume(
+                            token,
+                            &request.intent,
+                            state.generation,
+                            &ExtensionRequestId::Number(request.parent_request_id),
+                        );
+                    }
                     return Ok(());
                 };
+                if request.approval_token.is_some()
+                    && !read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_APPROVALS)
+                {
+                    try_queue_child_response(
+                        &state.child_requests,
+                        &id,
+                        &state.writer,
+                        state.max_message_bytes(),
+                        serde_json::json!({
+                            "jsonrpc":"2.0", "id":id,
+                            "error":{
+                                "code":-32602,
+                                "message":"approval token requires negotiated approvals",
+                            },
+                        }),
+                    )?;
+                    return Ok(());
+                }
+                if let Some(adapter) = &state.tool_approval_adapter {
+                    return handle_tool_policy_evaluation(
+                        state,
+                        id,
+                        request,
+                        registered,
+                        adapter.as_ref(),
+                    );
+                }
                 let parent = registered
                     .parent_request_id
                     .expect("API 0.2 child registration returns a parent ID");
                 if let Some(token) = request.approval_token {
-                    if !read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_APPROVALS) {
-                        try_queue_child_response(
-                            &state.child_requests,
-                            &id,
-                            &state.writer,
-                            state.max_message_bytes(),
-                            serde_json::json!({
-                                "jsonrpc":"2.0",
-                                "id":id,
-                                "error":{
-                                    "code":-32602,
-                                    "message":"approval token requires negotiated approvals",
-                                },
-                            }),
-                        )?;
-                        return Ok(());
-                    }
                     let approved = state
                         .approval_store
                         .consume(
@@ -14530,6 +14865,59 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
+    #[test]
+    fn private_input_dto_debug_redacts_nested_context_and_answers_without_changing_wire() {
+        let prompt = "Review private reply:\n{\"answer\":\"REVIEW-CANARY\"}\nhttps://example.test/?state=URL-CANARY";
+        let request = ExtensionInputRequest {
+            parent_request_id: 42,
+            prompt: prompt.into(),
+            secret: true,
+        };
+        let event = ExtensionEvent::InputRequested {
+            request_id: ExtensionRequestId::String("input-1".into()),
+            generation: 3,
+            parent_request_id: 42,
+            request: request.clone(),
+        };
+        for debug in [format!("{request:?}"), format!("{event:?}")] {
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains("REVIEW-CANARY"));
+            assert!(!debug.contains("URL-CANARY"));
+            assert!(!debug.contains("example.test"));
+        }
+        let wire = serde_json::json!({
+            "parent_request_id": 42,
+            "prompt": prompt,
+            "secret": true,
+        });
+        assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<ExtensionInputRequest>(wire).unwrap(),
+            request
+        );
+        let ordinary: ExtensionInputRequest = serde_json::from_value(serde_json::json!({
+            "parent_request_id": 42,
+            "prompt": "Name:",
+        }))
+        .unwrap();
+        assert!(!ordinary.secret);
+        assert!(format!("{ordinary:?}").contains("Name:"));
+        for value in [Some("ANSWER-CANARY".to_owned()), Some(String::new()), None] {
+            let response = ExtensionInputResponse {
+                value: value.clone(),
+            };
+            let debug = format!("{response:?}");
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains("ANSWER-CANARY"));
+            let wire = serde_json::json!({"value": value});
+            assert_eq!(serde_json::to_value(&response).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ExtensionInputResponse>(wire).unwrap(),
+                response
+            );
+        }
+    }
+
     const VALID_MANIFEST: &str = r#"
 name = "git-tools"
 version = "0.1.0"
@@ -14598,10 +14986,13 @@ confirmations = true
                 },
                 provider_streams: Arc::new(StdMutex::new(HashMap::new())),
                 tool_catalog: Arc::new(StdRwLock::new(Vec::new())),
+                catalog_revision: Arc::new(AtomicU64::new(0)),
+                catalog_guard: Arc::new(StdRwLock::new(())),
                 catalog_updates,
                 delegation_service: Arc::new(StdRwLock::new(None)),
                 session_lifecycle: None,
                 approval_store: Arc::new(ExtensionApprovalStore::new()),
+                tool_approval_adapter: None,
                 secret_broker: None,
                 extension_identity: ExtensionIdentity {
                     name: "test-extension".into(),
@@ -14640,6 +15031,7 @@ confirmations = true
                 cancellation_sent: Arc::new(AtomicBool::new(false)),
                 progress: None,
                 child_interaction_progress: None,
+                tool_invocation: None,
                 resource_owner,
                 last_progress_sequence: None,
             },
@@ -15291,6 +15683,413 @@ confirmations = true
             .expect("rollback recovers publication capacity");
     }
 
+    struct AskExactTool;
+
+    impl ExtensionToolApprovalAdapter for AskExactTool {
+        fn inspect(
+            &self,
+            _extension: &ExtensionIdentity,
+            _invocation: &ExtensionToolInvocation,
+            _intent: &ExtensionActionIntent,
+        ) -> ExtensionToolApprovalDecision {
+            // Deliberately permissive fixture adapter: the kernel must still
+            // reject mismatched original tool/arguments and every stale fence.
+            ExtensionToolApprovalDecision::Ask
+        }
+    }
+
+    struct CancelDuringToolInspection(CancellationToken);
+
+    impl ExtensionToolApprovalAdapter for CancelDuringToolInspection {
+        fn inspect(
+            &self,
+            _: &ExtensionIdentity,
+            _: &ExtensionToolInvocation,
+            _: &ExtensionActionIntent,
+        ) -> ExtensionToolApprovalDecision {
+            self.0.cancel();
+            ExtensionToolApprovalDecision::Ask
+        }
+    }
+
+    fn exact_tool_policy_request(
+        state: &ProtocolReadState,
+        id: &str,
+        intent: &ExtensionActionIntent,
+        token: Option<&ExtensionApprovalToken>,
+    ) {
+        handle_protocol_line(
+            &serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "method": methods::POLICY_EVALUATE,
+                "params": {"parent_request_id": 7, "intent": intent, "approval_token": token},
+            }))
+            .unwrap(),
+            state,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_tool_approval_revalidates_owner_catalog_and_cancellation_before_issue_and_retry()
+    {
+        for phase in ["issue", "retry"] {
+            for change in [
+                "owner",
+                "instance",
+                "generation",
+                "catalog",
+                "cancel",
+                "inspect_cancel",
+                "transport",
+                "expire",
+            ] {
+                let (events, mut events_rx) = broadcast::channel(8);
+                let (mut state, mut frames) =
+                    protocol_read_state_for_test(ManifestContributions::default(), events);
+                *write_std_lock(&state.protocol) = ExtensionNegotiatedProtocol {
+                    version: EXTENSION_API_VERSION_0_2.into(),
+                    features: API_0_2_REQUIRED_FEATURES
+                        .iter()
+                        .copied()
+                        .chain([
+                            EXTENSION_FEATURE_POLICY_INTENTS,
+                            EXTENSION_FEATURE_APPROVALS,
+                        ])
+                        .map(str::to_owned)
+                        .collect(),
+                    max_concurrent_requests: 1,
+                    lifecycle_events: BTreeSet::new(),
+                };
+                state.tool_approval_adapter = Some(Arc::new(AskExactTool));
+                let owner = test_resource_owner("owner-a");
+                insert_test_parent(&state, 7, Some(owner.clone()));
+                let (progress, mut updates) = ToolProgressSink::bounded_channel();
+                let cancellation = CancellationToken::default();
+                let original = Arc::new(PendingToolInvocation {
+                    original: ExtensionToolInvocation {
+                        tool: "fixture_tool".into(),
+                        arguments: serde_json::json!({"text": "original"}),
+                        catalog_revision: Some(0),
+                        resource_owner: owner,
+                        parent_request_id: 7,
+                    },
+                    cancellation: cancellation.clone(),
+                    deadline: Instant::now()
+                        + if change == "expire" {
+                            Duration::from_millis(50)
+                        } else {
+                            Duration::from_secs(5)
+                        },
+                    approval_requested: AtomicBool::new(false),
+                });
+                {
+                    let mut parents = lock_std_mutex(&state.pending);
+                    let parent = parents.get_mut(&7).unwrap();
+                    parent.child_interaction_progress = Some(progress);
+                    parent.tool_invocation = Some(original.clone());
+                }
+                let intent = ExtensionActionIntent {
+                    kind: "external_side_effect".into(),
+                    operation: "fixture.tool.call".into(),
+                    target: serde_json::json!({"tool": "fixture_tool", "arguments": {"text": "original"}}),
+                    data_classes: Vec::new(),
+                    adapter_hints: Default::default(),
+                };
+                exact_tool_policy_request(&state, "ask", &intent, None);
+                let crate::ToolProgress::Confirmation(confirmation) =
+                    tokio::time::timeout(Duration::from_secs(1), updates.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                else {
+                    panic!("expected private exact-call confirmation");
+                };
+                let token = if phase == "retry" {
+                    confirmation.respond(true);
+                    let frame = frames.recv().await.unwrap();
+                    let value: serde_json::Value = serde_json::from_slice(&frame.line).unwrap();
+                    assert_eq!(value["result"]["decision"], "ask");
+                    Some(
+                        serde_json::from_value::<ExtensionApprovalToken>(
+                            value["result"]["approval_token"].clone(),
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                match change {
+                    "owner" | "instance" => {
+                        let mut parents = lock_std_mutex(&state.pending);
+                        let owner = parents
+                            .get_mut(&7)
+                            .unwrap()
+                            .resource_owner
+                            .as_mut()
+                            .unwrap();
+                        if change == "owner" {
+                            owner.session_id = "owner-b".into();
+                        } else {
+                            owner.extension_instance_id = "instance-b".into();
+                        }
+                    }
+                    "generation" => {
+                        state.draining.store(true, Ordering::Release);
+                    }
+                    "catalog" => {
+                        state.catalog_revision.store(1, Ordering::Release);
+                    }
+                    "cancel" => cancellation.cancel(),
+                    "inspect_cancel" if phase == "retry" => {
+                        state.tool_approval_adapter =
+                            Some(Arc::new(CancelDuringToolInspection(cancellation.clone())));
+                    }
+                    "inspect_cancel" => cancellation.cancel(),
+                    "transport" => state.closed.store(true, Ordering::Release),
+                    "expire" => {
+                        tokio::time::sleep_until(
+                            (original.deadline + Duration::from_millis(1)).into(),
+                        )
+                        .await
+                    }
+                    _ => unreachable!(),
+                }
+                if phase == "retry" {
+                    exact_tool_policy_request(&state, "retry", &intent, token.as_ref());
+                } else {
+                    confirmation.respond(true);
+                }
+                let frame = tokio::time::timeout(Duration::from_secs(1), frames.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&frame.line).unwrap();
+                assert_eq!(value["result"]["decision"], "deny", "{phase}/{change}");
+                assert!(value["result"]["approval_token"].is_null());
+                assert!(state.approval_store.is_empty(), "{phase}/{change}");
+                assert!(matches!(
+                    events_rx.try_recv(),
+                    Err(broadcast::error::TryRecvError::Empty)
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exact_tool_approval_wire_executes_once_or_dispatches_nothing() {
+        for case in [
+            "allow",
+            "deny",
+            "no_ui",
+            "alter_tool",
+            "alter_arguments",
+            "alter_retry",
+            "replace_catalog",
+            "cancel",
+            "overflow",
+        ] {
+            let temp = TempDir::new().unwrap();
+            write_executable_script(
+                &temp.path().join("exact-approval.py"),
+                include_str!("../tests/fixtures/exact_tool_approval.py"),
+            );
+            let manifest = ExtensionManifest::parse(
+                r#"
+name = "exact-approval"
+version = "0.2.0"
+api_version = "0.2"
+[entrypoint]
+command = "exact-approval.py"
+args = ["fixture.tool.call"]
+[contributes]
+tools = ["fixture_tool"]
+commands = ["fixture_command"]
+"#,
+            )
+            .unwrap();
+            let mut runtime = ExtensionRuntimeConfig::new(temp.path());
+            runtime.approvals = true;
+            runtime.tool_approval_adapter = Some(Arc::new(AskExactTool));
+            runtime.request_timeout = Duration::from_secs(5);
+            runtime.supervise = false;
+            let process =
+                ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), runtime)
+                    .await
+                    .unwrap();
+            let mut host = ExtensionHost::new();
+            host.load(&process);
+            host.finalize_tool_surface();
+            let tool = host.tool_snapshot().1[0].clone();
+            let (progress, mut updates) = ToolProgressSink::bounded_channel();
+            if case == "no_ui" {
+                updates.close();
+            }
+            let cancellation = CancellationToken::default();
+            let sandbox = crate::SandboxConfig::new(temp.path());
+            let context = ToolContext {
+                workspace: temp.path(),
+                sandbox: &sandbox,
+                execution_scope: "scope",
+                resource_owner: "owner-a",
+                active_skills: &[],
+                registered_tools: &[],
+                progress,
+                cancellation: cancellation.clone(),
+            };
+            let arguments = serde_json::json!({"case": case, "text": if case == "overflow" { "x".repeat(8192) } else { "original\u{1b}[31m\u{202e}<text>".into() }});
+            let mut events = process.subscribe();
+            let mut prompts = 0;
+            let output = tokio::time::timeout(Duration::from_secs(5), async {
+                let call = tool.execute(arguments.clone(), &context);
+                tokio::pin!(call);
+                loop {
+                    tokio::select! {
+                        output = &mut call => break output,
+                        Some(update) = updates.recv(), if case != "no_ui" => {
+                            if let crate::ToolProgress::Confirmation(confirmation) = update {
+                                prompts += 1;
+                                assert_eq!(prompts, 1, "{case}: no duplicate approval UI");
+                                assert!(confirmation.destructive);
+                                assert!(!confirmation.default);
+                                let detail = confirmation.detail.as_deref().unwrap();
+                                assert_eq!(confirmation.prompt, EXTENSION_TOOL_APPROVAL_PROMPT);
+                                assert!(detail.is_ascii());
+                                assert!(confirmation.prompt.len() + 2 + detail.len() <= 8192);
+                                let preview: serde_json::Value = serde_json::from_str(detail.lines().last().unwrap()).unwrap();
+                                assert_eq!(preview["tool"], "fixture_tool");
+                                assert_eq!(preview["arguments"], arguments);
+                                assert!(!detail.contains("untrusted-server"));
+                                assert!(!format!("{confirmation:?}").contains("original"));
+                                if case == "replace_catalog" {
+                                    while host.tool_definitions()[0].description != "replacement catalog" {
+                                        tokio::task::yield_now().await;
+                                    }
+                                }
+                                if case == "cancel" { cancellation.cancel(); }
+                                confirmation.respond(case != "deny");
+                            }
+                        }
+                    }
+                }
+            }).await.unwrap_or_else(|_| panic!("{case}: tool approval timed out"));
+            if case == "cancel" {
+                assert!(output.is_err());
+            } else {
+                let output = output.unwrap();
+                assert_eq!(
+                    output.text,
+                    if case == "allow" {
+                        "executions=1"
+                    } else {
+                        "executions=0"
+                    },
+                    "{case}"
+                );
+            }
+            assert_eq!(
+                prompts,
+                usize::from(matches!(
+                    case,
+                    "allow" | "deny" | "alter_retry" | "replace_catalog" | "cancel"
+                )),
+                "{case}"
+            );
+            assert!(process.inner.approval_store.is_empty());
+            while let Ok(event) = events.try_recv() {
+                assert!(
+                    !matches!(
+                        event,
+                        ExtensionEvent::PolicyEvaluationRequested { .. }
+                            | ExtensionEvent::ConfirmationRequested { .. }
+                    ),
+                    "no supervisor/event race"
+                );
+            }
+            if case == "replace_catalog" {
+                let output = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    tool.execute(serde_json::json!({}), &context),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    output.text, "executions=0",
+                    "old model catalog cannot authorize after replacement"
+                );
+                assert!(updates.try_recv().is_err());
+            }
+            process.shutdown().await;
+            let marker = temp.path().join("approval-executions");
+            if case == "allow" {
+                assert_eq!(std::fs::read_to_string(marker).unwrap(), "executed\n");
+            } else {
+                assert!(!marker.exists(), "{case}: denied action executed");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_tool_approval_adapter_cannot_bypass_token_negotiation() {
+        let (events, mut events_rx) = broadcast::channel(8);
+        let (mut state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        state.tool_approval_adapter = Some(Arc::new(AskExactTool));
+        {
+            let mut protocol = write_std_lock(&state.protocol);
+            protocol.version = EXTENSION_API_VERSION_0_2.into();
+            protocol
+                .features
+                .insert(EXTENSION_FEATURE_POLICY_INTENTS.into());
+            protocol.features.remove(EXTENSION_FEATURE_APPROVALS);
+        }
+        insert_test_parent(&state, 7, Some(test_resource_owner("owner-a")));
+        let intent = ExtensionActionIntent {
+            kind: "external_side_effect".into(),
+            operation: "fixture.tool.call".into(),
+            target: serde_json::json!({"tool": "fixture_tool", "arguments": {}}),
+            data_classes: Vec::new(),
+            adapter_hints: Default::default(),
+        };
+        let token = state
+            .approval_store
+            .issue(
+                &intent,
+                1,
+                ExtensionRequestId::Number(7),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        exact_tool_policy_request(&state, "unnegotiated", &intent, Some(&token));
+        let response: serde_json::Value =
+            serde_json::from_slice(&frames.try_recv().unwrap().line).unwrap();
+        assert_eq!(response["error"]["code"], -32602);
+        write_std_lock(&state.protocol)
+            .features
+            .insert(EXTENSION_FEATURE_APPROVALS.into());
+        handle_protocol_line(
+            &serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0", "id": "inactive-parent", "method": methods::POLICY_EVALUATE,
+                "params": {"parent_request_id": 999, "intent": intent, "approval_token": token},
+            }))
+            .unwrap(),
+            &state,
+        )
+        .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_slice(&frames.try_recv().unwrap().line).unwrap();
+        assert_eq!(response["error"]["code"], JSON_RPC_REQUEST_CANCELLED);
+        assert!(
+            state.approval_store.is_empty(),
+            "inactive parent burns recognized token"
+        );
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
     #[test]
     fn approval_token_retry_is_single_use_and_emits_no_second_policy_event() {
         let (events, mut events_rx) = broadcast::channel(8);
@@ -15559,6 +16358,7 @@ confirmations = true
                 cancellation_sent: Arc::new(AtomicBool::new(false)),
                 progress: None,
                 child_interaction_progress: None,
+                tool_invocation: None,
                 resource_owner: None,
                 last_progress_sequence: None,
             },
@@ -15604,6 +16404,7 @@ confirmations = true
                 cancellation_sent: Arc::new(AtomicBool::new(false)),
                 progress: None,
                 child_interaction_progress: None,
+                tool_invocation: None,
                 resource_owner: None,
                 last_progress_sequence: None,
             },
@@ -15682,6 +16483,7 @@ confirmations = true
                 cancellation_sent: Arc::new(AtomicBool::new(false)),
                 progress: None,
                 child_interaction_progress: None,
+                tool_invocation: None,
                 resource_owner: None,
                 last_progress_sequence: None,
             },
@@ -15730,6 +16532,7 @@ confirmations = true
                 cancellation_sent: Arc::new(AtomicBool::new(false)),
                 progress: None,
                 child_interaction_progress: None,
+                tool_invocation: None,
                 resource_owner: None,
                 last_progress_sequence: None,
             },

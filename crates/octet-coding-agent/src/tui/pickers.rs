@@ -33,23 +33,24 @@ const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from
 struct SecretInputBuffer(Vec<u8>);
 
 impl SecretInputBuffer {
-    fn push(&mut self, character: char) {
+    fn push(&mut self, character: char) -> bool {
         let mut encoded = [0; 4];
         let bytes = character.encode_utf8(&mut encoded).as_bytes();
-        if self.0.len().saturating_add(bytes.len()) <= MAX_SECRET_INPUT_BYTES {
+        let fits = self.0.len().saturating_add(bytes.len()) <= MAX_SECRET_INPUT_BYTES;
+        if fits {
             self.0.extend_from_slice(bytes);
         }
         encoded.fill(0);
+        fits
     }
 
-    fn extend_paste(&mut self, pasted: &str) {
+    fn extend_paste(&mut self, pasted: &str) -> bool {
         let pasted = pasted.trim_end_matches(['\r', '\n']);
-        let remaining = MAX_SECRET_INPUT_BYTES.saturating_sub(self.0.len());
-        let mut end = pasted.len().min(remaining);
-        while end > 0 && !pasted.is_char_boundary(end) {
-            end -= 1;
+        if pasted.len() > MAX_SECRET_INPUT_BYTES.saturating_sub(self.0.len()) {
+            return false;
         }
-        self.0.extend_from_slice(&pasted.as_bytes()[..end]);
+        self.0.extend_from_slice(pasted.as_bytes());
+        true
     }
 
     fn backspace(&mut self) {
@@ -74,8 +75,31 @@ impl Drop for SecretInputBuffer {
     }
 }
 
-/// Give one running tool exclusive ownership of terminal input. The answer is
-/// sent directly to its reply channel and never enters the ordinary editor.
+/// Also clears private context if the owning picker future is dropped.
+struct ToolInputSurface<'a> {
+    shell: &'a mut InteractiveShell,
+    request: Option<&'a ToolInputRequest>,
+}
+
+impl Drop for ToolInputSurface<'_> {
+    fn drop(&mut self) {
+        if let Some(request) = self.request {
+            request.cancel();
+        }
+        self.shell.set_tool_input_prompt(None);
+        self.shell.render();
+    }
+}
+
+fn private_input_unavailable(shell: &mut InteractiveShell) {
+    shell.error(
+        "Private input cancelled: complete context must fit; terminal write logging must be off."
+            .into(),
+    );
+}
+
+/// Give one running tool exclusive ownership of terminal input. Complete
+/// context stays in a transient panel; answers never enter the ordinary editor.
 pub async fn tool_input_picker<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -84,57 +108,68 @@ pub async fn tool_input_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    shell.set_tool_input_prompt(Some(request.prompt.clone()));
+    let surface = ToolInputSurface {
+        shell,
+        request: Some(request),
+    };
+    let shell = &mut *surface.shell;
+    if !request.is_pending() {
+        return Ok(false);
+    }
+    if !shell.set_tool_input_prompt(Some(request.prompt.clone())) {
+        private_input_unavailable(shell);
+        return Ok(false);
+    }
     shell.render();
     let mut secret = SecretInputBuffer::default();
     loop {
         let next = tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => None,
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                if !request.is_pending() {
+                    return Ok(false);
+                }
+                if !shell.tool_input_fits() {
+                    private_input_unavailable(shell);
+                    return Ok(false);
+                }
+                continue;
+            }
             next = input.next() => next,
         };
-        let event = match next {
-            Some(Ok(event)) => event,
-            Some(Err(error)) => {
-                request.cancel();
-                shell.set_tool_input_prompt(None);
-                shell.render();
-                return Err(error.into());
-            }
-            None => {
-                request.cancel();
-                shell.set_tool_input_prompt(None);
-                shell.render();
-                return Ok(false);
-            }
+        let Some(event) = next else {
+            return Ok(false);
         };
-        if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
-            request.cancel();
-            shell.set_tool_input_prompt(None);
-            shell.request_close();
-            shell.render();
+        let event = event?;
+        if !request.is_pending() {
             return Ok(false);
         }
-        match event {
+        if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
+            shell.request_close();
+            return Ok(false);
+        }
+        if !shell.tool_input_fits() {
+            private_input_unavailable(shell);
+            return Ok(false);
+        }
+        let fits = match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match key.code {
-                    KeyCode::Enter => {
+                    KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                        if !shell.tool_input_was_rendered() {
+                            shell.render();
+                            continue;
+                        }
                         request.respond(secret.take());
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
                         return Ok(true);
                     }
-                    KeyCode::Esc => {
-                        request.cancel();
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
-                        return Ok(false);
+                    KeyCode::Esc => return Ok(false),
+                    KeyCode::Backspace => {
+                        secret.backspace();
+                        true
                     }
-                    KeyCode::Backspace => secret.backspace(),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        request.cancel();
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
                         return Ok(false);
                     }
                     KeyCode::Char(character)
@@ -144,22 +179,36 @@ where
                     {
                         secret.push(character)
                     }
-                    _ => {}
+                    _ => true,
                 }
             }
-            Event::Paste(pasted) => secret.extend_paste(&pasted),
-            Event::Resize(columns, rows) => shell.set_size(columns, rows),
-            _ => {}
+            Event::Paste(pasted) => {
+                let fits = secret.extend_paste(&pasted);
+                pasted.into_bytes().fill(0);
+                fits
+            }
+            Event::Resize(columns, rows) => {
+                shell.set_size(columns, rows);
+                true
+            }
+            _ => true,
+        };
+        if !fits {
+            shell.error("Private input cancelled: answer exceeds 4096 bytes.".into());
+            return Ok(false);
         }
-        // Re-rendering is safe: only the fixed prompt and cursor are visible;
-        // secret bytes never influence frame contents.
+        if !shell.tool_input_fits() {
+            private_input_unavailable(shell);
+            return Ok(false);
+        }
+        // Secret bytes never influence frame contents, including their length.
         shell.render();
     }
 }
 
 /// Give one extension command exclusive ownership of terminal input. Secret
 /// answers never enter the ordinary editor or rendered frame; non-secret setup
-/// values use the same temporary composer surface and are echoed while typed.
+/// values are echoed only on the same temporary private surface.
 pub async fn extension_input_picker<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -168,7 +217,15 @@ pub async fn extension_input_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    shell.set_tool_input_prompt(Some(request.prompt.clone()));
+    let surface = ToolInputSurface {
+        shell,
+        request: None,
+    };
+    let shell = &mut *surface.shell;
+    if !shell.set_tool_input_prompt(Some(request.prompt.clone())) {
+        private_input_unavailable(shell);
+        return Ok(None);
+    }
     shell.render();
     let mut value = SecretInputBuffer::default();
     loop {
@@ -177,45 +234,36 @@ where
             _ = crate::tui::terminal::wait_for_shutdown_signal() => None,
             next = input.next() => next,
         };
-        let event = match next {
-            Some(Ok(event)) => event,
-            Some(Err(error)) => {
-                shell.set_tool_input_prompt(None);
-                shell.render();
-                return Err(error.into());
-            }
-            None => {
-                shell.set_tool_input_prompt(None);
-                shell.render();
-                return Ok(None);
-            }
+        let Some(event) = next else {
+            return Ok(None);
         };
+        let event = event?;
         if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
-            shell.set_tool_input_prompt(None);
             shell.request_close();
-            shell.render();
             return Ok(None);
         }
-        match event {
+        if !shell.tool_input_fits() {
+            private_input_unavailable(shell);
+            return Ok(None);
+        }
+        let fits = match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match key.code {
-                    KeyCode::Enter => {
-                        let bytes = value.take();
-                        let answer = String::from_utf8(bytes)
-                            .map_err(|_| anyhow::anyhow!("extension input was not valid UTF-8"))?;
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
-                        return Ok(Some(answer));
+                    KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                        if !shell.tool_input_was_rendered() {
+                            shell.render();
+                            continue;
+                        }
+                        return Ok(Some(String::from_utf8(value.take()).map_err(|_| {
+                            anyhow::anyhow!("extension input was not valid UTF-8")
+                        })?));
                     }
-                    KeyCode::Esc => {
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
-                        return Ok(None);
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Backspace => {
+                        value.backspace();
+                        true
                     }
-                    KeyCode::Backspace => value.backspace(),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
                         return Ok(None);
                     }
                     KeyCode::Char(character)
@@ -225,20 +273,35 @@ where
                     {
                         value.push(character)
                     }
-                    _ => {}
+                    _ => true,
                 }
             }
-            Event::Paste(pasted) => value.extend_paste(&pasted),
-            Event::Resize(columns, rows) => shell.set_size(columns, rows),
-            _ => {}
-        }
-        let shown = if request.secret {
-            request.prompt.clone()
-        } else {
-            let entered = std::str::from_utf8(&value.0).unwrap_or_default();
-            format!("{} {}", request.prompt, entered)
+            Event::Paste(pasted) => {
+                let fits = value.extend_paste(&pasted);
+                pasted.into_bytes().fill(0);
+                fits
+            }
+            Event::Resize(columns, rows) => {
+                shell.set_size(columns, rows);
+                true
+            }
+            _ => true,
         };
-        shell.set_tool_input_prompt(Some(shown));
+        if !fits {
+            shell.error("Private input cancelled: answer exceeds 4096 bytes.".into());
+            return Ok(None);
+        }
+        if !request.secret {
+            let entered = std::str::from_utf8(&value.0).expect("UTF-8 input");
+            if !shell.set_tool_input_prompt(Some(format!("{} {}", request.prompt, entered))) {
+                private_input_unavailable(shell);
+                return Ok(None);
+            }
+        }
+        if !shell.tool_input_fits() {
+            private_input_unavailable(shell);
+            return Ok(None);
+        }
         shell.render();
     }
 }
@@ -1024,8 +1087,20 @@ where
         request.detail.as_deref(),
         request.destructive,
         request.default,
+        request.require_complete_preview,
     )
     .await
+}
+
+/// Extension command settlement can drop its confirmation future independently
+/// of terminal input. Keep that ordinary panel ephemeral on the drop path too.
+struct ExtensionConfirmationSurface<'a>(&'a mut InteractiveShell);
+
+impl Drop for ExtensionConfirmationSurface<'_> {
+    fn drop(&mut self) {
+        self.0.close_panel();
+        self.0.render();
+    }
 }
 
 pub async fn extension_confirmation_picker<S>(
@@ -1037,14 +1112,16 @@ pub async fn extension_confirmation_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let surface = ExtensionConfirmationSurface(shell);
     let prompt = format!("{extension}: {}", request.prompt);
     confirmation_prompt_picker(
-        shell,
+        &mut *surface.0,
         input,
         &prompt,
         request.detail.as_deref(),
         request.destructive,
         request.default,
+        false,
     )
     .await
 }
@@ -1056,6 +1133,7 @@ async fn confirmation_prompt_picker<S>(
     detail: Option<&str>,
     destructive: bool,
     default: bool,
+    require_complete_preview: bool,
 ) -> anyhow::Result<bool>
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
@@ -1070,7 +1148,7 @@ where
     // independently selectable.
     let shared_detail = detail.map(str::to_owned);
     let descriptions = vec![shared_detail.clone(), shared_detail];
-    let title = if destructive {
+    let title = if destructive && !require_complete_preview {
         format!("Action requires approval · {prompt}")
     } else {
         prompt.to_owned()
@@ -1082,7 +1160,13 @@ where
         items,
         descriptions,
         0,
-        PanelAction::Confirmation,
+        if require_complete_preview {
+            PanelAction::CompleteConfirmation {
+                approve_index: usize::from(!default),
+            }
+        } else {
+            PanelAction::Confirmation
+        },
     )
     .await?;
     Ok(selected.map(|index| decisions[index]).unwrap_or(false))
@@ -1341,6 +1425,142 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use tokio_stream::wrappers::ReceiverStream;
+
+    #[test]
+    fn private_input_buffer_accepts_exact_bound_without_truncating_paste_or_unicode() {
+        let mut buffer = SecretInputBuffer::default();
+        assert!(buffer.extend_paste(&"x".repeat(MAX_SECRET_INPUT_BYTES - 2)));
+        assert!(buffer.push('é'));
+        assert_eq!(buffer.0.len(), MAX_SECRET_INPUT_BYTES);
+        assert!(!buffer.push('x'));
+        assert!(!buffer.extend_paste("tail"));
+        assert_eq!(buffer.0.len(), MAX_SECRET_INPUT_BYTES);
+        buffer.backspace();
+        assert_eq!(buffer.0.len(), MAX_SECRET_INPUT_BYTES - 2);
+        assert!(buffer.extend_paste("ok\r\n"));
+        assert_eq!(buffer.take().len(), MAX_SECRET_INPUT_BYTES);
+        assert!(buffer.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_confirmation_picker_denies_clipped_preview_but_allows_complete_normal_width()
+    {
+        for (padding, width, height, expected) in [
+            (5 * 1024, 80, 24, false),
+            (400, 80, 24, true),
+            (5 * 1024, 240, 50, true),
+            (0, 46, 24, false),
+            (0, 80, 6, false),
+        ] {
+            let (sink, mut progress) = octet_agent::ToolProgressSink::bounded_channel();
+            let detail = serde_json::json!({"a_padding": "x".repeat(padding), "z_consequence": "delete-production"}).to_string();
+            let ask = tokio::spawn(async move {
+                sink.confirmation_with_complete_preview(
+                    octet_agent::extension_policy::EXTENSION_TOOL_APPROVAL_PROMPT.into(),
+                    detail,
+                    true,
+                    false,
+                )
+                .await
+            });
+            let octet_agent::ToolProgress::Confirmation(request) = progress.recv().await.unwrap()
+            else {
+                panic!("confirmation")
+            };
+            assert!(request.require_complete_preview);
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, height);
+            let mut input = futures_util::stream::iter(
+                [KeyCode::Down, KeyCode::Enter, KeyCode::Esc]
+                    .map(|code| Ok(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))),
+            );
+            let allowed = confirmation_picker(&mut shell, &mut input, &request)
+                .await
+                .unwrap();
+            request.respond(allowed);
+            assert_eq!(allowed, expected, "{width}x{height}, {padding} bytes");
+            assert_eq!(ask.await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_confirmation_picker_rechecks_resize_and_never_infers_consent() {
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        for (default, events, expected) in [
+            (false, vec![key(KeyCode::Enter)], false),
+            (false, vec![], false),
+            (false, vec![key(KeyCode::Esc)], false),
+            (
+                false,
+                vec![
+                    key(KeyCode::Down),
+                    Event::Resize(80, 6),
+                    key(KeyCode::Enter),
+                ],
+                false,
+            ),
+            (
+                false,
+                vec![
+                    Event::Resize(46, 24),
+                    key(KeyCode::Down),
+                    key(KeyCode::Enter),
+                ],
+                false,
+            ),
+            (
+                false,
+                vec![
+                    Event::Resize(46, 24),
+                    key(KeyCode::Down),
+                    key(KeyCode::Enter),
+                    Event::Resize(80, 24),
+                    key(KeyCode::Enter),
+                ],
+                true,
+            ),
+            (
+                true,
+                vec![Event::Resize(46, 24), key(KeyCode::Enter)],
+                false,
+            ),
+            (true, vec![key(KeyCode::Enter)], true),
+            (
+                true,
+                vec![
+                    Event::Resize(46, 24),
+                    key(KeyCode::Down),
+                    key(KeyCode::Enter),
+                ],
+                false,
+            ),
+        ] {
+            let (sink, mut progress) = octet_agent::ToolProgressSink::bounded_channel();
+            let ask = tokio::spawn(async move {
+                sink.confirmation_with_complete_preview(
+                    octet_agent::extension_policy::EXTENSION_TOOL_APPROVAL_PROMPT.into(),
+                    "Untrusted tool data (complete JSON):\n{\"tool\":\"fixture\",\"arguments\":{}}"
+                        .into(),
+                    true,
+                    default,
+                )
+                .await
+            });
+            let octet_agent::ToolProgress::Confirmation(request) = progress.recv().await.unwrap()
+            else {
+                panic!("confirmation")
+            };
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(80, 24);
+            let mut input = futures_util::stream::iter(events.into_iter().map(Ok));
+            let allowed = confirmation_picker(&mut shell, &mut input, &request)
+                .await
+                .unwrap();
+            request.respond(allowed);
+            assert_eq!(allowed, expected);
+            assert_eq!(ask.await.unwrap(), expected);
+        }
+    }
 
     #[test]
     fn active_choice_is_focused_and_marked_without_reordering() {

@@ -814,6 +814,262 @@ fn confirmation_allows_a_visible_action_when_the_title_is_clipped() {
 }
 
 #[test]
+fn complete_confirmation_never_approves_omitted_consequences_and_rechecks_resize() {
+    let detail = serde_json::json!({"a_padding": "x".repeat(5 * 1024), "z_consequence": "delete-production"}).to_string();
+    for (width, height, complete) in [(80, 24, false), (46, 8, false), (240, 50, true)] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(width, height);
+        shell.open_panel(Panel::SelectList {
+            surface: OrdinarySurfaceMetadata::new("Approve this exact tool call once?"),
+            items: vec!["Deny".into(), "Approve".into()],
+            descriptions: vec![Some(detail.clone()); 2],
+            selected: 1,
+            filter: String::new(),
+            action: PanelAction::CompleteConfirmation { approve_index: 1 },
+        });
+        let rows = shell_chrome(&shell.state.borrow(), width, Instant::now()).panel;
+        let visible = rows
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            visible.contains("delete-production"),
+            complete,
+            "{width}x{height}"
+        );
+        assert!(rows
+            .iter()
+            .all(|line| visible_width(line) <= usize::from(width)));
+        assert_eq!(
+            shell
+                .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                .is_some(),
+            complete
+        );
+        if !complete {
+            // Denial remains available even when evidence is too large.
+            shell.panel_input(&panel_key(crossterm::event::KeyCode::Up));
+            assert_eq!(
+                shell
+                    .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                    .unwrap()
+                    .0,
+                PanelResult::Confirm(0)
+            );
+        }
+    }
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(240, 50);
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Approve this exact tool call once?"),
+        items: vec!["Deny".into(), "Approve".into()],
+        descriptions: vec![Some(detail); 2],
+        selected: 1,
+        filter: String::new(),
+        action: PanelAction::CompleteConfirmation { approve_index: 1 },
+    });
+    let wide = shell_chrome(&shell.state.borrow(), 240, Instant::now()).panel;
+    assert!(wide.iter().any(|line| line.contains("delete-production")));
+    shell.set_size(80, 8);
+    assert!(
+        shell
+            .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+            .is_none(),
+        "a previously complete frame cannot authorize after narrowing"
+    );
+}
+
+#[test]
+fn complete_confirmation_uses_available_rows_without_lossy_json_whitespace() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 24);
+    let detail = format!(
+        "Untrusted tool data (complete JSON):\n{}",
+        serde_json::json!({
+            "a": "data  with  two  spaces".repeat(18), "z": "trailing-consequence"
+        })
+    );
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Approve this exact tool call once?"),
+        items: vec!["Deny".into(), "Approve".into()],
+        descriptions: vec![Some(detail.clone()); 2],
+        selected: 1,
+        filter: String::new(),
+        action: PanelAction::CompleteConfirmation { approve_index: 1 },
+    });
+    let rows = shell_chrome(&shell.state.borrow(), 80, Instant::now()).panel;
+    assert!(
+        rows.len() > 6,
+        "exact preview must not use the cooperative three-row cap"
+    );
+    let plain = rows
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>();
+    let prefix = plain[1].find("Untrusted").unwrap();
+    let recovered = plain[1..plain.len() - 2]
+        .iter()
+        .map(|line| &line[prefix..])
+        .collect::<String>();
+    // Physical wrapping must preserve every original byte, including whitespace
+    // inside JSON strings. Ordinary summary word wrapping does not do this.
+    assert_eq!(recovered, detail.replace('\n', ""));
+    assert_eq!(
+        shell
+            .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+            .unwrap()
+            .0,
+        PanelResult::Confirm(1)
+    );
+}
+
+#[test]
+fn complete_confirmation_requires_literal_evidence_and_the_complete_host_heading() {
+    use octet_agent::extension_policy::EXTENSION_TOOL_APPROVAL_PROMPT;
+
+    for (title, detail) in [
+        (EXTENSION_TOOL_APPROVAL_PROMPT.to_owned(), None),
+        (
+            EXTENSION_TOOL_APPROVAL_PROMPT.to_owned(),
+            Some(String::new()),
+        ),
+        (
+            EXTENSION_TOOL_APPROVAL_PROMPT.to_owned(),
+            Some("x".repeat(8192)),
+        ),
+        (
+            EXTENSION_TOOL_APPROVAL_PROMPT.to_owned(),
+            Some("before\u{1b}[2Jhidden".into()),
+        ),
+        (
+            EXTENSION_TOOL_APPROVAL_PROMPT.to_owned(),
+            Some("before\u{202e}hidden".into()),
+        ),
+        (
+            EXTENSION_TOOL_APPROVAL_PROMPT.to_owned(),
+            Some("before\rhidden".into()),
+        ),
+        ("before\u{1b}[2Jhidden".into(), Some("{}".into())),
+        ("too long a heading ".repeat(20), Some("{}".into())),
+    ] {
+        // The approving item can be first or second. A suggested default must
+        // never bypass complete review, and denial must remain usable.
+        for approve_index in [0, 1] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(80, 24);
+            let mut items = vec!["Deny".into(); 2];
+            items[approve_index] = "Approve".into();
+            shell.open_panel(Panel::SelectList {
+                surface: OrdinarySurfaceMetadata::new(title.clone()),
+                items,
+                descriptions: vec![detail.clone(); 2],
+                selected: approve_index,
+                filter: String::new(),
+                action: PanelAction::CompleteConfirmation { approve_index },
+            });
+            assert!(shell
+                .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                .is_none());
+            shell.panel_input(&panel_key(if approve_index == 0 {
+                crossterm::event::KeyCode::Down
+            } else {
+                crossterm::event::KeyCode::Up
+            }));
+            assert_eq!(
+                shell
+                    .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                    .unwrap()
+                    .0,
+                PanelResult::Confirm(1 - approve_index)
+            );
+        }
+    }
+}
+
+#[test]
+fn complete_confirmation_approvable_preview_is_wholly_on_the_emitted_terminal_screen() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use octet_agent::extension_policy::{
+        EXTENSION_TOOL_APPROVAL_PROMPT, MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES,
+    };
+
+    let make_detail = |padding| {
+        format!(
+            "Untrusted tool data (complete JSON):\n{}",
+            serde_json::json!({"a_padding": "x".repeat(padding), "z_consequence": "delete-production"}),
+        )
+    };
+    let maximum_padding = MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES
+        - EXTENSION_TOOL_APPROVAL_PROMPT.len()
+        - 2
+        - make_detail(0).len();
+    for application_viewport in [false, true] {
+        for unicode in [false, true] {
+            for (width, height, padding, expected) in [
+                (1, 1, 0, false),
+                (80, 4, 0, false),
+                (80, 5, 0, false),
+                (80, 6, 0, false),
+                (46, 24, 0, false), // Even a short detail needs the complete heading.
+                (80, 24, 400, true),
+                (80, 24, 5 * 1024, false),
+                (240, 50, 5 * 1024, true),
+                (240, 50, maximum_padding, true),
+                (240, 50, maximum_padding + 1, false),
+            ] {
+                let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+                    true,
+                    unicode,
+                    if unicode {
+                        ColorDepth::TrueColor
+                    } else {
+                        ColorDepth::None
+                    },
+                ));
+                let (mut shell, bytes) =
+                    emulated_shell_with_mode(theme, width, height, true, application_viewport);
+                // Occupied transcript/native history and a draft must not push
+                // approvable evidence above the physical viewport.
+                shell.on_prompt_submitted(&"prior transcript row\n".repeat(60));
+                shell.apply_edit(EditAction::Char('x'));
+                let detail = make_detail(padding);
+                shell.open_panel(Panel::SelectList {
+                    surface: OrdinarySurfaceMetadata::new(EXTENSION_TOOL_APPROVAL_PROMPT),
+                    items: vec!["Deny".into(), "Approve".into()],
+                    descriptions: vec![Some(detail); 2],
+                    selected: 1,
+                    filter: String::new(),
+                    action: PanelAction::CompleteConfirmation { approve_index: 1 },
+                });
+                shell.render();
+                let panel = shell_chrome(&shell.state.borrow(), width, Instant::now()).panel;
+                let mut terminal = vt100::Parser::new(height, width, 0);
+                terminal.process(&bytes.lock().unwrap());
+                if expected {
+                    let expected_rows = panel
+                        .iter()
+                        .map(|line| strip_terminal_sequences(line).trim_end().to_owned())
+                        .collect::<Vec<_>>();
+                    let screen = terminal.screen().contents();
+                    let screen_rows = screen.lines().collect::<Vec<_>>();
+                    assert!(screen_rows.windows(expected_rows.len()).any(|window| {
+                        window.iter().zip(&expected_rows).all(|(actual, expected)| actual == expected)
+                    }), "{width}x{height}, unicode={unicode}, viewport={application_viewport}: {screen}");
+                }
+                assert_eq!(
+                    shell
+                        .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                        .is_some(),
+                    expected,
+                    "{width}x{height}, unicode={unicode}, viewport={application_viewport}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn select_list_filter_narrows_items_and_confirm_returns_original_index() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 24);
@@ -1213,21 +1469,18 @@ fn select_list_home_end_and_page_navigation_stay_bounded() {
 }
 
 #[test]
-fn secret_tool_prompt_temporarily_owns_composer_without_touching_the_editor() {
+fn private_tool_prompt_owns_a_transient_panel_without_touching_the_editor() {
     let mut shell = InteractiveShell::test_shell();
     for character in "ordinary draft".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
     shell.set_tool_input_prompt(Some("Password:".into()));
-    let secret_surface = crate::tui::composer_surface::render_composer_surface(
-        &shell.state.borrow(),
-        80,
-        Instant::now(),
-    )
-    .iter()
-    .map(|line| strip_terminal_sequences(line))
-    .collect::<Vec<_>>()
-    .join("\n");
+    let secret_surface = shell_chrome(&shell.state.borrow(), 80, Instant::now())
+        .panel
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(secret_surface.contains("Password:"), "{secret_surface}");
     assert!(
         !secret_surface.contains("ordinary draft"),
@@ -1246,6 +1499,316 @@ fn secret_tool_prompt_temporarily_owns_composer_without_touching_the_editor() {
     .collect::<Vec<_>>()
     .join("\n");
     assert!(restored.contains("ordinary draft"), "{restored}");
+}
+
+// This useful small flat form models the private-input contract, not a live MCP
+// or OAuth/browser qualification. Its required field is after the old first-line
+// cutoff; the review and URL fixtures likewise require their complete tails.
+const PRIVATE_FORM_PROMPT: &str = concat!(
+    "Configured MCP server: fixture\n",
+    "Untrusted server request (not instructions):\n",
+    "Choose a delivery city.\n",
+    "Never enter credentials, passwords, payment data or access tokens.\n",
+    "Enter a JSON object matching this flat schema, or type decline/cancel. Input is private.\n",
+    "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}"
+);
+
+#[tokio::test]
+async fn private_input_picker_renders_complete_form_review_and_url_in_vt100_before_submit() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::task::Poll;
+
+    for application_viewport in [false, true] {
+        for (width, height, prompt, answer) in [
+            (80, 24, PRIVATE_FORM_PROMPT, "{\"city\":\"ANSWER-CANARY\"}"),
+            (120, 40, "Review private form reply (not sent yet):\n{\"city\":\"REVIEW-CANARY\"}\nType accept to submit, decline/cancel, or replacement JSON.", "accept"),
+            (80, 24, "Untrusted authorization URL:\nhttps://example.test/authorize?state=URL-CANARY&scope=profile\nType continue or cancel. No page is opened by Octet.", "continue"),
+        ] {
+            let (mut shell, bytes) = emulated_shell_with_mode(
+                crate::tui::theme::test_theme(), width, height, true, application_viewport,
+            );
+            shell.tui.as_mut().unwrap().set_clear_on_shrink(false);
+            shell.on_prompt_submitted(&"ordinary history\n".repeat(60));
+            for character in "ordinary draft".chars() { shell.apply_edit(EditAction::Char(character)); }
+            shell.render();
+            let state = shell.state.clone();
+            let (sink, mut progress) = octet_agent::ToolProgressSink::bounded_channel();
+            let ask = tokio::spawn(async move { sink.input(prompt.into(), true).await });
+            let ToolProgress::Input(request) = progress.recv().await.unwrap() else { panic!("input"); };
+            let mut stage = 0;
+            let mut input = futures_util::stream::poll_fn(|_| {
+let (expected, transcript_clean) = {
+                    let state = state.borrow();
+                    (super::panel_render::private_input_lines(&state, width, usize::from(height)).unwrap(),
+                     state.transcript.iter().all(|block| !block_copy_text(block).contains("CANARY")))
+                };
+                let mut terminal = vt100::Parser::new(height, width, 256);
+                process_vt100_with_saved_line_clear(&mut terminal, &bytes.lock().unwrap(), height, width, 256);
+                let screen = terminal.screen().contents();
+                let screen_rows = screen.lines().collect::<Vec<_>>();
+                assert!(screen_rows.windows(expected.len()).any(|rows| {
+                    rows.iter().zip(&expected).all(|(actual, expected)| actual.trim_end() == expected.trim_end())
+                }), "every private context row must be visible before input is accepted: {width}x{height}, application_viewport={application_viewport}");
+                assert!(screen.contains(TOOL_INPUT_CAPTION));
+                assert!(!screen.contains("ANSWER-CANARY"));
+                assert!(!screen.contains("ordinary draft"));
+                assert!(expected.iter().all(|row| visible_width(row) <= usize::from(width)));
+                assert!(transcript_clean);
+                let event = if stage == 0 {
+                    Event::Paste(answer.into())
+                } else {
+                    Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                };
+                stage += 1;
+                Poll::Ready(Some(Ok(event)))
+            });
+            assert!(crate::tui::pickers::tool_input_picker(&mut shell, &mut input, &request).await.unwrap());
+            assert_eq!(ask.await.unwrap().unwrap().as_bytes(), answer.as_bytes());
+            assert_eq!(shell.pending(), "ordinary draft");
+            assert!(shell.state.borrow().tool_input_prompt.is_none());
+            assert!(!shell.debug_snapshot().contains("CANARY"));
+            // Force later appends into history. No former private request row
+            // may survive in either live cells or terminal-owned saved lines.
+            shell.on_prompt_submitted(&"later history\n".repeat(60));
+            shell.render();
+            let mut terminal = vt100::Parser::new(height, width, 512);
+            process_vt100_with_saved_line_clear(&mut terminal, &bytes.lock().unwrap(), height, width, 512);
+            terminal.set_size(512, width);
+            terminal.set_scrollback(usize::MAX);
+            let all = terminal.screen().contents();
+            assert!(!all.contains("CANARY"));
+            assert!(!all.contains("Configured MCP server"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn private_input_extension_command_picker_shows_complete_context_and_preserves_echo_policy() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::task::Poll;
+    for secret in [false, true] {
+        let (mut shell, bytes) = emulated_shell(crate::tui::theme::test_theme(), 80, 24);
+        let state = shell.state.clone();
+        let request = octet_agent::extension_process::ExtensionInputRequest {
+            parent_request_id: 1,
+            prompt: "Configured server: fixture\nhttps://example.test/authorize?state=COMMAND-URL\nType continue or cancel. Required trailing context.".into(),
+            secret,
+        };
+        let mut stage = 0;
+        let mut input = futures_util::stream::poll_fn(|_| {
+            let mut terminal = vt100::Parser::new(24, 80, 0);
+            terminal.process(&bytes.lock().unwrap());
+            let screen = terminal.screen().contents();
+            assert!(screen.contains("COMMAND-URL"));
+            assert!(screen.contains("Required trailing context."));
+            let echoed = screen.contains("ECHO-CANARY");
+            assert_eq!(echoed, !secret && stage > 0);
+            assert!(state.borrow().editor.is_empty());
+            let event = if stage == 0 {
+                Event::Paste("ECHO-CANARY".into())
+            } else {
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            };
+            stage += 1;
+            Poll::Ready(Some(Ok(event)))
+        });
+        assert_eq!(
+            crate::tui::pickers::extension_input_picker(&mut shell, &mut input, &request)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("ECHO-CANARY")
+        );
+        assert!(shell.state.borrow().tool_input_prompt.is_none());
+        assert!(shell.debug_snapshot().is_empty());
+        for event in [Event::Resize(20, 4), Event::Paste("x".repeat(4097))] {
+            shell.set_size(80, 24);
+            let mut input = futures_util::stream::iter([
+                Ok(event),
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+            ]);
+            assert!(
+                crate::tui::pickers::extension_input_picker(&mut shell, &mut input, &request)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(shell.state.borrow().tool_input_prompt.is_none());
+            shell.clear_error();
+        }
+    }
+}
+
+#[test]
+fn private_input_speculative_fit_does_not_authorize_an_unrendered_request() {
+    let mut shell = InteractiveShell::test_shell();
+    assert!(shell.set_tool_input_prompt(Some(PRIVATE_FORM_PROMPT.into())));
+    assert!(shell.tool_input_fits());
+    assert!(!shell.tool_input_was_rendered());
+    shell.render();
+    assert!(shell.tool_input_was_rendered());
+    shell.set_size(100, 30);
+    assert!(shell.tool_input_fits());
+    assert!(!shell.tool_input_was_rendered());
+    shell.render();
+    assert!(shell.tool_input_was_rendered());
+    assert!(shell.set_tool_input_prompt(Some("Review:\nprivate answer".into())));
+    assert!(!shell.tool_input_was_rendered());
+}
+
+#[test]
+fn private_input_never_reaches_backend_bytes_when_write_logging_is_configured() {
+    let (mut shell, bytes) = emulated_shell(crate::tui::theme::test_theme(), 80, 24);
+    shell.state.borrow_mut().terminal_write_log_configured = true;
+    assert!(!shell.set_tool_input_prompt(Some("Private reply:\nLOG-CANARY".into())));
+    shell.render();
+    assert!(!String::from_utf8_lossy(&bytes.lock().unwrap()).contains("LOG-CANARY"));
+    assert!(shell.state.borrow().tool_input_prompt.is_none());
+}
+
+#[test]
+fn private_input_escapes_untrusted_controls_and_rechecks_renderer_resize() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    for application_viewport in [false, true] {
+        for unicode in [false, true] {
+            let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+                true,
+                unicode,
+                if unicode {
+                    ColorDepth::TrueColor
+                } else {
+                    ColorDepth::None
+                },
+            ));
+            let (mut shell, bytes) =
+                emulated_shell_with_mode(theme, 80, 24, true, application_viewport);
+            shell.tui.as_mut().unwrap().set_clear_on_shrink(false);
+            shell.on_prompt_submitted(&"ordinary history\n".repeat(60));
+            assert!(shell.set_tool_input_prompt(Some("Private review\n{\"a\":\"two  spaces\",\"z\":\"TRAIL-CANARY\"}\n\u{001b}]8;;https://bad.test\u{0007}\u{202e}tail\tend\r".into())));
+            shell.render();
+            let mut terminal = vt100::Parser::new(24, 80, 256);
+            process_vt100_with_saved_line_clear(&mut terminal, &bytes.lock().unwrap(), 24, 80, 256);
+            let screen = terminal.screen().contents();
+            assert!(screen.contains("TRAIL-CANARY"));
+            assert!(screen.contains("two  spaces"));
+            assert!(screen.contains(r"\u{1b}]8;;https://bad.test\u{7}\u{202e}tail\tend\r"));
+            assert!(shell.tool_input_fits());
+            bytes.lock().unwrap().clear();
+            // Includes the renderer's polling path, not only key-stream Resize.
+            reconcile_terminal_size(&shell.state, &shell.size, (46, 8));
+            shell.render();
+            assert!(!shell.tool_input_fits());
+            terminal.set_size(8, 46);
+            process_vt100_with_saved_line_clear(&mut terminal, &bytes.lock().unwrap(), 8, 46, 256);
+            assert!(!terminal.screen().contents().contains("TRAIL-CANARY"));
+            shell.set_tool_input_prompt(None);
+            shell.render();
+            assert!(!shell.debug_snapshot().contains("TRAIL-CANARY"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn private_input_fails_closed_on_clipping_logging_overflow_resize_and_cancel() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    let enter = || Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for (width, height, prompt, logging, script) in [
+        (80, 24, "first\n".repeat(100), false, vec![enter()]),
+        (80, 24, "x".repeat(16 * 1024 + 1), false, vec![enter()]),
+        (80, 24, "\u{202e}".repeat(4000), false, vec![enter()]),
+        (1, 1, "Name:".into(), false, vec![enter()]),
+        (80, 24, PRIVATE_FORM_PROMPT.into(), true, vec![enter()]),
+        (
+            80,
+            24,
+            PRIVATE_FORM_PROMPT.into(),
+            false,
+            vec![Event::Resize(46, 8), enter()],
+        ),
+        (
+            80,
+            24,
+            PRIVATE_FORM_PROMPT.into(),
+            false,
+            vec![Event::Paste("x".repeat(4097)), enter()],
+        ),
+        (
+            80,
+            24,
+            PRIVATE_FORM_PROMPT.into(),
+            false,
+            vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))],
+        ),
+        (
+            80,
+            24,
+            PRIVATE_FORM_PROMPT.into(),
+            false,
+            vec![Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            ))],
+        ),
+        (80, 24, PRIVATE_FORM_PROMPT.into(), false, vec![]),
+    ] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(width, height);
+        shell.state.borrow_mut().terminal_write_log_configured = logging;
+        let (sink, mut progress) = octet_agent::ToolProgressSink::bounded_channel();
+        let ask = tokio::spawn(async move { sink.input(prompt, true).await });
+        let ToolProgress::Input(request) = progress.recv().await.unwrap() else {
+            panic!("input");
+        };
+        let mut input = futures_util::stream::iter(script.into_iter().map(Ok));
+        assert!(
+            !crate::tui::pickers::tool_input_picker(&mut shell, &mut input, &request)
+                .await
+                .unwrap()
+        );
+        assert!(ask.await.unwrap().is_none());
+        assert!(shell.state.borrow().tool_input_prompt.is_none());
+        assert!(shell.pending_is_empty());
+        assert!(shell.debug_snapshot().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn private_input_clears_on_owner_settlement_or_dropped_picker_future() {
+    for drop_picker in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        let (sink, mut progress) = octet_agent::ToolProgressSink::bounded_channel();
+        let ask = tokio::spawn(async move { sink.input(PRIVATE_FORM_PROMPT.into(), true).await });
+        let ToolProgress::Input(request) = progress.recv().await.unwrap() else {
+            panic!("input");
+        };
+        let mut input = futures_util::stream::pending();
+        let mut picker = Box::pin(crate::tui::pickers::tool_input_picker(
+            &mut shell, &mut input, &request,
+        ));
+        assert!(futures_util::poll!(picker.as_mut()).is_pending());
+        if drop_picker {
+            drop(picker);
+            assert!(ask.await.unwrap().is_none());
+        } else {
+            ask.abort();
+            assert!(matches!(ask.await, Err(error) if error.is_cancelled()));
+            assert!(
+                !tokio::time::timeout(Duration::from_secs(1), picker.as_mut())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            );
+            drop(picker);
+        }
+        assert!(!request.is_pending());
+        assert!(shell.state.borrow().tool_input_prompt.is_none());
+        assert!(shell.pending_is_empty());
+        assert!(shell.debug_snapshot().is_empty());
+    }
 }
 
 #[test]

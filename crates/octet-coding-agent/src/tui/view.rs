@@ -601,9 +601,15 @@ pub(crate) enum PanelAction {
     ReadOnlyDocument,
     /// Confirm or deny a typed tool request.
     Confirmation,
+    /// The designated approving action requires a completely rendered preview.
+    CompleteConfirmation { approve_index: usize },
 }
 
 impl PanelAction {
+    pub(crate) fn is_confirmation(&self) -> bool {
+        matches!(self, Self::Confirmation | Self::CompleteConfirmation { .. })
+    }
+
     pub(crate) fn is_model_picker(&self) -> bool {
         matches!(self, Self::SelectModel(_) | Self::SelectGroupedModel { .. })
     }
@@ -921,9 +927,15 @@ pub(crate) struct ShellState {
     /// Changes whenever the ephemeral tool prompt changes without mutating the
     /// normal editor draft.
     tool_input_revision: u64,
-    /// Ephemeral tool-owned prompt rendered in place of the editor. Secret
-    /// keystrokes never enter `editor` or any transcript/session structure.
+    /// Complete escaped private context rendered in the transient panel area.
+    /// Secret keystrokes never enter this, `editor`, or transcript/session state.
     pub(crate) tool_input_prompt: Option<String>,
+    /// Backend-byte logging has no private-text exclusion channel. Refuse
+    /// private prompts while it is configured instead of leaking review data.
+    terminal_write_log_configured: bool,
+    /// Geometry/revision only, never a private prompt snapshot. An input event
+    /// cannot settle a newly queued context before the renderer has built it.
+    tool_input_rendered: Cell<Option<(u64, u16, u16)>>,
     /// Durable request to leave the interactive frontend. Exclusive picker and
     /// lifecycle loops set this so the owning outer loop can finish in-flight
     /// cleanup before exiting.
@@ -1071,6 +1083,8 @@ pub(crate) struct ShellState {
 }
 
 const STATUS_RAINBOW_DURATION: Duration = Duration::from_secs(2);
+const MAX_PRIVATE_INPUT_PROMPT_BYTES: usize = 16 * 1024;
+const TOOL_INPUT_CAPTION: &str = "Input - enter submit / esc cancel";
 
 fn status_rainbow_strength_at(reasoning: Option<&str>, elapsed: Option<Duration>) -> u16 {
     if !matches!(reasoning, Some("max" | "ultra")) {
@@ -1110,10 +1124,10 @@ impl ShellState {
         geometry: ComposerEditorGeometry,
     ) -> Ref<'_, ComposerEditorProjection> {
         let (source, text, cursor) = match &self.tool_input_prompt {
-            Some(prompt) => (
+            Some(_) => (
                 ComposerEditorSource::ToolPrompt(self.tool_input_revision),
-                prompt.as_str(),
-                prompt.len(),
+                TOOL_INPUT_CAPTION,
+                TOOL_INPUT_CAPTION.len(),
             ),
             None => (
                 ComposerEditorSource::Draft(self.editor.text_revision()),
@@ -2397,6 +2411,7 @@ impl InteractiveShell {
                 capabilities: image_capabilities,
             },
             terminal_images: image_store,
+            terminal_write_log_configured: std::env::var_os("OCTET_TUI_WRITE_LOG").is_some(),
             ..ShellState::default()
         });
         let (render_tx, render_rx) = mpsc::sync_channel(1);
@@ -2489,6 +2504,7 @@ impl InteractiveShell {
             let mut state = self.state.borrow_mut();
             let enabled = state.image_rendering.enabled;
             state.update_image_rendering(enabled, image_capabilities);
+            state.terminal_write_log_configured = std::env::var_os("OCTET_TUI_WRITE_LOG").is_some();
         }
         let current_size = *self.size.lock().expect("terminal size mutex poisoned");
         self.set_size(current_size.0, current_size.1);
@@ -3848,16 +3864,69 @@ impl InteractiveShell {
         self.state.borrow().editor.text().to_owned()
     }
 
-    pub fn set_tool_input_prompt(&mut self, prompt: Option<String>) {
+    /// Install complete ephemeral request context, never a clipped first line.
+    /// All non-ASCII/control characters are visible escapes; JSON/URLs remain
+    /// literal text, not Markdown, hyperlinks, or terminal control sequences.
+    /// Returns false if the context cannot be safely presented by this shell.
+    pub fn set_tool_input_prompt(&mut self, prompt: Option<String>) -> bool {
         let mut state = self.state.borrow_mut();
-        state.tool_input_prompt = prompt.map(|prompt| {
-            sanitize_for_terminal(&prompt)
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_owned()
-        });
+        state.tool_input_prompt = None;
+        state.tool_input_rendered.set(None);
+        state.composer_editor_cache.replace(None);
         state.tool_input_revision = state.tool_input_revision.saturating_add(1);
+        let Some(prompt) = prompt else {
+            return true;
+        };
+        if state.terminal_write_log_configured
+            || state.panel.is_some()
+            || state.overlay.is_some()
+            || prompt.trim().is_empty()
+            || prompt.len() > MAX_PRIVATE_INPUT_PROMPT_BYTES
+        {
+            return false;
+        }
+        let mut escaped = String::with_capacity(prompt.len());
+        for character in prompt.chars() {
+            if character == '\n' || character.is_ascii() && !character.is_ascii_control() {
+                escaped.push(character);
+            } else {
+                escaped.extend(character.escape_default());
+            }
+            if escaped.len() > MAX_PRIVATE_INPUT_PROMPT_BYTES {
+                return false;
+            }
+        }
+        state.tool_input_prompt = Some(escaped);
+        drop(state);
+        self.tool_input_fits()
+    }
+
+    /// Revalidate the actual shared chrome and literal panel layout, including
+    /// renderer-polled resizes, immediately before accepting an answer.
+    pub(crate) fn tool_input_fits(&self) -> bool {
+        let state = self.state.borrow();
+        let width = state.size.0;
+        if state.tool_input_prompt.is_none()
+            || state.terminal_write_log_configured
+            || state.panel.is_some()
+            || state.overlay.is_some()
+            || composer_editor_geometry(&state, width).text_width() < TOOL_INPUT_CAPTION.len()
+        {
+            return false;
+        }
+        let rendered = state.tool_input_rendered.get();
+        let chrome = shell_chrome(&state, width, Instant::now());
+        // A speculative layout check must not count as a renderer-built frame.
+        state.tool_input_rendered.set(rendered);
+        self::shell_chrome::shell_chrome_rows(&chrome) <= usize::from(state.size.1)
+            && self::panel_render::private_input_lines(&state, width, chrome.panel.len())
+                .is_some_and(|lines| lines == chrome.panel)
+    }
+
+    pub(crate) fn tool_input_was_rendered(&self) -> bool {
+        let state = self.state.borrow();
+        state.tool_input_rendered.get()
+            == Some((state.tool_input_revision, state.size.0, state.size.1))
     }
 
     pub fn set_input_modalities(&mut self, modalities: ModalitySet) {
@@ -4707,14 +4776,13 @@ impl InteractiveShell {
         let rendered_panel = shell_chrome(&state, size.0, Instant::now()).panel;
         let visible_panel_rows = rendered_panel.len();
         let confirmation_render = match state.panel.as_ref() {
-            Some(Panel::SelectList {
-                action: PanelAction::Confirmation,
-                ..
-            }) => self::panel_render::confirmation_metadata_for_rendered_panel(
-                &state,
-                size.0,
-                &rendered_panel,
-            ),
+            Some(Panel::SelectList { action, .. }) if action.is_confirmation() => {
+                self::panel_render::confirmation_metadata_for_rendered_panel(
+                    &state,
+                    size.0,
+                    &rendered_panel,
+                )
+            }
             _ => None,
         };
         let document_page_step =
@@ -4739,7 +4807,7 @@ impl InteractiveShell {
             Panel::MessagePicker { .. } => PanelAction::MessagePicker,
             Panel::ReadOnlyDocument { .. } => PanelAction::ReadOnlyDocument,
         };
-        let confirmation = matches!(&action, PanelAction::Confirmation);
+        let confirmation = action.is_confirmation();
         match panel {
             Panel::SelectList {
                 items,

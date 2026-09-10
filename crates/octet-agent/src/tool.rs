@@ -257,6 +257,10 @@ pub struct ToolConfirmation {
     pub destructive: bool,
     /// Suggested choice when a frontend can represent a default.
     pub default: bool,
+    /// Approval is permitted only if the complete prompt and detail remain
+    /// inspectable after all frontend transformations. Clipped or lossy
+    /// presentation must deny; ordinary cooperative confirmations leave this off.
+    pub require_complete_preview: bool,
     reply: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
 }
 
@@ -264,7 +268,8 @@ pub struct ToolConfirmation {
 /// never included in progress events, debug output, or session state.
 #[derive(Clone)]
 pub struct ToolInputRequest {
-    /// Short prompt shown by an interactive frontend.
+    /// Complete private request/review context for an interactive frontend.
+    /// It must remain ephemeral and fully inspectable before accepting input.
     pub prompt: String,
     /// Whether the frontend must suppress echo and ordinary editor handling.
     pub secret: bool,
@@ -272,6 +277,14 @@ pub struct ToolInputRequest {
 }
 
 impl ToolInputRequest {
+    /// Whether the owning operation can still receive this request's answer.
+    /// Frontends use this to dismiss private UI when the owner settles.
+    pub fn is_pending(&self) -> bool {
+        self.reply
+            .lock()
+            .is_ok_and(|reply| reply.as_ref().is_some_and(|sender| !sender.is_closed()))
+    }
+
     /// Deliver one answer. Repeated answers are ignored.
     pub fn respond(&self, bytes: Vec<u8>) {
         if let Ok(mut reply) = self.reply.lock() {
@@ -295,7 +308,14 @@ impl std::fmt::Debug for ToolInputRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ToolInputRequest")
-            .field("prompt", &self.prompt)
+            .field(
+                "prompt",
+                &if self.secret {
+                    "[REDACTED]"
+                } else {
+                    &self.prompt
+                },
+            )
             .field("secret", &self.secret)
             .finish_non_exhaustive()
     }
@@ -336,6 +356,7 @@ impl std::fmt::Debug for ToolConfirmation {
             .field("detail", &self.detail.as_ref().map(|_| "[REDACTED]"))
             .field("destructive", &self.destructive)
             .field("default", &self.default)
+            .field("require_complete_preview", &self.require_complete_preview)
             .finish_non_exhaustive()
     }
 }
@@ -533,12 +554,38 @@ impl ToolProgressSink {
         destructive: bool,
         default: bool,
     ) -> bool {
+        self.confirmation_inner(prompt, detail, destructive, default, false)
+            .await
+    }
+
+    /// Ask once only when the frontend can present the complete preview. This
+    /// is a generic display requirement, not permission or a domain classifier.
+    pub async fn confirmation_with_complete_preview(
+        &self,
+        prompt: String,
+        detail: String,
+        destructive: bool,
+        default: bool,
+    ) -> bool {
+        self.confirmation_inner(prompt, Some(detail), destructive, default, true)
+            .await
+    }
+
+    async fn confirmation_inner(
+        &self,
+        prompt: String,
+        detail: Option<String>,
+        destructive: bool,
+        default: bool,
+        require_complete_preview: bool,
+    ) -> bool {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.send_one(ToolProgress::Confirmation(ToolConfirmation {
             prompt,
             detail,
             destructive,
             default,
+            require_complete_preview,
             reply: Arc::new(std::sync::Mutex::new(Some(reply))),
         }));
         answer.await.unwrap_or(false)
@@ -1730,21 +1777,41 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
         let sink = ToolProgressSink::live(tx);
         let waiter = tokio::spawn(async move {
-            sink.input("Password:".into(), true)
-                .await
-                .expect("interactive answer")
+            sink.input(
+                "Review private reply:\n{\"answer\":\"swordfish\"}".into(),
+                true,
+            )
+            .await
+            .expect("interactive answer")
         });
         let request = match rx.recv().await.expect("input request") {
             ToolProgress::Input(request) => request,
             _ => panic!("expected input request"),
         };
         let debug = format!("{request:?}");
-        assert!(debug.contains("Password:"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Review private reply"));
+        assert!(request.is_pending());
         assert!(!debug.contains("swordfish"));
         request.respond(b"swordfish".to_vec());
+        assert!(!request.is_pending());
         let response = waiter.await.unwrap();
         assert_eq!(response.as_bytes(), b"swordfish");
         assert!(!format!("{request:?}").contains("swordfish"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_input_debug_preserves_prompt_and_owner_settlement_closes_input() {
+        let (sink, mut progress) = ToolProgressSink::bounded_channel();
+        let waiter = tokio::spawn(async move { sink.input("Name:".into(), false).await });
+        let ToolProgress::Input(request) = progress.recv().await.unwrap() else {
+            panic!("input request");
+        };
+        assert!(format!("{request:?}").contains("Name:"));
+        assert!(request.is_pending());
+        waiter.abort();
+        assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+        assert!(!request.is_pending());
     }
 
     #[test]

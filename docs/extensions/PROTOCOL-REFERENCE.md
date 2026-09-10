@@ -249,10 +249,17 @@ The host likewise appends `approvals` only when single-use approval issuance is
 enabled, and appends `secrets` only when a secret broker is configured and the
 manifest's exact `[capabilities].secrets` allowlist is non-empty. Negotiating
 `approvals` also requires `policy_intents`; neither conditional service may be
-returned when it was not offered. The coding product currently leaves
-approvals disabled, configures no secret broker, and supervises generic
-`policy/evaluate` requests with `deny`, so it offers neither conditional
-feature.
+returned when it was not offered. The source coding product enables approvals
+only for the trusted, enabled, isolated API `0.2` `octet-mcp` bridge, using a
+generic exact-call adapter. This is an unreleased host/bundle change, not a claim
+about published `0.7.3` installations. The adapter may ask once, never grant a
+blanket allow: original tool/arguments/catalog/owner/generation/parent are bound
+by the host, complete escaped evidence must be reviewable, and stale, altered,
+cancelled or unavailable/noninteractive confirmations deny. It does not complete
+#383's typed automation app/origin/fresh-observation policy. Other generic
+`policy/evaluate` requests remain supervised with `deny`. No host secret broker
+is configured and `secrets` is not offered; MCP's explicit private authentication
+store is extension-owned, not a second host secrets service.
 
 Secret names are duplicate-free identifiers of at most 64 ASCII bytes. The
 first character is a letter or underscore; subsequent characters may also use
@@ -1052,7 +1059,16 @@ text and are bounded to 16 KiB UTF-8; answers are bounded to 256 KiB UTF-8; the
 editor handling in an interactive frontend. Secret answers stay on the private
 reply channel and are never placed in diagnostics, progress, session state, or
 persistence. Headless/unavailable input is cancelled rather than guessed.
-Parent settlement cancels the pending input request.
+Parent settlement cancels the pending input request. A secret prompt may itself
+contain private review context; it must not enter diagnostics or public events.
+
+The unreleased source coding TUI requires the complete escaped context to fit its
+actual viewport before accepting input. Raw/escaped prompts remain capped at
+16 KiB; its input buffer has a stricter 4096-byte limit. Overflow, clipping,
+unsuitable resize and configured `OCTET_TUI_WRITE_LOG` cancel. Serve has no private
+prompt channel and cancels tool input without public pending-request events or
+blind substitute prompts; extension commands remain headless. These frontend
+limits do not change the API `0.2` wire bounds.
 
 ---
 
@@ -1153,8 +1169,10 @@ generation before its bounded expiry (at most five minutes). Expiry, reuse, or
 intent/parent/generation mismatch returns `deny`; a recognized mismatched token
 is consumed as well. Supplying a token without negotiated `approvals` is
 rejected with `-32602`. Approval capability state is invalidated on generation
-replacement. The coding product currently has approvals off and no domain
-policy adapter, so its policy supervisor returns `deny` without a token.
+replacement. The unreleased source coding product enables this only through the
+isolated API `0.2` `octet-mcp` exact-call adapter described above; every other
+extension remains default-deny. This is not #383's domain-specific automation
+policy, and published `0.7.3` binaries do not acquire the new adapter.
 
 An extension may send `$/cancelRequest` for one of its own outstanding child
 request IDs. The host also sends it automatically when the owning parent

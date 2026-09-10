@@ -4293,7 +4293,6 @@ struct CheckoutRollbackGate {
 
 enum PrivateResponse {
     Approval(Box<dyn FnOnce(bool) + Send + Sync>),
-    Input(Box<dyn FnOnce(Option<Vec<u8>>) + Send + Sync>),
 }
 
 struct PrivateRequest {
@@ -7343,45 +7342,6 @@ async fn handle_active_command(
                         .await;
                     Ok(DriverCommandOutcome::default())
                 }
-                Some(PrivateRequest {
-                    kind,
-                    response: PrivateResponse::Input(respond),
-                }) => {
-                    let answer = match answer {
-                        RequestAnswer::Text { text } => text,
-                        RequestAnswer::Choice { choice } => choice,
-                        _ => {
-                            projection.private_requests.insert(
-                                request_id,
-                                PrivateRequest {
-                                    kind,
-                                    response: PrivateResponse::Input(respond),
-                                },
-                            );
-                            let _ = message.response.send(Err(ServiceError::InvalidBoundary));
-                            return;
-                        }
-                    };
-                    respond(Some(answer.into_bytes()));
-                    let changed = PendingRequest {
-                        id: request_id,
-                        actor_generation: projection_actor_generation(run_id),
-                        kind,
-                        state: RequestState::Resolved,
-                    };
-                    let _ = events
-                        .send(event(EventPayload::PendingRequestChanged {
-                            request: changed,
-                        }))
-                        .await;
-                    let _ = events
-                        .send(event(EventPayload::SessionStateChanged {
-                            state: SessionLiveState::Working,
-                            active_run_id: Some(run_id.clone()),
-                        }))
-                        .await;
-                    Ok(DriverCommandOutcome::default())
-                }
                 None => Err(ServiceError::InvalidBoundary),
             }
         }
@@ -9653,7 +9613,6 @@ async fn expire_private_requests(
     for (id, request) in projection.private_requests.drain() {
         match request.response {
             PrivateResponse::Approval(respond) => respond(false),
-            PrivateResponse::Input(respond) => respond(None),
         }
         events
             .send(event(EventPayload::PendingRequestChanged {
@@ -9735,12 +9694,17 @@ async fn project_tool_progress(
                 projection.request_counter
             ))
             .map_err(|_| ServiceError::Internal)?;
-            let action = approval_action(&request.prompt, request.detail.as_deref());
+            let original_action = approval_action(&request.prompt, request.detail.as_deref());
+            let action = bounded_text(&original_action, 8 * 1024);
+            if request.require_complete_preview && action != original_action {
+                request.respond(false);
+                return Ok(());
+            }
             let pending = PendingRequest {
                 id: request_id.clone(),
                 actor_generation: projection_actor_generation(run_id),
                 kind: RequestKind::Approval {
-                    action: bounded_text(&action, 8 * 1024),
+                    action,
                     item_id: projection.tool_items.get(&id.0).cloned(),
                 },
                 state: RequestState::Pending,
@@ -9770,48 +9734,11 @@ async fn project_tool_progress(
                 .map_err(|_| ServiceError::Unavailable)?;
         }
         ToolProgress::Input(request) => {
-            projection.request_counter = projection.request_counter.saturating_add(1);
-            let request_id = RequestId::new(format!(
-                "request-{}-{}",
-                run_id.as_str(),
-                projection.request_counter
-            ))
-            .map_err(|_| ServiceError::Internal)?;
-            let pending = PendingRequest {
-                id: request_id.clone(),
-                actor_generation: projection_actor_generation(run_id),
-                kind: RequestKind::UserInput {
-                    // The extension-owned prompt is private tool progress. Do
-                    // not forward it verbatim across the public boundary.
-                    prompt: "A tool needs additional input to continue.".into(),
-                    choices: Vec::new(),
-                },
-                state: RequestState::Pending,
-            };
-            let kind = pending.kind.clone();
-            projection.private_requests.insert(
-                request_id,
-                PrivateRequest {
-                    kind,
-                    response: PrivateResponse::Input(Box::new(move |answer| match answer {
-                        Some(answer) => request.respond(answer),
-                        None => request.cancel(),
-                    })),
-                },
-            );
-            events
-                .send(event(EventPayload::PendingRequestChanged {
-                    request: pending,
-                }))
-                .await
-                .map_err(|_| ServiceError::Unavailable)?;
-            events
-                .send(event(EventPayload::SessionStateChanged {
-                    state: SessionLiveState::NeedsInput,
-                    active_run_id: Some(run_id.clone()),
-                }))
-                .await
-                .map_err(|_| ServiceError::Unavailable)?;
+            // The pending-request contract is public/replayable. A generic
+            // substitute would invite a blind answer; the actual prompt may
+            // contain private form replies or authorization URLs. No existing
+            // private prompt channel is available, so cancel truthfully.
+            request.cancel();
         }
         ToolProgress::SessionEvent(_, _) => {}
     }
@@ -16936,6 +16863,37 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         );
     }
 
+    #[tokio::test]
+    async fn private_input_progress_cancels_without_public_or_blind_pending_request() {
+        for secret in [false, true] {
+            let (sink, mut progress) = octet_agent::ToolProgressSink::bounded_channel();
+            let ask = tokio::spawn(async move {
+                sink.input(
+                    "Review private form reply:\n{\"private\":\"ANSWER-CANARY\"}\nhttps://example.test/?code=URL-CANARY".into(),
+                    secret,
+                ).await
+            });
+            let mut projection = ProjectionState::new(0);
+            let (events, mut receiver) = mpsc::channel(4);
+            project_tool_progress(
+                ToolCallId("private-input".into()),
+                progress.recv().await.unwrap(),
+                &RunId::new("private-input-run").unwrap(),
+                &mut projection,
+                &events,
+            )
+            .await
+            .unwrap();
+            assert!(ask.await.unwrap().is_none());
+            assert!(projection.private_requests.is_empty());
+            assert_eq!(projection.request_counter, 0);
+            assert!(
+                receiver.try_recv().is_err(),
+                "private requests must produce no public events"
+            );
+        }
+    }
+
     #[test]
     fn approval_progress_forwards_the_trusted_prompt_and_bounded_intent_detail() {
         let action = approval_action(
@@ -16948,6 +16906,80 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         assert!(action.contains("content: bounded-preview"));
         assert!(action.contains("intent SHA-256: digest-canary"));
         assert!(!action.contains("Approve this tool action?"));
+    }
+
+    #[tokio::test]
+    async fn complete_approval_progress_preserves_large_trailing_evidence_or_denies_loss() {
+        use octet_agent::extension_policy::{
+            EXTENSION_TOOL_APPROVAL_PROMPT, MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES,
+        };
+
+        let make_detail = |padding| {
+            format!(
+                "Untrusted tool data (complete JSON):\n{}",
+                serde_json::json!({"a_padding": "x".repeat(padding), "z_consequence": "delete-production  permanently"}),
+            )
+        };
+        let maximum_padding = MAX_EXTENSION_TOOL_APPROVAL_PREVIEW_BYTES
+            - EXTENSION_TOOL_APPROVAL_PROMPT.len()
+            - 2
+            - make_detail(0).len();
+        for (detail, expected) in [
+            (make_detail(5 * 1024), true),
+            (make_detail(maximum_padding), true),
+            (make_detail(maximum_padding + 1), false),
+            ("x".repeat(8 * 1024), false),
+            ("before\u{202e}hidden consequence".into(), false),
+            ("before\u{001b}[2Jhidden consequence".into(), false),
+        ] {
+            let (sink, mut progress) = octet_agent::ToolProgressSink::bounded_channel();
+            let original = approval_action(EXTENSION_TOOL_APPROVAL_PROMPT, Some(&detail));
+            let ask = tokio::spawn(async move {
+                sink.confirmation_with_complete_preview(
+                    EXTENSION_TOOL_APPROVAL_PROMPT.into(),
+                    detail,
+                    true,
+                    false,
+                )
+                .await
+            });
+            let mut projection = ProjectionState::new(0);
+            let (events, mut receiver) = mpsc::channel(4);
+            project_tool_progress(
+                ToolCallId("complete-preview".into()),
+                progress.recv().await.unwrap(),
+                &RunId::new("run-complete-preview").unwrap(),
+                &mut projection,
+                &events,
+            )
+            .await
+            .unwrap();
+            if expected {
+                let EventPayload::PendingRequestChanged { request } =
+                    receiver.recv().await.unwrap().payload
+                else {
+                    panic!("approval event")
+                };
+                let RequestKind::Approval { action, .. } = request.kind else {
+                    panic!("approval kind")
+                };
+                assert_eq!(action, original);
+                assert!(action.contains("delete-production  permanently"));
+                let PrivateResponse::Approval(respond) = projection
+                    .private_requests
+                    .remove(&request.id)
+                    .unwrap()
+                    .response;
+                respond(true);
+            } else {
+                assert!(
+                    projection.private_requests.is_empty(),
+                    "incomplete preview must have no approvable request"
+                );
+                assert!(receiver.try_recv().is_err());
+            }
+            assert_eq!(ask.await.unwrap(), expected);
+        }
     }
 
     #[test]

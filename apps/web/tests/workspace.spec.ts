@@ -1386,6 +1386,59 @@ test("renders an explicit approval decision", async ({ page }) => {
   await expect(page.getByText("Allowed once")).toBeVisible();
 });
 
+test("keeps the complete large approval preview inspectable before approval", async ({ page }) => {
+  const makePreview = (padding: number) =>
+    `Approve this exact tool call once? It may change external state.\n\nUntrusted tool data (complete JSON):\n${JSON.stringify({
+      a_padding: "x".repeat(padding),
+      z_consequence: "delete-production  permanently",
+    })}`;
+  const preview = makePreview(8 * 1024 - makePreview(0).length);
+  expect(preview.length).toBe(8 * 1024);
+  // Feed the actual fixture transport before it clones the session; do not
+  // replace the rendered approval DOM or its styles in this regression.
+  await page.route("**/src/fixtures.ts", async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({
+      response,
+      body: `${await response.text()}\n{
+        const approval = fixtureSessions["session-attention"].items.find(item => item.kind === "approval");
+        approval.description = ${JSON.stringify(preview)};
+        approval.title = ${JSON.stringify(`Allow ${preview}?`)};
+      }`,
+    });
+  });
+  await page.reload();
+  await selectSession(page, "Prepare signed macOS build");
+  const card = page.getByRole("region", { name: "Approval needed" });
+  const detail = card.locator(".approval-copy p");
+  await expect.poll(() => detail.textContent()).toBe(preview);
+  const approve = card.getByRole("button", { name: "Allow once" });
+  await approve.scrollIntoViewIfNeeded();
+  const presentation = await detail.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const range = document.createRange();
+    const text = element.firstChild!;
+    range.setStart(text, text.textContent!.indexOf("delete-production"));
+    range.setEnd(text, text.textContent!.length);
+    const tail = range.getBoundingClientRect();
+    const viewport = element.closest(".transcript-scroll")!.getBoundingClientRect();
+    return {
+      whiteSpace: style.whiteSpace,
+      overflowWrap: style.overflowWrap,
+      noHorizontalClipping: element.scrollWidth <= element.clientWidth + 1,
+      noVerticalClipping: element.scrollHeight <= element.clientHeight + 1,
+      tailInspectable: tail.top >= viewport.top && tail.bottom <= viewport.bottom,
+    };
+  });
+  expect(presentation).toEqual({
+    whiteSpace: "pre-wrap", overflowWrap: "anywhere",
+    noHorizontalClipping: true, noVerticalClipping: true, tailInspectable: true,
+  });
+  await expectNoViewportOverflow(page);
+  await approve.click();
+  await expect(page.getByText("Allowed once")).toBeVisible();
+});
+
 test("uses one fixed workbench appearance", async ({ page }) => {
   await ensureSidebar(page);
   await page.getByRole("button", { name: /Settings/ }).click();

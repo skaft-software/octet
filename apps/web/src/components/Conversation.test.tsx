@@ -2337,6 +2337,37 @@ describe("conversation composer", () => {
     );
   });
 
+  it("renders complete approval evidence literally beyond 4 KiB, including trailing consequences", async () => {
+    const user = userEvent.setup();
+    const session = structuredClone(fixtureSessions["session-attention"]!);
+    const approval = session.items.find((item) => item.kind === "approval")!;
+    if (approval.kind !== "approval") throw new Error("approval fixture");
+    const preview = `Approve this exact tool call once?\n\n${JSON.stringify({
+      a_padding: "x".repeat(5 * 1024),
+      z_consequence: "delete-production  permanently <script>not HTML</script>",
+    })}`;
+    approval.description = preview;
+    const onResolveApproval = vi.fn().mockResolvedValue(undefined);
+    render(
+      <Conversation
+        session={session}
+        bootstrap={structuredClone(fixtureBootstrap)}
+        onSubmit={noOp}
+        onInterrupt={noOp}
+        onConfigure={noOp}
+        onResolveApproval={onResolveApproval}
+        onResolveUserInput={noOp}
+        onOpenOutput={() => {}}
+        onOpenSource={() => {}}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "Approval needed" });
+    expect(card.querySelector(".approval-copy p")?.textContent).toBe(preview);
+    expect(card.querySelector("script")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Allow once" }));
+    expect(onResolveApproval).toHaveBeenCalledWith(approval.requestId, "allowed_once");
+  });
+
   it("keeps interruption available while a failed image remains retryable", async () => {
     const user = userEvent.setup();
     const onInterrupt = vi.fn().mockResolvedValue(undefined);

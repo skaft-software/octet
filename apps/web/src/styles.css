@@ -2979,12 +2979,17 @@ kbd {
 
 .approval-copy h3 {
   margin-top: 3px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .approval-copy p {
   margin-top: 7px;
   color: var(--text-soft);
   line-height: 1.52;
+  /* Approval evidence is literal text, never a collapsed or clipped summary. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .approval-scope {
