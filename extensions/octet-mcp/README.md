@@ -9,6 +9,8 @@ for you.
 host and extension from this PR stack, not the published `0.7.3` binary/bundle.
 Remote HTTP remains experimental. [Qualification](QUALIFICATION.md) pins the
 compatibility target and keeps unsupported features and unrun journeys explicit.
+[Candidate evidence](qualification/candidate.json) separately pins the tested
+implementation, unsigned artifacts and remaining gates; it is not live qualification.
 
 ## Connect a local server
 
