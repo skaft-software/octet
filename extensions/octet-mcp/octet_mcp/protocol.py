@@ -111,7 +111,7 @@ from .config import Limits, ServerConfig
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset(
-    {MCP_PROTOCOL_VERSION, "2025-03-26", "2024-11-05"}
+    {MCP_PROTOCOL_VERSION, "2025-11-25", "2025-03-26", "2024-11-05"}
 )
 CLIENT_NAME = "octet-mcp"
 CLIENT_VERSION = "0.7.3"
@@ -234,6 +234,7 @@ class _Pending:
     result: Any = None
     error: Optional[McpError] = None
     progress: Optional[Callable[[Mapping[str, Any]], None]] = None
+    dispatch_guard: Optional[Callable[[], None]] = None
 
 
 class McpStdioClient:
@@ -454,6 +455,7 @@ class McpStdioClient:
         *,
         cancellation: Any = None,
         progress: Optional[Callable[[Mapping[str, Any]], None]] = None,
+        dispatch_guard: Optional[Callable[[], None]] = None,
     ) -> Mapping[str, Any]:
         result = self.request(
             "tools/call",
@@ -462,6 +464,7 @@ class McpStdioClient:
             cancellation=cancellation,
             progress=progress,
             include_progress_token=True,
+            dispatch_guard=dispatch_guard,
         )
         if not isinstance(result, Mapping):
             raise McpProtocolError("invalid_result", "MCP tool result was malformed")
@@ -476,6 +479,7 @@ class McpStdioClient:
         cancellation: Any = None,
         progress: Optional[Callable[[Mapping[str, Any]], None]] = None,
         include_progress_token: bool = False,
+        dispatch_guard: Optional[Callable[[], None]] = None,
     ) -> Any:
         if not isinstance(method, str) or not method:
             raise ValueError("MCP request method must be non-empty")
@@ -498,6 +502,7 @@ class McpStdioClient:
                     progress_token=progress_token,
                     event=threading.Event(),
                     progress=progress,
+                    dispatch_guard=dispatch_guard,
                 )
                 self._pending[request_id] = pending
                 if progress is not None:
@@ -517,6 +522,7 @@ class McpStdioClient:
                 },
                 deadline=deadline,
                 cancellation=cancellation,
+                dispatch_guard=dispatch_guard,
             )
             while True:
                 remaining = deadline - time.monotonic()
@@ -624,6 +630,7 @@ class McpStdioClient:
                     "params": {"requestId": pending.request_id, "reason": reason[:256]},
                 },
                 deadline=time.monotonic() + min(0.5, self.limits.shutdown_timeout_ms / 1000),
+                dispatch_guard=pending.dispatch_guard,
             )
         except McpError:
             pass
@@ -634,6 +641,7 @@ class McpStdioClient:
         *,
         deadline: Optional[float] = None,
         cancellation: Any = None,
+        dispatch_guard: Optional[Callable[[], None]] = None,
     ) -> None:
         try:
             payload = json.dumps(
@@ -662,9 +670,9 @@ class McpStdioClient:
                 stdin = process.stdin
             try:
                 if os.name == "posix":
-                    self._write_nonblocking(stdin.fileno(), payload, deadline, cancellation)
+                    self._write_nonblocking(stdin.fileno(), payload, deadline, cancellation, dispatch_guard)
                 else:  # pragma: no cover - Windows release host
-                    self._write_in_thread(stdin, payload, deadline, cancellation)
+                    self._write_in_thread(stdin, payload, deadline, cancellation, dispatch_guard)
             except (McpTimeout, McpCancelled):
                 raise
             except (BrokenPipeError, OSError, ValueError) as error:
@@ -675,13 +683,18 @@ class McpStdioClient:
                 raise transport_error from error
 
     def _write_nonblocking(
-        self, fd: int, payload: bytes, deadline: float, cancellation: Any
+        self, fd: int, payload: bytes, deadline: float, cancellation: Any,
+        dispatch_guard: Optional[Callable[[], None]] = None,
     ) -> None:
         view = memoryview(payload)
         written = 0
         while written < len(view):
             self._check_write_boundary(deadline, cancellation)
             try:
+                # Recheck after writer admission, not before a potentially long
+                # queue/lock wait. EAGAIN did not send bytes: recheck on retry.
+                if written == 0 and dispatch_guard is not None:
+                    dispatch_guard()
                 count = os.write(fd, view[written:])
             except BlockingIOError:
                 count = 0
@@ -692,13 +705,17 @@ class McpStdioClient:
             select.select([], [fd], [], min(0.05, max(0.0, remaining)))
 
     def _write_in_thread(
-        self, stdin: Any, payload: bytes, deadline: float, cancellation: Any
+        self, stdin: Any, payload: bytes, deadline: float, cancellation: Any,
+        dispatch_guard: Optional[Callable[[], None]] = None,
     ) -> None:
         complete = threading.Event()
         errors: list[BaseException] = []
 
         def write() -> None:
             try:
+                self._check_write_boundary(deadline, cancellation)
+                if dispatch_guard is not None:
+                    dispatch_guard()
                 stdin.write(payload)
                 stdin.flush()
             except BaseException as error:
@@ -801,6 +818,9 @@ class McpStdioClient:
                     "invalid_frame", "MCP server emitted an invalid method", permanent=True
                 )
             if "id" in message:
+                # Legacy stdio provides no exact host-operation correlation.
+                # Even one pending call is not evidence of origin: never borrow
+                # its owner/parent for unsolicited elicitation (or sampling).
                 self._reply_method_not_found(message["id"])
                 return
             params = message.get("params", {})
