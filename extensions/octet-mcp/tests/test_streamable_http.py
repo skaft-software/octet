@@ -232,7 +232,10 @@ class _TokenProvider:
         self.token = token
         self.calls: list[tuple[str, str]] = []
 
-    def bearer_token(self, credential: str, *, server_id: str) -> Optional[str]:
+    def bearer_token(
+        self, credential: str, *, server_id: str, deadline: Optional[float] = None,
+        cancel: Callable[[], bool] = lambda: False,
+    ) -> Optional[str]:
         self.calls.append((credential, server_id))
         return self.token
 
@@ -542,6 +545,7 @@ class StreamableHttpTests(unittest.TestCase):
             self.assertEqual(len(outcome), 1)
             self.assertIsInstance(outcome[0], McpCancelled)
             self.assertTrue(cancelled_received.wait(1), "cancellation notification was not received")
+            wait_for(lambda: not client._operations, timeout=.3, message="socket abort without peer cooperation")
             self.assertTrue(client.alive)
         finally:
             release_call.set()
