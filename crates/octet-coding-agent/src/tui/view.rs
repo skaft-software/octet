@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use std::io::{IsTerminal, Write as IoWrite};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -191,6 +189,8 @@ enum TranscriptBlock {
     /// informational events. Approval/denial notices use `NoticeStatus` so
     /// their margin marker can carry the outcome without colouring the text.
     Notice(String),
+    /// One UI-only stable-release notice with a rich inline-code action.
+    UpdateAvailable(semver::Version),
     NoticeStatus {
         text: String,
         tone: NoticeTone,
@@ -387,6 +387,7 @@ enum ShellOverlay {
 enum ReportBody {
     Text { text: String, styled: bool },
     Context(crate::tui::context::ContextReport),
+    Markdown(sexy_tui_rs::Document),
 }
 
 /// Mutable presentation state for a report over the transcript viewport.
@@ -828,6 +829,10 @@ struct ShellAutocompleteOverlay {
 
 #[derive(Default)]
 pub(crate) struct ShellState {
+    /// Newer stable version for this invocation's mutable startup splash.
+    available_update: Option<semver::Version>,
+    /// Invocation-wide late notice retained through model/session rehydration.
+    late_update_notice: Option<semver::Version>,
     /// Active interactive panel, if any.
     pub(crate) panel: Option<Panel>,
     /// View-layer requests waiting for the picker driver to execute.
@@ -898,7 +903,7 @@ pub(crate) struct ShellState {
     /// Input modalities of the active model; gates attach attempts.
     pub(crate) input_modalities: ModalitySet,
     /// Workspace root and its lazily built mention-completion index.
-    workspace: Option<PathBuf>,
+    pub(crate) workspace: Option<PathBuf>,
     file_index: Option<Vec<String>>,
     /// Selected result in the bounded path/mention completion list.
     path_selection: usize,
@@ -1965,11 +1970,16 @@ impl ShellState {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn advance_status_shimmer(&mut self) {
+        self.advance_status_shimmer_by(1);
+    }
+
+    pub(crate) fn advance_status_shimmer_by(&mut self, ticks: usize) {
         if !self.has_active_status_shimmer() {
             return;
         }
-        self.status_shimmer_frame = self.status_shimmer_frame.wrapping_add(1);
+        self.status_shimmer_frame = self.status_shimmer_frame.wrapping_add(ticks);
         let active = self
             .active_event_blocks
             .iter()
@@ -2049,11 +2059,11 @@ impl ShellState {
     /// Advance only the braille thinking spinner. Unlike the shared event-dot
     /// cycle this never toggles the tool/shell dots, so a fast spinner frame
     /// rate does not hurry the rest of the transcript's pulse.
-    pub(crate) fn advance_thinking_spinner(&mut self) {
+    pub(crate) fn advance_thinking_spinner(&mut self, ticks: usize) {
         if !self.has_active_thinking_spinner() {
             return;
         }
-        self.event_spinner_frame = self.event_spinner_frame.wrapping_add(1) % 10;
+        self.event_spinner_frame = (self.event_spinner_frame + ticks % 10) % 10;
         let active = self
             .active_event_blocks
             .iter()
@@ -2072,12 +2082,19 @@ impl ShellState {
         }
     }
 
+    #[cfg(test)]
     fn advance_event_dot_animation(&mut self) {
+        self.advance_event_dot_animation_by(1);
+    }
+
+    fn advance_event_dot_animation_by(&mut self, ticks: usize) {
         if !self.has_active_event_dot() {
             return;
         }
-        self.event_dot_visible = !self.event_dot_visible;
-        self.event_spinner_frame = self.event_spinner_frame.wrapping_add(1) % 10;
+        if ticks % 2 == 1 {
+            self.event_dot_visible = !self.event_dot_visible;
+        }
+        self.event_spinner_frame = (self.event_spinner_frame + ticks % 10) % 10;
         for position in 0..self.active_event_blocks.len() {
             let index = self.active_event_blocks[position];
             let markers_enabled = self.theme.resolve::<bool>("margin_markers").unwrap_or(true);
@@ -2359,7 +2376,7 @@ pub struct InteractiveShell {
     tui: Option<TUI<'static>>,
     state: SharedState,
     size: TerminalSize,
-    render_tx: Option<SyncSender<RenderCommand>>,
+    render_tx: Arc<Mutex<Option<SyncSender<RenderCommand>>>>,
     render_thread: Option<JoinHandle<()>>,
     capture_mouse: bool,
 }
@@ -2416,7 +2433,7 @@ impl InteractiveShell {
             tui: None,
             state,
             size,
-            render_tx: Some(render_tx),
+            render_tx: Arc::new(Mutex::new(Some(render_tx))),
             render_thread: Some(render_thread),
             capture_mouse,
         })
@@ -2444,14 +2461,19 @@ impl InteractiveShell {
             tui: Some(tui),
             state,
             size,
-            render_tx: None,
+            render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: false,
         }
     }
 
     fn stop_renderer(&mut self) {
-        if let Some(render_tx) = self.render_tx.take() {
+        let render_tx = self
+            .render_tx
+            .lock()
+            .expect("renderer sender mutex poisoned")
+            .take();
+        if let Some(render_tx) = render_tx {
             let _ = render_tx.send(RenderCommand::Stop);
         }
         if let Some(render_thread) = self.render_thread.take() {
@@ -2505,7 +2527,10 @@ impl InteractiveShell {
                     true,
                 )
             })?;
-        self.render_tx = Some(render_tx);
+        *self
+            .render_tx
+            .lock()
+            .expect("renderer sender mutex poisoned") = Some(render_tx);
         self.render_thread = Some(render_thread);
         self.render();
         Ok(())
@@ -2538,7 +2563,12 @@ impl InteractiveShell {
     /// Queue a retained-frame render without doing layout on the async loop.
     /// The bounded renderer queue coalesces bursts of model/tool events.
     pub fn render(&mut self) {
-        if let Some(render_tx) = &self.render_tx {
+        if let Some(render_tx) = self
+            .render_tx
+            .lock()
+            .expect("renderer sender mutex poisoned")
+            .as_ref()
+        {
             let _ = render_tx.try_send(RenderCommand::Render);
         } else if let Some(tui) = self.tui.as_mut() {
             tui.request_render();
@@ -4393,6 +4423,18 @@ impl InteractiveShell {
         );
     }
 
+    /// Open this binary's bundled release notes as a read-only rich document.
+    /// This report never becomes transcript, session, or provider input.
+    pub fn show_changelog(&mut self) {
+        self.show_report(
+            OrdinarySurfaceMetadata::with_purpose(
+                format!("Changelog v{}", env!("CARGO_PKG_VERSION")),
+                "Bundled release notes for this version",
+            ),
+            ReportBody::Markdown(parse_markdown(crate::commands::CURRENT_CHANGELOG)),
+        );
+    }
+
     /// Styled report text must already have been terminal-sanitized at its
     /// producing boundary. Only octet-owned theme SGR is retained while wrapping.
     pub fn show_styled_report_text(
@@ -5548,6 +5590,9 @@ impl InteractiveShell {
             deferred.retained_id_end = state.next_transcript_commit_id.0;
             deferred
         });
+        if let Some(notice) = state.late_update_notice.clone() {
+            state.push_block(TranscriptBlock::UpdateAvailable(notice));
+        }
         state.invalidate_transcript();
         Ok(())
     }
@@ -5562,6 +5607,10 @@ impl InteractiveShell {
                 TranscriptBlock::User { text, .. } | TranscriptBlock::Notice(text) => {
                     result.push('\n');
                     result.push_str(text);
+                }
+                TranscriptBlock::UpdateAvailable(version) => {
+                    result.push('\n');
+                    result.push_str(&startup_update::update_message(version));
                 }
                 TranscriptBlock::NoticeStatus { text, .. } => {
                     result.push('\n');
@@ -5664,6 +5713,7 @@ mod panel_render;
 mod reasoning_render;
 mod renderer_runtime;
 mod shell_chrome;
+mod startup_update;
 mod status_telemetry;
 mod surface_frame;
 mod surface_layout;
@@ -5679,6 +5729,8 @@ mod transcript_selection;
 mod viewport;
 mod welcome_card;
 
+#[cfg(test)]
+mod changelog_tests;
 #[cfg(test)]
 mod ordinary_surface_contract_tests;
 #[cfg(test)]

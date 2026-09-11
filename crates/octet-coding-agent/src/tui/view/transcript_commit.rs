@@ -29,6 +29,7 @@ fn transcript_block_is_final(block: &TranscriptBlock) -> bool {
         TranscriptBlock::Compaction(_)
         | TranscriptBlock::User { .. }
         | TranscriptBlock::Outcome(_)
+        | TranscriptBlock::UpdateAvailable(_)
         | TranscriptBlock::Notice(_)
         | TranscriptBlock::NoticeStatus { .. } => true,
     }
@@ -125,6 +126,7 @@ fn finalized_block_rows_are_stable(block: &TranscriptBlock) -> bool {
         TranscriptBlock::Tool(panel) => finalized_tool_rows_are_stable(panel),
         TranscriptBlock::Shell(shell) => shell.output.trim().is_empty(),
         TranscriptBlock::Outcome(_)
+        | TranscriptBlock::UpdateAvailable(_)
         | TranscriptBlock::Notice(_)
         | TranscriptBlock::NoticeStatus { .. } => true,
         // These presentations can shrink when Ctrl+O changes disclosure. They

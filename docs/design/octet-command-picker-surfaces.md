@@ -36,7 +36,7 @@ or authority boundary.
 
 ### Read-only reports
 
-`/help`, `/status`, `/context`, `/cost`, and `/cache` use an ordinary report.
+`/help`, `/status`, `/context`, `/cost`, `/cache`, and `/changelog` use an ordinary report.
 Their body starts at the first semantic row so the task title and accounting or
 help context remain visible. Wrapped rows reflow through `PresentationLayout`
 on resize; reports keep only their semantic body and never enter transcript
@@ -46,6 +46,23 @@ Up/Down, PageUp/PageDown, Home, and End scroll a report without dismissing it.
 Escape and Left close it. Its footer describes only those handled actions and
 shows the visible body-row range when geometry permits. Other legacy text
 overlays retain their one-shot dismissal owner until separately migrated.
+
+`/changelog` uses a parsed semantic Markdown document and the existing rich
+renderer, including headings, lists, inline styling, and highlighted code. It
+reflows at the report's shared-grid content width; raw Markdown is never a TUI
+fallback. It reads only the compiled notes for `CARGO_PKG_VERSION`, can open
+without a configured model and during active runs, and cannot enqueue model or
+session work. Background run events continue while it is open. The muted startup
+reminder sits immediately below the version in the logo's right-hand text
+column; an available-update hint follows it with a rich inline-code action.
+Compact layouts retain this ordering without cutting logo or frame edges.
+
+The versioned source `docs/releases/v<VERSION>.md` is mirrored inside the cargo
+package at `src/tui/view/releases/v<VERSION>.md`. `include_str!` selects that exact
+package-local filename using `CARGO_PKG_VERSION`, so a missing current release
+fails compilation rather than falling back to old notes or repository-only
+paths. A test asserts the version heading and, in a checkout, byte equality with
+the canonical release file. Updating release prose must update the mirror too.
 
 ## Surface record and hierarchy
 

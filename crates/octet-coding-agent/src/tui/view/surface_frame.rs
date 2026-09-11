@@ -239,7 +239,7 @@ pub(super) fn event_margin_marker_with_frame(
         } else {
             theme.settled_event_dot("error", event_dot)
         }),
-        TranscriptBlock::Notice(_) if markers_enabled => {
+        TranscriptBlock::Notice(_) | TranscriptBlock::UpdateAvailable(_) if markers_enabled => {
             Some(theme.settled_event_dot("neutral", event_dot))
         }
         TranscriptBlock::NoticeStatus { tone, .. } if markers_enabled => {
@@ -257,6 +257,7 @@ pub(super) fn event_margin_marker_with_frame(
         | TranscriptBlock::Tool(_)
         | TranscriptBlock::Shell(_)
         | TranscriptBlock::Assistant(_)
+        | TranscriptBlock::UpdateAvailable(_)
         | TranscriptBlock::Notice(_)
         | TranscriptBlock::NoticeStatus { .. } => None,
     }

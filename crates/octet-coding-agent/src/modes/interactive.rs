@@ -1142,6 +1142,7 @@ fn handle_active_command(
         Command::Cost | Command::Cache => {
             shell.notice("cost and cache reports are available at the next idle boundary")
         }
+        Command::Changelog => shell.show_changelog(),
         Command::Update => shell.notice("update checks are available at the next idle boundary"),
         Command::Verbose(value) => {
             let enabled = value.unwrap_or(!shell.verbose_tools());
@@ -2006,6 +2007,7 @@ async fn reload_resources(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
 ) -> anyhow::Result<App> {
+    let _diagnostics = crate::output::defer_tui_diagnostics();
     let background = shell.theme().background();
     let (app, theme) = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
         let mut app = app;
@@ -2920,6 +2922,7 @@ async fn checkout_entry(
     input: &mut EventStream,
     id: String,
 ) -> anyhow::Result<App> {
+    let _diagnostics = crate::output::defer_tui_diagnostics();
     let display_id = id.clone();
     let (app, path, previous_head) =
         run_blocking_lifecycle(shell, input, "checking out session…", move || {
@@ -2977,6 +2980,7 @@ async fn transition<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let _diagnostics = crate::output::defer_tui_diagnostics();
     let app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
         apply_reconfig(app, reconfig)
     })
@@ -3690,6 +3694,7 @@ async fn run_idle_command(
     goal_deadline: &mut Option<Instant>,
 ) -> anyhow::Result<IdleCommandOutcome> {
     match command {
+        Command::Changelog => shell.show_changelog(),
         Command::Help(topic) => {
             shell.show_report_text(
                 "Help",
@@ -4587,6 +4592,17 @@ async fn run_interactive_without_model(
     shell.notice(
         "No configured model. Use /login, /model, or /reload to configure one; prompts are disabled until then.",
     );
+    // Keep onboarding and model-less prompt/template behavior unchanged, but
+    // honor a positional read-only command once the session is ready.
+    if boot.config.prompt_template.is_none()
+        && boot
+            .config
+            .initial_prompt
+            .as_deref()
+            .is_some_and(|prompt| matches!(commands::parse(prompt), Command::Changelog))
+    {
+        shell.show_changelog();
+    }
     shell.render();
 
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
@@ -4624,6 +4640,10 @@ async fn run_interactive_without_model(
             }
             Idle::Command(raw) => match commands::parse(&raw) {
                 Command::Quit => return Ok(resume_command),
+                Command::Changelog => {
+                    shell.show_changelog();
+                    shell.render();
+                }
                 Command::Help(topic) => {
                     shell.show_report_text(
                         "Help",
@@ -4723,6 +4743,32 @@ async fn run_interactive_without_model(
                 }
             },
         }
+    }
+}
+
+/// Dispatch positional release notes locally before a startup prompt or prewarm
+/// can send context. Template expansions retain their explicit prompt semantics.
+fn prepare_startup_input(
+    app: &App,
+    shell: &mut InteractiveShell,
+    prompt: Option<String>,
+) -> Option<ComposedInput> {
+    if app.config.prompt_template.is_none()
+        && prompt
+            .as_deref()
+            .is_some_and(|prompt| matches!(commands::parse(prompt), Command::Changelog))
+    {
+        shell.show_changelog();
+        None
+    } else {
+        schedule_responses_prewarm(app);
+        prompt.map(ComposedInput::from_text)
+    }
+}
+
+fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
+    if !matches!(command, Command::Changelog) {
+        schedule_responses_prewarm(app);
     }
 }
 
@@ -5179,6 +5225,24 @@ async fn guided_provider_setup(
     }
 }
 
+/// Own exactly one best-effort startup check. JoinSet's drop aborts it on every
+/// exit path; neither input nor renderer work awaits release discovery.
+fn startup_update_task(
+    offline: bool,
+    check: impl std::future::Future<Output = Option<semver::Version>> + Send + 'static,
+    notify: impl FnOnce(semver::Version) + Send + 'static,
+) -> tokio::task::JoinSet<()> {
+    let mut tasks = tokio::task::JoinSet::new();
+    if !offline {
+        tasks.spawn(async move {
+            if let Some(version) = check.await {
+                notify(version);
+            }
+        });
+    }
+    tasks
+}
+
 /// Run the interactive frontend with explicit idle and active borrow phases.
 pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
     let initial_prompt = boot.config.initial_prompt.clone();
@@ -5187,6 +5251,11 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
     let mut shell =
         InteractiveShell::enter_with_mouse(theme, size, boot.config.mouse.application_owned())?;
     shell.set_runtime_config(boot.config.clone());
+    let _update_task = startup_update_task(
+        boot.config.offline,
+        crate::update::startup_available_update(),
+        shell.startup_update_notifier(),
+    );
     let mut input = EventStream::new();
     apply_detected_terminal_background(&mut shell, &mut input, &boot.config).await;
     if crate::cli::should_offer_theme_onboarding(&boot.config)
@@ -5260,15 +5329,14 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
         }
         startup_prompt = Some(rendered.text);
     }
-    let mut startup_input = startup_prompt.map(ComposedInput::from_text);
     shell.hydrate(app.agent.session())?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
     request_extension_ui(&mut shell, &mut app);
     shell.finish_startup();
+    let mut startup_input = prepare_startup_input(&app, &mut shell, startup_prompt);
     shell.render();
-    schedule_responses_prewarm(&app);
 
     let mut pending_actions = VecDeque::new();
     let mut goal_deadline = recovered_goal_deadline(&app)?;
@@ -5344,18 +5412,19 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     startup_input = Some(ComposedInput::from_text(command_input));
                     continue;
                 }
+                let command = commands::parse(&command_input);
                 match run_idle_command(
                     app,
                     &mut shell,
                     &mut input,
-                    commands::parse(&command_input),
+                    command.clone(),
                     &mut goal_deadline,
                 )
                 .await?
                 {
                     IdleCommandOutcome::Continue(next) => {
                         app = *next;
-                        schedule_responses_prewarm(&app);
+                        schedule_idle_responses_prewarm(&app, &command);
                     }
                     IdleCommandOutcome::Submit { app: next, input } => {
                         app = *next;
@@ -6722,6 +6791,86 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn startup_update_is_skipped_offline_and_cancelled_with_its_owner() {
+        let offline = startup_update_task(
+            true,
+            async { panic!("offline startup must not poll the release request") },
+            |_| panic!("offline startup must not publish a notice"),
+        );
+        assert!(offline.is_empty());
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let check = startup_update_task(
+            false,
+            async move {
+                let _ = started_tx.send(());
+                let _ = held_rx.await;
+                Some(semver::Version::new(9, 8, 7))
+            },
+            |_| panic!("exited startup must not publish a notice"),
+        );
+        started_rx.await.unwrap();
+        assert_eq!(check.len(), 1);
+        drop(check);
+        let mut held_tx = held_tx;
+        tokio::time::timeout(Duration::from_secs(1), held_tx.closed())
+            .await
+            .expect("owner exit must cancel the held check");
+    }
+
+    #[tokio::test]
+    async fn startup_update_publishes_once_and_failure_is_quiet() {
+        for latest in [None, Some(semver::Version::new(9, 8, 7))] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = calls.clone();
+            let expected = usize::from(latest.is_some());
+            let mut check = startup_update_task(false, async move { latest }, move |_| {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            assert_eq!(check.len(), 1);
+            check.join_next().await.unwrap().unwrap();
+            assert!(check.is_empty());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), expected);
+        }
+    }
+
+    #[test]
+    fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        let before = shell.debug_snapshot();
+        let mut queue = VecDeque::new();
+        let mut quit_requested = false;
+        handle_active_command(
+            &mut shell,
+            Command::Changelog,
+            &mut queue,
+            &mut quit_requested,
+        );
+        assert!(shell.has_overlay());
+        assert!(queue.is_empty());
+        assert!(!quit_requested);
+        assert_eq!(
+            shell.debug_snapshot(),
+            before,
+            "release notes are not conversation"
+        );
+        assert_eq!(
+            shell.overlay_input(&Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ))),
+            OverlayInputResult::Closed
+        );
+        assert_eq!(
+            shell.debug_snapshot(),
+            before,
+            "escape closes the report, not the run"
+        );
+    }
+
     #[test]
     fn active_cost_and_cache_reports_wait_for_the_idle_boundary() {
         for command in [Command::Cost, Command::Cache] {
@@ -7424,6 +7573,194 @@ mod tests {
         assert_eq!(ended, HostRunOutcome::Aborted);
         assert!(quit);
         assert!(shell.debug_snapshot().contains("Interrupted"));
+    }
+
+    #[tokio::test]
+    async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
+        use base64::Engine;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A real loopback WebSocket records response.create bodies, including
+        // generate=false. No provider credentials or external endpoint exist.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut server = tokio::task::JoinSet::new();
+        server.spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+                assert!(head.len() < 16 * 1024);
+            }
+            let head = String::from_utf8(head).unwrap();
+            assert!(head.starts_with("GET /v1/responses HTTP/1.1"));
+            assert!(!head.to_ascii_lowercase().contains("authorization:"));
+            let key = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("sec-websocket-key").then(|| value.trim())
+            }).unwrap();
+            let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
+                format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes());
+            let accept = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
+            socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
+            loop {
+                let opcode = socket.read_u8().await.unwrap();
+                assert_eq!(opcode, 0x81, "fixture expects one complete JSON text frame");
+                let flags = socket.read_u8().await.unwrap();
+                assert_ne!(flags & 0x80, 0, "client frames must be masked");
+                let length = match flags & 0x7f {
+                    126 => u64::from(socket.read_u16().await.unwrap()),
+                    127 => socket.read_u64().await.unwrap(),
+                    length => u64::from(length),
+                };
+                assert!(length <= 128 * 1024);
+                let mut mask = [0; 4];
+                socket.read_exact(&mut mask).await.unwrap();
+                let mut body = vec![0; length as usize];
+                socket.read_exact(&mut body).await.unwrap();
+                for (index, byte) in body.iter_mut().enumerate() { *byte ^= mask[index % 4]; }
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["type"], "response.create");
+                assert_eq!(body["generate"], false);
+                let completed = br#"{"type":"response.completed","response":{"id":"fixture-prewarm"}}"#;
+                socket.write_all(&[0x81, completed.len() as u8]).await.unwrap();
+                socket.write_all(completed).await.unwrap();
+                requests.send(body).unwrap();
+            }
+        });
+        let mut model = scripted_model(&uri);
+        Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        Arc::make_mut(&mut model.endpoint).transport =
+            octet_ai::EndpointTransport::WebSocketPreferred;
+        let (workspace, agent) = scripted_agent_for_route(model.clone(), octet_ai::AiClient::new());
+        let (_app_workspace, mut app) = crate::compaction::tests::app_for_estimate();
+        app.agent = agent;
+        app.model = model;
+        let path = workspace.path().join("session.jsonl");
+        let before = std::fs::read(&path).unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        for prompt in ["/changelog", " /chang  "] {
+            assert!(prepare_startup_input(&app, &mut shell, Some(prompt.into())).is_none());
+            assert!(shell.has_overlay());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            received.try_recv().is_err(),
+            "release-note startup sent context"
+        );
+
+        // An ordinary startup must still prewarm. This positive control also
+        // proves the synthetic model can exercise the transport under test.
+        assert!(prepare_startup_input(&app, &mut shell, None).is_none());
+        tokio::time::timeout(Duration::from_secs(3), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        for command in ["/changelog", "/chang"] {
+            schedule_idle_responses_prewarm(&app, &commands::parse(command));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            received.try_recv().is_err(),
+            "idle release notes sent context"
+        );
+        schedule_idle_responses_prewarm(&app, &Command::Status);
+        tokio::time::timeout(Duration::from_secs(3), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // This is not a general startup slash-command dispatcher. Unknown
+        // arguments, ordinary text, and explicit templates remain prompts.
+        for (template, prompt) in [
+            (None, "/changelog extra"),
+            (None, "/status"),
+            (None, "Explain the changelog"),
+            (Some("fixture"), "/changelog"),
+            (Some("fixture"), "Expanded template argument: /changelog"),
+        ] {
+            app.config.prompt_template = template.map(str::to_owned);
+            let input = prepare_startup_input(&app, &mut shell, Some(prompt.into())).unwrap();
+            assert_eq!(input.display_text, prompt);
+            tokio::time::timeout(Duration::from_secs(3), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        server.abort_all();
+    }
+
+    #[tokio::test]
+    async fn scripted_active_changelog_keeps_running_without_provider_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+        let (_server, _workspace, mut agent) = scripted_agent().await;
+        let mut shell = InteractiveShell::test_shell();
+        let (sender, receiver) = tokio::sync::mpsc::channel(32);
+        for character in "/changelog".chars() {
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
+        }
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        // The first Enter selects the inline completion; the second executes
+        // the selected no-argument command, like the ordinary composer path.
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut false,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(run);
+        assert_eq!(ended, HostRunOutcome::Completed);
+        assert!(
+            shell.has_overlay(),
+            "the report stays open while the run settles"
+        );
+        assert!(pending.is_empty());
+        assert!(!quit);
+        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/changelog"));
     }
 
     #[tokio::test]

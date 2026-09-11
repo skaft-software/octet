@@ -197,6 +197,10 @@ enum StartupFixture<'a> {
     ConfiguredGemma,
     /// Empty inventory and no appearance preference: both onboarding owners run.
     Setup,
+    Changelog {
+        model: bool,
+        initial: Option<&'a str>,
+    },
 }
 
 struct PtyOctet {
@@ -271,7 +275,10 @@ impl PtyOctet {
                     "providers": {"cerebras": {
                         "label": "Cerebras", "base_url": "http://127.0.0.1:9/v1/",
                         "auth": {"kind": "none"}, "auto_discover": false,
-                        "models": [{"api_name": "gemma-4-31b", "display_name": "Gemma 4 31B"}]
+                        "models": [
+                            {"api_name": "gemma-4-31b", "display_name": "Gemma 4 31B"},
+                            {"api_name": "qwen-3.8-27b", "display_name": "Qwen 3.8 27B"},
+                        ]
                     }}
                 });
                 fs::write(&credential, record.to_string()).expect("offline Cerebras/Gemma fixture");
@@ -281,8 +288,19 @@ impl PtyOctet {
                 )
                 .expect("persisted model and appearance fixture");
             }
-            StartupFixture::Setup => {
+            StartupFixture::Setup | StartupFixture::Changelog { model: false, .. } => {
                 fs::remove_file(&credential).expect("empty disposable provider inventory");
+            }
+            StartupFixture::Changelog { model: true, .. } => {
+                fs::write(
+                    &credential,
+                    serde_json::json!({
+                        "base_url": api.unwrap(), "api_key": "", "api_name": "probe",
+                        "headers": [], "models": [], "auto_discover": false,
+                    })
+                    .to_string(),
+                )
+                .unwrap();
             }
             StartupFixture::Model(_) => {}
         }
@@ -342,6 +360,15 @@ impl PtyOctet {
         match fixture {
             StartupFixture::Model(model) => {
                 command.args(["--model", &format!("custom/{model}")]);
+            }
+            StartupFixture::Changelog { model, initial } => {
+                command.args(["--theme", "dark"]);
+                if model {
+                    command.args(["--model", "custom/probe"]);
+                }
+                if let Some(initial) = initial {
+                    command.arg(initial);
+                }
             }
             StartupFixture::ConfiguredGemma | StartupFixture::Setup => {
                 // SSH is transport, not evidence of limited terminal colour.
@@ -967,6 +994,150 @@ fn real_octet_first_branded_frame_has_resolved_gemma_workspace_and_accent() {
         assert!(capture.termios_restored);
         assert!(!uses_alternate_screen(&capture.output));
     }
+}
+
+fn assert_model_switch_welcome(diagnostics: bool) {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        let (columns, rows) = (190, 19);
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            None,
+            true,
+            (columns, rows),
+            (17, true, true),
+            StartupFixture::ConfiguredGemma,
+        );
+        let mut parser = vt100::Parser::new(rows, columns, 512);
+        let mut consumed = 0;
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Gemma 4 31B",
+            STARTUP_TIMEOUT,
+        );
+        if diagnostics {
+            // Lifecycle rebuilds rescan optional resources while the TUI owns
+            // raw output. Diagnostics must not move the renderer's cursor.
+            let invalid_skill = octet
+                ._root
+                .path()
+                .join("home/.octet/skills/invalid/SKILL.md");
+            fs::create_dir_all(invalid_skill.parent().unwrap()).unwrap();
+            fs::write(&invalid_skill, "---\nname: [broken\n---\ninvalid fixture\n").unwrap();
+        }
+        let switches_start = octet.pty.output.len();
+        let mut settled_screens = Vec::new();
+        for (id, name) in [
+            ("qwen-3.8-27b", "Qwen 3.8 27B"),
+            ("gemma-4-31b", "Gemma 4 31B"),
+            ("qwen-3.8-27b", "Qwen 3.8 27B"),
+        ] {
+            octet
+                .pty
+                .write_input(format!("\x1b[200~/model custom/cerebras/{id}\x1b[201~\r").as_bytes());
+            await_screen(
+                &mut octet,
+                &mut parser,
+                &mut consumed,
+                name,
+                STARTUP_TIMEOUT,
+            );
+            octet.pty.drain_for(Duration::from_millis(150));
+            parser.process(&octet.pty.output[consumed..]);
+            consumed = octet.pty.output.len();
+            settled_screens.push(parser.screen().contents());
+        }
+        // Shut down before asserting captured frames, so a failed visual
+        // assertion cannot leave a child blocked on a full PTY output buffer.
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        for screen in settled_screens {
+            assert_eq!(screen.contains("Invalid manifest"), diagnostics,
+                "diagnostics must survive completed model-switch hydration, not just appear in a fleeting frame\n{screen}");
+        }
+        let output = &capture.output[..capture.shutdown_start];
+        if let Some(directory) = std::env::var_os("OCTET_STARTUP_REDRAW_TRACE_DIR") {
+            fs::write(
+                PathBuf::from(directory).join(format!(
+                    "model-switch-{mode:?}-diagnostics{diagnostics}.ansi"
+                )),
+                output,
+            )
+            .unwrap();
+        }
+        let mut parser = vt100::Parser::new(rows, columns, 512);
+        let mut consumed = 0;
+        let mut branded = false;
+        let mut diagnostic_visible = false;
+        for frame in frame_ranges(output) {
+            parser.process(&output[consumed..frame.end]);
+            consumed = frame.end;
+            if !branded && !parser.screen().contents().contains("octet v") {
+                continue;
+            }
+            branded = true;
+            assert_single_welcome(&parser, columns, "model-switch");
+            let text = parser.screen().contents();
+            diagnostic_visible |= text.contains("Invalid manifest");
+            let mut colors = vec![None; usize::from(columns)];
+            for row in 0..rows {
+                for column in 0..columns {
+                    let cell = parser.screen().cell(row, column).unwrap();
+                    if cell.contents() == "█" {
+                        let previous = &mut colors[usize::from(column)];
+                        if let Some(color) = previous {
+                            assert_eq!(
+                                *color,
+                                cell.fgcolor(),
+                                "mixed logo column {column}\n{text}"
+                            );
+                        }
+                        *previous = Some(cell.fgcolor());
+                    }
+                }
+            }
+        }
+        assert!(branded);
+        assert_eq!(
+            diagnostic_visible, diagnostics,
+            "diagnostics must remain visible, not suppressed"
+        );
+        assert_eq!(
+            count_bytes(output, b"\x1b[2J"),
+            1,
+            "only terminal entry clears the viewport"
+        );
+        assert_eq!(
+            count_bytes(output, b"\x1b[3J"),
+            0,
+            "visible model switches must stay differential"
+        );
+        for (index, byte) in output.iter().enumerate().skip(switches_start) {
+            if *byte == b'\n' {
+                assert_eq!(
+                    output.get(index.wrapping_sub(1)),
+                    Some(&b'\r'),
+                    "raw LF outside the renderer at byte {index}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn real_octet_successive_model_switches_keep_one_colored_welcome() {
+    assert_model_switch_welcome(false);
+}
+
+#[test]
+fn real_octet_resource_diagnostics_do_not_displace_model_switch_frames() {
+    assert_model_switch_welcome(true);
 }
 
 #[test]
@@ -2275,4 +2446,138 @@ fn real_octet_plain_explicit_prompts_once() {
             assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }
+}
+
+fn changelog_session_bytes(octet: &PtyOctet) -> Vec<u8> {
+    fn collect(path: &Path, sessions: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, sessions);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+            {
+                sessions.push(path);
+            }
+        }
+    }
+    let mut sessions = Vec::new();
+    collect(&octet._root.path().join("sessions"), &mut sessions);
+    assert_eq!(
+        sessions.len(),
+        1,
+        "changelog must not create another session"
+    );
+    fs::read(&sessions[0]).unwrap()
+}
+
+#[test]
+fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for initial in [Some("/changelog"), Some(" /chang  "), None] {
+        let api = HeldChatApi::start();
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            MouseMode::Auto,
+            Some(&api.url),
+            false,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            StartupFixture::Changelog {
+                model: true,
+                initial,
+            },
+        );
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        let mut consumed = 0;
+        let before = if initial.is_none() {
+            await_screen(
+                &mut octet,
+                &mut parser,
+                &mut consumed,
+                "custom/probe",
+                STARTUP_TIMEOUT,
+            );
+            let before = changelog_session_bytes(&octet);
+            octet.pty.write_input(b"/changelog\r\r");
+            Some(before)
+        } else {
+            None
+        };
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Fixed",
+            STARTUP_TIMEOUT,
+        );
+        assert!(parser.screen().contents().contains("Changelog"));
+        octet.pty.drain_for(Duration::from_millis(200));
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let after = changelog_session_bytes(&octet);
+        for line in after
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let record: serde_json::Value = serde_json::from_slice(line).unwrap();
+            assert_ne!(record["value"]["type"], "message", "{record}");
+            assert_ne!(record["type"], "usage", "{record}");
+        }
+        if let Some(before) = before {
+            assert_eq!(after, before);
+        }
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn real_octet_initial_changelog_without_model_preserves_setup_choice() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut octet = PtyOctet::spawn_at(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Auto,
+        None,
+        false,
+        (INITIAL_COLUMNS, INITIAL_ROWS),
+        (2, false, false),
+        StartupFixture::Changelog {
+            model: false,
+            initial: Some("/changelog"),
+        },
+    );
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "Set up a provider",
+        STARTUP_TIMEOUT,
+    );
+    octet.pty.write_input(b"\x1b[B\x1b[B\r");
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "Fixed",
+        STARTUP_TIMEOUT,
+    );
+    assert!(parser.screen().contents().contains("Changelog"));
+    assert!(!octet
+        ._root
+        .path()
+        .join("home/.octet/credentials/custom.json")
+        .exists());
+    assert!(changelog_session_bytes(&octet).is_empty());
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
 }

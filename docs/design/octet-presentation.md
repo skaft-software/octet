@@ -69,8 +69,12 @@ resize earlier rows.
 There is exactly one breathing row between transcript content and the composer.
 The composer does not animate or recolour merely because work starts or draft
 text changes; transcript activity owns liveness. The footer is one quiet line:
-model/reasoning identity on the left and bounded context/session cost on the
-right, dropping secondary fields before truncating primary identity.
+`model · reasoning · context%/limit · cost` on the left, with the workspace path
+right-aligned. Values remain live and model-bound, not fixed example text. Home
+paths use `~`; long paths shorten from the left or disappear before left-hand
+metadata is sacrificed. Narrow layouts compact or drop whole secondary fields
+before primary identity. Estimated context retains `~`, unavailable cost is not
+invented, and uncertain usage remains an explicit subtotal plus unknown amount.
 
 Context composition is a semantic timeline. Segments run left-to-right in the
 order the model receives them, from system/provider framing and tool schemas

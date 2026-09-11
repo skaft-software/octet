@@ -43,6 +43,8 @@ pub enum Command {
     Cost,
     Cache,
     Update,
+    /// Read the current version's bundled release notes without inference.
+    Changelog,
     Name(Option<String>),
     Export(Option<String>),
     Quit,
@@ -208,6 +210,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     slash!("cost", "/cost", "show turn and session cost", false),
     slash!("cache", "/cache", "show prompt-cache diagnostics", false),
     slash!(
+        "changelog",
+        "/changelog",
+        "read this version's bundled release notes (interactive TUI)",
+        false
+    ),
+    slash!(
         "update",
         "/update",
         "check for a newer octet release; run `octet update` to install",
@@ -246,6 +254,23 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!("quit", "/quit", "exit octet", false),
 ];
+
+/// Package-local copy of docs/releases/v<CARGO_PKG_VERSION>.md. Keep the copy
+/// inside the crate: an include outside CARGO_MANIFEST_DIR breaks cargo packages.
+pub(crate) const CURRENT_CHANGELOG: &str = include_str!(concat!(
+    "tui/view/releases/v",
+    env!("CARGO_PKG_VERSION"),
+    ".md"
+));
+
+/// Do not accidentally send this local, read-only TUI command to a provider in
+/// frontends that have no report surface. Their ordinary error channel owns it.
+pub(crate) fn reject_tui_changelog(input: &str) -> anyhow::Result<()> {
+    if matches!(parse(input), Command::Changelog) {
+        anyhow::bail!("/changelog is available in the interactive TUI; launch octet without --plain, --print, or --mode rpc and enter /changelog");
+    }
+    Ok(())
+}
 
 /// Complete TUI-ordered built-in slash-command catalog.
 pub fn slash_commands() -> &'static [SlashCommandSuggestion] {
@@ -491,6 +516,7 @@ pub fn parse(input: &str) -> Command {
         "cost" if argument.is_none() => Command::Cost,
         "cache" if argument.is_none() => Command::Cache,
         "update" if argument.is_none() => Command::Update,
+        "changelog" if argument.is_none() => Command::Changelog,
         "quit" if argument.is_none() => Command::Quit,
         _ => Command::Unknown(input.to_owned()),
     }
@@ -955,6 +981,49 @@ pub(crate) fn status_text_with_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changelog_parser_discovery_and_local_help() {
+        for input in ["/changelog", " /changelog  ", "/chang"] {
+            assert_eq!(parse(input), Command::Changelog);
+            assert!(reject_tui_changelog(input)
+                .unwrap_err()
+                .to_string()
+                .contains("interactive TUI"));
+        }
+        assert!(matches!(parse("/changelog extra"), Command::Unknown(_)));
+        assert!(
+            matches!(parse("/ch"), Command::Unknown(_)),
+            "checkout shares this prefix"
+        );
+        assert_eq!(complete_slash_command("/chang"), Some("/changelog".into()));
+        let suggestions = slash_suggestions("/chang");
+        assert_eq!(suggestions.len(), 1);
+        assert!(!suggestions[0].accepts_argument);
+        let help = help_text(Path::new("."), Some("changelog"));
+        assert!(help.contains("/changelog") && help.contains("bundled release notes"));
+        assert!(help_text(Path::new("."), None).contains("/changelog"));
+        assert!(reject_tui_changelog("Explain the changelog").is_ok());
+    }
+
+    #[test]
+    fn changelog_bundle_matches_current_version_and_canonical_source() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            CURRENT_CHANGELOG.lines().next(),
+            Some(format!("# octet {version}").as_str())
+        );
+        // Published packages have no repository docs tree. The package-local
+        // include above must still compile; a checkout additionally guards drift.
+        let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../docs/releases/v{version}.md"));
+        if canonical.is_file() {
+            assert_eq!(
+                CURRENT_CHANGELOG,
+                std::fs::read_to_string(canonical).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn parses_the_complete_v1_command_grammar() {

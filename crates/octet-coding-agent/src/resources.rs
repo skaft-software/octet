@@ -994,6 +994,16 @@ fn scan_skill_root(
     }
 }
 
+fn canonical_skill_directory(path: &Path) -> Option<PathBuf> {
+    // Match the scanner's root boundary: a rejected symlink must not make its
+    // target look like an already-admitted user root.
+    if fs::symlink_metadata(path).ok()?.is_dir() {
+        path.canonicalize().ok()
+    } else {
+        None
+    }
+}
+
 fn project_skill_directories(workspace: &Path, invocation_cwd: &Path) -> Vec<PathBuf> {
     let mut directories = dirs_from_workspace_to_cwd(workspace, invocation_cwd);
     // Roots are applied from low to high precedence; the nearest .agents
@@ -1101,10 +1111,23 @@ impl FileSystemSkillRegistry {
         let mut gated_project_roots = project_roots;
         gated_project_roots.push(invocation_cwd.join(".pi/skills"));
         gated_project_roots.push(workspace_root.join(".octet/skills"));
+        // A workspace can be the user's home. Keep overlapping roots in their
+        // user tier instead of scanning or warning about them again as project
+        // resources. Canonical aliases count only for non-symlink directories.
+        let user_roots = roots
+            .iter()
+            .flat_map(|(root, _)| {
+                std::iter::once(root.clone()).chain(canonical_skill_directory(root))
+            })
+            .collect::<HashSet<_>>();
+        gated_project_roots.retain(|root| {
+            !user_roots.contains(root)
+                && !canonical_skill_directory(root)
+                    .is_some_and(|canonical| user_roots.contains(&canonical))
+        });
         if workspace_trusted {
-            for (index, root) in gated_project_roots.into_iter().enumerate() {
-                let is_pi = index + 2
-                    == project_skill_directories(&workspace_root, &invocation_cwd).len() + 2;
+            for root in gated_project_roots {
+                let is_pi = root == invocation_cwd.join(".pi/skills");
                 let is_octet = root == workspace_root.join(".octet/skills");
                 roots.push((
                     root,
@@ -1952,6 +1975,170 @@ Environment:
         .unwrap();
         let loaded3 = registry3.load(&"test-skill".to_string()).unwrap();
         assert_eq!(loaded3.descriptor.name, "User Skill");
+    }
+
+    #[test]
+    fn home_workspace_skills_keep_user_precedence_and_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        for (root, instructions) in [
+            (".agents/skills", "Agent instructions."),
+            (".octet/skills", "Octet instructions."),
+        ] {
+            let skill_dir = home.join(root).join("shared");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: shared\ndescription: User skill.\n---\n{instructions}"),
+            )
+            .unwrap();
+        }
+
+        // The workspace is canonicalized, while HOME may use a parent alias.
+        #[cfg(unix)]
+        let home = {
+            let alias = temp.path().join("home-alias");
+            std::os::unix::fs::symlink(&home, &alias).unwrap();
+            alias
+        };
+        for workspace_trusted in [false, true] {
+            let registry = FileSystemSkillRegistry::discover(
+                home.canonicalize().unwrap(),
+                home.canonicalize().unwrap(),
+                vec![],
+                workspace_trusted,
+                Some(home.clone()),
+            )
+            .unwrap();
+            let loaded = registry.load(&"shared".to_owned()).unwrap();
+            assert_eq!(loaded.instructions.trim(), "Octet instructions.");
+            assert_eq!(loaded.descriptor.trust, SkillTrust::UserInstalled);
+            assert_eq!(registry.descriptors().len(), 1);
+            let diagnostics = registry.diagnostics();
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert!(diagnostics[0].message.contains("collision"));
+            assert_eq!(
+                diagnostics[0].path,
+                home.join(".octet/skills/shared/SKILL.md")
+                    .canonicalize()
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_project_skill_roots_still_require_trust_and_keep_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = home.join("project");
+        let invocation = project.join("nested");
+        let user_skill = home.join(".agents/skills/shared/SKILL.md");
+        let project_skills = [
+            project.join(".agents/skills/shared/SKILL.md"),
+            invocation.join(".agents/skills/shared/SKILL.md"),
+            invocation.join(".pi/skills/shared.md"),
+            project.join(".octet/skills/shared/SKILL.md"),
+        ];
+        for entrypoint in std::iter::once(&user_skill).chain(&project_skills) {
+            std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
+            std::fs::write(
+                entrypoint,
+                "---\nname: shared\ndescription: Skill precedence fixture.\n---\nInstructions.",
+            )
+            .unwrap();
+        }
+
+        // Starting at home removes its duplicate .agents root, but not the
+        // nested project roots or the invocation's direct Pi markdown source.
+        for (workspace, project_count) in [(&home, 3), (&project, 4)] {
+            for workspace_trusted in [false, true] {
+                let registry = FileSystemSkillRegistry::discover(
+                    workspace.clone(),
+                    invocation.clone(),
+                    vec![],
+                    workspace_trusted,
+                    Some(home.clone()),
+                )
+                .unwrap();
+                let loaded = registry.load(&"shared".to_owned()).unwrap();
+                let diagnostics = registry.diagnostics();
+                assert_eq!(diagnostics.len(), project_count, "{diagnostics:?}");
+                let expected = if workspace_trusted {
+                    assert_eq!(loaded.descriptor.trust, SkillTrust::Workspace);
+                    for (diagnostic, entrypoint) in
+                        diagnostics.iter().zip(&project_skills[..project_count])
+                    {
+                        assert!(diagnostic.message.contains("collision"));
+                        assert_eq!(diagnostic.path, entrypoint.canonicalize().unwrap());
+                    }
+                    &project_skills[project_count - 1]
+                } else {
+                    assert_eq!(loaded.descriptor.trust, SkillTrust::UserInstalled);
+                    for (diagnostic, entrypoint) in
+                        diagnostics.iter().zip(&project_skills[..project_count])
+                    {
+                        assert_eq!(
+                            diagnostic.message,
+                            "ignored project skills because the workspace is not trusted"
+                        );
+                        assert!(entrypoint.starts_with(&diagnostic.path));
+                        assert!(diagnostic.path.starts_with(&project));
+                    }
+                    &user_skill
+                };
+                assert_eq!(
+                    skill_location(&loaded.descriptor).unwrap(),
+                    expected.canonicalize().unwrap()
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejected_user_skill_root_symlink_does_not_hide_project_trust_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = home.join("project");
+        let project_root = project.join(".agents/skills");
+        let user_root = home.join(".agents/skills");
+        std::fs::create_dir_all(project_root.join("project-skill")).unwrap();
+        std::fs::create_dir_all(user_root.parent().unwrap()).unwrap();
+        std::fs::write(
+            project_root.join("project-skill/SKILL.md"),
+            "---\nname: project-skill\ndescription: Project-only skill.\n---\nInstructions.",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&project_root, &user_root).unwrap();
+
+        for workspace_trusted in [false, true] {
+            let registry = FileSystemSkillRegistry::discover(
+                project.clone(),
+                project.clone(),
+                vec![],
+                workspace_trusted,
+                Some(home.clone()),
+            )
+            .unwrap();
+            let diagnostics = registry.diagnostics();
+            assert!(diagnostics.iter().any(|diagnostic| {
+                diagnostic.path == user_root
+                    && diagnostic.message == "skill root must not be a symlink"
+            }));
+            if workspace_trusted {
+                assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+                let loaded = registry.load(&"project-skill".to_owned()).unwrap();
+                assert_eq!(loaded.descriptor.trust, SkillTrust::Workspace);
+            } else {
+                assert!(registry.descriptors().is_empty());
+                assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+                assert!(diagnostics.iter().any(|diagnostic| {
+                    diagnostic.path == project_root
+                        && diagnostic.message
+                            == "ignored project skills because the workspace is not trusted"
+                }));
+            }
+        }
     }
 
     #[test]

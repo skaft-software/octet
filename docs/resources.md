@@ -58,6 +58,13 @@ Skill discovery uses this **low-to-high precedence** order:
    workspace's `.octet/skills`. These project roots require `--workspace-trusted`.
 3. **Explicit:** `--skill-dir` sources in command-line option order.
 
+A project root that is also a user skill root is scanned only in the user tier.
+For example, starting in your home directory keeps `~/.agents/skills` and
+`~/.octet/skills` user-installed, without an untrusted-project warning for those
+same roots. This does not trust the workspace: distinct project roots, including
+nested `.agents/skills` and the invocation's `.pi/skills`, remain gated. Root
+symlinks are still rejected.
+
 Later definitions replace earlier definitions of the same skill name; collisions
 are recorded in discovery diagnostics. Discovery does not activate a skill.
 The octet-native entrypoints remain `~/.octet/skills/*/SKILL.md`,

@@ -5534,6 +5534,7 @@ async fn invoke_idle_slash_command(
 ) -> (Option<App>, Result<SlashInvocationOutcome, ServiceError>) {
     let parsed = commands::parse(&invocation.invocation);
     match parsed {
+        commands::Command::Changelog => (Some(app), Err(ServiceError::InvalidBoundary)),
         commands::Command::Help(topic) => (
             Some(app),
             Ok(SlashInvocationOutcome::Start(RunPromptInput::New(

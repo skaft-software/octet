@@ -15,8 +15,9 @@ never starts executable extensions. For extension authoring, see
 
 ## Handshake
 
-The example reports this checkout's **UNPUBLISHED 0.7.4 source candidate**
-version, not published binary availability; see [candidate gates](releases/v0.7.4.md).
+The example reports this checkout's **0.7.5 source version**. For version-matched
+published native assets, see [installation](installation.md) and the
+[release record](releases/v0.7.5.md).
 
 Send `hello` and validate the response before accepting work, including when the
 application uses a configured host path:
@@ -26,7 +27,7 @@ application uses a configured host path:
 ```
 
 ```json
-{"protocol_version":1,"request_id":"probe-1","seq":1,"type":"hello","data":{"sdk_version":"0.7.4","protocol_version":1,"max_frame_bytes":1048576,"max_concurrent_runs":1,"commands":["hello","models","run","shutdown"],"features":{"streaming":true,"persistent_sessions":true,"seed_history":true,"typed_media_input":true,"typed_image_input":true,"typed_audio_input":true,"prompt_display_text":true,"inline_models":true,"tools":true,"skills":true,"extensions":true,"process_group_abort":true,"in_band_abort":false}}}
+{"protocol_version":1,"request_id":"probe-1","seq":1,"type":"hello","data":{"sdk_version":"0.7.5","protocol_version":1,"max_frame_bytes":1048576,"max_concurrent_runs":1,"commands":["hello","models","run","shutdown"],"features":{"streaming":true,"persistent_sessions":true,"seed_history":true,"typed_media_input":true,"typed_image_input":true,"typed_audio_input":true,"prompt_display_text":true,"inline_models":true,"tools":true,"skills":true,"extensions":true,"process_group_abort":true,"in_band_abort":false}}}
 ```
 
 Reject a protocol mismatch, unknown request ID, run/session ID mismatch, or
@@ -127,8 +128,8 @@ in a logical turn, including subsequent request opening. `None` is the default
 delay beyond the remaining allowance stops recovery rather than retrying early.
 This is not a whole-job timeout and does not extend caller/child limits or
 provider body deadlines. The same setting is passed to auxiliary compaction
-and terminal-gate recovery and inherited by child agents. Final integration
-qualification remains pending; see [candidate recovery qualification](qualification/v0.7.4-recovery.md).
+and terminal-gate recovery and inherited by child agents. Historical integration
+checks and remaining limits are recorded in [v0.7.4 recovery qualification](qualification/v0.7.4-recovery.md).
 
 This is a Rust host setter, not a new NDJSON run field, CLI flag, or persisted
 configuration setting. NDJSON applications retain process-group cancellation.
@@ -272,18 +273,18 @@ additive uncertainty record evolves its record contract. CLI RPC uses the same
 event type
 with `delayMs`/`errorMessage`; finite retries use `auto_retry_start` with
 `maxAttempts`, rather than the native-host field casing. Plain/print diagnostics
-go to stderr; print stdout remains response-only. See [candidate recovery qualification](qualification/v0.7.4-recovery.md).
+go to stderr; print stdout remains response-only. See [historical recovery qualification](qualification/v0.7.4-recovery.md).
 
 Auxiliary recovery has a separate core `AgentEvent::ProviderOperationRetry`:
 `operation` is `local_compaction`, `native_compaction`, or `terminal_gate`;
 `attempt` is one-based; `max_attempts: Option<usize>` is absent as a count limit
 for pre-send waiting; `delay` and sanitized `error` describe that operation.
-It does **not** invalidate main-answer output or settle the run. Its candidate
+It does **not** invalidate main-answer output or settle the run. Its
 `provider_operation_retry` consumer wire uses native-host `operation`, `attempt`,
 `max_attempts`, `delay_ms`, and `error`; CLI RPC uses `operation`, `attempt`,
 `maxAttempts`, `delayMs`, and `errorMessage`. The nullable maximum is JSON `null`
-for pre-send waiting. Consumer integration is still pending verification in
-this source candidate; it is not an additional API-version negotiation.
+for pre-send waiting. These fields are additive, not an additional API-version
+negotiation.
 
 The unit core event `AgentEvent::ProviderUsageUncertain` maps to native-host
 `{"type":"provider_usage_uncertain","data":{}}` (plus ordinary envelope fields)
@@ -307,7 +308,7 @@ flag sticky when the live event arrives. Statistics sum the independent durable
 usage ledger rather than only the active conversation branch; when the flag is
 true, numeric tokens/cost are known subtotals. Native-host protocol `1` has no
 separate idle session-inspection command; its resumed runs emit the live warning.
-These source additions remain subject to final integration qualification.
+Historical qualification applies only to its recorded source.
 
 `final_result.data` contains `status`, `output`, `error`, `filesChanged`,
 `toolCalls`, `steps`, and `sessionFile`. Status is `completed`, `blocked`, or

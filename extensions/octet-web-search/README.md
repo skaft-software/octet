@@ -1,9 +1,9 @@
 # octet-web-search
 
-**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
-to published octet 0.7.3 and its matching bundle; local candidate sources or
-archives require a locally built octet 0.7.4. See
-[the open release gates](../../docs/releases/v0.7.4.md).
+**Distribution version: 0.7.5.** Catalog commands below require version-matched
+published assets. Source checkouts and local archives require exactly octet 0.7.5.
+See the [release record](../../docs/releases/v0.7.5.md) for publication and
+installation evidence.
 
 Search the public web and retrieve pages with stable citations. Choose
 [Brave Search](https://brave.com/search/api/) or a configured
@@ -12,9 +12,8 @@ browser tabs, sign in, run JavaScript, or submit forms.
 
 ## Start a search
 
-With [octet 0.7.3 installed](../../docs/installation.md) and Python 3.9+ available
-as `python3`, once the matching signed public bundle is published, install it,
-then explicitly enable it:
+With [octet 0.7.5 installed](../../docs/installation.md) and Python 3.9+ available
+as `python3`, install the matching signed public bundle, then explicitly enable it:
 
 ```console
 octet extension install octet-web-search
@@ -85,7 +84,7 @@ keeps the process stopped even with explicit grants: executable startup still
 requires `unsafe_host`. An admitted extension has your OS authority; manifest
 consent metadata is not a sandbox. Skill loading remains independent.
 
-The source bundle `0.7.4` requires exactly octet `0.7.4` and retains API `0.2`.
+The source bundle `0.7.5` requires exactly octet `0.7.5` and retains API `0.2`.
 The following is a bundled-runtime reference, not a current SDK authoring tutorial.
 
 - <a id="install-and-opt-in"></a>[Install and opt in](REFERENCE.md#install-and-opt-in): public catalog installation and persistent activation.

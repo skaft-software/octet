@@ -8,7 +8,7 @@ trap 'rm -rf "$work_directory"' EXIT
 assets="$work_directory/assets"
 fake_bin="$work_directory/fake-bin"
 installer="$work_directory/install-octet.sh"
-version=0.7.4
+version=0.7.5
 identity_version=${version//./\\.}
 expected_identity="^https://github\\.com/skaft-software/octet/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
 package="octet-$version-aarch64-apple-darwin"
@@ -135,7 +135,18 @@ files = {
     "README.md": b"# octet\n",
     "octet": b'''#!/bin/sh
 case "${1:-}" in
-    --version) printf '%s\\n' 'octet 0.7.4' ;;
+    --version)
+        if [ "${OCTET_TEST_FINAL_VERSION_FAIL:-0}" = 1 ] && [ "$0" = "$OCTET_INSTALL_DIR/octet" ]; then
+            printf '%s\\n' 'installed version probe failed' >&2
+            exit 42
+        fi
+        if [ "${OCTET_TEST_FINAL_VERSION_WRONG:-0}" = 1 ] && [ "$0" = "$OCTET_INSTALL_DIR/octet" ]; then
+            printf '%s\\n' 'wrong installed binary output'
+            printf '%s\\n' 'unexpected installed binary diagnostic' >&2
+            exit 0
+        fi
+        printf '%s\\n' 'octet 0.7.5'
+        ;;
     --help) printf '%s\\n' 'fake octet help' ;;
     *) exit 0 ;;
 esac
@@ -144,7 +155,7 @@ esac
 IFS= read -r request
 case "$request" in
     *'"request_id":"installer-probe"'*)
-        printf '%s\\n' '{"protocol_version":1,"request_id":"installer-probe","seq":1,"type":"hello","data":{"sdk_version":"0.7.4"}}'
+        printf '%s\\n' '{"protocol_version":1,"request_id":"installer-probe","seq":1,"type":"hello","data":{"sdk_version":"0.7.5"}}'
         ;;
     *) exit 2 ;;
 esac
@@ -237,8 +248,8 @@ PY
     {
         printf '%064d  ./install-octet.sh\n' 0
         printf '%s  ./%s\n' "$(sha256_file "$assets/$archive_name")" "$archive_name"
-        printf '%064d  ./octet-0.7.4-x86_64-apple-darwin.tar.gz\n' 0
-        printf '%064d  ./octet-0.7.4-x86_64-unknown-linux-gnu.tar.gz\n' 0
+        printf '%064d  ./octet-0.7.5-x86_64-apple-darwin.tar.gz\n' 0
+        printf '%064d  ./octet-0.7.5-x86_64-unknown-linux-gnu.tar.gz\n' 0
     } > "$assets/OCTET_SHA256SUMS"
 }
 
@@ -261,6 +272,10 @@ set -eu
 output=
 headers=
 url=
+progress=false
+if [ -n "${OCTET_TEST_CURL_LOG:-}" ]; then
+    printf 'COLUMNS=%s %s\n' "${COLUMNS:-}" "$*" >> "$OCTET_TEST_CURL_LOG"
+fi
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --proto|--proto-redir|--max-redirs|--retry|--retry-delay|--connect-timeout|--max-time|--write-out)
@@ -273,6 +288,10 @@ while [ "$#" -gt 0 ]; do
         --output)
             output=$2
             shift 2
+            ;;
+        --progress-bar)
+            progress=true
+            shift
             ;;
         --tlsv1.2|--location|--fail|--silent|--show-error)
             shift
@@ -287,18 +306,27 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+if [ "${OCTET_TEST_DOWNLOAD_FAIL:-0}" = 1 ]; then
+    printf '%s\n' 'fixture download failed' >&2
+    exit 22
+fi
 name=${url##*/}
 source="$OCTET_TEST_ASSETS/$name"
-if [ "${OCTET_TEST_HARDLINK_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.4-aarch64-apple-darwin.tar.gz ]; then
+if [ "${OCTET_TEST_HARDLINK_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.5-aarch64-apple-darwin.tar.gz ]; then
     ln "$source" "$output"
 else
     cp "$source" "$output"
 fi
-if [ "${OCTET_TEST_TAMPER_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.4-aarch64-apple-darwin.tar.gz ]; then
+if [ "${OCTET_TEST_TAMPER_ARCHIVE:-0}" = 1 ] && [ "$name" = octet-0.7.5-aarch64-apple-darwin.tar.gz ]; then
     printf 'tampered' >> "$output"
 fi
 if [ "${OCTET_TEST_TAMPER_COSIGN:-0}" = 1 ] && [ "$name" = cosign-darwin-arm64 ]; then
     printf 'tampered' >> "$output"
+fi
+if [ "$progress" = true ]; then
+    # The fixture copy is complete; actual incremental curl progress is covered
+    # by the loopback transfer tests, never by a simulated installation total.
+    printf '\r######## 100.0%%\n' >&2
 fi
 host=${OCTET_TEST_REDIRECT_HOST:-release-assets.githubusercontent.com}
 effective="https://$host/test/$name"
@@ -337,6 +365,11 @@ expect_failure() {
     fi
     grep -F "$expected" "$work_directory/$label.err" >/dev/null
     test ! -e "$test_home/bin/octet"
+    grep -F 'octet installation failed' "$work_directory/$label.err" >/dev/null
+    if grep -F 'is installed.' "$work_directory/$label.err" >/dev/null; then
+        printf 'installer reported completion after failure: %s\n' "$label" >&2
+        exit 1
+    fi
 }
 
 make_archive valid
@@ -346,8 +379,8 @@ test -x "$positive_home/bin/octet"
 test -x "$positive_home/bin/octet-host"
 printf '%s\n' '{"protocol_version":1,"request_id":"installer-probe","command":"hello"}' \
     | "$positive_home/bin/octet-host" \
-    | grep -F '"sdk_version":"0.7.4"' >/dev/null
-test "$("$positive_home/bin/octet" --version)" = 'octet 0.7.4'
+    | grep -F '"sdk_version":"0.7.5"' >/dev/null
+test "$("$positive_home/bin/octet" --version)" = 'octet 0.7.5'
 test -f "$positive_home/share/octet/README.md"
 test -f "$positive_home/share/octet/docs/index.md"
 test -f "$positive_home/share/octet/docs/current-reference.md"
@@ -377,10 +410,10 @@ printf '%s\n' 'keep config' > "$upgrade_home/.octet/config.toml"
 printf '%s\n' 'keep session' > "$upgrade_home/.octet/sessions/session.jsonl"
 printf '%s\n' 'remove old docs' > "$upgrade_home/share/octet/docs/old.md"
 run_installer "$upgrade_home" > "$work_directory/upgrade.out"
-test "$("$upgrade_home/bin/octet" --version)" = 'octet 0.7.4'
+test "$("$upgrade_home/bin/octet" --version)" = 'octet 0.7.5'
 printf '%s\n' '{"protocol_version":1,"request_id":"installer-probe","command":"hello"}' \
     | "$upgrade_home/bin/octet-host" \
-    | grep -F '"sdk_version":"0.7.4"' >/dev/null
+    | grep -F '"sdk_version":"0.7.5"' >/dev/null
 grep -Fx 'keep helper' "$upgrade_home/bin/unrelated-helper" >/dev/null
 grep -Fx 'keep config' "$upgrade_home/.octet/config.toml" >/dev/null
 grep -Fx 'keep session' "$upgrade_home/.octet/sessions/session.jsonl" >/dev/null
@@ -400,7 +433,7 @@ printf '%s\n' 'untouched old docs' > "$legacy_home/share/ygg/README.md"
 run_installer "$legacy_home" \
     YGG_INSTALL_DIR="$work_directory/forbidden-old-bin" \
     YGG_DATA_DIR="$work_directory/forbidden-old-docs" > "$work_directory/legacy-trap.out"
-test "$("$legacy_home/bin/octet" --version)" = 'octet 0.7.4'
+test "$("$legacy_home/bin/octet" --version)" = 'octet 0.7.5'
 grep -Fx 'untouched old binary' "$legacy_home/bin/ygg" >/dev/null
 grep -Fx 'untouched old host' "$legacy_home/bin/ygg-host" >/dev/null
 grep -Fx 'untouched old config' "$legacy_home/.ygg/config.toml" >/dev/null
@@ -419,6 +452,15 @@ test -f "$override_data/docs/index.md"
 test -f "$override_data/examples/README.md"
 test -f "$override_data/sdk/README.md"
 test ! -e "$override_home/share/octet"
+
+# Exercise presentation with these exact offline signed-package fixtures.
+env \
+    PATH="$fake_bin:$PATH" \
+    OCTET_TEST_REAL_CURL="$(command -v curl)" \
+    OCTET_TEST_ASSETS="$assets" \
+    OCTET_TEST_COSIGN_LOG="$work_directory/cosign.log" \
+    OCTET_TEST_EXPECTED_IDENTITY="$expected_identity" \
+    python3 "$script_directory/test-installer-progress.py" "$installer" "$work_directory"
 
 expect_failure untrusted 'redirected to an untrusted host' OCTET_TEST_REDIRECT_HOST=example.com
 expect_failure signature 'release checksum provenance verification failed' OCTET_TEST_BAD_SIGNATURE=1

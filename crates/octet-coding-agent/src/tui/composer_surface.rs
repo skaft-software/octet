@@ -631,6 +631,40 @@ fn identity_variants(
     variants
 }
 
+/// Present the host workspace without filesystem lookups. Clip from the left
+/// so a long path retains its most specific tail, without splitting graphemes.
+fn footer_workspace(
+    path: &std::path::Path,
+    home: Option<&std::path::Path>,
+    width: usize,
+    unicode: bool,
+) -> String {
+    if width < 4 {
+        return String::new();
+    }
+    let display = home
+        .and_then(|home| path.strip_prefix(home).ok())
+        .map_or_else(
+            || path.display().to_string(),
+            |relative| {
+                if relative.as_os_str().is_empty() {
+                    "~".to_owned()
+                } else {
+                    format!("~/{}", relative.display())
+                }
+            },
+        );
+    let display = super::view::sanitize_ordinary_surface_cell(&display, unicode);
+    let cells = visible_width(&display);
+    if cells <= width {
+        return display;
+    }
+    let ellipsis = if unicode { "…" } else { "..." };
+    let tail_width = width - visible_width(ellipsis);
+    let tail = sexy_tui_rs::slice_by_column(&display, cells - tail_width, tail_width, true);
+    format!("{ellipsis}{tail}")
+}
+
 fn context_percent(used: u64, limit: u64) -> u64 {
     if limit == 0 {
         return 0;
@@ -641,10 +675,10 @@ fn context_percent(used: u64, limit: u64) -> u64 {
 
 /// Render one calm, width-aware status row. Detailed cache and input/output
 /// accounting stays in `/status`, `/cost`, and `/cache`; default chrome keeps
-/// only identity, context pressure, and durable session spend.
+/// identity, context pressure and durable session spend together on the left,
+/// with the workspace right-aligned when space permits.
 fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Instant) -> String {
     let theme_layout = state.theme.layout_for_width(width);
-    let presentation = PresentationLayout::new(&state.theme, width);
     let total_width = usize::from(width);
     if total_width == 0 {
         return String::new();
@@ -659,7 +693,8 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
         0
     };
     let available = total_width.saturating_sub(left_inset.saturating_mul(2));
-    let gap = presentation.footer_gap;
+    let separator = super::view::semantic_separator(&state.theme);
+    let gap = visible_width(separator);
     let active = state.run.current().is_some_and(|run| run.is_active());
 
     // Active runs retain the identity captured at submission. An idle footer
@@ -737,8 +772,8 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
         segments.push(StatusFooterSegment::new(
             FooterKind::Context,
             vec![
-                format!("context {marker}{percent}%/{limit_display}"),
                 format!("{marker}{percent}%/{limit_display}"),
+                format!("{marker}{percent}%"),
             ],
         ));
     }
@@ -766,10 +801,7 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
             }],
         ));
     } else if let Some(cost) = cost {
-        segments.push(StatusFooterSegment::new(
-            FooterKind::Cost,
-            vec![format!("session {cost}")],
-        ));
+        segments.push(StatusFooterSegment::new(FooterKind::Cost, vec![cost]));
     }
 
     if !theme_layout.show_footer || theme_layout.show_header {
@@ -827,32 +859,37 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
         _ => state.theme.fg("muted", segment.segment.text()),
     };
 
-    let identity = segments
+    let left_text = segments
         .iter()
-        .find(|segment| segment.segment.is_visible() && segment.kind == FooterKind::Identity);
-    let metrics = segments
-        .iter()
-        .filter(|segment| segment.segment.is_visible() && segment.kind != FooterKind::Identity)
-        .collect::<Vec<_>>();
-    let identity_text = identity.map(style_segment).unwrap_or_default();
-    let identity_width = identity.map_or(0, |segment| visible_width(segment.segment.text()));
-    let metrics_width = metrics
-        .iter()
-        .map(|segment| visible_width(segment.segment.text()))
-        .sum::<usize>()
-        + metrics.len().saturating_sub(1) * gap;
-    let metrics_text = metrics
-        .iter()
-        .map(|segment| style_segment(segment))
+        .filter(|segment| segment.segment.is_visible())
+        .map(style_segment)
         .collect::<Vec<_>>()
-        .join(&" ".repeat(gap));
-    let body = if identity.is_some() && !metrics.is_empty() {
-        let spacing = available
-            .saturating_sub(identity_width + metrics_width)
-            .max(gap);
-        format!("{identity_text}{}{metrics_text}", " ".repeat(spacing))
+        .join(&state.theme.fg("muted", separator));
+    let left_width = status_footer_width(&segments, gap);
+    // The directory is secondary: shorten or omit it before compromising any
+    // left-hand metadata. Keep the same two-cell right inset as the composer.
+    let cwd = if !left_text.is_empty() && theme_layout.show_footer && !theme_layout.show_header {
+        state.workspace.as_deref().map_or_else(String::new, |path| {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            footer_workspace(
+                path,
+                home.as_deref(),
+                available.saturating_sub(left_width + 2),
+                state.theme.unicode(),
+            )
+        })
     } else {
-        format!("{identity_text}{metrics_text}")
+        String::new()
+    };
+    let body = if cwd.is_empty() {
+        left_text
+    } else {
+        let spacing = available.saturating_sub(left_width + visible_width(&cwd));
+        format!(
+            "{left_text}{}{}",
+            " ".repeat(spacing),
+            state.theme.fg("muted", &cwd)
+        )
     };
     fit_line(&format!("{}{body}", " ".repeat(left_inset)), width)
 }
@@ -1026,6 +1063,50 @@ mod tests {
         assert_eq!(composer_content_rows(12, 10), 3);
         // 20-row terminal → max 5 rows
         assert_eq!(composer_content_rows(20, 7), 5); // capped at 5
+    }
+
+    #[test]
+    fn footer_workspace_uses_home_components_not_string_prefixes() {
+        use std::path::Path;
+        let home = Some(Path::new("/home/user"));
+        for (path, expected) in [
+            ("/home/user", "~"),
+            ("/home/user/project", "~/project"),
+            ("/home/user-other/project", "/home/user-other/project"),
+            ("/", "/"),
+        ] {
+            assert_eq!(footer_workspace(Path::new(path), home, 80, true), expected);
+        }
+        assert_eq!(
+            footer_workspace(Path::new("/work/project"), None, 80, true),
+            "/work/project"
+        );
+    }
+
+    #[test]
+    fn footer_workspace_stays_one_safe_row_and_preserves_grapheme_tails() {
+        use std::path::Path;
+        let path = Path::new("/work/\x1b[31mparent\x1b[0m\nline\t/家/e\u{301}-👩‍💻");
+        for unicode in [true, false] {
+            for width in 0..81 {
+                let display = footer_workspace(path, None, width, unicode);
+                assert!(visible_width(&display) <= width, "{width}: {display:?}");
+                assert!(!display.chars().any(char::is_control), "{display:?}");
+                if width < 4 {
+                    assert!(display.is_empty());
+                } else if width >= 6 {
+                    assert!(display.ends_with("👩‍💻"), "{width}: {display:?}");
+                }
+            }
+        }
+        assert_eq!(
+            footer_workspace(Path::new("/long/parent/project"), None, 10, true),
+            "…t/project"
+        );
+        assert_eq!(
+            footer_workspace(Path::new("/long/parent/project"), None, 10, false),
+            "...project"
+        );
     }
 
     #[test]

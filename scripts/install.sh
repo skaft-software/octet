@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# 0.7.4 candidate release tooling; public installs remain on published 0.7.3
-# until the mandatory acceptance gate and signed publication are complete.
+# Exact-version 0.7.5 release tooling. Published assets must match this version.
+# See the version-pinned release record for publication and installation evidence.
 repository="skaft-software/octet"
-version="0.7.4"
+version="0.7.5"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"
@@ -78,6 +78,66 @@ case "$data_directory" in
         ;;
 esac
 
+# Presentation is stderr-only: several download/verification functions return
+# machine-readable values through command substitution. Never animate beside
+# child diagnostics or Cargo logs; only curl owns a live, measured transfer bar.
+ui_interactive=false
+if [ -t 2 ] && [ -n "${TERM:-}" ] && [ "$TERM" != dumb ]; then
+    ui_interactive=true
+fi
+
+ui_terminal_columns() {
+    python3 -c 'import os; print(max(1, os.get_terminal_size(3).columns))' 3>&2 2>/dev/null
+}
+
+ui_heading() {
+    [ "${OCTET_UPDATE_PARENT_UI:-0}" != 1 ] || return 0
+    if [ "$ui_interactive" = false ]; then
+        printf 'octet / %s / Installing\n' "$tag" >&2
+        return
+    fi
+    ui_columns=$(ui_terminal_columns) || ui_columns=80
+    ui_locale=$(printf '%s' "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" | tr '[:upper:]' '[:lower:]')
+    case "$ui_locale" in
+        *utf-8*|*utf8*)
+            ui_top='  ████  ████████'
+            ui_bottom='████████████████'
+            ui_compact_top=' ██ ████'
+            ui_compact_bottom='████████'
+            ;;
+        *)
+            ui_top='  ####  ########'
+            ui_bottom='################'
+            ui_compact_top=' ## ####'
+            ui_compact_bottom='########'
+            ;;
+    esac
+    printf '\n' >&2
+    if [ "$ui_columns" -ge 31 ] && [ "$ui_columns" -ge "$((21 + ${#tag}))" ]; then
+        printf '  %s   octet\n  %s   %s\n  %s   Installing\n  %s\n' \
+            "$ui_top" "$ui_top" "$tag" "$ui_bottom" "$ui_bottom" >&2
+    else
+        # Stack rather than truncate the canonical 4x16 mark on narrow TTYs.
+        if [ "$ui_columns" -ge 18 ]; then
+            printf '  %s\n  %s\n  %s\n  %s\n' \
+                "$ui_top" "$ui_top" "$ui_bottom" "$ui_bottom" >&2
+        elif [ "$ui_columns" -ge 10 ]; then
+            printf '  %s\n  %s\n' "$ui_compact_top" "$ui_compact_bottom" >&2
+        fi
+        # Keep the complete version even when it needs multiple narrow rows.
+        printf 'octet\n%s\nInstalling\n' "$tag" | awk -v width="$ui_columns" '{
+            for (start = 1; start <= length($0); start += width)
+                print substr($0, start, width)
+        }' >&2
+    fi
+    printf '\n' >&2
+}
+
+ui_stage() {
+    # Unmeasured phases deliberately have no percent, ETA, or synthetic timer.
+    printf '  %s\n' "$1" >&2
+}
+
 work_directory=$(mktemp -d "${TMPDIR:-/tmp}/octet-install.XXXXXX")
 chmod 0700 "$work_directory"
 install_temporary=
@@ -91,7 +151,20 @@ cleanup() {
     fi
     rm -rf "$work_directory"
 }
-trap cleanup EXIT HUP INT TERM
+installer_exit() {
+    status=$?
+    trap - 0 HUP INT TERM
+    cleanup
+    if [ "$status" -ne 0 ]; then
+        if [ "$ui_interactive" = true ]; then printf '\n' >&2; fi
+        printf 'octet installation failed (exit %s).\n' "$status" >&2
+    fi
+    exit "$status"
+}
+trap installer_exit 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 trusted_release_url() {
     case "$1" in
@@ -115,7 +188,23 @@ download_release_file() {
         printf 'refusing untrusted release URL\n' >&2
         return 1
     fi
-    if ! effective_url=$(curl \
+    # curl reports only this transfer, including unknown-length activity.
+    # With captured stdout its native meter can fall back to 79 cells; it also
+    # ignores COLUMNS <= 20. Query stderr per transfer and reserve one column.
+    # Cap the meter at 79 cells; below 22 columns use honest static phase lines.
+    # Set COLUMNS on curl itself: a shell may reset an inherited value.
+    curl_progress=--silent
+    curl_columns=79
+    if [ "$ui_interactive" = true ]; then
+        ui_columns=$(ui_terminal_columns) || ui_columns=0
+        if [ "$ui_columns" -ge 22 ]; then
+            curl_progress=--progress-bar
+            if [ "$ui_columns" -le 80 ]; then
+                curl_columns=$((ui_columns - 1))
+            fi
+        fi
+    fi
+    if ! effective_url=$(COLUMNS="$curl_columns" curl \
         --proto '=https' \
         --proto-redir '=https' \
         --tlsv1.2 \
@@ -126,7 +215,7 @@ download_release_file() {
         --connect-timeout 15 \
         --max-time 300 \
         --fail \
-        --silent \
+        "$curl_progress" \
         --show-error \
         --dump-header "$headers" \
         --output "$destination" \
@@ -217,10 +306,12 @@ install_pinned_cosign() {
             ;;
     esac
 
+    ui_stage "Downloading signature verifier"
     cosign_path="$work_directory/cosign"
     download_release_file \
         "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_asset" \
         "$cosign_path"
+    ui_stage "Verifying signature verifier checksum"
     bounded_file "$cosign_path" 167772160
     actual_cosign_sha256=$(sha256_file "$cosign_path")
     if [ "$actual_cosign_sha256" != "$cosign_sha256" ]; then
@@ -236,6 +327,7 @@ verified_archive_sha256() {
     archive_name=$3
     validate_release_source_commit
     install_pinned_cosign
+    ui_stage "Verifying release signature and checksums"
 
     # The published v0.7.0 checksum signature predates the repository rename.
     # Download from the current repository without changing historical trust.
@@ -264,9 +356,9 @@ manifest_path, bundle_path, cosign_path = sys.argv[1:4]
 identity, repository, source_commit, archive_name = sys.argv[4:8]
 expected_names = {
     "install-octet.sh",
-    "octet-0.7.4-aarch64-apple-darwin.tar.gz",
-    "octet-0.7.4-x86_64-apple-darwin.tar.gz",
-    "octet-0.7.4-x86_64-unknown-linux-gnu.tar.gz",
+    "octet-0.7.5-aarch64-apple-darwin.tar.gz",
+    "octet-0.7.5-x86_64-apple-darwin.tar.gz",
+    "octet-0.7.5-x86_64-unknown-linux-gnu.tar.gz",
 }
 line_pattern = re.compile(r"^([0-9A-Fa-f]{64})  (?:\./)?([A-Za-z0-9_.-]+)$")
 
@@ -683,12 +775,15 @@ install_executable() {
 install_release_binaries() {
     source_root=$1
     expected_version=$2
+    ui_stage "Checking executable version and host handshake"
     validate_release_binaries "$source_root" "$expected_version"
+    ui_stage "Installing executables"
     install_executable "$source_root/octet" octet
     install_executable "$source_root/octet-host" octet-host
 }
 
 install_assets() {
+    ui_stage "Installing documentation"
     source_root=$1
     if [ ! -f "$source_root/README.md" ] || [ -L "$source_root/README.md" ] \
         || [ ! -d "$source_root/docs" ] || [ -L "$source_root/docs" ] \
@@ -786,7 +881,8 @@ if [ "$mode" = "source" ]; then
         fi
     done
     validate_release_source_commit
-    printf 'Building octet %s from immutable source %s\n' "$tag" "$release_source_commit"
+    ui_heading
+    ui_stage "Building octet $tag from immutable source $release_source_commit"
     source_root="$work_directory/source-root"
     cargo install \
         --locked \
@@ -800,11 +896,13 @@ if [ "$mode" = "source" ]; then
     source_archive="$work_directory/octet-source.tar.gz"
     source_extraction="$work_directory/source-extraction"
     source_package="${repository##*/}-$release_source_commit"
+    ui_stage "Downloading source documentation"
     download_release_file \
         "https://github.com/$repository/archive/$release_source_commit.tar.gz" \
         "$source_archive"
     bounded_file "$source_archive" 134217728
     mkdir -m 0700 "$source_extraction"
+    ui_stage "Validating and extracting source documentation"
     extract_validated_archive \
         "$source_archive" \
         "$source_extraction" \
@@ -826,9 +924,11 @@ else
     archive="$work_directory/$archive_name"
     checksums="$work_directory/$checksum_asset"
     checksum_bundle="$work_directory/$checksum_bundle_asset"
-    printf 'Downloading octet %s for %s\n' "$version" "$target"
+    ui_heading
+    ui_stage "Downloading release checksums ($target)"
     download_release_file "$release_base/$checksum_asset" "$checksums"
     bounded_file "$checksums" 1048576
+    ui_stage "Downloading release signature"
     download_release_file "$release_base/$checksum_bundle_asset" "$checksum_bundle"
     bounded_file "$checksum_bundle" 1048576
     if ! expected_sha256=$(verified_archive_sha256 \
@@ -838,11 +938,13 @@ else
         exit 1
     fi
 
+    ui_stage "Downloading octet $tag ($target)"
     download_release_file "$release_base/$archive_name" "$archive"
     bounded_file "$archive" 134217728
     package="octet-$version-$target"
     extraction="$work_directory/extracted"
     mkdir -m 0700 "$extraction"
+    ui_stage "Verifying checksum, validating and extracting archive"
     extract_validated_archive \
         "$archive" \
         "$extraction" \
@@ -877,17 +979,27 @@ if [ "$path_present" = false ] && [ "${OCTET_NO_MODIFY_PATH:-0}" != "1" ]; then
     marker="# Added by the octet installer"
     if [ -n "$profile" ] && ! grep -F "$marker" "$profile" >/dev/null 2>&1; then
         printf '\n%s\n%s\n' "$marker" "$path_line" >> "$profile"
-        printf 'Added %s to PATH in %s\n' "$install_directory" "$profile"
+        printf 'Added %s to PATH in %s\n' "$install_directory" "$profile" >&2
     fi
 fi
 
-"$install_directory/octet" --version
+ui_stage "Checking installed version"
+if installed_version=$("$install_directory/octet" --version 2>/dev/null); then
+    if [ "$installed_version" != "octet $version" ]; then
+        printf 'installed octet binary version mismatch\n' >&2
+        exit 1
+    fi
+else
+    status=$?
+    printf 'could not verify the installed octet version\n' >&2
+    exit "$status"
+fi
 if ! command -v rg >/dev/null 2>&1; then
     printf '%s\n' \
         "Note: octet also requires ripgrep (rg)." \
-        "Install it with 'brew install ripgrep' on macOS or your Linux package manager."
+        "Install it with 'brew install ripgrep' on macOS or your Linux package manager." >&2
 fi
 if [ "$path_present" = false ]; then
-    printf 'Restart your shell, or run:\n  export PATH="%s:$PATH"\n' "$install_directory"
+    printf 'Restart your shell, or run:\n  export PATH="%s:$PATH"\n' "$install_directory" >&2
 fi
-printf '%s\n' "octet is installed. Run 'octet --help' to get started."
+printf '%s\n' "octet $tag is installed. Run 'octet --help' to get started." >&2

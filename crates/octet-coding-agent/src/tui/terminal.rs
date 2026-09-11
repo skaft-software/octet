@@ -409,6 +409,7 @@ fn restore_terminal(advance_line: bool) {
         let _ = execute!(out, cursor::MoveToNextLine(1), cursor::MoveToColumn(0));
     }
     let _ = out.flush();
+    crate::output::end_tui_diagnostics();
 }
 
 /// Install a panic hook which restores the terminal before delegating to the
@@ -576,7 +577,11 @@ impl OctetTerminal<Stdout> {
         capture_mouse: bool,
         image_store: TerminalImageStore,
     ) -> Result<Self> {
-        terminal::enable_raw_mode()?;
+        crate::output::begin_tui_diagnostics();
+        if let Err(error) = terminal::enable_raw_mode() {
+            crate::output::end_tui_diagnostics();
+            return Err(error.into());
+        }
         RAW_ACTIVE.store(true, Ordering::SeqCst);
 
         let result = Self::enter_inner(size, capture_mouse, image_store);

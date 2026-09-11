@@ -6,15 +6,16 @@
 
 ## Install native binaries
 
-The [v0.7.3 release](releases/v0.7.3.md) includes signed native archives and a
-version-pinned installer for macOS Apple silicon/Intel and GNU/Linux x86-64.
-See the release record for public-install verification results. Install from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.3):
+Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
+See the [v0.7.5 notes](releases/v0.7.5.md) for changes; availability, signed
+assets and public-install verification are recorded on the version-pinned
+GitHub release. Install using the matching installer from the
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.3/install-octet.sh | sh
-octet --version   # octet 0.7.3
+  https://github.com/skaft-software/octet/releases/download/v0.7.5/install-octet.sh | sh
+octet --version   # octet 0.7.5
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -31,12 +32,47 @@ Cargo command in [distribution](distribution.md). The immutable v0.7.0
 installer's `--from-source` mode expects the old repository archive directory
 name and is not supported after the rename; its default native mode is unchanged.
 
+## Installer progress
+
+The installer and `octet update` show the monochrome octet byte mark and target
+version on an interactive terminal. Progress is written to stderr. The mark uses
+the terminal's default foreground, with an ASCII fallback outside UTF-8 locales;
+narrow terminals use a compact layout. Redirected output and a missing or `dumb`
+`TERM` use plain stage messages without animated terminal controls.
+
+The native installer uses curl's measured, per-download progress bar when stderr
+width is known and at least 22 columns; otherwise it keeps plain stage messages.
+The width is sampled before each download, not continuously during a transfer.
+A transfer reaching 100% means **downloaded**, not verified or installed; signature/checksum
+verification, archive validation, executable checks and installation remain
+separate named stages. Unknown-size transfers have no invented percentage.
+Unmeasured updater checks and package-manager work use an indeterminate activity
+bar, with command output streamed live. There is no simulated overall percentage
+or ETA. The installed executable must report the requested version before the
+final success message. Existing signature, archive, path and trust checks remain
+required.
+
+## Update and release notes
+
+Run `octet update` to update using the channel that installed the binary, then
+restart octet. `octet update --check` checks without installing.
+Starting an interactive session also makes one quiet, bounded release check unless
+`--offline` is set. A newer stable release adds an `octet update` hint to the splash;
+if the splash is already in history, a single notice appears at the live tail.
+Failures do not block startup or produce an error. No automatic installation,
+provider request, credentials, periodic polling or persistent update cache is used.
+Proxy-only networks do not receive this optional direct-HTTPS startup notice.
+
+From 0.7.5 onward, `/changelog` opens the current binary's bundled release notes
+inside the TUI as rich Markdown. Up/Down, PageUp/PageDown, Home and End scroll;
+Escape or Left returns to the composer. It works offline and does not send notes
+or the command to the model.
+
 ## Build from a checkout
 
-This checkout is the **UNPUBLISHED 0.7.4 source candidate**, not the published
-0.7.3 release installed above. Mandatory #382 physical acceptance is UNRUN;
-see [candidate gates](releases/v0.7.4.md). Build matching candidate extensions
-locally; the public catalog does not provide 0.7.4 bundles yet.
+A source checkout can differ from the published release. Check `octet --version`
+and use matching executable bundles; source builds do not establish signed
+publication or replace an installed binary.
 
 On macOS or GNU/Linux, install Rust 1.86+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep). From the source checkout:
@@ -55,8 +91,9 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The v0.7.3 release includes the four official executable bundles and the
-separate Serve 0.7.3 application. For example:
+The four official executable bundles and the separate Serve application must
+match octet 0.7.5. Their publication status is recorded on the GitHub release;
+installation never substitutes another host version. For example:
 
 ```sh
 octet extension install octet-web-search
@@ -92,15 +129,15 @@ end-to-end example remains missing.
 ## Container
 
 The included **linux/amd64** image is a source-build route, not evidence of a
-published image. The following local-only commands label the 0.7.4 source
-candidate; they do not pull a published image:
+published image. The following local-only commands label the source checkout; they do not pull a
+published image:
 
 ```sh
-scripts/build-octet-image.sh octet:0.7.4
+scripts/build-octet-image.sh octet:local
 docker run --rm -it \
   -e ANTHROPIC_API_KEY \
   -v "$PWD:/workspace" \
-  octet:0.7.4 --model claude-sonnet-4-6
+  octet:local --model claude-sonnet-4-6
 ```
 
 The script builds a clean tracked Git snapshot, refuses tracked changes, and
