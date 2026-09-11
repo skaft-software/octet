@@ -8,8 +8,12 @@
   distribution versions to 0.7.4; independent APIs and schemas are unchanged.
 - Maintenance #411 is already merged, including #403, #357, #208, #201 and #361.
 - The three medium-severity GitHub Vitest alerts are fixed on main.
-- Runtime performance findings await independent review/verification; no new performance
-  metrics or terminal-acceptance pass is claimed.
+- Overlap independent custom-provider discovery in bounded foreground batches,
+  preserving validation, cache isolation and deterministic catalog publication.
+- Avoid whole-branch reference allocation during provider-usage reconciliation;
+  retain explicit limits and [matched local evidence](docs/benchmarks/v0.7.4-performance.md).
+- Improve ANSI256 Light added-diff contrast while retaining green semantics (#412).
+  No physical terminal-acceptance pass is claimed.
 - Mandatory #382 physical acceptance remains **UNRUN**, blocking publication.
   No 0.7.4 tags or assets are claimed. Public installation commands remain
   pinned to 0.7.3. See [candidate notes](docs/releases/v0.7.4.md).

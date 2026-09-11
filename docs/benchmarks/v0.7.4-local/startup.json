@@ -1,0 +1,81 @@
+{
+  "binary": "<BUILD_ROOT>/target/debug/octet",
+  "sha256": "d73a0df45c484ecf2631a4eb0ae31069724be067946d615ec58584a7be19781b",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "profile": "dev",
+  "scope": "offline manual model, default core tools, no extensions, 80x24 PTY; no prompt submitted, no provider readiness inference",
+  "trials": [
+    {
+      "trial": 0,
+      "first_completed_frame_ms": 39.4965,
+      "model_label_completed_frame_ms": 59.32425,
+      "edit_to_completed_frame_ms": 20.265917,
+      "spawn_to_editable_frame_ms": 79.598875,
+      "exit": 0
+    },
+    {
+      "trial": 1,
+      "first_completed_frame_ms": 16.47825,
+      "model_label_completed_frame_ms": 33.645875,
+      "edit_to_completed_frame_ms": 20.25475,
+      "spawn_to_editable_frame_ms": 53.908167,
+      "exit": 0
+    },
+    {
+      "trial": 2,
+      "first_completed_frame_ms": 18.0175,
+      "model_label_completed_frame_ms": 36.103125,
+      "edit_to_completed_frame_ms": 20.306916,
+      "spawn_to_editable_frame_ms": 56.41725,
+      "exit": 0
+    },
+    {
+      "trial": 3,
+      "first_completed_frame_ms": 17.654208,
+      "model_label_completed_frame_ms": 37.925625,
+      "edit_to_completed_frame_ms": 20.1085,
+      "spawn_to_editable_frame_ms": 58.041917,
+      "exit": 0
+    },
+    {
+      "trial": 4,
+      "first_completed_frame_ms": 20.701542,
+      "model_label_completed_frame_ms": 41.04225,
+      "edit_to_completed_frame_ms": 20.324542,
+      "spawn_to_editable_frame_ms": 61.376584,
+      "exit": 0
+    },
+    {
+      "trial": 5,
+      "first_completed_frame_ms": 22.117625,
+      "model_label_completed_frame_ms": 42.331166,
+      "edit_to_completed_frame_ms": 20.385459,
+      "spawn_to_editable_frame_ms": 62.728375,
+      "exit": 0
+    },
+    {
+      "trial": 6,
+      "first_completed_frame_ms": 25.004042,
+      "model_label_completed_frame_ms": 45.2635,
+      "edit_to_completed_frame_ms": 16.661083,
+      "spawn_to_editable_frame_ms": 61.937042,
+      "exit": 0
+    },
+    {
+      "trial": 7,
+      "first_completed_frame_ms": 23.672542,
+      "model_label_completed_frame_ms": 44.139125,
+      "edit_to_completed_frame_ms": 20.372792,
+      "spawn_to_editable_frame_ms": 64.523959,
+      "exit": 0
+    },
+    {
+      "trial": 8,
+      "first_completed_frame_ms": 22.867167,
+      "model_label_completed_frame_ms": 42.375417,
+      "edit_to_completed_frame_ms": 17.086084,
+      "spawn_to_editable_frame_ms": 59.472417,
+      "exit": 0
+    }
+  ]
+}

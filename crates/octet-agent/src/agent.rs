@@ -2856,47 +2856,67 @@ fn usage_context_tokens(usage: &Usage) -> u64 {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static PROVIDER_CONTEXT_ENTRY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROVIDER_CONTEXT_USAGE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Provider usage is the best available tokenizer measurement of the prefix
 /// through its assistant response. Add structural estimates only for messages
 /// persisted after that response. Usage from before the latest compaction or
 /// from a different route/model is stale and must not retrigger compaction.
 fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
-    let branch = active_branch_entries(session);
-    let boundary = branch
-        .iter()
-        .rposition(|entry| {
-            matches!(
-                entry.value,
-                EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
-            )
-        })
-        .map_or(0, |index| index.saturating_add(1));
-
-    for (index, entry) in branch.iter().enumerate().skip(boundary).rev() {
-        if !matches!(entry.value, EntryValue::Message(Message::Assistant(_))) {
-            continue;
+    // Imported/legacy sessions may have history but no provider measurements.
+    if session.usage_records().is_empty() {
+        return None;
+    }
+    // Only the suffix after the newest usable measurement contributes. Walking
+    // backwards avoids allocating/copying the entire active branch on startup,
+    // context inspection, and capacity-cache rebuilds in long sessions.
+    let mut cursor = session.head_ref();
+    while let Some(id) = cursor {
+        #[cfg(test)]
+        PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let entry = session.entry(id)?;
+        match &entry.value {
+            EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. } => break,
+            EntryValue::Message(message) => {
+                if matches!(message, Message::Assistant(_)) {
+                    if let Some(record) = session.usage_records().iter().rev().find(|record| {
+                        #[cfg(test)]
+                        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(visits.get() + 1));
+                        matches!(
+                            &record.kind,
+                            crate::session::UsageRecordKind::AssistantTurn { assistant }
+                                if assistant == &entry.id
+                        ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
+                            && record.model.as_ref() == Some(&model.spec.id)
+                            && usage_context_tokens(&record.usage) > 0
+                    }) {
+                        // Estimate only after finding usable usage. Sessions with
+                        // no measurement must not serialize their entire history.
+                        let mut trailing = 0u64;
+                        let mut tail = session.head_ref();
+                        while let Some(tail_id) = tail.filter(|tail_id| *tail_id != id) {
+                            #[cfg(test)]
+                            PROVIDER_CONTEXT_ENTRY_VISITS
+                                .with(|visits| visits.set(visits.get() + 1));
+                            let tail_entry = session.entry(tail_id)?;
+                            if let EntryValue::Message(message) = &tail_entry.value {
+                                trailing = trailing.saturating_add(estimate_messages_tokens(
+                                    std::slice::from_ref(message),
+                                ));
+                            }
+                            tail = tail_entry.parent.as_ref();
+                        }
+                        return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+                    }
+                }
+            }
+            _ => {}
         }
-        let Some(record) = session.usage_records().iter().rev().find(|record| {
-            matches!(
-                &record.kind,
-                crate::session::UsageRecordKind::AssistantTurn { assistant }
-                    if assistant == &entry.id
-            ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
-                && record.model.as_ref() == Some(&model.spec.id)
-                && usage_context_tokens(&record.usage) > 0
-        }) else {
-            continue;
-        };
-        let trailing = branch[index.saturating_add(1)..]
-            .iter()
-            .filter_map(|entry| match &entry.value {
-                EntryValue::Message(message) => Some(message),
-                _ => None,
-            })
-            .fold(0u64, |total, message| {
-                total.saturating_add(estimate_messages_tokens(std::slice::from_ref(message)))
-            });
-        return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+        cursor = entry.parent.as_ref();
     }
     None
 }
@@ -8474,6 +8494,279 @@ mod tests {
             ),
             "a rejected native request must not persist a checkpoint"
         );
+    }
+
+    fn provider_context_estimate_reference(session: &Session, model: &Model) -> Option<u64> {
+        let branch = active_branch_entries(session);
+        let boundary = branch
+            .iter()
+            .rposition(|entry| {
+                matches!(
+                    entry.value,
+                    EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
+                )
+            })
+            .map_or(0, |index| index.saturating_add(1));
+
+        for (index, entry) in branch.iter().enumerate().skip(boundary).rev() {
+            if !matches!(entry.value, EntryValue::Message(Message::Assistant(_))) {
+                continue;
+            }
+            let Some(record) = session.usage_records().iter().rev().find(|record| {
+                matches!(
+                    &record.kind,
+                    crate::session::UsageRecordKind::AssistantTurn { assistant }
+                        if assistant == &entry.id
+                ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
+                    && record.model.as_ref() == Some(&model.spec.id)
+                    && usage_context_tokens(&record.usage) > 0
+            }) else {
+                continue;
+            };
+            let trailing = branch[index.saturating_add(1)..]
+                .iter()
+                .filter_map(|entry| match &entry.value {
+                    EntryValue::Message(message) => Some(message),
+                    _ => None,
+                })
+                .fold(0u64, |total, message| {
+                    total.saturating_add(estimate_messages_tokens(std::slice::from_ref(message)))
+                });
+            return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+        }
+        None
+    }
+
+    fn append_usage_fixture(session: &mut Session, model: &Model, tokens: u64) -> EntryId {
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("measured response".into())],
+                model: model.spec.id.clone(),
+                protocol: model.spec.protocol,
+            })))
+            .unwrap();
+        session
+            .record_assistant_usage(
+                assistant.clone(),
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                Usage {
+                    total_tokens: tokens,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        assistant
+    }
+
+    #[test]
+    fn provider_usage_suffix_matches_reference_across_branches_and_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("suffix.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let check = |session: &Session| {
+            assert_eq!(
+                provider_context_estimate(session, &model),
+                provider_context_estimate_reference(session, &model)
+            );
+        };
+        check(&session);
+        let measured = append_usage_fixture(&mut session, &model, 1234);
+        check(&session);
+        session
+            .append(user_message(UserInput::from("trailing λ message")))
+            .unwrap();
+        session
+            .append(EntryValue::Config {
+                model: None,
+                reasoning: Some("low".into()),
+                reasoning_mode: None,
+            })
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: octet_ai::ToolCallId("fixture-call".into()),
+                    content: vec![ToolResultPart::Text("tool result λ".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+        check(&session);
+        append_usage_fixture(&mut session, &model, 0);
+        check(&session);
+        let mut other_model = model.clone();
+        Arc::make_mut(&mut other_model.spec).id = octet_ai::ModelId("other-model".into());
+        append_usage_fixture(&mut session, &other_model, 9000);
+        check(&session);
+        let mut other_endpoint = model.clone();
+        Arc::make_mut(&mut other_endpoint.endpoint).id =
+            octet_ai::EndpointId("other-endpoint".into());
+        append_usage_fixture(&mut session, &other_endpoint, 9000);
+        check(&session);
+        let abandoned = session.head().unwrap();
+        session.checkout(measured.clone()).unwrap();
+        session
+            .append(user_message(UserInput::from("new branch")))
+            .unwrap();
+        check(&session);
+        append_usage_fixture(&mut session, &model, u64::MAX);
+        session
+            .append(user_message(UserInput::from("saturating suffix")))
+            .unwrap();
+        check(&session);
+        assert_eq!(provider_context_estimate(&session, &model), Some(u64::MAX));
+        session.checkout(abandoned).unwrap();
+        session.compact("summary", measured).unwrap();
+        check(&session);
+        assert_eq!(provider_context_estimate(&session, &model), None);
+        append_usage_fixture(&mut session, &model, 99);
+        check(&session);
+        session
+            .append_responses_compaction(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                octet_ai::ResponsesOutput::new(
+                    vec![octet_ai::ResponsesItem::new(serde_json::json!({
+                "type": "compaction", "id": "native-checkpoint", "encrypted_content": "opaque"
+            })).unwrap()],
+                ),
+            )
+            .unwrap();
+        check(&session);
+        assert_eq!(provider_context_estimate(&session, &model), None);
+        append_usage_fixture(&mut session, &model, 101);
+        check(&session);
+        drop(session);
+        let reopened = Session::open_read_only(directory.path().join("suffix.jsonl")).unwrap();
+        check(&reopened);
+    }
+
+    #[test]
+    fn provider_usage_entry_work_is_bounded_by_the_unmeasured_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("work.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        for history in [10, 100, 1000] {
+            while session.entries().len() < history {
+                session
+                    .append(user_message(UserInput::from("settled history")))
+                    .unwrap();
+            }
+            if session.usage_records().is_empty() {
+                PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(0));
+                assert_eq!(provider_context_estimate(&session, &model), None);
+                assert_eq!(PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.get()), 0);
+            }
+            append_usage_fixture(&mut session, &model, 1000);
+            session
+                .append(user_message(UserInput::from("fixed tail")))
+                .unwrap();
+            PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(0));
+            let estimate = provider_context_estimate(&session, &model);
+            assert_eq!(PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.get()), 3);
+            assert_eq!(
+                estimate,
+                provider_context_estimate_reference(&session, &model)
+            );
+        }
+    }
+
+    #[test]
+    fn provider_usage_abandoned_records_remain_an_explicit_scan_cost() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("abandoned.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let anchor = append_usage_fixture(&mut session, &model, 1234);
+        let mut other = model.clone();
+        Arc::make_mut(&mut other.spec).id = octet_ai::ModelId("other-model".into());
+        for records in [5, 20] {
+            for _ in 0..records {
+                append_usage_fixture(&mut session, &other, 99);
+            }
+            session.checkout(anchor.clone()).unwrap();
+            PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(0));
+            PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+            assert_eq!(provider_context_estimate(&session, &model), Some(1234));
+            assert_eq!(PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.get()), 1);
+            assert_eq!(
+                PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()),
+                session.usage_records().len()
+            );
+            assert_eq!(
+                provider_context_estimate(&session, &model),
+                provider_context_estimate_reference(&session, &model)
+            );
+        }
+    }
+
+    /// Offline matched microbenchmark, not provider or end-to-end launch latency.
+    /// Run with: cargo test --release --offline --locked -p octet-agent --lib
+    /// provider_usage_suffix_benchmark -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore = "manual matched timing experiment"]
+    fn provider_usage_suffix_benchmark() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let repetitions = 200;
+        for history in [100, 1000, 10_000] {
+            let mut session =
+                Session::create(directory.path().join(format!("benchmark-{history}.jsonl")))
+                    .unwrap();
+            while session.entries().len() < history {
+                session
+                    .append(user_message(UserInput::from("settled history")))
+                    .unwrap();
+            }
+            for scenario in ["unmeasured", "suffix"] {
+                if scenario == "suffix" {
+                    append_usage_fixture(&mut session, &model, 1000);
+                    session
+                        .append(user_message(UserInput::from("fixed tail")))
+                        .unwrap();
+                }
+                assert_eq!(
+                    provider_context_estimate(&session, &model),
+                    provider_context_estimate_reference(&session, &model)
+                );
+                for trial in 0..9 {
+                    // Alternate order to avoid systematically favoring warm caches.
+                    for candidate in if trial % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    } {
+                        let estimate = if candidate {
+                            provider_context_estimate
+                        } else {
+                            provider_context_estimate_reference
+                        };
+                        let start = std::time::Instant::now();
+                        for _ in 0..repetitions {
+                            std::hint::black_box(estimate(
+                                std::hint::black_box(&session),
+                                std::hint::black_box(&model),
+                            ));
+                        }
+                        println!("provider_usage_suffix scenario={scenario} history={history} trial={trial} candidate={candidate} repetitions={repetitions} elapsed_ns={}", start.elapsed().as_nanos());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

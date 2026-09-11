@@ -1,0 +1,23 @@
+{
+  "head": "0d7711eb73a0d9df30c8cb1be291dbe8bb1649cf",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: aarch64-apple-darwin\nrelease: 1.97.1\nLLVM version: 22.1.6\n",
+  "system": "macOS 27.0 / Darwin 27.0.0 / arm64 (nonessential host identity omitted)",
+  "files": {
+    "crates/octet-agent/src/agent.rs": "8b37a8d0be05dc87950eb0fe6818e372db6a9c290759fac09fca9b870c3e3107",
+    "crates/octet-coding-agent/src/app/bootstrap.rs": "9e2a9d85941714e1fc54570094251f9110503d3980e3abb8b383ab46e2fdb865",
+    "crates/octet-coding-agent/src/app/bootstrap/tests.rs": "4d586e8466b91716412d0a1491dd7e363c24c54959bb24516cdd6d8f74630a6f",
+    "target/profiling/deps/octet_agent-2c2ef2f6557f3d84": "f4cfe4e796045de9838d3e28ad0291ea20951796ac77c7f28f5059eeb697ba42",
+    "target/debug/deps/octet_sdk-8b04d2dc9149c32d": "4aa5c2d07bf4908bf1a2bcd01957ff03886704b60b9a62f1ba302244afdaa2c4",
+    "target/debug/octet": "d73a0df45c484ecf2631a4eb0ae31069724be067946d615ec58584a7be19781b",
+    "target/performance/suffix-profiling-final.log": "7e397582af3351ee40d783d796a3bbf75c366a192c6b641b75c7b209656fa132",
+    "target/performance/custom-startup-benchmark-final.log": "603619ff042f76c6c77b260cab8164bbaee138a764a688f0c1b230f3a3ab570a"
+  },
+  "source_note": "Apply measured-source.patch to base head to reconstruct the measured three files. Subsequent qualification-only tests are not part of this timing snapshot.",
+  "sanitization": "Only host identity and absolute binary path removed. Numeric trials and benchmark logs unchanged. No campaign homes, registry files, sessions or PTY transcripts included.",
+  "public_sha256": {
+    "raw-text.json": "fc5808677163f31b39ce607c683d0d3546dc4790b880d40bc8cd8e0edc56a2a7",
+    "startup.py": "530b4263117e194acd73e66ce55099fbef619dd36b40fcffd725ba7340f4fead",
+    "startup.json": "ad107394d507855eb7db7517fc6da409b7c45e49ce4a3eb90cb248898767c5aa",
+    "README.md": "d032601610d751314664141d19333f422add919d124239f3cf3eae13636993e0"
+  }
+}
