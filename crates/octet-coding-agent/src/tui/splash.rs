@@ -37,6 +37,16 @@ pub(crate) fn render_logo(
     let top_pad = (rows - mark_rows) / 2;
     let left_pad = (width - column_width * BYTE.len()) / 2;
     let right_pad = width - left_pad - column_width * BYTE.len();
+    // Quantizing a per-column gradient can wash out individual bars. Reuse the
+    // background-balanced model accent uniformly, without the brightening sweep.
+    // Explicit splash colours retain precedence at every capability tier.
+    let solid_color = solid_color.or_else(|| {
+        (theme.capabilities().color != crate::tui::terminal::ColorDepth::TrueColor).then(|| {
+            model_accent
+                .or_else(|| theme.model_rgb(None))
+                .unwrap_or(COLORS[0])
+        })
+    });
     let glyph = if theme.unicode() { "█" } else { "#" };
     let filled = glyph.repeat(column_width);
     let blank = " ".repeat(column_width);
@@ -175,6 +185,58 @@ mod tests {
             rows,
             render_logo(&theme, 8, 2, 1.5, Some((255, 0, 0)), None)
         );
+    }
+
+    #[test]
+    fn limited_color_logo_uses_one_static_background_balanced_accent() {
+        use crate::tui::theme::{test_theme_for, ModelLab, TerminalBackground};
+        for depth in [ColorDepth::Ansi256, ColorDepth::Ansi16, ColorDepth::None] {
+            for background in [
+                TerminalBackground::Light,
+                TerminalBackground::Dark,
+                TerminalBackground::Unknown,
+            ] {
+                for unicode in [false, true] {
+                    let theme = test_theme_for(
+                        background,
+                        TerminalCapabilities::test(true, unicode, depth),
+                    );
+                    for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Anthropic), None] {
+                        let accent = lab.and_then(|lab| theme.model_rgb(Some(lab)));
+                        let color = accent.or_else(|| theme.model_rgb(None)).unwrap();
+                        let glyph = if unicode { "█" } else { "#" };
+                        for width in [8, 16, 24] {
+                            let scale = width / 8;
+                            let painted = theme.rgb_fg(color, &glyph.repeat(scale));
+                            let expected = [
+                                format!(
+                                    "{}{}{}{}",
+                                    " ".repeat(scale),
+                                    painted.repeat(2),
+                                    " ".repeat(scale),
+                                    painted.repeat(4)
+                                ),
+                                painted.repeat(8),
+                            ];
+                            for elapsed in [0.0, 0.5, 1.5, DURATION, DURATION + 1.0] {
+                                let rows =
+                                    render_logo(&theme, width, scale * 2, elapsed, accent, None);
+                                assert_eq!(rows[..scale], vec![expected[0].clone(); scale]);
+                                assert_eq!(rows[scale..], vec![expected[1].clone(); scale]);
+                                assert!(rows.iter().all(|row| visible_width(row) == width));
+                            }
+                        }
+                        let custom = (217, 119, 87);
+                        let rows = render_logo(&theme, 8, 2, 0.5, accent, Some(custom));
+                        assert_eq!(rows[1], theme.rgb_fg(custom, glyph).repeat(8));
+                        assert_eq!(
+                            rows,
+                            render_logo(&theme, 8, 2, DURATION, accent, Some(custom))
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

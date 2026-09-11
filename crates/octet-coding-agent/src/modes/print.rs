@@ -153,6 +153,36 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
                     )
                 );
             }
+            AgentEvent::ProviderUsageUncertain => {
+                crate::output::stderr!("warning: provider usage and cost are uncertain for this session; all subsequent numeric usage/cost values are known subtotals, not complete totals (including after resume).");
+            }
+            AgentEvent::ProviderOperationRetry {
+                operation,
+                attempt,
+                max_attempts,
+                delay,
+                error,
+            } => {
+                let operation =
+                    serde_json::to_value(operation).expect("provider operation serializes");
+                let limit = max_attempts
+                    .map(|limit| format!("/{limit}"))
+                    .unwrap_or_default();
+                crate::output::stderr!(
+                    "[provider operation retry: {}] attempt {attempt}{limit}; next attempt in at least {}s: {error}",
+                    operation.as_str().expect("provider operation is a string"), delay.as_secs_f64()
+                );
+            }
+            AgentEvent::ProviderWaitingForNetwork {
+                attempt,
+                delay,
+                error,
+            } => {
+                crate::output::stderr!(
+                    "waiting for network (attempt {attempt}; next attempt in at least {}s): {error}",
+                    delay.as_secs_f64()
+                );
+            }
             // stdout cannot retract bytes. Keep each provider attempt buffered
             // until `TurnFinished`, then a transient reconnect can discard its
             // provisional output without corrupting print-mode results.

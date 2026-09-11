@@ -103,6 +103,7 @@ pub(crate) struct SessionUsageRecord {
 pub(crate) struct SessionCatalogInspection {
     pub catalog: SessionCatalogEntry,
     pub usage_records: Vec<SessionUsageRecord>,
+    pub usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
 }
 
 /// Small user-owned metadata kept next to, but separate from, append-only
@@ -638,6 +639,9 @@ enum SummaryRecord {
         prompt: EntryId,
         head: EntryId,
     },
+    UsageUncertainty {
+        record: octet_agent::UsageUncertaintyRecord,
+    },
     Usage {
         record: SummaryUsageRecord,
     },
@@ -854,6 +858,7 @@ struct TranscriptSummary {
     configured_reasoning: Option<String>,
     message_count: usize,
     usage_records: Vec<SessionUsageRecord>,
+    usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
 }
 
 /// Replay only the graph metadata needed by the session picker and serve
@@ -884,6 +889,7 @@ fn summarize_session_with_usage(
     let mut head = None;
     let mut checkpoints = Vec::<(EntryId, EntryId, usize)>::new();
     let mut usage_records = Vec::<SessionUsageRecord>::new();
+    let mut usage_uncertainty_records = Vec::new();
     let mut line_bytes = Vec::new();
     let mut observed_bytes = 0usize;
     let mut line_no = 0usize;
@@ -1092,6 +1098,26 @@ fn summarize_session_with_usage(
                 }
                 checkpoints.push((prompt, checkpoint_head, line_no));
             }
+            SummaryRecord::UsageUncertainty { record } => {
+                // Mirror Session replay validation without retaining conversation bodies.
+                for value in [&record.endpoint.0, &record.model.0, &record.operation] {
+                    if value.is_empty()
+                        || value.len() > 128
+                        || value.contains("://")
+                        || !value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
+                    {
+                        return Err(corrupt_summary(
+                            line_no,
+                            "invalid usage uncertainty identifiers",
+                        ));
+                    }
+                }
+                if retain_usage_records {
+                    usage_uncertainty_records.push(record);
+                }
+            }
             SummaryRecord::Usage { record } => {
                 if let SummaryUsageKind::AssistantTurn { assistant } = &record.kind {
                     let valid_assistant = entries
@@ -1172,6 +1198,7 @@ fn summarize_session_with_usage(
         configured_reasoning,
         message_count,
         usage_records,
+        usage_uncertainty_records,
     })
 }
 
@@ -1422,6 +1449,7 @@ impl SessionStore {
                 configured_reasoning: transcript.configured_reasoning,
             },
             usage_records: transcript.usage_records,
+            usage_uncertainty_records: transcript.usage_uncertainty_records,
         })
     }
 
@@ -3167,6 +3195,48 @@ mod tests {
     }
 
     #[test]
+    fn uncertainty_reopens_and_keeps_warm_and_cold_catalogs_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("uncertain.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("recoverable title".into())],
+            })))
+            .unwrap();
+        assert_eq!(store.list().len(), 1); // Warm the index before the additive record.
+        let head = session.head();
+        for _ in 0..2 {
+            session
+                .record_usage_uncertainty(
+                    EndpointId("openai".into()),
+                    ModelId("test-model".into()),
+                    "assistant_turn",
+                )
+                .unwrap();
+        }
+        drop(session);
+        let bytes = std::fs::read(&path).unwrap();
+        let reopened = Session::open_read_only(&path).unwrap();
+        assert!(reopened.has_uncertain_usage());
+        assert_eq!(reopened.head(), head);
+        assert!(reopened.usage_records().is_empty());
+        let inspection = store.inspect_by_id("uncertain").unwrap();
+        assert_eq!(inspection.usage_uncertainty_records.len(), 2);
+        assert!(inspection.usage_records.is_empty());
+        assert_eq!(inspection.catalog.meta.unwrap().title, "recoverable title");
+        assert_eq!(store.list()[0].title, "recoverable title");
+        let cold = SessionStore::new(root.path(), workspace.path());
+        assert_eq!(cold.list()[0].message_count, 1);
+        assert_eq!(cold.list_all()[0].title, "recoverable title");
+        assert!(cold.catalog_by_id("uncertain").unwrap().meta.is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
     fn targeted_catalog_inspection_validates_only_the_requested_session() {
         use octet_ai::{AssistantMessage, AssistantPart, Protocol, Usage, UserMessage};
 
@@ -3212,6 +3282,13 @@ mod tests {
                 reasoning_mode: None,
             })
             .unwrap();
+        session
+            .record_usage_uncertainty(
+                EndpointId("target-endpoint".into()),
+                ModelId("target-model".into()),
+                "assistant_turn",
+            )
+            .unwrap();
         drop(session);
         store
             .set_lifecycle("target", SessionStorageLifecycle::Trash, 1_000)
@@ -3223,6 +3300,7 @@ mod tests {
         std::fs::write(&corrupt, b"{not valid json}\n").unwrap();
 
         let inspection = store.inspect_by_id("target").unwrap();
+        assert_eq!(inspection.usage_uncertainty_records.len(), 1);
         let meta = inspection.catalog.meta.as_ref().unwrap();
         assert_eq!(meta.title, "target title");
         assert_eq!(meta.trashed_at_ms, Some(1_000));

@@ -35,6 +35,153 @@ still overlap through the effect-checked **post-persistence** parallel path.
 This deliberately gives up unsafe overlap rather than promising equivalent
 latency. See the [performance contract](performance.md).
 
+## In-process provider recovery
+
+Recovery surrounds one unfinished provider request, never `Agent::prompt` or
+previously committed tool effects. The initial qualified contract is an
+`OpenAiResponses` model with the **host-selected**
+`ResponsesRuntimeProfile::Codex`. Selecting that profile now also asserts that
+this route performs generation with locally dispatched function tools; an
+embedding host must not assign it to an arbitrary compatible endpoint merely
+for wire formatting. Model names, provider labels, Responses Lite, event counts,
+and invisible output cannot grant recovery authority.
+
+Canonical local function tools qualify, including mutations that remain
+provisional. Opaque input is restricted to message, reasoning, function-call,
+function-result, and compaction items. Unknown/provider-hosted item types,
+server-side continuation IDs, explicit storage, and arbitrary context management
+fail closed. The codec/transport owns wire facts and socket retirement; the
+agent alone owns autonomous replacement policy.
+
+Qualified unknown `response.failed` and `response.incomplete` reasons (before
+assistant persistence), transient provider `server_error`/internal/unavailable
+errors,
+body interruptions, codec-annotated provider-frame JSON failures, HTTP 408, and
+terminal EOF errors permit at most **eleven stream replacements** per logical
+turn. Qualified Connect/ResponseHeaders transport failures (including timeouts)
+and all HTTP 5xx with permanent-code vetoes share a separate
+**29-replacement opening/admission** allowance. Both share a **35-replacement cumulative cap**; neither transport
+fallback nor pre-send network waiting resets these counters. Thus stream-only
+failures permit twelve attempts, HTTP-admission-only failures thirty, and mixed
+failures at most thirty-six. This covers the pinned local Codex `3d3df0a0`
+default count envelope: five WS stream retries followed by HTTP fallback, with
+five physical HTTP sends (`request_max_retries=4`, inclusive loop) for each of six
+outer HTTP attempts. Octet's flattened host-owned policy is not a reproduction
+of Codex's nested scheduling or a promise of identical outcomes for every error
+sequence. No hidden HTTP replay is added to `octet-ai`.
+
+Admission retries do not consume the independent stream allowance: twenty HTTP
+503 failures followed by an EOF can still recover. The emitted cumulative
+`max_attempts` ceiling reflects the remaining allowance for the current failure
+class and never exceeds 35; it can change when failure classes change. Arbitrary
+local-request JSON, UTF-8, schema validation, resource, pricing, auth, and permanent
+request failures do not qualify. Only codec-owned `StreamFailure` wrapping
+`Decode::Json` or `Decode::InvalidUtf8` grants provider-stream parse recovery;
+raw decode errors do not. Typed `ResponsesFailed` provenance authorizes unknown
+qualified terminal errors, not arbitrary `Provider` errors. Explicit permanent
+provider codes outrank retry- or context-sounding messages, including policy,
+auth, quota, `server_is_overloaded`, and `slow_down` denials. The counter survives re-preparation and WebSocket-to-HTTP fallback;
+it resets only on a completed assistant response. The failed stream is dropped
+before hooks, compaction, waiting, or opening another attempt. Remote cancellation
+and exactly-once provider charges are not promised.
+
+A separately classified, definitely **pre-send** `AiError::NetworkUnavailable`
+or credential `AuthError::Unavailable` on the qualified route permits sustained
+cancellable waiting, without consuming the finite inference budget. Generic
+Connect errors (including unknown DNS/TLS/certificate failures) do not authorize
+unbounded waiting. Backoff starts around five seconds, doubles with run-specific
+jitter, and is capped at sixty seconds. Valid provider `Retry-After` is never
+shortened. `set_max_network_wait(Some(duration))` bounds elapsed outage recovery
+for embedding hosts; it does not extend external job/child deadlines. Ordinary
+cancellation remains level-triggered and wins same-poll races.
+
+`ProviderRetry` invalidates all provisional text, reasoning, media and tool
+presentation owned by the failed attempt. `ProviderWaitingForNetwork` represents
+unbounded-count pre-send waiting without a fictional retry denominator. Both
+leave the run, session, accepted controls, and children alive. Controls are
+received during main-request backoff; replacement re-enters the existing safe
+preparation boundary so steering delivery, sticky FinishNow and schema/tool
+implementation snapshots remain coherent. Follow-ups retain their ordinary
+queue semantics. Retry hooks cannot expand eligibility or budgets;
+`ProviderRetryContext.max_attempts` is `None` for pre-send waiting, serialized as
+JSON null, and its kind is `waiting_for_network`; qualified inference replacement
+uses `interrupted_inference`. `ProviderRetryContext.operation` is the typed
+auxiliary operation, or `None` (JSON null) for a main assistant request. Hooks
+receive the owning run/resource identity and cannot shorten host/provider delay.
+Post-generation `rate_limit_exceeded` is retryable on the qualified route, with
+Codex-style "try again in" seconds/milliseconds hints honored; permanent quota,
+usage-not-included and request codes remain excluded.
+
+Autonomous local compaction, native compaction, and terminal-gate calls share the
+same classification/budget guardrails through an auxiliary helper. Their immutable
+session snapshot remains exclusively borrowed until settlement. Recovery emits
+`ProviderOperationRetry` with its actual typed operation and route diagnostic,
+never a main-answer rollback event. Only successful completed auxiliary calls
+reach existing usage/checkpoint commits. Auxiliary drives drain accepted controls
+while the immutable request is pending, then deliver at the safe settlement
+boundary. A successful terminal gate cannot return ahead of queued input;
+FinishNow remains sticky. A serialized final admission/drain boundary includes
+controls submitted in the gate's final poll or while `TurnFinished` is yielded:
+successful submissions continue the run; submissions after closure return
+`RunEnded`. Natural completion uses the same atomic drain/close admission
+boundary without holding its mutex across a yielded event. Cancellation has
+priority over control/event traffic.
+Manual native-compaction calls also use bounded recovery and retry hooks.
+
+Local summary and gate calls expose opening separately from body collection:
+outage deadlines cover opening/backoff, never a healthy reconnected response
+body. Outage deadlines also preempt pending retry hooks, even when shorter than
+the hook's advisory timeout. Backoff longer than the remaining allowance waits
+until the actual outage deadline rather than expiring early or shortening
+Retry-After. Native compaction uses the AI client's explicit
+HTTP-header opening boundary for both manual and autonomous calls: credential
+and header opening remain outage-bounded, while a healthy reconnected body uses
+its provider body deadlines.
+If the outage deadline interrupts opening after possible dispatch, main and
+auxiliary paths emit and persist usage uncertainty before returning
+`NetworkWaitLimit { usage_unknown: true, .. }`. Credential-only waiting and
+pre-send backoff do not invent provider usage. Dispatch is conservatively
+tracked at the AI boundary, including opaque host transports; missing headers
+never establish nonacceptance. Resumed hard ceilings respect the durable marker.
+
+Failed-attempt usage is **unknown**, not zero. Every observed accepted failure
+is durably recorded before replacement, independently of successful usage and
+session branches. HTTP 5xx and 408 responses also carry unknown usage: a gateway
+failure can hide accepted upstream work. Replay authority is not zero-billing
+evidence. Under a hard ceiling these stop after the first response; without a
+ceiling their uncertainty remains durable after recovery. Hard cumulative token/cost ceilings fail closed on outstanding
+uncertainty, including after resume or later ceiling activation. Child uncertainty
+is mirrored before its known usage subtotal. `ProviderUsageUncertain` is emitted
+on the first observed uncertainty and at run start for an already-uncertain
+session; successful turns do not clear it. Subsequent cost/token numbers are known
+subtotals, not complete totals. Context-size estimates still use successful
+provider usage, never invented failed-attempt tokens.
+
+Accepted OAuth rotation with indeterminate completion is not autonomously
+replayed merely to refresh credentials. Generic Connect/DNS/TLS failures have
+only the finite opening allowance, never indefinite outage waiting. Pinned Codex
+`codex-api/src/sse/responses.rs:613` skips malformed frame deserialization and
+`:489` maps malformed completed-response parsing to a retryable stream error.
+Octet replaces the unfinished qualified request within its finite stream budget,
+recording unknown usage, rather than continuing an incompletely decoded stream.
+Post-parsing field/resource/state-machine validation remains fail-closed.
+
+Deterministic tests include interrupted reasoning/text/provisional tools, durable
+mutation ordering, cancellation, exhaustion, hard budgets, permanent/unqualified
+routes, steering/FinishNow and operation-scoped terminal-gate recovery. A virtual
+clock exercises over fourteen days of pre-send waiting with a constant session
+ledger and no finite inference-budget consumption. A loopback WebSocket-to-HTTP
+fixture combines an initial interruption, 20,200 credential-unavailable waits,
+and recovery on the twelfth accepted request or finite exhaustion. Auxiliary
+callsite tests hold more than eight controls, test sticky FinishNow, verify
+healthy bodies beyond outage deadlines, and exercise hook Stop/bounded delay.
+Manual and autonomous native fixtures separately hold credential opening, HTTP
+headers, and healthy response bodies. HTTP 520 sequences/exhaustion and unknown
+failed/incomplete terminal partial generations retain the same finite envelopes.
+Four terminal EOFs followed by success also retain durable unknown usage. This is not a live-provider
+interruption, real-terminal qualification, weeks-long wall-clock soak, or a claim
+of complete unattended-runtime parity.
+
 ## Effect admission boundary
 
 Every registered `Tool` classifies the exact parsed call through host-owned code. The model cannot provide or lower this classification, and the trait default is `Unknown`. Unknown effects fail closed under every policy, including `UnsafeHost`. Before any hook or tool implementation receives a call, the agent constructs a bounded canonical `EffectIntent` over the principal, run, tool-catalog generation, provider call ID, tool name, effect, arguments, and policy version.

@@ -2245,6 +2245,17 @@ describe("usage wire projections", () => {
     });
   });
 
+  it("retains additive uncertainty without altering known totals and rejects non-booleans", () => {
+    expect(projectUsageStats({ period: "daily", ...totals, usage_uncertain: true })).toMatchObject({ usageUncertain: true, totalTokens: 260, requestCount: 3 });
+    expect(projectLifetimeUsage({ ...totals, first_request_at_ms: null, last_request_at_ms: null, usage_uncertain: true })).toMatchObject({ usageUncertain: true, totalTokens: 260 });
+    expect(projectUsageActivity({ days: [], current_streak: 0, longest_streak: 0, usage_uncertain: true })).toMatchObject({ usageUncertain: true, days: [] });
+    const snapshot = clone(sessionSnapshotGolden);
+    const uncertain = { ...snapshot, context: { ...snapshot.context, usageUncertain: true } };
+    expect(projectSessionSnapshot(uncertain).context.usageUncertain).toBe(true);
+    expect(() => projectSessionSnapshot({ ...snapshot, context: { ...snapshot.context, usageUncertain: "true" } })).toThrow(WireContractError);
+    expect(() => projectUsageStats({ period: "daily", ...totals, usage_uncertain: 1 })).toThrow(WireContractError);
+  });
+
   it("requires bounded, unique, descending model breakdowns", () => {
     const model = totals.models[0];
     expect(() =>

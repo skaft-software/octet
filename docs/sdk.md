@@ -117,6 +117,22 @@ The seam does not implement GitHub's live OAuth endpoints, Enterprise endpoint
 policy, or an interactive CLI flow. These are host-owned; use Rust embedding
 only when the host can implement and test that policy.
 
+## Rust-owned recovery limits
+
+Rust embedding hosts can call
+`Agent::set_max_network_wait(Option<Duration>)` before starting a run. This
+bounds elapsed recovery after the first positively identified pre-send outage
+in a logical turn, including subsequent request opening. `None` is the default
+(no outage-duration ceiling); zero disables outage waiting. A minimum retry
+delay beyond the remaining allowance stops recovery rather than retrying early.
+This is not a whole-job timeout and does not extend caller/child limits or
+provider body deadlines. The same setting is passed to auxiliary compaction
+and terminal-gate recovery and inherited by child agents. Final integration
+qualification remains pending; see [candidate recovery qualification](qualification/v0.7.4-recovery.md).
+
+This is a Rust host setter, not a new NDJSON run field, CLI flag, or persisted
+configuration setting. NDJSON applications retain process-group cancellation.
+
 ## Run requests
 
 Required run-specific fields are `run_id`, `workspace`, `model`, and `prompt`,
@@ -216,7 +232,8 @@ Streaming events include:
 
 - `model_delta`, `output_media`;
 - opt-in `provider_lifecycle` readiness telemetry;
-- `provider_retry`, `candidate_rejected`;
+- `provider_retry`, `provider_waiting_for_network`, `provider_operation_retry`,
+  `provider_usage_uncertain`, `candidate_rejected`;
 - `tool_start`, `tool_policy`, `tool_progress`, `tool_finish`;
 - `model_step` usage/cost accounting;
 - `steering_delivered`, `follow_up_delivered`;
@@ -239,6 +256,58 @@ all host hooks and reservation commit gates finish.
 `provider_lifecycle.data` has `state` `queued`/`loading`/`ready` and nullable
 bounded `detail`. It emits only for explicitly opted-in configured endpoints,
 and is advisory telemetry, not model output or durable content.
+
+`provider_retry.data` carries `attempt`, `max_attempts`, `delay_ms`, and sanitized
+`error`. Discard all provisional output/media from the failed attempt, including
+reasoning already closed for presentation; do not discard independent activity
+or previously committed assistant/tool results. A replacement is not a new run.
+
+The additive `provider_waiting_for_network.data` carries `attempt`, `delay_ms`,
+and sanitized `error`, with **no** `max_attempts`: eligible pre-send waiting has
+no finite count limit and does not consume the finite inference-replacement
+budget. It keeps the run live and is not `settled` or `final_result`. Cancellation
+and caller-owned job limits still apply. These event additions do not bump
+native-host protocol `1`. The session schema version is unchanged, but the
+additive uncertainty record evolves its record contract. CLI RPC uses the same
+event type
+with `delayMs`/`errorMessage`; finite retries use `auto_retry_start` with
+`maxAttempts`, rather than the native-host field casing. Plain/print diagnostics
+go to stderr; print stdout remains response-only. See [candidate recovery qualification](qualification/v0.7.4-recovery.md).
+
+Auxiliary recovery has a separate core `AgentEvent::ProviderOperationRetry`:
+`operation` is `local_compaction`, `native_compaction`, or `terminal_gate`;
+`attempt` is one-based; `max_attempts: Option<usize>` is absent as a count limit
+for pre-send waiting; `delay` and sanitized `error` describe that operation.
+It does **not** invalidate main-answer output or settle the run. Its candidate
+`provider_operation_retry` consumer wire uses native-host `operation`, `attempt`,
+`max_attempts`, `delay_ms`, and `error`; CLI RPC uses `operation`, `attempt`,
+`maxAttempts`, `delayMs`, and `errorMessage`. The nullable maximum is JSON `null`
+for pre-send waiting. Consumer integration is still pending verification in
+this source candidate; it is not an additional API-version negotiation.
+
+The unit core event `AgentEvent::ProviderUsageUncertain` maps to native-host
+`{"type":"provider_usage_uncertain","data":{}}` (plus ordinary envelope fields)
+and CLI RPC `{"type":"provider_usage_uncertain"}`. It neither discards assistant
+output nor settles the run. Treat it as sticky session state: later success
+does not clear it, and a run on an uncertain resumed session emits it again.
+All subsequent numeric usage/cost fields, including cumulative accounting, are
+**known subtotals**, not complete totals. Plain/print warn on stderr; interactive
+footer/telemetry labels the uncertainty rather than presenting exact totals.
+
+Rust hosts can inspect `Session::has_uncertain_usage()` and
+`usage_uncertainty_records()` even when no run is active.
+`Session::record_usage_uncertainty(endpoint, model, operation)` durably appends
+`{"type":"usage_uncertainty","record":{"endpoint":"codex","model":"openai/gpt-5.4","operation":"assistant_turn"}}`.
+It records no fictional tokens or cost, changes neither conversation head nor
+known subtotal, and must succeed before replacing the failed attempt. Uncertainty
+survives resume, checkout, and compaction; a fork starts independent accounting.
+CLI RPC `get_state` and session-statistics snapshots expose additive
+`usageUncertain: bool`, including idle/resumed sessions. Active state keeps the
+flag sticky when the live event arrives. Statistics sum the independent durable
+usage ledger rather than only the active conversation branch; when the flag is
+true, numeric tokens/cost are known subtotals. Native-host protocol `1` has no
+separate idle session-inspection command; its resumed runs emit the live warning.
+These source additions remain subject to final integration qualification.
 
 `final_result.data` contains `status`, `output`, `error`, `filesChanged`,
 `toolCalls`, `steps`, and `sessionFile`. Status is `completed`, `blocked`, or

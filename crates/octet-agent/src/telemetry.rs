@@ -424,6 +424,76 @@ impl EventObserver for TelemetryObserver {
                     fields,
                 );
             }
+            AgentEvent::ProviderUsageUncertain => {
+                inner.emit(
+                    Some(resource_owner),
+                    Some(&run_id),
+                    "provider_usage_uncertain",
+                    Map::new(),
+                );
+            }
+            AgentEvent::ProviderOperationRetry {
+                operation,
+                attempt,
+                max_attempts,
+                delay,
+                error,
+            } => {
+                let mut fields = Map::new();
+                fields.insert(
+                    "operation".into(),
+                    serde_json::to_value(operation).unwrap_or(Value::Null),
+                );
+                fields.insert("attempt".into(), Value::Number((*attempt as u64).into()));
+                fields.insert(
+                    "max_attempts".into(),
+                    max_attempts.map_or(Value::Null, |limit| Value::Number((limit as u64).into())),
+                );
+                fields.insert(
+                    "delay_ms".into(),
+                    Value::Number((delay.as_millis().min(u64::MAX as u128) as u64).into()),
+                );
+                fields.insert("error".into(), Value::String(bounded_text(error)));
+                inner.emit(
+                    Some(resource_owner),
+                    Some(&run_id),
+                    "provider_operation_retry",
+                    fields,
+                );
+            }
+            AgentEvent::ProviderWaitingForNetwork {
+                attempt,
+                delay,
+                error,
+            } => {
+                state.awaiting_retry = true;
+                state.requests_discarded = state.requests_discarded.saturating_add(1);
+                let timing = state.current_attempt.take();
+                let mut fields = Map::new();
+                fields.insert(
+                    "retry_attempt".into(),
+                    Value::Number((*attempt as u64).into()),
+                );
+                fields.insert("max_attempts".into(), Value::Null);
+                fields.insert(
+                    "delay_ms".into(),
+                    Value::Number((delay.as_millis().min(u64::MAX as u128) as u64).into()),
+                );
+                fields.insert("error".into(), Value::String(bounded_text(error)));
+                if let Some(timing) = timing {
+                    fields.insert(
+                        "elapsed_ms".into(),
+                        Value::Number(duration_ms(timing.started.elapsed()).into()),
+                    );
+                    timing.add_output_timings(&mut fields);
+                }
+                inner.emit(
+                    Some(resource_owner),
+                    Some(&run_id),
+                    "provider_waiting_for_network",
+                    fields,
+                );
+            }
             AgentEvent::ToolStarted { id, name, args } => {
                 state.tool_calls = state.tool_calls.saturating_add(1);
                 state.step_index = state.step_index.saturating_add(1);
@@ -920,6 +990,9 @@ fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::CompactionFinished { .. } => "compaction_finished",
         AgentEvent::TurnStarted => "model_request_started",
         AgentEvent::ProviderLifecycle { .. } => "provider_lifecycle",
+        AgentEvent::ProviderWaitingForNetwork { .. } => "provider_waiting_for_network",
+        AgentEvent::ProviderOperationRetry { .. } => "provider_operation_retry",
+        AgentEvent::ProviderUsageUncertain => "provider_usage_uncertain",
         AgentEvent::ToolStarted { .. } => "tool_started",
         AgentEvent::ToolPolicyDecision { .. } => "tool_policy_decision",
         AgentEvent::ToolFinished { .. } => "tool_finished",

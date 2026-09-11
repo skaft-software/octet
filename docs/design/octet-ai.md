@@ -64,9 +64,52 @@ endpoint identity or session-affinity format:
 Public/non-Lite compact routes retain their narrower schema. Lite is never
 inferred from a model name, endpoint label, or authentication plan.
 
+## Native compact opening boundary
+
+`AiClient::open_compact_responses` resolves credentials and sends exactly one
+request, returning `PendingResponsesCompact` only after actual HTTP headers
+arrive, including non-2xx headers. Its consuming `complete()` method reads the
+body or optional bounded error snippet under independent body timeouts; the
+absolute body deadline starts at header arrival. The existing
+`compact_responses` composes these operations. Dropping either phase cancels
+local work; neither phase replays a POST or rotates credentials autonomously.
+A host outage deadline may therefore cover opening without cancelling a healthy
+body. Header arrival ends that opening episode, not remote execution or usage.
+
+For streaming and native compact calls, `track_request_dispatch()` creates an
+attempt-local client clone with a fresh sticky dispatch marker. The marker is
+set after credential resolution/signing and before HTTP send, WebSocket dispatch,
+or entry into an opaque host transport. `request_may_have_been_sent()` is
+conservative evidence of possible dispatch, not proof of transmission or billing.
+A deadline cancelling a tracked opening must retain usage uncertainty when set;
+credential-only waiting leaves it unset. A fresh clone is required per attempt;
+the original client and other attempts retain independent tracking.
+
 ## Stream contract
 
 A successful guarded stream has exactly one `Started`, balanced start/delta/end events for every indexed part, at most one usage event, and exactly one terminal `Finished`. Premature EOF, events after finish, and unbalanced parts are errors. Completed parseable tool arguments are normalized and checked against the immutable request schema snapshot before their `ToolCallEnd`: an ordinary schema mismatch remains a canonical call marked for a bounded paired error, while malformed schemas, malformed arguments, and validation-limit failures are errors. An authoritative max-token terminal is the sole malformed-argument exception: it retains only the call envelope with empty arguments so the agent can pair a non-executing error result and continue safely.
+
+### Responses failure provenance
+
+`AiError::ResponsesFailed(ProviderError)` identifies a native `response.failed`
+terminal; arbitrary top-level provider errors remain `AiError::Provider`.
+Both retain sanitized code/kind/message metadata and stream progress. Qualified
+host policy can treat unknown failed terminals separately without broadening
+arbitrary provider-error retry. `ProviderError::is_permanent()` shares typed
+code/kind vetoes with HTTP classification, including policy/quota/context/auth
+errors and pinned Codex `server_is_overloaded` / `slow_down` denials (not generic
+`overloaded_error`). `HttpError::is_transient_server_error()` covers all 5xx,
+including 520, with the same veto; it is solely a hint for host-qualified finite
+replacement and does not broaden the legacy `is_safe_to_retry()` whitelist.
+
+Within the Responses codec, only an unknown `response.incomplete` reason creates
+`StopReason::Other`; this is sufficient provenance for qualified hosts to reject
+partial completion before commit. `max_output_tokens` and `content_filter`
+retain successful `MaxTokens` / `Refusal` terminals. Unqualified consumers keep
+the existing unknown-incomplete terminal contract. WebSocket failed terminals
+and unknown incomplete outcomes retire/disable pooled state before publication,
+including text and binary frames. None of this grants automatic replay or
+establishes nonacceptance, cancellation, or zero usage.
 
 ### Opt-in endpoint lifecycle feedback
 
@@ -112,14 +155,20 @@ at most a ten-second acknowledgement deadline (both shorten with a configured
 response-idle bound). A Pong proves only control-path liveness and never
 extends the provider-event idle deadline. A missed probe retires and disables
 the pooled socket before reporting a post-send body timeout, so it cannot
-silently replay the generation; a caller's explicit subsequent request follows
-the normal HTTP fallback path. Response-body disconnects are terminal even
-before visible text, reasoning, media, or tool generation: no visible output
-does not prove the provider rejected the request. Post-send header timeouts
-and failures after generation likewise do not authorize replay. A provider error reporting WebSocket
-connection-lifetime exhaustion retires and disables the poisoned socket before
-the error is published, so an immediate safe pre-generation retry uses HTTP.
-Once generation has been observed, every automatic retry path remains disabled.
+silently replay the generation. Fatal WebSocket failures retire/disable pooled
+state before publishing the error, so an immediately authorized subsequent
+request cannot reuse the poisoned socket and preferred transport can use HTTP.
+This ordering does not itself authorize a replacement or prove remote
+cancellation. The AI client reports post-send header/body failures rather than
+silently retrying them; zero visible output does not establish nonacceptance.
+The agent retains this conservative default for unqualified requests, but may
+replace host-qualified Codex local-function inference before assistant commit,
+even after provisional generation. The developing candidate separates finite
+streamed-inference replacement and HTTP-admission budgets; neither authorizes
+blanket retry or establishes the number of accepted generations or charges.
+Transport fallback does not reset these logical-turn budgets. See the
+[recovery boundary](../tools.md#recovery-and-security) and
+[candidate qualification](../qualification/v0.7.4-recovery.md).
 The coding product uses a
 fifteen-minute response-header default for built-in and custom routes; custom
 providers can override that startup allowance for their own cold-start profile.
@@ -133,9 +182,25 @@ Observed indices use a hash set and are sorted only during final assembly, keepi
 
 Strict mode rejects unsupported modalities, reasoning state, tools, malformed schemas, missing/orphan tool results, invalid sampling parameters, and model-limit violations before network I/O. Lossy conversion emits bounded diagnostics and visible placeholders rather than silently changing semantic data. Explicit generation reasoning selections are validated without clamping, even in Lossy mode: silently omitting a rejected Off could enable provider-default thinking. Token budgets must leave answer room within the effective output allowance. Anthropic/Bedrock thinking also rejects incompatible sampling and forced tool choices. Product-level normalization is separate from core wire validation.
 
+`AiError::NetworkUnavailable` preserves positively classified transient pre-send
+connection failures, including connect timeouts, separately from generic
+`Transport` errors. Unclassified DNS/TLS/certificate/configuration failures do
+not authorize sustained network waiting. The agent, not the transport, owns
+that cancellable recovery policy.
+
 ## Authentication and secrets
 
 Endpoints resolve static, environment, or dynamic credentials immediately before requests. Secret values redact `Debug` and `Display`; authorization headers are marked sensitive; redirects are disabled. Transport errors and bounded response snippets are sanitized before crossing the API.
+
+`AuthError::Unavailable` preserves positively identified transient pre-send
+credential-service connection failure for host-owned network waiting. It does
+not classify accepted or ambiguous OAuth token rotation as safe to repeat;
+response-body or HTTP-status failures after acceptance are not autonomously
+replayed. Like inference opening, this requires positive connect-timeout or
+transient I/O evidence, not a generic DNS/TLS error.
+The Codex resolver keeps those failures, permanent auth errors, and unclassified
+resolution failures conservative; credential details do not enter diagnostics.
+Recovery does not add an independent OAuth retry loop.
 
 ## Deterministic catalog
 
@@ -168,3 +233,13 @@ input, model/catalog selection, polling, and JSON output. See
 ## Cost accounting
 
 Usage buckets remain disjoint and pricing uses integer picodollar arithmetic. A response carries exact provider usage and optional cost; the agent decides when that completed operation becomes durable session accounting.
+
+Usage lost through interruption or an ambiguous HTTP 5xx (including gateway
+504) is not inferred as zero. Even a status response need not prove whether
+upstream generation was accepted or charged. The
+agent persists separate `usage_uncertainty` evidence before replacement; known
+usage/cost remains an independent subtotal. Success, resume, and checkout do not
+clear uncertainty. `Session::has_uncertain_usage()` exposes this durable state;
+hard cumulative ceilings fail closed while it is set. Fork accounting starts
+independently. This additive session record evolves the record contract without
+a schema-version bump; see [sessions](../sessions.md).

@@ -5,7 +5,15 @@
 ### 0.7.4 source candidate — UNPUBLISHED
 
 - Align product, SDK, Serve, installer, image and four official bundle source
-  distribution versions to 0.7.4; independent APIs and schemas are unchanged.
+  distribution versions to 0.7.4; independent API and schema versions are unchanged.
+- Add host-qualified Codex interrupted-inference recovery and separately paced
+  pre-send network waiting without restarting tasks or replaying committed tools.
+  Recovery also covers auxiliary provider operations and preserves accepted controls.
+- Persist unknown failed-attempt usage across resume, distinguish known subtotals
+  from complete totals, and fail closed on unresolved hard-budget exposure.
+- Add quiet attempt-owned rollback and operation-scoped recovery status. Full
+  #350/#346 acceptance, live interruption and wall-clock endurance remain open;
+  see the [recovery qualification boundary](docs/qualification/v0.7.4-recovery.md).
 - Maintenance #411 is already merged, including #403, #357, #208, #201 and #361.
 - The three medium-severity GitHub Vitest alerts are fixed on main.
 - Overlap independent custom-provider discovery in bounded foreground batches,

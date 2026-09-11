@@ -491,6 +491,20 @@ describe("conversation composer", () => {
     ).toBeVisible();
   });
 
+  it("keeps durable unknown usage visible for an idle resumed session", () => {
+    const session = structuredClone(fixtureSessions["session-fresh"]!);
+    session.context.usageUncertain = true;
+    render(<Conversation
+      session={session}
+      bootstrap={structuredClone(fixtureBootstrap)}
+      onSubmit={noOp} onInterrupt={noOp} onConfigure={noOp}
+      onResolveApproval={noOp} onResolveUserInput={noOp}
+      onOpenOutput={vi.fn()} onOpenSource={vi.fn()}
+    />);
+    expect(screen.getByText("Usage / cost unknown")).toBeVisible();
+    expect(document.querySelector(".composer-context-cost")).toHaveAccessibleName(/Usage and cost incomplete: some provider usage is unknown; numeric accounting is a known subtotal/);
+  });
+
   it("omits a meaningless zero-value context cost estimate", () => {
     render(
       <Conversation

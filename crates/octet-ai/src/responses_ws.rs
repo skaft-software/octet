@@ -70,6 +70,23 @@ fn heartbeat_timeout(message: &'static str) -> AiError {
     })
 }
 
+fn websocket_connect_error(error: tungstenite::Error) -> AiError {
+    let transient = matches!(&error, tungstenite::Error::Io(io)
+        if crate::error::transient_connection_io(io));
+    let timeout = matches!(&error, tungstenite::Error::Io(io)
+        if io.kind() == std::io::ErrorKind::TimedOut);
+    let transport = TransportError {
+        phase: TransportPhase::Connect,
+        timeout,
+        message: format!("Responses WebSocket connect: {error}"),
+    };
+    if transient {
+        AiError::NetworkUnavailable(transport)
+    } else {
+        AiError::Transport(transport)
+    }
+}
+
 fn websocket_url(mut url: Url) -> Result<Url, AiError> {
     match url.scheme() {
         "http" => url
@@ -243,6 +260,17 @@ pub(crate) struct ResponsesWsPool {
 }
 
 impl ResponsesWsPool {
+    /// Protocol/consumer failures must fence the pool before reaching the caller.
+    pub(crate) async fn disable(&self, key: Option<&str>) {
+        if let Some(key) = key {
+            let mut state = self.state.lock().await;
+            state.disabled.insert(key.to_owned());
+            if let Some(connection) = state.sessions.remove(key) {
+                connection.alive.store(false, Ordering::Release);
+            }
+        }
+    }
+
     async fn connect(
         &self,
         key: Option<&str>,
@@ -273,10 +301,7 @@ impl ResponsesWsPool {
         let (socket, _) = match connect_async(request).await {
             Ok(connected) => connected,
             Err(error) => {
-                let error = transport_error(
-                    TransportPhase::Connect,
-                    format!("Responses WebSocket connect: {error}"),
-                );
+                let error = websocket_connect_error(error);
                 if let Some(key) = key {
                     let mut state = self.state.lock().await;
                     if let Some(connection) = state.sessions.get(key) {
@@ -398,7 +423,7 @@ impl ResponsesWsPool {
         )
         .await
         .map_err(|_| {
-            AiError::Transport(TransportError {
+            AiError::NetworkUnavailable(TransportError {
                 phase: TransportPhase::Connect,
                 timeout: true,
                 message: "Responses WebSocket handshake timed out before request send".to_owned(),
@@ -519,6 +544,22 @@ impl ResponsesWsPool {
     }
 }
 
+// Failed terminals and unknown incomplete outcomes poison continuation even
+// when their code is unfamiliar. Retire before forwarding to the decoder so a
+// host-authorized replacement cannot race onto the same socket.
+fn failed_terminal(value: &Value) -> bool {
+    match value.get("type").and_then(Value::as_str) {
+        Some("response.failed" | "response.cancelled") => true,
+        Some("response.incomplete") => !matches!(
+            value
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str),
+            Some("max_output_tokens" | "content_filter")
+        ),
+        _ => false,
+    }
+}
+
 fn connection_refresh_error(value: &Value) -> bool {
     let error = value
         .get("response")
@@ -590,6 +631,10 @@ async fn run_connection<S>(
         + Unpin,
 {
     let mut continuation = None;
+    // Fatal transport failures must mark the actor dead and disable its key
+    // before publishing an error (including the request-start acknowledgement).
+    // The consumer can immediately request a replacement on another task;
+    // cleanup after a send/await is too late to prevent poisoned socket reuse.
     'actor: loop {
         // Poll the socket even without an active request so peer closes and
         // control frames are handled promptly. Control traffic does not extend
@@ -694,9 +739,9 @@ async fn run_connection<S>(
         };
         if let Err(error) = send_result {
             let message = format!("Responses WebSocket request send: {error}");
-            let _ = command.started.send(Err(message.clone()));
             alive.store(false, Ordering::Release);
             disable_key(&state, key.as_deref()).await;
+            let _ = command.started.send(Err(message));
             break 'actor;
         }
         let _ = command.started.send(Ok(()));
@@ -769,6 +814,8 @@ async fn run_connection<S>(
             let message = match message {
                 Ok(message) => message,
                 Err(error) => {
+                    alive.store(false, Ordering::Release);
+                    disable_key(&state, key.as_deref()).await;
                     let _ = command
                         .reply
                         .send(Err(transport_error(
@@ -776,8 +823,6 @@ async fn run_connection<S>(
                             format!("Responses WebSocket read: {error}"),
                         )))
                         .await;
-                    alive.store(false, Ordering::Release);
-                    disable_key(&state, key.as_deref()).await;
                     break 'actor;
                 }
             };
@@ -786,14 +831,14 @@ async fn run_connection<S>(
                     let value = match serde_json::from_str::<Value>(text.as_ref()) {
                         Ok(value) => value,
                         Err(error) => {
+                            alive.store(false, Ordering::Release);
+                            disable_key(&state, key.as_deref()).await;
                             let _ = command
                                 .reply
                                 .send(Err(AiError::Decode(crate::error::DecodeError::Json(
                                     format!("invalid Responses WebSocket event: {error}"),
                                 ))))
                                 .await;
-                            alive.store(false, Ordering::Release);
-                            disable_key(&state, key.as_deref()).await;
                             break 'actor;
                         }
                     };
@@ -801,7 +846,8 @@ async fn run_connection<S>(
                     if is_terminal {
                         update_continuation(&command.body, &value, &mut continuation);
                     }
-                    let connection_refresh = connection_refresh_error(&value);
+                    let connection_refresh =
+                        connection_refresh_error(&value) || failed_terminal(&value);
                     if connection_refresh {
                         // Retire the poisoned socket before publishing the
                         // provider error. An immediate agent retry must observe
@@ -827,14 +873,14 @@ async fn run_connection<S>(
                     let value = match serde_json::from_slice::<Value>(&bytes) {
                         Ok(value) => value,
                         Err(error) => {
+                            alive.store(false, Ordering::Release);
+                            disable_key(&state, key.as_deref()).await;
                             let _ = command
                                 .reply
                                 .send(Err(AiError::Decode(crate::error::DecodeError::Json(
                                     format!("invalid Responses WebSocket event: {error}"),
                                 ))))
                                 .await;
-                            alive.store(false, Ordering::Release);
-                            disable_key(&state, key.as_deref()).await;
                             break 'actor;
                         }
                     };
@@ -842,7 +888,8 @@ async fn run_connection<S>(
                     if is_terminal {
                         update_continuation(&command.body, &value, &mut continuation);
                     }
-                    let connection_refresh = connection_refresh_error(&value);
+                    let connection_refresh =
+                        connection_refresh_error(&value) || failed_terminal(&value);
                     if connection_refresh {
                         // Retire the poisoned socket before publishing the
                         // provider error. An immediate agent retry must observe
@@ -887,6 +934,8 @@ async fn run_connection<S>(
                     }
                 }
                 Message::Close(_) => {
+                    alive.store(false, Ordering::Release);
+                    disable_key(&state, key.as_deref()).await;
                     let _ = command
                         .reply
                         .send(Err(transport_error(
@@ -894,8 +943,6 @@ async fn run_connection<S>(
                             "Responses WebSocket closed before completion",
                         )))
                         .await;
-                    alive.store(false, Ordering::Release);
-                    disable_key(&state, key.as_deref()).await;
                     break 'actor;
                 }
                 Message::Pong(payload) => {
@@ -913,6 +960,8 @@ async fn run_connection<S>(
             }
         }
         if !terminal {
+            alive.store(false, Ordering::Release);
+            disable_key(&state, key.as_deref()).await;
             let _ = command
                 .reply
                 .send(Err(transport_error(
@@ -920,8 +969,6 @@ async fn run_connection<S>(
                     "Responses WebSocket ended before completion",
                 )))
                 .await;
-            alive.store(false, Ordering::Release);
-            disable_key(&state, key.as_deref()).await;
             break 'actor;
         }
     }
@@ -956,12 +1003,19 @@ mod tests {
         (client, server.await.unwrap())
     }
 
-    async fn spawn_test_actor(
-        socket: ClientSocket,
+    async fn spawn_test_actor<S>(
+        socket: S,
         state: &Arc<Mutex<PoolState>>,
         key: &str,
         idle_timeout: Duration,
-    ) -> (Connection, JoinHandle<()>) {
+    ) -> (Connection, JoinHandle<()>)
+    where
+        S: futures_core::Stream<Item = Result<Message, tungstenite::Error>>
+            + futures_util::Sink<Message, Error = tungstenite::Error>
+            + Send
+            + Unpin
+            + 'static,
+    {
         let (sender, receiver) = mpsc::channel(4);
         let alive = Arc::new(AtomicBool::new(true));
         let connection = Connection {
@@ -982,6 +1036,31 @@ mod tests {
             idle_timeout,
         ));
         (connection, actor)
+    }
+
+    #[test]
+    fn websocket_connect_failures_require_positive_io_classification() {
+        for kind in [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let error = websocket_connect_error(tungstenite::Error::Io(std::io::Error::from(kind)));
+            assert!(matches!(error, AiError::NetworkUnavailable(_)));
+        }
+        // TLS/certificate errors surfaced by rustls use InvalidData, not a
+        // transient network kind. Configuration/protocol errors also stay generic.
+        for error in [
+            tungstenite::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid peer certificate",
+            )),
+            tungstenite::Error::Url(tungstenite::error::UrlError::UnsupportedUrlScheme),
+        ] {
+            assert!(matches!(
+                websocket_connect_error(error),
+                AiError::Transport(_)
+            ));
+        }
     }
 
     #[test]
@@ -1258,6 +1337,223 @@ mod tests {
         let state = state.lock().await;
         assert!(!state.sessions.contains_key("cancel"));
         assert!(state.disabled.contains("cancel"));
+    }
+
+    #[tokio::test]
+    async fn send_failure_retires_before_start_error_with_a_contended_pool() {
+        let (client, _server) = websocket_pair().await;
+        // Fail the generation send without relying on OS TCP buffer timing.
+        let client = client.with(|message| {
+            // `With` may repoll its failed conversion during socket cleanup.
+            futures_util::future::poll_fn(move |_| {
+                std::task::Poll::Ready(if matches!(message, Message::Text(_)) {
+                    Err(tungstenite::Error::ConnectionClosed)
+                } else {
+                    Ok(message.clone())
+                })
+            })
+        });
+        let state = Arc::new(Mutex::new(PoolState::default()));
+        let (connection, actor) =
+            spawn_test_actor(client, &state, "send-failure", Duration::from_secs(60)).await;
+        let (reply, _events) = mpsc::channel(1);
+        let (started, mut started_rx) = oneshot::channel();
+        let guard = state.lock().await;
+        connection
+            .sender
+            .send(RequestCommand {
+                body: serde_json::json!({"model": "gpt", "input": []}),
+                reply,
+                started,
+                liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while connection.alive.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor did not observe send failure");
+        assert!(
+            matches!(
+                started_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "start error escaped before the pool key was disabled"
+        );
+        drop(guard);
+        let error = tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("request send"));
+        assert!(state.lock().await.disabled.contains("send-failure"));
+        tokio::time::timeout(Duration::from_secs(2), actor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!state.lock().await.sessions.contains_key("send-failure"));
+    }
+
+    #[tokio::test]
+    async fn fatal_events_retire_before_publishing_with_a_contended_pool() {
+        for failure in [
+            None, // TCP EOF without a Close frame is a WebSocket read error.
+            Some(Message::Close(None)),
+            Some(Message::Text("{".into())),
+            Some(Message::Binary(vec![0xff].into())),
+            Some(Message::Text("test EOF".into())),
+        ] {
+            let (client, mut server) = websocket_pair().await;
+            // Tungstenite normally turns unclean TCP EOF into a read error.
+            // Also exercise the actor's distinct Stream::None failure branch.
+            let client = client.take_while(|message| {
+                std::future::ready(
+                    !matches!(message, Ok(Message::Text(text)) if text.as_str() == "test EOF"),
+                )
+            });
+            let state = Arc::new(Mutex::new(PoolState::default()));
+            let (connection, actor) =
+                spawn_test_actor(client, &state, "poisoned", Duration::from_secs(60)).await;
+            let (reply, mut events) = mpsc::channel(1);
+            let (started, started_rx) = oneshot::channel();
+            connection
+                .sender
+                .send(RequestCommand {
+                    body: serde_json::json!({"model": "gpt", "input": []}),
+                    reply,
+                    started,
+                    liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(server.next().await, Some(Ok(Message::Text(_)))));
+            started_rx.await.unwrap().unwrap();
+            let output = serde_json::json!({
+                "type": "response.output_text.delta", "delta": "provisional"
+            });
+            server
+                .send(Message::Text(output.to_string().into()))
+                .await
+                .unwrap();
+            assert_eq!(events.recv().await.unwrap().unwrap(), output);
+
+            // Holding this lock forces retirement to suspend. The old ordering
+            // published the error before waiting for this lock, allowing a
+            // consumer to race its next request against an enabled pool key.
+            let guard = state.lock().await;
+            if let Some(failure) = failure {
+                server.send(failure).await.unwrap();
+            }
+            drop(server);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while connection.alive.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("actor did not detect the injected failure");
+            assert!(
+                matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "failure escaped before the pool key was disabled"
+            );
+            assert!(!guard.disabled.contains("poisoned"));
+            drop(guard);
+
+            let error = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("retirement did not publish the failure")
+                .unwrap()
+                .unwrap_err();
+            assert!(matches!(error, AiError::Transport(_) | AiError::Decode(_)));
+            assert!(state.lock().await.disabled.contains("poisoned"));
+            assert!(events.recv().await.is_none());
+            tokio::time::timeout(Duration::from_secs(2), actor)
+                .await
+                .expect("failed actor did not exit")
+                .unwrap();
+            assert!(!state.lock().await.sessions.contains_key("poisoned"));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_terminals_retire_before_publication_for_text_and_binary() {
+        for value in [
+            serde_json::json!({"type":"response.failed", "response":{"error":{"code":"unknown_failure","message":"boom"}}}),
+            serde_json::json!({"type":"response.failed", "response":{"error":{"code":"invalid_prompt","message":"denied"}}}),
+            serde_json::json!({"type":"response.incomplete", "response":{"incomplete_details":{"reason":"upstream_disconnect"}}}),
+        ] {
+            for binary in [false, true] {
+                let failure = if binary {
+                    Message::Binary(value.to_string().into_bytes().into())
+                } else {
+                    Message::Text(value.to_string().into())
+                };
+                let (client, mut server) = websocket_pair().await;
+                let state = Arc::new(Mutex::new(PoolState::default()));
+                let (connection, actor) =
+                    spawn_test_actor(client, &state, "poisoned", Duration::from_secs(60)).await;
+                let (reply, mut events) = mpsc::channel(1);
+                let (started, started_rx) = oneshot::channel();
+                connection
+                    .sender
+                    .send(RequestCommand {
+                        body: serde_json::json!({"model": "gpt", "input": []}),
+                        reply,
+                        started,
+                        liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                    })
+                    .await
+                    .unwrap();
+                assert!(matches!(server.next().await, Some(Ok(Message::Text(_)))));
+                started_rx.await.unwrap().unwrap();
+                let output = serde_json::json!({
+                    "type": "response.output_text.delta", "delta": "provisional"
+                });
+                server
+                    .send(Message::Text(output.to_string().into()))
+                    .await
+                    .unwrap();
+                assert_eq!(events.recv().await.unwrap().unwrap(), output);
+
+                // Holding this lock forces retirement to suspend. The old ordering
+                // published the error before waiting for this lock, allowing a
+                // consumer to race its next request against an enabled pool key.
+                let guard = state.lock().await;
+                server.send(failure).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while connection.alive.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("actor did not detect the injected failure");
+                assert!(
+                    matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                    "failure escaped before the pool key was disabled"
+                );
+                assert!(!guard.disabled.contains("poisoned"));
+                drop(guard);
+
+                let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                    .await
+                    .expect("retirement did not publish the failure")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(event, value);
+                drop(server);
+                assert!(state.lock().await.disabled.contains("poisoned"));
+                assert!(events.recv().await.is_none());
+                tokio::time::timeout(Duration::from_secs(2), actor)
+                    .await
+                    .expect("failed actor did not exit")
+                    .unwrap();
+                assert!(!state.lock().await.sessions.contains_key("poisoned"));
+            }
+        }
     }
 
     #[test]

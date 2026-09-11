@@ -120,6 +120,7 @@ Each physical line is one JSON object with a `type` discriminator:
 | `head` | Active branch selection and cumulative cost. |
 | `checkpoint` | Completed prompt and exact restorable head. |
 | `usage` | Provider/model/token/cost accounting for one operation. |
+| `usage_uncertainty` | Accepted-attempt exposure whose usage and cost are unknown. |
 
 Stable entry envelope:
 
@@ -157,6 +158,31 @@ route/model, exact category cost, and picodollar remainder. Child JSONL remains
 the detailed transcript; a root mirror is written **once before the owning
 checkpoint**. Session cost, `/cost`, footer, export, resume, and subsequent
 cost-limit checks therefore include child spend without reopening private paths.
+
+An accepted inference attempt interrupted before authoritative usage is available
+is recorded separately as `usage_uncertainty`, **not** as zero tokens or zero
+cost. Its `record` contains only trusted `endpoint`, `model`, and `operation`
+identifiers, each bounded to 128 ASCII identifier bytes; no endpoint URLs,
+request/response bodies, prompts, credentials, or error text belong there.
+Unknown exposure uses the same owner-private, locked, synced append path as
+known usage. An append failure must stop automatic replacement.
+
+`Session::has_uncertain_usage()` remains true after later successful turns,
+checkpoints, compaction, checkout (including another branch or the root), and
+reopening. It is session-global accounting, never model-visible context or head
+state. Existing usage and cost totals remain **known subtotals**, not complete
+spend; hard cumulative cost/token limits must fail closed while uncertainty is
+present, including limits enabled after resuming. `usage_uncertainty_records()`
+exposes the bounded evidence without inventing missing counts or prices. The
+writer records each failed physical attempt once, not each retry notification;
+records are evidence, not provider-confirmed billable-attempt counts. Delegated
+unknown exposure must also be mirrored into the owning root ledger.
+
+Older sessions without these records retain their existing known ledger; the
+reader does not fabricate evidence about historical failures. Fork/clone remains
+a new accounting session: like known usage telemetry, uncertainty is not copied
+by the active-branch conversation projection. Restoring within the original
+session never clears its exposure.
 
 The head record is the only branch-selection mutation:
 

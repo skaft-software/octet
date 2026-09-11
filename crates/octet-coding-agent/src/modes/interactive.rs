@@ -1662,17 +1662,6 @@ where
                             shell.notice("interactive command input cancelled");
                         }
                     }
-                    if let AgentEvent::ProviderRetry {
-                        attempt,
-                        max_attempts,
-                        error,
-                        ..
-                    } = &event
-                    {
-                        shell.notice(format!(
-                            "{error} Retrying ({attempt}/{max_attempts})…"
-                        ));
-                    }
                     shell.on_run_event(run_id, &event);
                     if let AgentEvent::ToolFinished { id, result, .. } = &event {
                         if let Some((name, arguments)) = tool_calls.remove(id) {

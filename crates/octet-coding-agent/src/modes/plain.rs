@@ -361,6 +361,23 @@ async fn run_prompt(
                             ),
                         )?;
                     }
+                    AgentEvent::ProviderUsageUncertain => {
+                        crate::output::stderr!("warning: provider usage and cost are uncertain for this session; all subsequent numeric usage/cost values are known subtotals, not complete totals (including after resume).");
+                    }
+                    AgentEvent::ProviderOperationRetry { operation, attempt, max_attempts, delay, error } => {
+                        let operation = serde_json::to_value(operation).expect("provider operation serializes");
+                        let limit = max_attempts.map(|limit| format!("/{limit}")).unwrap_or_default();
+                        crate::output::stderr!(
+                            "[provider operation retry: {}] attempt {attempt}{limit}; next attempt in at least {}s: {error}",
+                            operation.as_str().expect("provider operation is a string"), delay.as_secs_f64()
+                        );
+                    }
+                    AgentEvent::ProviderWaitingForNetwork { attempt, delay, error } => {
+                        crate::output::stderr!(
+                            "[waiting for network] attempt {attempt}; next attempt in at least {}s: {error}",
+                            delay.as_secs_f64()
+                        );
+                    }
                     AgentEvent::CandidateRejected {
                         run_cost_microdollars,
                         ..
@@ -862,6 +879,81 @@ mod tests {
 
         let error = status.finish().unwrap_err().to_string();
         assert!(error.contains("first request failed"), "{error}");
+    }
+
+    #[test]
+    fn operation_retries_do_not_discard_plain_candidate() {
+        let mut output = ProviderAttemptOutput {
+            pending: "candidate awaiting gate".into(),
+        };
+        assert!(output
+            .observe(&AgentEvent::ProviderUsageUncertain)
+            .is_none());
+        assert!(
+            HostRunOutcome::from_event(&AgentEvent::ProviderUsageUncertain, "test", "test")
+                .is_none()
+        );
+        assert_eq!(output.pending, "candidate awaiting gate");
+        for operation in [
+            octet_agent::ProviderOperation::LocalCompaction,
+            octet_agent::ProviderOperation::NativeCompaction,
+            octet_agent::ProviderOperation::TerminalGate,
+        ] {
+            for max_attempts in [None, Some(5)] {
+                let event = AgentEvent::ProviderOperationRetry {
+                    operation,
+                    attempt: 8,
+                    max_attempts,
+                    delay: Duration::ZERO,
+                    error: "offline".into(),
+                };
+                assert!(output.observe(&event).is_none());
+                assert!(HostRunOutcome::from_event(&event, "test", "test").is_none());
+                assert_eq!(output.pending, "candidate awaiting gate");
+            }
+        }
+        assert_eq!(
+            output.observe(&completed_turn()).unwrap(),
+            "candidate awaiting gate"
+        );
+    }
+
+    #[test]
+    fn repeated_network_waits_preserve_committed_plain_output() {
+        let mut output = ProviderAttemptOutput::default();
+        let mut published = String::new();
+        output.observe(&AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "COMMITTED".into(),
+        });
+        published.push_str(&output.observe(&completed_turn()).unwrap());
+        output.observe(&AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "STALE".into(),
+        });
+        output.observe(&AgentEvent::ProviderRetry {
+            attempt: 1,
+            max_attempts: 5,
+            delay: Duration::ZERO,
+            error: "disconnect".into(),
+        });
+        for attempt in 1..=32 {
+            let wait = AgentEvent::ProviderWaitingForNetwork {
+                attempt,
+                delay: Duration::from_secs(30),
+                error: "offline".into(),
+            };
+            assert!(output.observe(&wait).is_none());
+            assert!(HostRunOutcome::from_event(&wait, "test", "test").is_none());
+            assert!(output.pending.is_empty());
+            assert_eq!(published, "COMMITTED");
+        }
+        output.observe(&AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "RECOVERED".into(),
+        });
+        published.push_str(&output.observe(&completed_turn()).unwrap());
+        assert_eq!(published, "COMMITTEDRECOVERED");
     }
 
     #[test]

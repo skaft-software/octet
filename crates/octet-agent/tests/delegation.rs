@@ -1287,23 +1287,32 @@ impl Respond for StartupRetryScript {
                     }),
                 )]))
             }
-            ("root", 3) | ("root", 4) => response(tool_turn(&[(
-                if index == 3 {
-                    "wait-startup-retry-1"
+            ("root", 3..=12) => {
+                // wait_agent can return mailbox activity before all accepted
+                // tasks settle. Wait for the follow-up result, not a fixed
+                // number of wakeups (startup failure and initial completion
+                // notifications can arrive on different schedules).
+                let history = body.to_string();
+                if history.contains("\"tool_use_id\":\"list-startup-retry\"") {
+                    response(text_turn("startup retry complete"))
+                } else if history.contains("follow-up complete") {
+                    response(tool_turn(&[(
+                        "list-startup-retry",
+                        "list_agents",
+                        serde_json::json!({}),
+                    )]))
                 } else {
-                    "wait-startup-retry-2"
-                },
-                "wait_agent",
-                serde_json::json!({"timeout_ms": 2_000}),
-            )])),
-            ("root", 5) => response(tool_turn(&[(
-                "list-startup-retry",
-                "list_agents",
-                serde_json::json!({}),
-            )])),
-            ("root", 6) => response(text_turn("startup retry complete")),
+                    response(tool_turn(&[(
+                        &format!("wait-startup-retry-{index}"),
+                        "wait_agent",
+                        serde_json::json!({"timeout_ms": 2_000}),
+                    )]))
+                }
+            }
             ("child", 0) => response(text_turn("initial task complete")),
-            ("child", 1) => response(text_turn("follow-up complete")),
+            ("child", 1) => {
+                response(text_turn("follow-up complete")).set_delay(Duration::from_millis(50))
+            }
             _ => self.state.unexpected(route, index),
         }
     }

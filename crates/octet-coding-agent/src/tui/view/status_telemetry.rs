@@ -31,9 +31,19 @@ fn status_dollars(microdollars: u64) -> String {
 
 pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     let mut lines = vec!["Telemetry".to_owned()];
+    if state.usage_uncertain {
+        lines.push(
+            "Accounting     incomplete: usage/cost totals unknown; reported values are subtotals"
+                .to_owned(),
+        );
+    }
     if let Some(usage) = state.last_turn_usage {
         lines.extend([
-            "Usage source   provider-reported (exact)".to_owned(),
+            if state.usage_uncertain {
+                "Usage source   provider-reported subtotal (interrupted usage unknown)".to_owned()
+            } else {
+                "Usage source   provider-reported (exact)".to_owned()
+            },
             format!("Input tokens   {}", usage.input_tokens),
             format!("Cache read     {}", usage.cache_read_tokens),
             format!("Cache write    {}", usage.cache_write_tokens),
@@ -49,30 +59,44 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     }
 
     let active = state.run.current().is_some_and(|run| run.is_active());
-    match state.price_display {
-        PriceDisplay::Unknown => {
-            lines.push("Turn cost      unavailable (pricing not configured)".to_owned());
-            lines.push("Session cost   unavailable (pricing not configured)".to_owned());
-        }
-        PriceDisplay::ExplicitZero => {
-            lines.push("Turn cost      $0 (configured zero-priced)".to_owned());
-            lines.push("Session cost   $0 (configured zero-priced)".to_owned());
-        }
-        PriceDisplay::Priced => {
-            if state.run_cost_available {
-                let approximate = if active { "~" } else { "" };
-                lines.push(format!(
-                    "Turn cost      {approximate}{} ({})",
-                    status_dollars(state.run_cost_microdollars),
-                    if active { "incomplete" } else { "reported" }
-                ));
-            } else {
-                lines.push("Turn cost      unavailable (no durable completed run)".to_owned());
+    if state.usage_uncertain {
+        lines.push(match state.run_cost_available {
+            true => format!(
+                "Turn subtotal  {} + unknown",
+                status_dollars(state.run_cost_microdollars)
+            ),
+            false => "Turn cost      unknown".to_owned(),
+        });
+        lines.push(match state.session_cost_microdollars {
+            Some(cost) => format!("Session subtotal {} + unknown", status_dollars(cost)),
+            None => "Session cost   unknown".to_owned(),
+        });
+    } else {
+        match state.price_display {
+            PriceDisplay::Unknown => {
+                lines.push("Turn cost      unavailable (pricing not configured)".to_owned());
+                lines.push("Session cost   unavailable (pricing not configured)".to_owned());
             }
-            lines.push(match state.session_cost_microdollars {
-                Some(cost) => format!("Session cost   {} (reported)", status_dollars(cost)),
-                None => "Session cost   awaiting first usage report".to_owned(),
-            });
+            PriceDisplay::ExplicitZero => {
+                lines.push("Turn cost      $0 (configured zero-priced)".to_owned());
+                lines.push("Session cost   $0 (configured zero-priced)".to_owned());
+            }
+            PriceDisplay::Priced => {
+                if state.run_cost_available {
+                    let approximate = if active { "~" } else { "" };
+                    lines.push(format!(
+                        "Turn cost      {approximate}{} ({})",
+                        status_dollars(state.run_cost_microdollars),
+                        if active { "incomplete" } else { "reported" }
+                    ));
+                } else {
+                    lines.push("Turn cost      unavailable (no durable completed run)".to_owned());
+                }
+                lines.push(match state.session_cost_microdollars {
+                    Some(cost) => format!("Session cost   {} (reported)", status_dollars(cost)),
+                    None => "Session cost   awaiting first usage report".to_owned(),
+                });
+            }
         }
     }
 

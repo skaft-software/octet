@@ -2041,14 +2041,30 @@ fn backfill_usage_store(
     usage: &mut InferenceRequestStore,
 ) -> anyhow::Result<()> {
     for project in projects.list() {
-        let Ok(root) = projects.resolve_root(&project.id) else {
+        let session_ids = projects.sessions_for_project(&project.id);
+        if session_ids.is_empty() {
+            continue;
+        }
+        // Archived projects still own accounting evidence. Unavailable roots
+        // are not proof that their separately stored transcripts were deleted.
+        let Ok(root) = projects.resolve_root_for_cleanup(&project.id) else {
+            usage.mark_backfill_incomplete();
             continue;
         };
         let sessions = SessionStore::new(&config.session_dir, root.as_path());
-        for session_id in projects.sessions_for_project(&project.id) {
-            let Ok(inspection) = sessions.inspect_by_id(&session_id) else {
-                continue;
+        for session_id in session_ids {
+            let inspection = match sessions.inspect_by_id(&session_id) {
+                Ok(inspection) => inspection,
+                Err(_) => {
+                    if !matches!(sessions.session_file_exists(&session_id), Ok(false)) {
+                        usage.mark_backfill_incomplete();
+                    }
+                    continue;
+                }
             };
+            if !inspection.usage_uncertainty_records.is_empty() {
+                usage.record_uncertainty(&session_id)?;
+            }
             usage.record_all(project_catalog_usage(
                 &session_id,
                 &inspection.usage_records,
@@ -2130,9 +2146,13 @@ fn sync_session_usage(
 ) -> Result<(), ServiceError> {
     let requests =
         project_session_usage(session_id.as_str(), session).map_err(usage_store_service_error)?;
+    let mut usage = usage.lock().map_err(|_| ServiceError::Internal)?;
+    if session.has_uncertain_usage() {
+        usage
+            .record_uncertainty(session_id.as_str())
+            .map_err(usage_store_service_error)?;
+    }
     usage
-        .lock()
-        .map_err(|_| ServiceError::Internal)?
         .record_all(requests)
         .map_err(usage_store_service_error)?;
     Ok(())
@@ -3180,6 +3200,29 @@ impl HostService for OctetHost {
         let context = self.storage_context_for_session(session_id)?;
         if self.attachments.is_none() || self.documents.is_none() || self.resources.is_none() {
             return Err(ServiceError::Unavailable);
+        }
+        // The supervisor has quiesced the session owner. Preserve every last
+        // ledger row and uncertainty marker before deleting their only source.
+        let inspection = context
+            .sessions
+            .inspect_by_id(session_id.as_str())
+            .map_err(|_| ServiceError::Unavailable)?;
+        {
+            let mut usage = self.usage.lock().map_err(|_| ServiceError::Internal)?;
+            usage
+                .ensure_available()
+                .map_err(|_| ServiceError::Unavailable)?;
+            if !inspection.usage_uncertainty_records.is_empty() {
+                usage
+                    .record_uncertainty(session_id.as_str())
+                    .map_err(|_| ServiceError::Unavailable)?;
+            }
+            usage
+                .record_all(
+                    project_catalog_usage(session_id.as_str(), &inspection.usage_records)
+                        .map_err(|_| ServiceError::Unavailable)?,
+                )
+                .map_err(|_| ServiceError::Unavailable)?;
         }
         let mut deletion = PendingSessionDeletion::new(
             session_id,
@@ -4337,6 +4380,7 @@ struct PendingUserItem {
 }
 
 struct RunContextProjection {
+    usage_uncertain: bool,
     last_agent_snapshot: Option<AgentContextSnapshot>,
     last_published: Option<ContextUsage>,
     current_totals: Option<ContextTotals>,
@@ -4355,6 +4399,7 @@ impl RunContextProjection {
         project_file_context_tokens: u64,
     ) -> Self {
         Self {
+            usage_uncertain: false,
             last_agent_snapshot: None,
             last_published: None,
             current_totals: None,
@@ -4406,6 +4451,8 @@ enum RunDriveOutcome {
 }
 
 struct ProjectionState {
+    usage_uncertain: bool,
+    last_context: Option<ContextUsage>,
     known_entries: usize,
     run_counter: u64,
     user_item_counter: u64,
@@ -4432,6 +4479,8 @@ struct ProjectionState {
 impl ProjectionState {
     fn new(known_entries: usize) -> Self {
         Self {
+            usage_uncertain: false,
+            last_context: None,
             known_entries,
             run_counter: 0,
             user_item_counter: 0,
@@ -5220,9 +5269,17 @@ async fn run_worker(
                         }
                     },
                 };
-                let (next_app, result) =
+                let (next_app, mut result) =
                     invoke_idle_slash_command(owned_app, invocation, &mut plan, &mut projection)
                         .await;
+                if let Some(owned_app) = next_app.as_ref() {
+                    projection.usage_uncertain |= owned_app.agent.session().has_uncertain_usage();
+                    if let Err(error) =
+                        publish_idle_accounting_context(&mut projection, &events).await
+                    {
+                        result = Err(error);
+                    }
+                }
                 match (next_app, result) {
                     (Some(mut owned_app), Ok(SlashInvocationOutcome::Start(input))) => {
                         let session_path = owned_app.agent.session().path().to_owned();
@@ -5494,14 +5551,9 @@ async fn invoke_idle_slash_command(
             app.config.compaction.keep_recent_tokens = 1;
             let result = attempt_compaction(&mut app).await;
             app.config.compaction.keep_recent_tokens = original_keep_recent_tokens;
-            let outcome = match result {
-                Ok(_) => {
-                    let _ = sync_session_usage(&plan.usage, &plan.session_id, app.agent.session());
-                    idle_mutation_outcome(&app, plan, projection)
-                        .map(SlashInvocationOutcome::immediate)
-                }
-                Err(_) => Err(ServiceError::Internal),
-            };
+            // Failed/cancelled compaction may still have provider accounting.
+            // Reconcile it even when no conversation entries were appended.
+            let outcome = finish_idle_compaction(&app, plan, projection, result.is_ok());
             (Some(app), outcome)
         }
         commands::Command::Model(Some(model)) => {
@@ -5673,6 +5725,47 @@ fn execute_slash_skills_command(
         | commands::SkillsSubcommand::Search(_) => Ok(DriverCommandOutcome::default()),
         commands::SkillsSubcommand::Reload => Err(ServiceError::InvalidBoundary),
     }
+}
+
+fn finish_idle_compaction(
+    app: &App,
+    plan: &WorkerPlan,
+    projection: &mut ProjectionState,
+    succeeded: bool,
+) -> Result<SlashInvocationOutcome, ServiceError> {
+    projection.usage_uncertain |= app.agent.session().has_uncertain_usage();
+    if let Err(error) = sync_session_usage(&plan.usage, &plan.session_id, app.agent.session()) {
+        projection.usage_uncertain = true;
+        return Err(error);
+    }
+    if !succeeded {
+        return Err(ServiceError::Internal);
+    }
+    idle_mutation_outcome(app, plan, projection).map(SlashInvocationOutcome::immediate)
+}
+
+async fn publish_idle_accounting_context(
+    projection: &mut ProjectionState,
+    events: &mpsc::Sender<TimestampedEvent>,
+) -> Result<(), ServiceError> {
+    if !projection.usage_uncertain
+        || projection
+            .last_context
+            .as_ref()
+            .is_some_and(|context| context.usage_uncertain)
+    {
+        return Ok(());
+    }
+    let mut context = projection.last_context.clone().unwrap_or_default();
+    context.usage_uncertain = true;
+    events
+        .send(event(EventPayload::ContextUpdated {
+            context: context.clone(),
+        }))
+        .await
+        .map_err(|_| ServiceError::Unavailable)?;
+    projection.last_context = Some(context);
+    Ok(())
 }
 
 fn idle_mutation_outcome(
@@ -6805,6 +6898,7 @@ async fn start_and_drive_run(
     let title_before_prompt =
         session_meta_for_open_session(&plan.sessions, &plan.session_id, app.agent.session())
             .map(|metadata| metadata.title);
+    projection.usage_uncertain |= app.agent.session().has_uncertain_usage();
     let run_model = app.model.clone();
     let mut run = match app.agent.prompt(UserInput::from(input_parts)).await {
         Ok(run) => run,
@@ -6821,6 +6915,7 @@ async fn start_and_drive_run(
         document_context_tokens,
         project_file_context_tokens,
     );
+    context_projection.usage_uncertain = projection.usage_uncertain;
     if !attachments.is_empty() {
         projection
             .pending_attachments
@@ -6936,6 +7031,7 @@ async fn start_and_drive_run(
                     events,
                 )
                 .await?;
+                projection.last_context = context_projection.last_published.clone();
                 if let Some(projected_outcome) = projected_outcome {
                     outcome = projected_outcome;
                     break;
@@ -6978,9 +7074,14 @@ async fn start_and_drive_run(
         events,
     )
     .await?;
+    projection.last_context = context_projection.last_published.clone();
     let completed = outcome.allows_after_response();
     let terminal = TerminalProjection::from_host_outcome(&outcome);
-    sync_session_usage(&plan.usage, &plan.session_id, app.agent.session())?;
+    if let Err(error) = sync_session_usage(&plan.usage, &plan.session_id, app.agent.session()) {
+        projection.usage_uncertain = true;
+        publish_idle_accounting_context(projection, events).await?;
+        return Err(error);
+    }
     let settled_at_ms = now_ms();
     let unfinished = projection
         .tool_calls
@@ -8277,6 +8378,7 @@ fn project_context_snapshot(
         u32::try_from(snapshot.compactions_completed).map_err(|_| ServiceError::Internal)?;
     let usage = &snapshot.run_usage;
     let context = ContextUsage {
+        usage_uncertain: projection.usage_uncertain,
         usage: UsageSnapshot {
             input_tokens: usage
                 .input_tokens
@@ -8378,10 +8480,41 @@ async fn project_agent_event(
     response_text: &mut String,
 ) -> Result<Option<HostRunOutcome>, ServiceError> {
     match agent_event {
+        AgentEvent::ProviderUsageUncertain => {
+            projection.usage_uncertain = true;
+            context_projection.usage_uncertain = true;
+            // Publish independently of host-marker persistence: a failed append
+            // must not hide the session's already-known accounting uncertainty.
+            let mut context = context_projection
+                .last_published
+                .clone()
+                .unwrap_or_default();
+            context.usage_uncertain = true;
+            context_projection.last_published = Some(context.clone());
+            projection.last_context = Some(context.clone());
+            let persisted = plan
+                .usage
+                .lock()
+                .map_err(|_| ServiceError::Internal)
+                .and_then(|mut usage| {
+                    usage
+                        .record_uncertainty(plan.session_id.as_str())
+                        .map_err(usage_store_service_error)
+                });
+            events
+                .send(event(EventPayload::ContextUpdated { context }))
+                .await
+                .map_err(|_| ServiceError::Unavailable)?;
+            crate::output::stderr!("warning: provider usage and cost are uncertain; displayed numeric usage is a known subtotal, not a complete total.");
+            persisted?;
+        }
         AgentEvent::TurnStarted => {}
-        AgentEvent::ProviderLifecycle { .. } => {
+        AgentEvent::ProviderLifecycle { .. }
+        | AgentEvent::ProviderWaitingForNetwork { .. }
+        | AgentEvent::ProviderOperationRetry { .. } => {
             // Serve's durable item protocol intentionally has no endpoint-status
-            // item. Keep transport readiness out of session projections.
+            // item. Keep transport readiness out of session projections. A
+            // pre-send wait neither settles the run nor retracts committed items.
         }
         AgentEvent::OutputDelta { channel, text } => {
             let text = bounded_text(&text, MAX_ITEM_TEXT_BYTES);
@@ -9477,6 +9610,11 @@ fn build_completion_review(
         output_ids.len(),
         if output_ids.len() == 1 { "" } else { "s" },
     );
+    let summary = if projection.usage_uncertain {
+        format!("Provider usage and cost are uncertain; numeric usage values are known subtotals, not complete totals. {summary}")
+    } else {
+        summary
+    };
     CompletionReview {
         summary: bounded_text(&summary, 2 * 1024),
         duration_ms: completed_at_ms.saturating_sub(started_at_ms),
@@ -10792,7 +10930,10 @@ fn seed_from_session(
         active_run_id: None,
         model,
         authority,
-        context: ContextUsage::default(),
+        context: ContextUsage {
+            usage_uncertain: session.has_uncertain_usage(),
+            ..ContextUsage::default()
+        },
         items,
         extension_presentations: Vec::new(),
         pending_requests: Vec::new(),
@@ -11725,6 +11866,335 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+    #[tokio::test]
+    async fn unknown_usage_publishes_context_and_durable_accounting_before_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = pull_request_worker_plan(directory.path(), "unknown-live");
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let run_id = RunId::new("unknown-live-run").unwrap();
+        let mut projection = ProjectionState::new(7);
+        let mut context = RunContextProjection::new(0, 0, 0);
+        context.last_published = Some(ContextUsage::default());
+        let (events, mut receiver) = mpsc::channel(8);
+        for _ in 0..2 {
+            assert!(project_agent_event(
+                AgentEvent::ProviderUsageUncertain,
+                &run_id,
+                &plan,
+                &model,
+                &mut projection,
+                &mut context,
+                &events,
+                &mut String::new()
+            )
+            .await
+            .unwrap()
+            .is_none());
+            let event = receiver.try_recv().unwrap();
+            let EventPayload::ContextUpdated { context } = event.payload else {
+                panic!("expected live accounting, not a completed outcome");
+            };
+            assert!(context.usage_uncertain);
+            let usage = plan.usage.lock().unwrap();
+            assert!(usage.lifetime().usage_uncertain);
+            assert_eq!(usage.lifetime().request_count, 0);
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unknown_usage_publishes_even_when_host_accounting_is_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = pull_request_worker_plan(directory.path(), "unknown-unavailable");
+        // The store latches failed persistence and rejects subsequent writes.
+        assert!(plan.usage.lock().unwrap().record_uncertainty("").is_err());
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let mut projection = ProjectionState::new(0);
+        let mut context = RunContextProjection::new(0, 0, 0);
+        let (events, mut receiver) = mpsc::channel(8);
+        assert!(project_agent_event(
+            AgentEvent::ProviderUsageUncertain,
+            &RunId::new("unknown-unavailable-run").unwrap(),
+            &plan,
+            &model,
+            &mut projection,
+            &mut context,
+            &events,
+            &mut String::new(),
+        )
+        .await
+        .is_err());
+        assert!(matches!(receiver.try_recv().unwrap().payload,
+            EventPayload::ContextUpdated { context } if context.usage_uncertain));
+        assert!(receiver.try_recv().is_err());
+        assert!(projection.usage_uncertain);
+        assert!(context.usage_uncertain);
+        assert!(plan.usage.lock().unwrap().lifetime().usage_uncertain);
+        assert_eq!(plan.usage.lock().unwrap().lifetime().request_count, 0);
+    }
+
+    #[tokio::test]
+    async fn idle_compaction_publishes_uncertainty_without_entries_or_fake_completion() {
+        for succeeded in [false, true] {
+            for unavailable in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let mut plan = pull_request_worker_plan(directory.path(), "idle-compact-unknown");
+                plan.launch.model = ModelId("gpt-4o-mini".into());
+                let mut app = build_worker_app(&mut plan).unwrap();
+                app.agent
+                    .session_mut()
+                    .record_usage_uncertainty(
+                        octet_ai::EndpointId("openai".into()),
+                        ModelId("gpt-4o-mini".into()),
+                        "compaction",
+                    )
+                    .unwrap();
+                let mut projection = ProjectionState::new(app.agent.session().entries().len());
+                if unavailable {
+                    assert!(plan.usage.lock().unwrap().record_uncertainty("").is_err());
+                }
+                let result = finish_idle_compaction(&app, &plan, &mut projection, succeeded);
+                if succeeded && !unavailable {
+                    let SlashInvocationOutcome::Immediate(outcome) = result.unwrap() else {
+                        panic!("idle compaction must not start a run");
+                    };
+                    assert!(outcome.events.is_empty());
+                } else {
+                    assert!(result.is_err());
+                }
+                let (events, mut receiver) = mpsc::channel(8);
+                publish_idle_accounting_context(&mut projection, &events)
+                    .await
+                    .unwrap();
+                assert!(matches!(receiver.try_recv().unwrap().payload,
+                    EventPayload::ContextUpdated { context } if context.usage_uncertain));
+                publish_idle_accounting_context(&mut projection, &events)
+                    .await
+                    .unwrap();
+                assert!(receiver.try_recv().is_err());
+                assert!(plan.usage.lock().unwrap().lifetime().usage_uncertain);
+                assert_eq!(plan.usage.lock().unwrap().lifetime().request_count, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_usage_rehydrates_idle_session_without_inventing_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unknown-idle.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let head = session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("unfinished request".into())],
+            })))
+            .unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                "assistant_turn",
+            )
+            .unwrap();
+        drop(session); // Crash before any completion/checkpoint/outcome record.
+        let reopened = Session::open_read_only(&path).unwrap();
+        let seed = seed_from_session(
+            &reopened,
+            SessionId::new("unknown-idle").unwrap(),
+            SessionSeedOptions {
+                workspace: directory.path(),
+                project_id: None,
+                model: ModelSelection {
+                    provider: "openai".into(),
+                    model: "gpt-4o-mini".into(),
+                    reasoning: "off".into(),
+                },
+                authority: AuthorityProfile::FullAccess,
+                generation: 2,
+                meta: None,
+                attachment_store: None,
+                resource_store: None,
+            },
+        )
+        .unwrap();
+        assert!(seed.snapshot.context.usage_uncertain);
+        assert_eq!(seed.snapshot.live_state, SessionLiveState::Idle);
+        assert!(seed.snapshot.active_run_id.is_none());
+        assert_eq!(seed.snapshot.durable_head.unwrap().as_str(), head.0);
+        assert_eq!(seed.snapshot.items.len(), 1);
+        assert!(matches!(
+            seed.snapshot.items[0].payload,
+            ItemPayload::UserMessage { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn repeated_network_waits_do_not_retract_or_settle_serve_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = pull_request_worker_plan(directory.path(), "network-wait");
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let run_id = RunId::new("run-network-wait").unwrap();
+        let mut projection = ProjectionState::new(7);
+        let committed = ItemId::new("committed-assistant").unwrap();
+        let turn = TurnId::new("committed-turn").unwrap();
+        projection
+            .completed_assistant_items
+            .push_back(Some((committed.clone(), turn.clone())));
+        let tool = ItemId::new("committed-tool").unwrap();
+        projection.tool_items.insert("call".into(), tool.clone());
+        projection.assistant_item = Some(ItemId::new("stale-assistant").unwrap());
+        projection.reasoning_item = Some(ItemId::new("stale-reasoning").unwrap());
+        let mut context = RunContextProjection::new(0, 0, 0);
+        let (events, mut receiver) = mpsc::channel(8);
+        let mut response = "COMMITTED".to_owned();
+        for _ in 0..2 {
+            assert!(project_agent_event(
+                AgentEvent::ProviderUsageUncertain,
+                &run_id,
+                &plan,
+                &model,
+                &mut projection,
+                &mut context,
+                &events,
+                &mut response
+            )
+            .await
+            .unwrap()
+            .is_none());
+            assert!(projection.usage_uncertain);
+            assert!(matches!(
+                receiver.try_recv().unwrap().payload,
+                EventPayload::ContextUpdated { context } if context.usage_uncertain
+            ));
+            assert!(receiver.try_recv().is_err());
+            assert_eq!(
+                projection.assistant_item.as_ref().unwrap().as_str(),
+                "stale-assistant"
+            );
+            assert_eq!(response, "COMMITTED");
+        }
+        for operation in [
+            octet_agent::ProviderOperation::LocalCompaction,
+            octet_agent::ProviderOperation::NativeCompaction,
+            octet_agent::ProviderOperation::TerminalGate,
+        ] {
+            for max_attempts in [None, Some(5)] {
+                assert!(project_agent_event(
+                    AgentEvent::ProviderOperationRetry {
+                        operation,
+                        attempt: 8,
+                        max_attempts,
+                        delay: std::time::Duration::ZERO,
+                        error: "offline".into(),
+                    },
+                    &run_id,
+                    &plan,
+                    &model,
+                    &mut projection,
+                    &mut context,
+                    &events,
+                    &mut response
+                )
+                .await
+                .unwrap()
+                .is_none());
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                assert_eq!(
+                    projection.assistant_item.as_ref().unwrap().as_str(),
+                    "stale-assistant"
+                );
+                assert_eq!(
+                    projection.reasoning_item.as_ref().unwrap().as_str(),
+                    "stale-reasoning"
+                );
+                assert_eq!(projection.provider_attempt, 1);
+                assert_eq!(response, "COMMITTED");
+            }
+        }
+        let outcome = project_agent_event(
+            AgentEvent::ProviderRetry {
+                attempt: 1,
+                max_attempts: 5,
+                delay: std::time::Duration::ZERO,
+                error: "disconnect".into(),
+            },
+            &run_id,
+            &plan,
+            &model,
+            &mut projection,
+            &mut context,
+            &events,
+            &mut response,
+        )
+        .await
+        .unwrap();
+        assert!(outcome.is_none());
+        for expected in ["stale-assistant", "stale-reasoning"] {
+            let event = receiver.try_recv().unwrap();
+            assert!(
+                matches!(event.payload, EventPayload::ItemRetracted { item_id, .. } if item_id.as_str() == expected)
+            );
+        }
+        for attempt in 1..=32 {
+            let outcome = project_agent_event(
+                AgentEvent::ProviderWaitingForNetwork {
+                    attempt,
+                    delay: std::time::Duration::from_secs(30),
+                    error: "offline".into(),
+                },
+                &run_id,
+                &plan,
+                &model,
+                &mut projection,
+                &mut context,
+                &events,
+                &mut response,
+            )
+            .await
+            .unwrap();
+            assert!(outcome.is_none());
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            assert_eq!(projection.provider_attempt, 2);
+            assert_eq!(projection.known_entries, 7);
+            assert!(projection.assistant_item.is_none());
+            assert!(projection.reasoning_item.is_none());
+            assert_eq!(
+                projection.completed_assistant_items.front(),
+                Some(&Some((committed.clone(), turn.clone())))
+            );
+            assert_eq!(projection.tool_items.get("call"), Some(&tool));
+            assert_eq!(response, "COMMITTED");
+        }
+        projection.finish_turn();
+        assert!(projection.usage_uncertain);
+        let review = build_completion_review(
+            &TerminalProjection::completed(),
+            0,
+            1,
+            &projection,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+        assert!(review
+            .summary
+            .contains("known subtotals, not complete totals"));
+    }
+
     #[test]
     fn provider_failure_diagnostics_include_status_and_request_id() {
         let error = AgentError::Ai(AiError::Http(octet_ai::HttpError {
@@ -11909,9 +12379,16 @@ mod tests {
                 content: vec![UserPart::Text("searchable historical text".into())],
             })))
             .unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                "assistant_turn",
+            )
+            .unwrap();
         drop(session);
 
-        let host = OctetHost::new(config).unwrap();
+        let host = OctetHost::new(config.clone()).unwrap();
         let request = TranscriptSearchRequest {
             query: "historical".into(),
             filter: Default::default(),
@@ -11927,6 +12404,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second, first);
+        drop(host);
+        let reopened = OctetHost::new(config).unwrap();
+        assert_eq!(
+            HostService::search_transcripts(&reopened, &request)
+                .await
+                .unwrap()
+                .hits
+                .len(),
+            1
+        );
+        assert!(reopened
+            .list_sessions()
+            .await
+            .unwrap()
+            .iter()
+            .any(|session| session.id.as_str() == "search-session"));
     }
 
     #[tokio::test]
@@ -13805,6 +14298,139 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
     }
 
     #[tokio::test]
+    async fn permanent_delete_requires_accounting_recovery_before_removing_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = project_test_config(directory.path(), true);
+        config.workspace = config.workspace.canonicalize().unwrap();
+        config.invocation_cwd = config.workspace.clone();
+        let sessions = SessionStore::new(&config.session_dir, &config.workspace);
+        std::fs::create_dir_all(sessions.dir()).unwrap();
+        let session_id = SessionId::new("accounting-delete-failure").unwrap();
+        let path = sessions.dir().join("accounting-delete-failure.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("retain accounting source".into())],
+            })))
+            .unwrap();
+        let host = OctetHost::new(config.clone()).unwrap();
+        // New evidence since startup has not yet reached the host ledger.
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                "assistant_turn",
+            )
+            .unwrap();
+        drop(session);
+        sessions
+            .set_lifecycle(session_id.as_str(), SessionStorageLifecycle::Trash, 42_000)
+            .unwrap();
+        let confirmation = PermanentDeleteConfirmation {
+            session_id: session_id.clone(),
+            trashed_at_ms: 42_000,
+            phrase: format!("permanently delete {}", session_id.as_str()),
+        };
+        assert!(host.usage.lock().unwrap().record_uncertainty("").is_err());
+        assert!(matches!(
+            host.delete_session_permanently(&session_id, &confirmation)
+                .await,
+            Err(ServiceError::Unavailable)
+        ));
+        assert!(sessions.session_file_exists(session_id.as_str()).unwrap());
+        assert!(load_pending_session_deletions(&host.serve_state_dir)
+            .unwrap()
+            .is_empty());
+        assert!(host.usage_lifetime().await.unwrap().usage_uncertain);
+        assert!(
+            host.usage_stats(UsagePeriod::Daily)
+                .await
+                .unwrap()
+                .usage_uncertain
+        );
+        assert!(host.usage_activity().await.unwrap().usage_uncertain);
+        drop(host);
+        let recovered = OctetHost::new(config).unwrap();
+        assert!(recovered.usage.lock().unwrap().ensure_available().is_ok());
+        recovered
+            .delete_session_permanently(&session_id, &confirmation)
+            .await
+            .unwrap();
+        assert!(!sessions.session_file_exists(session_id.as_str()).unwrap());
+        let accounting = InferenceRequestStore::open(&recovered.serve_state_dir).unwrap();
+        assert!(accounting.lifetime().usage_uncertain);
+        assert_eq!(accounting.lifetime().request_count, 0);
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_syncs_accounting_added_after_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = project_test_config(directory.path(), true);
+        config.workspace = config.workspace.canonicalize().unwrap();
+        config.invocation_cwd = config.workspace.clone();
+        let sessions = SessionStore::new(&config.session_dir, &config.workspace);
+        std::fs::create_dir_all(sessions.dir()).unwrap();
+        let session_id = SessionId::new("accounting-delete-late").unwrap();
+        let mut session =
+            Session::create(sessions.dir().join("accounting-delete-late.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("late accounting".into())],
+            })))
+            .unwrap();
+        let host = OctetHost::new(config).unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("done".into())],
+                model: ModelId("gpt-4o-mini".into()),
+                protocol: Protocol::OpenAiChat,
+            })))
+            .unwrap();
+        session
+            .record_assistant_usage(
+                assistant,
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                octet_ai::Usage {
+                    input_tokens: 80,
+                    output_tokens: 20,
+                    total_tokens: 100,
+                    ..octet_ai::Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                "assistant_turn",
+            )
+            .unwrap();
+        drop(session);
+        assert_eq!(host.usage_lifetime().await.unwrap().request_count, 0);
+        assert!(!host.usage_lifetime().await.unwrap().usage_uncertain);
+        sessions
+            .set_lifecycle(session_id.as_str(), SessionStorageLifecycle::Trash, 43_000)
+            .unwrap();
+        host.delete_session_permanently(
+            &session_id,
+            &PermanentDeleteConfirmation {
+                session_id: session_id.clone(),
+                trashed_at_ms: 43_000,
+                phrase: format!("permanently delete {}", session_id.as_str()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!sessions.session_file_exists(session_id.as_str()).unwrap());
+        let accounting = InferenceRequestStore::open(&host.serve_state_dir).unwrap();
+        assert!(accounting.lifetime().usage_uncertain);
+        assert_eq!(accounting.lifetime().request_count, 1);
+        assert_eq!(accounting.lifetime().total_tokens, 100);
+    }
+
+    #[tokio::test]
     async fn permanent_delete_reclaims_all_session_sidecars_and_journal() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = project_test_config(directory.path(), true);
@@ -13818,6 +14444,13 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
             .append(EntryValue::Message(Message::User(UserMessage {
                 content: vec![UserPart::Text("delete everything".into())],
             })))
+            .unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("local".into()),
+                ModelId("test-model".into()),
+                "assistant_turn",
+            )
             .unwrap();
         drop(session);
         sessions
@@ -13983,6 +14616,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
             host.pull_requests.lock().unwrap().summary(&session_id),
             None
         );
+        assert!(host.usage.lock().unwrap().lifetime().usage_uncertain);
         assert_eq!(host.usage.lock().unwrap().lifetime().request_count, 1);
         assert!(load_pending_session_deletions(&host.serve_state_dir)
             .unwrap()
@@ -13990,6 +14624,8 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
 
         drop(host);
         let reopened = OctetHost::new(config).unwrap();
+        assert!(reopened.usage_lifetime().await.unwrap().usage_uncertain);
+        assert_eq!(reopened.usage_lifetime().await.unwrap().total_tokens, 15);
         assert_eq!(reopened.usage.lock().unwrap().lifetime().request_count, 1);
         assert_eq!(
             reopened.pull_requests.lock().unwrap().summary(&session_id),
@@ -14323,6 +14959,60 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         );
     }
 
+    #[test]
+    fn accounting_backfill_distinguishes_missing_corrupt_and_archived_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = project_test_config(directory.path(), true);
+        let state_dir = secure_serve_state_dir(&config.session_dir).unwrap();
+        let mut projects = ProjectRegistry::open(state_dir.join("projects")).unwrap();
+        let project = projects
+            .import(config.workspace.canonicalize().unwrap(), None)
+            .unwrap();
+        projects
+            .bind_session("backfill-source", &project.id)
+            .unwrap();
+        let root = projects.resolve_root(&project.id).unwrap();
+        let sessions = SessionStore::new(&config.session_dir, root.as_path());
+        std::fs::create_dir_all(sessions.dir()).unwrap();
+        let path = sessions.dir().join("backfill-source.jsonl");
+        let mut missing = InferenceRequestStore::open(&state_dir).unwrap();
+        backfill_usage_store(&config, &projects, &mut missing).unwrap();
+        assert!(!missing.lifetime().usage_uncertain);
+        assert!(missing.ensure_available().is_ok());
+        drop(missing);
+
+        std::fs::write(&path, b"{}\n").unwrap();
+        let mut corrupt = InferenceRequestStore::open(&state_dir).unwrap();
+        backfill_usage_store(&config, &projects, &mut corrupt).unwrap();
+        assert!(corrupt.lifetime().usage_uncertain);
+        assert!(corrupt.ensure_available().is_err());
+        drop(corrupt);
+        std::fs::remove_file(&path).unwrap();
+
+        let mut session = Session::create(&path).unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                "assistant_turn",
+            )
+            .unwrap();
+        drop(session);
+        projects.archive(&project.id).unwrap();
+        let mut archived = InferenceRequestStore::open(&state_dir).unwrap();
+        backfill_usage_store(&config, &projects, &mut archived).unwrap();
+        assert!(archived.lifetime().usage_uncertain);
+        // This warning is now a successfully synced marker, not incomplete inspection.
+        assert!(archived.ensure_available().is_ok());
+        drop(archived);
+
+        std::fs::rename(root.as_path(), directory.path().join("moved-workspace")).unwrap();
+        let mut unavailable = InferenceRequestStore::open(&state_dir).unwrap();
+        backfill_usage_store(&config, &projects, &mut unavailable).unwrap();
+        assert!(unavailable.lifetime().usage_uncertain);
+        assert!(unavailable.ensure_available().is_err());
+    }
+
     #[tokio::test]
     async fn host_backfills_durable_provider_usage_once_across_restarts() {
         let directory = tempfile::tempdir().unwrap();
@@ -14361,10 +15051,24 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
                 None,
             )
             .unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                "assistant_turn",
+            )
+            .unwrap();
         drop(session);
 
         let host = OctetHost::new(config.clone()).unwrap();
         let lifetime = host.usage_lifetime().await.unwrap();
+        assert!(lifetime.usage_uncertain);
+        assert!(
+            host.usage_stats(UsagePeriod::Daily)
+                .await
+                .unwrap()
+                .usage_uncertain
+        );
         assert_eq!(lifetime.prompt_tokens, 80);
         assert_eq!(lifetime.completion_tokens, 20);
         assert_eq!(lifetime.cache_read_tokens, 10);
@@ -14383,6 +15087,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         drop(host);
 
         let reopened = OctetHost::new(config).unwrap();
+        assert!(reopened.usage_lifetime().await.unwrap().usage_uncertain);
         assert_eq!(reopened.usage_lifetime().await.unwrap().request_count, 1);
         assert_eq!(reopened.usage_lifetime().await.unwrap().total_tokens, 115);
     }

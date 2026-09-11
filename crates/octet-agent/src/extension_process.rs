@@ -6778,10 +6778,13 @@ impl ProviderRetryHook for ExtensionProcess {
             "run_id": context.run_id,
             "attempt": context.attempt,
             "max_attempts": context.max_attempts,
+            "operation": context.operation,
             "host_delay_ms": context.host_delay.as_millis(),
             "kind": match context.kind {
                 crate::extension::ProviderRetryKind::BeforeGeneration => "before_generation",
                 crate::extension::ProviderRetryKind::StreamStart => "stream_start",
+                crate::extension::ProviderRetryKind::InterruptedInference => "interrupted_inference",
+                crate::extension::ProviderRetryKind::WaitingForNetwork => "waiting_for_network",
             },
         });
         let Ok(output) = self

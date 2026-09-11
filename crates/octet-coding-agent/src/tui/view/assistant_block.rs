@@ -84,6 +84,48 @@ fn reasoning_delimiter_crosses_chunk_boundary(previous: &str, next: &str) -> boo
     })
 }
 
+/// Presentation-only backoff; never retained as conversation or a raw cause.
+#[derive(Clone, Debug)]
+pub(super) struct RetryActivity {
+    pub(super) operation: Option<octet_agent::ProviderOperation>,
+    pub(super) attempt: usize,
+    pub(super) max_attempts: Option<usize>,
+    pub(super) delay: std::time::Duration,
+    pub(super) observed_at: Instant,
+}
+
+impl RetryActivity {
+    pub(super) fn label_at(&self, now: Instant) -> String {
+        let remaining = self
+            .delay
+            .saturating_sub(now.saturating_duration_since(self.observed_at));
+        let activity = match self.max_attempts {
+            Some(limit) => format!("Retrying {}/{}", self.attempt, limit),
+            None => format!("Waiting for network · attempt {}", self.attempt),
+        };
+        let activity = match self.operation {
+            Some(octet_agent::ProviderOperation::LocalCompaction) => {
+                format!("Local compaction · {activity}")
+            }
+            Some(octet_agent::ProviderOperation::NativeCompaction) => {
+                format!("Native compaction · {activity}")
+            }
+            Some(octet_agent::ProviderOperation::TerminalGate) => {
+                format!("Final-answer check · {activity}")
+            }
+            None => activity,
+        };
+        if remaining.is_zero() {
+            activity
+        } else {
+            format!(
+                "{activity} in {}s",
+                remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0)
+            )
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct AssistantBlock {
     pub(super) text: String,
@@ -101,6 +143,7 @@ pub(super) struct AssistantBlock {
     pub(super) reasoning_started_at: Option<Instant>,
     /// Frozen reasoning duration after the block closes.
     pub(super) reasoning_elapsed: Option<Duration>,
+    pub(super) retry_activity: Option<RetryActivity>,
     /// Start of the owning root run. Unlike reasoning timing, this survives
     /// steering, provider turns, and status-row replacement.
     pub(super) activity_started_at: Option<Instant>,
@@ -126,6 +169,7 @@ impl AssistantBlock {
             reasoning_expanded: false,
             reasoning_started_at: None,
             reasoning_elapsed: None,
+            retry_activity: None,
             activity_started_at: None,
             reasoning_heading: None,
             reasoning_heading_committed_blocks: 0,

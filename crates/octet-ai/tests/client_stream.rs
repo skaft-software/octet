@@ -536,6 +536,10 @@ fn text_request() -> Request {
 enum WebSocketBehavior {
     Complete,
     CloseBeforeEvents,
+    DropAfterOutput,
+    CloseAfterOutput,
+    InvalidTextAfterOutput,
+    InvalidBinaryAfterOutput,
     ConnectionLimit,
     RejectHandshake,
     StallHandshake,
@@ -608,12 +612,40 @@ async fn handle_test_responses_connection(
     let count = stream.peek(&mut peek).await?;
     let request_head = String::from_utf8_lossy(&peek[..count]).to_ascii_lowercase();
     if !request_head.contains("upgrade: websocket") {
-        let mut request = [0_u8; 16 * 1024];
-        let _ = stream.read(&mut request).await?;
-        requests
-            .lock()
-            .await
-            .push(serde_json::json!({"transport": "http"}));
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut bytes = [0_u8; 4096];
+            let count = stream.read(&mut bytes).await?;
+            assert_ne!(count, 0, "HTTP request ended before its headers");
+            request.extend_from_slice(&bytes[..count]);
+            if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .unwrap()
+            .trim()
+            .parse()?;
+        while request.len() < header_end + length {
+            let mut bytes = [0_u8; 4096];
+            let count = stream.read(&mut bytes).await?;
+            assert_ne!(count, 0, "HTTP request ended before its body");
+            request.extend_from_slice(&bytes[..count]);
+        }
+        let mut recorded = serde_json::json!({"transport": "http"});
+        if matches!(
+            behavior,
+            WebSocketBehavior::DropAfterOutput
+                | WebSocketBehavior::CloseAfterOutput
+                | WebSocketBehavior::InvalidTextAfterOutput
+                | WebSocketBehavior::InvalidBinaryAfterOutput
+        ) {
+            recorded["body"] = serde_json::from_slice(&request[header_end..header_end + length])?;
+        }
+        requests.lock().await.push(recorded);
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
             fallback_body.len(), fallback_body
@@ -686,6 +718,10 @@ async fn handle_test_responses_connection(
                 return Ok(());
             }
             WebSocketBehavior::Complete
+            | WebSocketBehavior::DropAfterOutput
+            | WebSocketBehavior::CloseAfterOutput
+            | WebSocketBehavior::InvalidTextAfterOutput
+            | WebSocketBehavior::InvalidBinaryAfterOutput
             | WebSocketBehavior::ConnectionLimit
             | WebSocketBehavior::RejectHandshake
             | WebSocketBehavior::StallHandshake => {}
@@ -748,9 +784,30 @@ async fn handle_test_responses_connection(
             }
         }));
         for event in events {
+            let output_begun = event["type"] == "response.output_text.delta";
             socket
                 .send(WebSocketMessage::Text(event.to_string().into()))
                 .await?;
+            if output_begun {
+                match behavior {
+                    WebSocketBehavior::DropAfterOutput => return Ok(()),
+                    WebSocketBehavior::CloseAfterOutput => {
+                        socket.send(WebSocketMessage::Close(None)).await?;
+                        return Ok(());
+                    }
+                    WebSocketBehavior::InvalidTextAfterOutput => {
+                        socket.send(WebSocketMessage::Text("{".into())).await?;
+                        return Ok(());
+                    }
+                    WebSocketBehavior::InvalidBinaryAfterOutput => {
+                        socket
+                            .send(WebSocketMessage::Binary(vec![0xff].into()))
+                            .await?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
         }
         if !prewarm {
             return Ok(());
@@ -868,7 +925,7 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
     };
     assert!(matches!(
         inner.as_ref(),
-        AiError::Provider(provider)
+        AiError::ResponsesFailed(provider)
             if provider.code.as_deref() == Some("websocket_connection_limit_reached")
     ));
     assert!(progress.first_body_seen);
@@ -1030,6 +1087,85 @@ async fn responses_websocket_failure_after_send_is_terminal() {
 }
 
 #[tokio::test]
+async fn responses_websocket_failed_output_next_explicit_request_uses_full_http_replay() {
+    for behavior in [
+        WebSocketBehavior::DropAfterOutput,
+        WebSocketBehavior::CloseAfterOutput,
+        WebSocketBehavior::InvalidTextAfterOutput,
+        WebSocketBehavior::InvalidBinaryAfterOutput,
+    ] {
+        let server = TestResponsesServer::start(behavior, fallback_responses_body()).await;
+        let model = websocket_test_model(&server.base_url);
+        let client = AiClient::new();
+        let session = Some("session-poisoned");
+        // Establish a socket-local cursor, then begin an incremental request.
+        client
+            .prewarm_responses(
+                &model,
+                responses_request(vec![user_message("durable")], session),
+            )
+            .await
+            .unwrap();
+        let request =
+            responses_request(vec![user_message("durable"), user_message("next")], session);
+        let mut stream = client.stream(&model, request.clone()).await.unwrap();
+        let mut provisional = String::new();
+        let error = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match stream.next().await.expect("failure must not be silent EOF") {
+                    Ok(StreamEvent::TextDelta { delta, .. }) => provisional.push_str(&delta),
+                    Ok(StreamEvent::Finished(_)) => panic!("interrupted output cannot finish"),
+                    Ok(_) => {}
+                    Err(error) => break error,
+                }
+            }
+        })
+        .await
+        .expect("injected failure was not surfaced");
+        assert_eq!(provisional, "websocket");
+        let AiError::StreamFailure { inner, progress } = error else {
+            panic!("expected annotated stream failure");
+        };
+        match behavior {
+            WebSocketBehavior::DropAfterOutput | WebSocketBehavior::CloseAfterOutput => {
+                assert!(matches!(*inner, AiError::Transport(ref transport)
+                    if transport.phase == octet_ai::TransportPhase::Body && !transport.timeout));
+            }
+            _ => assert!(matches!(*inner, AiError::Decode(_))),
+        }
+        assert!(progress.first_body_seen);
+        assert!(progress.content_bytes > 0);
+
+        // No sleep, stream drain or actor join before this explicit request.
+        // AiClient itself must never replay the accepted, interrupted attempt.
+        drop(stream);
+        let replacement =
+            tokio::time::timeout(Duration::from_secs(2), client.complete(&model, request))
+                .await
+                .expect("explicit fallback stalled")
+                .unwrap();
+        assert_eq!(replacement.response_id.as_deref(), Some("resp-http"));
+        let requests = server.requests().await;
+        assert_eq!(
+            requests.len(),
+            3,
+            "prewarm, failed WS, one explicit HTTP request only"
+        );
+        assert_eq!(requests[0]["generate"], false);
+        assert_eq!(requests[1]["previous_response_id"], "resp-prewarm");
+        assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
+        assert_eq!(requests[2]["transport"], "http");
+        let replay = &requests[2]["body"];
+        assert!(replay.get("previous_response_id").is_none());
+        assert!(replay.get("generate").is_none());
+        let mut expected_input = requests[0]["input"].as_array().unwrap().clone();
+        expected_input.extend(requests[1]["input"].as_array().unwrap().iter().cloned());
+        assert_eq!(replay["input"], serde_json::json!(expected_input));
+        assert_eq!(replay["model"], requests[1]["model"]);
+    }
+}
+
+#[tokio::test]
 async fn responses_websocket_heartbeat_timeout_after_created_is_terminal() {
     let server =
         TestResponsesServer::start(WebSocketBehavior::Stall, fallback_responses_body()).await;
@@ -1150,8 +1286,9 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
         TestResponsesServer::start(WebSocketBehavior::StallWithPongs, fallback_responses_body())
             .await;
     let model = websocket_test_model(&server.base_url);
-    let mut stream = AiClient::new()
-        .with_stream_timeouts(Duration::from_millis(500), Duration::from_secs(1))
+    let client =
+        AiClient::new().with_stream_timeouts(Duration::from_millis(500), Duration::from_secs(1));
+    let mut stream = client
         .stream(
             &model,
             responses_request(vec![user_message("wait")], Some("session-pongs")),
@@ -1182,8 +1319,26 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
     );
     assert!(progress.first_body_seen);
     assert!(progress.last_event_ms.is_some());
-    assert!(stream.next().await.is_none());
     assert_eq!(server.requests().await.len(), 1);
+    // Do not poll/drop the failed stream before immediately replacing it.
+    let mut replacement = client
+        .stream(
+            &model,
+            responses_request(
+                vec![user_message("explicit replacement")],
+                Some("session-pongs"),
+            ),
+        )
+        .await
+        .unwrap();
+    while let Some(event) = replacement.next().await {
+        if matches!(event.unwrap(), StreamEvent::Finished(_)) {
+            break;
+        }
+    }
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["transport"], "http");
 }
 
 #[tokio::test]
@@ -1758,4 +1913,126 @@ async fn test_client_drop_sentinel() {
         dropped.load(Ordering::SeqCst),
         "Expected server to detect client socket close after stream drop"
     );
+}
+
+#[tokio::test]
+async fn http_permanent_codes_override_transient_status_and_retry_after() {
+    for status in [429, 500, 503] {
+        for (code, safe) in [
+            ("insufficient_quota", false),
+            ("quota_exceeded", false),
+            ("usage_not_included", false),
+            ("billing_not_active", false),
+            ("account_deactivated", false),
+            ("organization_deactivated", false),
+            ("rate_limit_exceeded", true),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("retry-after", "7")
+                        .set_body_json(serde_json::json!({"error": {"code": code}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let model = make_test_model(&server.uri(), Protocol::OpenAiChat, false);
+            let error = match AiClient::new().stream(&model, text_request()).await {
+                Err(error) => error,
+                Ok(_) => panic!("expected HTTP failure"),
+            };
+            let AiError::Http(error) = error else {
+                panic!("expected HTTP failure")
+            };
+            assert_eq!(error.provider_code.as_deref(), Some(code));
+            assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
+            assert_eq!(error.is_safe_to_retry(), safe, "{status}: {code}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_failed_terminal_retains_provenance_and_sanitizes_diagnostics() {
+    const SECRET: &str = "FAILED_SECRET_31de";
+    let mock_server = MockServer::start().await;
+    let terminal = serde_json::json!({"type":"response.failed", "response":{"error":{
+        "code":"unknown_failure", "type":"unfamiliar_kind",
+        "message":format!("provider echoed {SECRET} \x1b]0;owned\x07")
+    }}});
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(format!("data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\"}}}}\n\ndata: {terminal}\n\n")))
+        .mount(&mock_server).await;
+    let mut model = make_test_model(&mock_server.uri(), Protocol::OpenAiResponses, false);
+    Arc::make_mut(&mut model.endpoint).auth = Auth::bearer(SECRET);
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    loop {
+        match stream
+            .next()
+            .await
+            .expect("terminal failure must be surfaced")
+        {
+            Ok(_) => continue,
+            Err(error) => {
+                let AiError::ResponsesFailed(provider) = stream_inner(&error) else {
+                    panic!("lost failed-terminal provenance: {error:?}");
+                };
+                assert_eq!(provider.code.as_deref(), Some("unknown_failure"));
+                assert!(!provider.is_permanent());
+                assert_secret_and_controls_are_absent(&error, &[SECRET]);
+                assert!(stream.next().await.is_none());
+                break;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn dispatch_tracking_distinguishes_credentials_from_pending_http_headers() {
+    struct HeldCredential;
+    #[async_trait::async_trait]
+    impl octet_ai::CredentialResolver for HeldCredential {
+        async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+            std::future::pending().await
+        }
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+        .mount(&server)
+        .await;
+    let client = AiClient::new();
+    let mut model = make_test_model(&server.uri(), Protocol::OpenAiChat, false);
+    Arc::make_mut(&mut model.endpoint).auth = Auth::dynamic(Arc::new(HeldCredential));
+    let credential_attempt = client.track_request_dispatch();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(20),
+        credential_attempt.stream(&model, text_request())
+    )
+    .await
+    .is_err());
+    assert!(!credential_attempt.request_may_have_been_sent());
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    Arc::make_mut(&mut model.endpoint).auth = Auth::bearer("synthetic");
+    let header_attempt = client.track_request_dispatch();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(100),
+        header_attempt.stream(&model, text_request())
+    )
+    .await
+    .is_err());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(header_attempt.request_may_have_been_sent());
+    assert!(header_attempt.clone().request_may_have_been_sent());
+    assert!(!header_attempt
+        .track_request_dispatch()
+        .request_may_have_been_sent());
+    assert!(!credential_attempt.request_may_have_been_sent());
+    assert!(!client.request_may_have_been_sent());
 }

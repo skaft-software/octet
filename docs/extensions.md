@@ -185,9 +185,11 @@ methods are not implicit API `0.3` capabilities.
 
 The schema also defines optional migration, provider catalog/auth/stream, and
 session-lifecycle services. A schema declaration is not proof that a particular
-product host offers the service. Provider acceptance ambiguity never permits
-automatic replay; authorization uses opaque host-policy leases, not credentials
-or URLs in protocol fields. See the exact generated models and host offer.
+product host offers the service. Provider acceptance ambiguity on these extension
+services never permits automatic replay; the separate host-qualified Codex
+local-function inference exception does not qualify an extension provider or
+its effects. Authorization uses opaque host-policy leases, not credentials or
+URLs in protocol fields. See the exact generated models and host offer.
 
 ## Lifecycle and reload
 
@@ -197,6 +199,35 @@ terminal disposition and generation ownership rather than inferring success
 from a lost connection. The retained [host lifecycle reference](extensions/legacy-authoring.md#lifecycle-and-reload)
 covers candidate-first reload, bounded drain, shutdown, and supervised restart;
 its legacy observational methods are not API `0.3` methods.
+
+### Provider-retry observations and advice
+
+The Rust `ProviderRetryKind` and retained API `0.2` provider-retry hook wire
+add `InterruptedInference` / `interrupted_inference` and `WaitingForNetwork` /
+`waiting_for_network`. `max_attempts` is optional (`Option<usize>` in the Rust
+hook context, JSON `null` for sustained pre-send waiting), not a fabricated
+finite denominator. `ProviderRetryContext.operation: Option<ProviderOperation>`
+is `None` for main sampling, serialized as an explicit `"operation": null`
+(not omitted). Auxiliary hooks receive `"operation": "local_compaction"`,
+`"native_compaction"`, or `"terminal_gate"`, including manual native compaction.
+These hooks can veto only the proposed retry for that operation, or add delay
+(cumulative additional delay capped at five seconds); they do not roll back an
+unrelated main answer or change the original failure classification. Existing
+`before_generation` and `stream_start` kinds remain. Advice can decline a host-authorized retry or add bounded delay, but
+cannot authorize unqualified replay, expand budgets, shorten `Retry-After`, or
+override cancellation. These are not new API `0.3` request-path hooks; extension
+API versions are unchanged. The session schema version is also unchanged, but
+the additive `usage_uncertainty` record evolves its record contract.
+
+`AgentEvent::ProviderWaitingForNetwork` is live recovery telemetry, not assistant
+content or run completion. Serve keeps its run owner alive during the wait
+without adding a durable status item. The separate unit
+`AgentEvent::ProviderUsageUncertain` reflects durable session accounting
+uncertainty: Serve retains it through completion and prefixes completion-review
+summaries with a warning that numeric usage/cost values are known subtotals.
+Neither event is assistant output. See the
+[recovery boundary](tools.md#recovery-and-security) and
+[candidate qualification](qualification/v0.7.4-recovery.md).
 
 ### Declared API `0.3` session hooks
 

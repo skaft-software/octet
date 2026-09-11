@@ -107,6 +107,43 @@ pub(crate) struct DelegatedUsage {
     pub(crate) cost: Option<Cost>,
 }
 
+/// Durable evidence that an accepted provider attempt has unreported usage.
+///
+/// This is not a zero-token or zero-cost usage record. Only host-selected route,
+/// model and operation identifiers belong here, never URLs, errors or payloads.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageUncertaintyRecord {
+    /// Host-selected endpoint identifier, not its URL or credentials.
+    pub endpoint: EndpointId,
+    /// Host-selected canonical model identifier.
+    pub model: ModelId,
+    /// Host-selected operation identifier (for example `assistant_turn`).
+    pub operation: String,
+}
+
+impl UsageUncertaintyRecord {
+    fn validate(&self) -> Result<(), SessionError> {
+        // Keep persisted diagnostics bounded and exclude URL/query/header and
+        // control syntax. Identifiers are trusted host metadata, not redacted
+        // arbitrary provider content; never echo an invalid value in errors.
+        for value in [&self.endpoint.0, &self.model.0, &self.operation] {
+            if value.is_empty()
+                || value.len() > 128
+                || value.contains("://")
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
+            {
+                return Err(SessionError::Limit(
+                    "usage uncertainty identifiers must be 1..=128 ASCII identifier bytes".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Provider usage and cost recorded for one durable operation.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct UsageRecord {
@@ -616,6 +653,11 @@ pub enum SessionRecord {
         #[serde(default)]
         run_cost_microdollars: Option<u64>,
     },
+    /// An accepted attempt with unknown usage. Session-global, not branch state.
+    UsageUncertainty {
+        /// Bounded host-selected identifiers only; no invented usage or cost.
+        record: UsageUncertaintyRecord,
+    },
     /// Usage for one assistant turn or compaction operation. This does not
     /// alter the active head or model-visible context.
     Usage {
@@ -629,6 +671,9 @@ pub enum SessionRecord {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionRecordRef<'a> {
+    UsageUncertainty {
+        record: &'a UsageUncertaintyRecord,
+    },
     Entry(&'a Entry),
     Head {
         id: &'a EntryId,
@@ -816,6 +861,8 @@ pub struct Session {
     checkpoints: Vec<Checkpoint>,
     /// Usage records for every completed provider operation, in append order.
     usage_records: Vec<UsageRecord>,
+    /// Session-global exposure; checkout and compaction never clear it.
+    usage_uncertainty_records: Vec<UsageUncertaintyRecord>,
 }
 
 impl std::fmt::Debug for Session {
@@ -881,6 +928,7 @@ impl Session {
             total_cost_picodollars_remainder: 0,
             checkpoints: Vec::new(),
             usage_records: Vec::new(),
+            usage_uncertainty_records: Vec::new(),
         })
     }
 
@@ -1015,6 +1063,7 @@ impl Session {
         let mut checkpoints: Vec<Checkpoint> = Vec::new();
         let mut checkpoint_lines: Vec<usize> = Vec::new();
         let mut usage_records: Vec<UsageRecord> = Vec::new();
+        let mut usage_uncertainty_records = Vec::new();
 
         // Byte offset of the end of the last accepted record, so a torn tail
         // can be truncated away below. Only one physical line is buffered at a
@@ -1224,6 +1273,13 @@ impl Session {
                         run_cost_microdollars,
                     });
                 }
+                SessionRecord::UsageUncertainty { record } => {
+                    record.validate().map_err(|_| SessionError::Corrupt {
+                        line: line_no,
+                        message: "invalid usage uncertainty identifiers".into(),
+                    })?;
+                    usage_uncertainty_records.push(record);
+                }
                 SessionRecord::Usage { record } => {
                     if let UsageRecordKind::AssistantTurn { assistant } = &record.kind {
                         let valid_assistant = index
@@ -1325,6 +1381,7 @@ impl Session {
             total_cost_picodollars_remainder,
             checkpoints,
             usage_records,
+            usage_uncertainty_records,
         })
     }
 
@@ -1981,6 +2038,49 @@ impl Session {
         Ok(())
     }
 
+    /// Persist unknown usage for one accepted attempt before replacing it.
+    ///
+    /// Supply only trusted endpoint/model/operation identifiers (1..=128 ASCII
+    /// letters, digits, `-`, `_`, `.`, `:`, `/`; URLs are forbidden). Call once
+    /// per failed physical attempt, not once per observer or retry notification.
+    /// A failed append leaves in-memory accounting unchanged and must stop
+    /// recovery. Successful appends use the session's ordinary private, locked,
+    /// synced persistence path and change neither head nor known usage subtotal.
+    pub fn record_usage_uncertainty(
+        &mut self,
+        endpoint: EndpointId,
+        model: ModelId,
+        operation: impl Into<String>,
+    ) -> Result<(), SessionError> {
+        let record = UsageUncertaintyRecord {
+            endpoint,
+            model,
+            operation: operation.into(),
+        };
+        record.validate()?;
+        let mut buffer = Vec::with_capacity(256);
+        write_json_line(
+            &mut buffer,
+            &SessionRecordRef::UsageUncertainty { record: &record },
+        )?;
+        self.persist(&buffer)?;
+        self.usage_uncertainty_records.push(record);
+        Ok(())
+    }
+
+    /// Whether any durable accepted-attempt usage is unknown, on any branch.
+    /// Known usage/cost totals are only subtotals while this is true. Hard
+    /// cumulative ceilings must fail closed, including after reopening.
+    pub fn has_uncertain_usage(&self) -> bool {
+        !self.usage_uncertainty_records.is_empty()
+    }
+
+    /// Unknown-usage evidence in append order, independent of the active head.
+    /// These records contain no token or cost estimates and are not usage totals.
+    pub fn usage_uncertainty_records(&self) -> &[UsageUncertaintyRecord] {
+        &self.usage_uncertainty_records
+    }
+
     /// Newest completed-prompt checkpoint on the active branch.
     pub fn latest_active_checkpoint(&self) -> Option<&Checkpoint> {
         if self.checkpoints.is_empty() {
@@ -2011,7 +2111,8 @@ impl Session {
         self.checkout(checkpoint.head)
     }
 
-    /// Returns the whole-microdollar portion of cumulative session cost.
+    /// Returns the whole-microdollar portion of known cumulative session cost.
+    /// This is only a subtotal when [`Self::has_uncertain_usage`] is true.
     pub fn total_cost_microdollars(&self) -> u64 {
         self.total_cost_microdollars
     }
@@ -3729,6 +3830,251 @@ mod tests {
         let reopened = Session::open(&fork_path).unwrap();
         assert_eq!(reopened.entries().len(), 1);
         assert_eq!(reopened.head(), Some(new_root));
+    }
+
+    fn record_unknown_attempt(session: &mut Session) -> Result<(), SessionError> {
+        session.record_usage_uncertainty(
+            EndpointId("codex".into()),
+            ModelId("openai/gpt-5.4".into()),
+            "assistant_turn",
+        )
+    }
+
+    #[test]
+    fn usage_uncertainty_serializes_without_fictional_usage_or_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        assert!(!session.has_uncertain_usage());
+        record_unknown_attempt(&mut session).unwrap();
+        let bytes = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({
+                "type": "usage_uncertainty",
+                "record": {
+                    "endpoint": "codex",
+                    "model": "openai/gpt-5.4",
+                    "operation": "assistant_turn"
+                }
+            })
+        );
+        let record: SessionRecord = serde_json::from_str(&bytes).unwrap();
+        let SessionRecord::UsageUncertainty { record } = record else {
+            panic!("expected uncertainty, not known usage");
+        };
+        assert_eq!(session.usage_uncertainty_records(), &[record]);
+        assert!(session.head().is_none());
+        assert!(session.entries().is_empty());
+        assert!(session.usage_records().is_empty());
+        assert!(session.context().unwrap().is_empty());
+        let reopened = Session::open_read_only(&path).unwrap();
+        assert!(reopened.has_uncertain_usage());
+        assert_eq!(
+            reopened.usage_uncertainty_records(),
+            session.usage_uncertainty_records()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn usage_uncertainty_survives_success_checkpoint_checkout_and_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        let prompt = session.append(user("first prompt")).unwrap();
+        let completed = session.append(assistant("first completion")).unwrap();
+        session.add_cost(17).unwrap();
+        let checkpoint = session.checkpoint(prompt.clone()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let context = serde_json::to_value(&*session.context().unwrap()).unwrap();
+        record_unknown_attempt(&mut session).unwrap();
+        record_unknown_attempt(&mut session).unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(&before));
+        assert_eq!(
+            serde_json::to_value(&*session.context().unwrap()).unwrap(),
+            context
+        );
+        assert_eq!(session.head(), Some(completed));
+        assert!(session.usage_records().is_empty());
+        // A later completed response does not erase earlier accepted exposure.
+        let later = session.append(assistant("replacement completed")).unwrap();
+        session
+            .record_assistant_usage(
+                later.clone(),
+                EndpointId("codex".into()),
+                ModelId("m".into()),
+                Usage {
+                    total_tokens: 31,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        session.checkpoint(prompt.clone()).unwrap();
+        session.compact("summary", later).unwrap();
+        assert!(session.has_uncertain_usage());
+        session.checkout(checkpoint.head).unwrap();
+        assert!(session.has_uncertain_usage());
+        session.restore_checkpoint(&prompt).unwrap();
+        assert!(session.has_uncertain_usage());
+        session.checkout_root().unwrap();
+        assert!(session.has_uncertain_usage());
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert!(reopened.head().is_none());
+        assert!(reopened.has_uncertain_usage());
+        assert_eq!(reopened.usage_uncertainty_records().len(), 2);
+        assert_eq!(reopened.usage_records().len(), 1);
+        assert_eq!(reopened.usage_records()[0].usage.total_tokens, 31);
+        assert_eq!(reopened.total_cost_microdollars(), 17);
+        assert_eq!(reopened.total_cost_picodollars_remainder(), 0);
+    }
+
+    #[test]
+    fn usage_uncertainty_legacy_sessions_remain_certain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        let prompt = session.append(user("legacy prompt")).unwrap();
+        session.append(assistant("legacy completion")).unwrap();
+        session.checkpoint(prompt).unwrap();
+        drop(session);
+        let reopened = Session::open(path).unwrap();
+        assert!(!reopened.has_uncertain_usage());
+        assert!(reopened.usage_uncertainty_records().is_empty());
+    }
+
+    #[test]
+    fn usage_uncertainty_fork_projection_starts_independent_accounting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut source = Session::create(&path).unwrap();
+        let head = source.append(user("forkable prompt")).unwrap();
+        source.add_cost(17).unwrap();
+        record_unknown_attempt(&mut source).unwrap();
+        let fork_path = dir.path().join("fork.jsonl");
+        let fork = source.fork_to(&fork_path, Some(&head)).unwrap();
+        assert_eq!(fork.head(), Some(head));
+        assert!(!fork.has_uncertain_usage());
+        assert_eq!(fork.total_cost_microdollars(), 0);
+        assert!(fork.usage_records().is_empty());
+        assert!(source.has_uncertain_usage());
+        assert!(Session::open_read_only(&path)
+            .unwrap()
+            .has_uncertain_usage());
+        assert!(!Session::open_read_only(&fork_path)
+            .unwrap()
+            .has_uncertain_usage());
+    }
+
+    #[test]
+    fn usage_uncertainty_append_failures_leave_memory_and_disk_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut writer = Session::create(&path).unwrap();
+        let mut stale = Session::open(&path).unwrap();
+        writer.append(user("concurrent writer")).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            record_unknown_attempt(&mut stale),
+            Err(SessionError::ConcurrentModification)
+        ));
+        assert!(!stale.has_uncertain_usage());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let mut read_only = Session::open_read_only(&path).unwrap();
+        assert!(record_unknown_attempt(&mut read_only).is_err());
+        assert!(!read_only.has_uncertain_usage());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        writer.persisted_records = MAX_SESSION_RECORDS;
+        assert!(matches!(
+            record_unknown_attempt(&mut writer),
+            Err(SessionError::Limit(_))
+        ));
+        assert!(!writer.has_uncertain_usage());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn usage_uncertainty_identifiers_are_bounded_and_validated_on_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        for invalid in [
+            "".to_string(),
+            "x".repeat(129),
+            "https://host/path".into(),
+            "secret?token=value".into(),
+            "Authorization: secret".into(),
+            "line\nfeed".into(),
+        ] {
+            for field in 0..3 {
+                let mut ids = [
+                    "codex".to_string(),
+                    "m".to_string(),
+                    "assistant_turn".to_string(),
+                ];
+                ids[field] = invalid.clone();
+                let error = session
+                    .record_usage_uncertainty(
+                        EndpointId(ids[0].clone()),
+                        ModelId(ids[1].clone()),
+                        ids[2].clone(),
+                    )
+                    .unwrap_err();
+                assert!(matches!(error, SessionError::Limit(_)));
+                assert!(!session.has_uncertain_usage());
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+                let record = serde_json::json!({"type":"usage_uncertainty", "record": {
+                    "endpoint": ids[0], "model": ids[1], "operation": ids[2]
+                }});
+                std::fs::write(&path, format!("{record}\n")).unwrap();
+                assert!(matches!(
+                    Session::open_read_only(&path),
+                    Err(SessionError::Corrupt { line: 1, .. })
+                ));
+                std::fs::write(&path, "").unwrap();
+            }
+        }
+        let with_payload = serde_json::json!({"type":"usage_uncertainty", "record": {
+            "endpoint":"codex", "model":"m", "operation":"assistant_turn", "body":"forbidden"
+        }});
+        assert!(serde_json::from_value::<SessionRecord>(with_payload).is_err());
+        session
+            .record_usage_uncertainty(
+                EndpointId("x".repeat(128)),
+                ModelId("x".repeat(128)),
+                "x".repeat(128),
+            )
+            .unwrap();
+        assert!(Session::open(&path).unwrap().has_uncertain_usage());
+    }
+
+    #[test]
+    fn usage_uncertainty_survives_repair_of_a_later_torn_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        record_unknown_attempt(&mut session).unwrap();
+        drop(session);
+        let before = std::fs::read(&path).unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"entry\"")
+            .unwrap();
+        let reopened = Session::open(&path).unwrap();
+        assert!(reopened.has_uncertain_usage());
+        assert_eq!(reopened.usage_uncertainty_records().len(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

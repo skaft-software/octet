@@ -2,9 +2,10 @@
 //!
 //! The append-only request log is authoritative. Lifetime, period, and daily
 //! activity metrics are rebuilt from that log at startup so one durable write
-//! records both the request and every aggregate derived from it.
+//! records both the request and every aggregate derived from it. Unknown-usage
+//! evidence lives in a separate idempotent session-marker log, never a fake request.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -120,6 +121,9 @@ pub struct ModelUsage {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageStats {
+    /// Known subtotals only: retained unknown usage cannot be attributed to a period.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usage_uncertain: bool,
     /// Selected aggregation period.
     pub period: UsagePeriod,
     /// Standard-rate prompt tokens.
@@ -148,6 +152,9 @@ pub struct UsageStats {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifetimeUsage {
+    /// True when retained provider usage/cost is incomplete. Numeric fields are known subtotals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usage_uncertain: bool,
     /// Standard-rate prompt tokens.
     pub prompt_tokens: u64,
     /// Generated output tokens.
@@ -190,6 +197,9 @@ pub struct UsageActivityDay {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageActivity {
+    /// Activity and streaks cover known records only when retained usage is incomplete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usage_uncertain: bool,
     /// Active days in the trailing 53 weeks, oldest first.
     pub days: Vec<UsageActivityDay>,
     /// Consecutive active days ending today or yesterday.
@@ -370,6 +380,7 @@ impl LifetimeMetricsStore {
         let total = self.lifetime.total;
         let (models, models_truncated) = self.lifetime.model_breakdown();
         LifetimeUsage {
+            usage_uncertain: false,
             prompt_tokens: total.prompt_tokens,
             completion_tokens: total.completion_tokens,
             cache_read_tokens: total.cache_read_tokens,
@@ -399,6 +410,7 @@ impl LifetimeMetricsStore {
         let total = aggregate.total;
         let (models, models_truncated) = aggregate.model_breakdown();
         UsageStats {
+            usage_uncertain: false,
             period,
             prompt_tokens: total.prompt_tokens,
             completion_tokens: total.completion_tokens,
@@ -429,6 +441,7 @@ impl LifetimeMetricsStore {
         let active_days = self.daily.range(..=today).map(|(day, _)| *day);
         let (current_streak, longest_streak) = streaks(active_days, today);
         UsageActivity {
+            usage_uncertain: false,
             days,
             current_streak,
             longest_streak,
@@ -438,10 +451,24 @@ impl LifetimeMetricsStore {
 
 /// Append-only durable inference-request store.
 pub struct InferenceRequestStore {
+    write_failed: bool,
+    backfill_incomplete: bool,
+    #[cfg(test)]
+    append_failure: Option<AppendFailure>,
+    uncertainty_file: File,
+    uncertainty_bytes: u64,
+    uncertain_sessions: HashSet<String>,
     file: File,
     file_bytes: u64,
     requests: HashMap<(String, u64), InferenceRequest>,
     metrics: LifetimeMetricsStore,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum AppendFailure {
+    Partial,
+    Sync,
 }
 
 impl fmt::Debug for InferenceRequestStore {
@@ -482,10 +509,8 @@ impl InferenceRequestStore {
 
         let mut requests = HashMap::new();
         let mut metrics = LifetimeMetricsStore::default();
-        for line in bytes.split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let line = &line[..line.len() - 1];
             if line.len() > MAX_RECORD_BYTES {
                 return Err(UsageStoreError::Corrupt);
             }
@@ -508,12 +533,110 @@ impl InferenceRequestStore {
             }
         }
 
+        // Separate additive log: unknown attempts are never zero-token requests.
+        let uncertainty_path = root.join("usage-uncertainty.jsonl");
+        let mut uncertainty_file = open_private_log(&uncertainty_path)?;
+        let length = uncertainty_file
+            .metadata()
+            .map_err(|_| UsageStoreError::Storage)?
+            .len();
+        if length > MAX_STORE_BYTES {
+            return Err(UsageStoreError::QuotaExceeded);
+        }
+        let mut bytes = Vec::new();
+        (&mut uncertainty_file)
+            .take(MAX_STORE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| UsageStoreError::Storage)?;
+        if bytes.len() as u64 > MAX_STORE_BYTES {
+            return Err(UsageStoreError::QuotaExceeded);
+        }
+        let uncertainty_bytes = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |position| position + 1);
+        if uncertainty_bytes < bytes.len() {
+            uncertainty_file
+                .set_len(uncertainty_bytes as u64)
+                .and_then(|()| uncertainty_file.sync_data())
+                .map_err(|_| UsageStoreError::Storage)?;
+            bytes.truncate(uncertainty_bytes);
+        }
+        let mut uncertain_sessions = HashSet::new();
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let line = &line[..line.len() - 1];
+            if line.len() > MAX_RECORD_BYTES {
+                return Err(UsageStoreError::Corrupt);
+            }
+            let session_id: String =
+                serde_json::from_slice(line).map_err(|_| UsageStoreError::Corrupt)?;
+            if !valid_label(&session_id, MAX_SESSION_ID_BYTES) {
+                return Err(UsageStoreError::Corrupt);
+            }
+            uncertain_sessions.insert(session_id);
+            if uncertain_sessions.len() > MAX_RECORDS {
+                return Err(UsageStoreError::QuotaExceeded);
+            }
+        }
+        // A prior process may have written a complete record but failed its
+        // barrier. Replay alone is not proof of durability: resync both logs
+        // before accepting idempotent retries or destructive source deletion.
+        file.sync_data().map_err(|_| UsageStoreError::Storage)?;
+        uncertainty_file
+            .sync_data()
+            .map_err(|_| UsageStoreError::Storage)?;
+        // Persist newly created directory entries as well as appended content.
+        File::open(&root)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| UsageStoreError::Storage)?;
+        File::open(serve_state_directory)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| UsageStoreError::Storage)?;
         Ok(Self {
+            write_failed: false,
+            backfill_incomplete: false,
+            #[cfg(test)]
+            append_failure: None,
+            uncertainty_file,
+            uncertainty_bytes: uncertainty_bytes as u64,
+            uncertain_sessions,
             file,
             file_bytes: complete_bytes as u64,
             requests,
             metrics,
         })
+    }
+
+    /// Durably marks a session's accounting incomplete, idempotently.
+    /// No timestamp is invented: period totals conservatively retain this warning.
+    /// This conversation-content-free evidence survives permanent session deletion.
+    pub fn record_uncertainty(&mut self, session_id: &str) -> Result<bool, UsageStoreError> {
+        self.ensure_writable()?;
+        let result = self.append_uncertainty(session_id);
+        self.write_failed |= result.is_err();
+        result
+    }
+
+    fn append_uncertainty(&mut self, session_id: &str) -> Result<bool, UsageStoreError> {
+        if !valid_label(session_id, MAX_SESSION_ID_BYTES) {
+            return Err(UsageStoreError::InvalidRecord);
+        }
+        if self.uncertain_sessions.contains(session_id) {
+            return Ok(false);
+        }
+        if self.uncertain_sessions.len() >= MAX_RECORDS {
+            return Err(UsageStoreError::QuotaExceeded);
+        }
+        let mut encoded =
+            serde_json::to_vec(session_id).map_err(|_| UsageStoreError::InvalidRecord)?;
+        encoded.push(b'\n');
+        if self.uncertainty_bytes.saturating_add(encoded.len() as u64) > MAX_STORE_BYTES {
+            return Err(UsageStoreError::QuotaExceeded);
+        }
+        self.append_synced(true, &encoded)?;
+        self.uncertainty_bytes += encoded.len() as u64;
+        self.uncertain_sessions.insert(session_id.to_owned());
+        Ok(true)
     }
 
     /// Appends one request unless its stable session/ordinal key already exists.
@@ -526,6 +649,16 @@ impl InferenceRequestStore {
 
     /// Appends a batch with one durability barrier and returns the inserted count.
     pub fn record_all(
+        &mut self,
+        requests: impl IntoIterator<Item = InferenceRequest>,
+    ) -> Result<usize, UsageStoreError> {
+        self.ensure_writable()?;
+        let result = self.append_requests(requests);
+        self.write_failed |= result.is_err();
+        result
+    }
+
+    fn append_requests(
         &mut self,
         requests: impl IntoIterator<Item = InferenceRequest>,
     ) -> Result<usize, UsageStoreError> {
@@ -575,10 +708,7 @@ impl InferenceRequestStore {
             return Err(UsageStoreError::QuotaExceeded);
         }
 
-        self.file
-            .write_all(&encoded)
-            .and_then(|()| self.file.sync_data())
-            .map_err(|_| UsageStoreError::Storage)?;
+        self.append_synced(false, &encoded)?;
         self.file_bytes += encoded_bytes;
         let inserted = pending.len();
         for request in pending {
@@ -588,19 +718,75 @@ impl InferenceRequestStore {
         Ok(inserted)
     }
 
+    fn append_synced(&mut self, uncertainty: bool, encoded: &[u8]) -> Result<(), UsageStoreError> {
+        let file = if uncertainty {
+            &mut self.uncertainty_file
+        } else {
+            &mut self.file
+        };
+        #[cfg(test)]
+        if let Some(failure) = self.append_failure.take() {
+            match failure {
+                AppendFailure::Partial => file.write_all(&encoded[..encoded.len() / 2]),
+                AppendFailure::Sync => file.write_all(encoded),
+            }
+            .map_err(|_| UsageStoreError::Storage)?;
+            return Err(UsageStoreError::Storage);
+        }
+        file.write_all(encoded)
+            .and_then(|()| file.sync_data())
+            .map_err(|_| UsageStoreError::Storage)
+    }
+
+    fn ensure_writable(&self) -> Result<(), UsageStoreError> {
+        if self.write_failed {
+            // An append may have stopped mid-record. Only reopen/replay may
+            // repair that tail; no subsequent record may be appended after it.
+            Err(UsageStoreError::Storage)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Retains a conservative warning when an existing source cannot be inspected.
+    /// Other readable sources may still be backfilled; reopen retries inspection.
+    pub fn mark_backfill_incomplete(&mut self) {
+        self.backfill_incomplete = true;
+    }
+
+    /// Requires successful persistence and complete source inspection before
+    /// deleting the source evidence. Unknown usage with a synced marker is safe.
+    pub fn ensure_available(&self) -> Result<(), UsageStoreError> {
+        self.ensure_writable()?;
+        if self.backfill_incomplete {
+            Err(UsageStoreError::Storage)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Returns all retained token and request totals.
     pub fn lifetime(&self) -> LifetimeUsage {
-        self.metrics.lifetime()
+        let mut result = self.metrics.lifetime();
+        result.usage_uncertain =
+            self.write_failed || self.backfill_incomplete || !self.uncertain_sessions.is_empty();
+        result
     }
 
     /// Returns current UTC daily or trailing-seven-day totals.
     pub fn stats(&self, period: UsagePeriod) -> UsageStats {
-        self.metrics.stats_at(period, unix_time_ms())
+        let mut result = self.metrics.stats_at(period, unix_time_ms());
+        result.usage_uncertain =
+            self.write_failed || self.backfill_incomplete || !self.uncertain_sessions.is_empty();
+        result
     }
 
     /// Returns recent UTC activity and lifetime streaks.
     pub fn activity(&self) -> UsageActivity {
-        self.metrics.activity_at(unix_time_ms())
+        let mut result = self.metrics.activity_at(unix_time_ms());
+        result.usage_uncertain =
+            self.write_failed || self.backfill_incomplete || !self.uncertain_sessions.is_empty();
+        result
     }
 
     /// Number of unique durable inference requests.
@@ -794,6 +980,155 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert_eq!(store.lifetime().total_tokens, 100);
         assert_eq!(store.lifetime().request_count, 1);
+    }
+
+    #[test]
+    fn failed_append_or_sync_latches_warning_and_blocks_writes_until_reopen() {
+        for uncertainty in [false, true] {
+            for failure in [AppendFailure::Partial, AppendFailure::Sync] {
+                let directory = tempfile::tempdir().unwrap();
+                let mut store = InferenceRequestStore::open(directory.path()).unwrap();
+                store.record(request(0, 0, 100)).unwrap();
+                store.append_failure = Some(failure);
+                let failed = if uncertainty {
+                    store.record_uncertainty("failed-session")
+                } else {
+                    store.record(request(1, 1, 200))
+                };
+                assert!(matches!(failed, Err(UsageStoreError::Storage)));
+                assert!(store.ensure_available().is_err());
+                assert!(store.lifetime().usage_uncertain);
+                assert!(store.stats(UsagePeriod::Daily).usage_uncertain);
+                assert!(store.stats(UsagePeriod::Weekly).usage_uncertain);
+                assert!(store.activity().usage_uncertain);
+                assert_eq!(store.lifetime().request_count, 1);
+                assert_eq!(store.lifetime().total_tokens, 100);
+                let root = directory.path().join(STORE_DIRECTORY);
+                let known = std::fs::read(root.join(STORE_FILE)).unwrap();
+                let unknown = std::fs::read(root.join("usage-uncertainty.jsonl")).unwrap();
+                // Even an otherwise idempotent request cannot claim durable
+                // success after an uncertain barrier. Neither file may grow.
+                assert!(store.record(request(0, 0, 100)).is_err());
+                assert!(store.record(request(2, 2, 300)).is_err());
+                assert!(store.record_uncertainty("failed-session").is_err());
+                assert_eq!(known, std::fs::read(root.join(STORE_FILE)).unwrap());
+                assert_eq!(
+                    unknown,
+                    std::fs::read(root.join("usage-uncertainty.jsonl")).unwrap()
+                );
+                drop(store);
+                // Reopen repairs a partial tail or replays a complete write.
+                // Backfill retries the retained session evidence idempotently.
+                let mut reopened = InferenceRequestStore::open(directory.path()).unwrap();
+                if uncertainty {
+                    reopened.record_uncertainty("failed-session").unwrap();
+                    assert_eq!(reopened.lifetime().request_count, 1);
+                    assert!(reopened.lifetime().usage_uncertain);
+                } else {
+                    reopened.record(request(1, 1, 200)).unwrap();
+                    assert_eq!(reopened.lifetime().request_count, 2);
+                    assert_eq!(reopened.lifetime().total_tokens, 300);
+                }
+                assert!(reopened.ensure_available().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn complete_blank_records_are_corrupt_not_torn_tails() {
+        for filename in [STORE_FILE, "usage-uncertainty.jsonl"] {
+            for bytes in [
+                b"\n".as_slice(),
+                b"\n\n",
+                b"\n\"later\"\n",
+                b"\"earlier\"\n\n",
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                drop(InferenceRequestStore::open(directory.path()).unwrap());
+                let path = directory.path().join(STORE_DIRECTORY).join(filename);
+                std::fs::write(&path, bytes).unwrap();
+                assert!(matches!(
+                    InferenceRequestStore::open(directory.path()),
+                    Err(UsageStoreError::Corrupt)
+                ));
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_backfill_warns_without_discarding_readable_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = InferenceRequestStore::open(directory.path()).unwrap();
+        store.mark_backfill_incomplete();
+        store.record(request(0, 0, 100)).unwrap();
+        assert_eq!(store.lifetime().total_tokens, 100);
+        assert!(store.lifetime().usage_uncertain);
+        assert!(store.activity().usage_uncertain);
+        assert!(store.ensure_available().is_err());
+    }
+
+    #[test]
+    fn uncertainty_is_durable_idempotent_and_never_a_zero_token_request() {
+        let directory = tempfile::tempdir().unwrap();
+        {
+            let mut store = InferenceRequestStore::open(directory.path()).unwrap();
+            assert!(store.record_uncertainty("unknown-session").unwrap());
+            assert!(!store.record_uncertainty("unknown-session").unwrap());
+            assert!(store.is_empty());
+            assert!(store.lifetime().usage_uncertain);
+            assert_eq!(store.lifetime().request_count, 0);
+            assert_eq!(store.lifetime().first_request_at_ms, None);
+            assert!(store.activity().days.is_empty());
+            assert!(store.activity().usage_uncertain);
+            store.record(request(10, 0, 100)).unwrap();
+        }
+        let mut reopened = InferenceRequestStore::open(directory.path()).unwrap();
+        assert!(!reopened.record_uncertainty("unknown-session").unwrap());
+        assert_eq!(reopened.len(), 1);
+        assert!(reopened.lifetime().usage_uncertain);
+        assert_eq!(reopened.lifetime().total_tokens, 100);
+        assert_eq!(reopened.lifetime().request_count, 1);
+        // No invented date: even a period without known requests warns conservatively.
+        assert!(reopened.stats(UsagePeriod::Daily).usage_uncertain);
+        assert!(reopened.stats(UsagePeriod::Weekly).usage_uncertain);
+        assert_eq!(reopened.stats(UsagePeriod::Daily).total_tokens, 0);
+    }
+
+    #[test]
+    fn uncertainty_log_discards_torn_tail_but_rejects_complete_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        {
+            let mut store = InferenceRequestStore::open(directory.path()).unwrap();
+            store.record_uncertainty("retained").unwrap();
+        }
+        let path = directory
+            .path()
+            .join(STORE_DIRECTORY)
+            .join("usage-uncertainty.jsonl");
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\"torn")
+            .unwrap();
+        assert!(
+            InferenceRequestStore::open(directory.path())
+                .unwrap()
+                .lifetime()
+                .usage_uncertain
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"\"retained\"\n");
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+        assert!(matches!(
+            InferenceRequestStore::open(directory.path()),
+            Err(UsageStoreError::Corrupt)
+        ));
     }
 
     #[test]

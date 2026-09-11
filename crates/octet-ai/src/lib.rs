@@ -61,7 +61,7 @@ pub use batch::{
     OpenRouterBatchResponse, OpenRouterBatchResult, OpenRouterBatchUsage,
 };
 pub use catalog::{AuthConfig, CatalogConfig, EndpointConfig, Model, ModelCatalog, ModelConfig};
-pub use client::AiClient;
+pub use client::{AiClient, PendingResponsesCompact};
 pub use error::{
     AiError, AuthError, ConfigError, DecodeError, Diagnostic, HttpError, PricingError,
     ProviderError, StreamProgress, StreamProtocolError, TransportError, TransportPhase,
