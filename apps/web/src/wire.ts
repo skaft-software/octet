@@ -2605,7 +2605,9 @@ function projectAgentRunTelemetry(
 }
 
 export function projectContextUsage(value: unknown, path = "context"): ContextUsage {
-  const wire = object(value, path, ["usage", "compactions", "status", "run"]);
+  const wire = object(value, path, [
+    "usage", "compactions", "status", "run", "usageUncertain",
+  ]);
   const usage = projectUsageSnapshot(wire.usage, `${path}.usage`);
   const compactions = number(wire.compactions, `${path}.compactions`);
   if (compactions > 0xffff_ffff) {
@@ -2631,7 +2633,12 @@ export function projectContextUsage(value: unknown, path = "context"): ContextUs
       "must equal the successful run-compaction count",
     );
   }
-  return { usage, compactions, status, run };
+  return {
+    usage, compactions, status, run,
+    ...(wire.usageUncertain === undefined
+      ? {}
+      : { usageUncertain: boolean(wire.usageUncertain, `${path}.usageUncertain`) }),
+  };
 }
 
 function contextPercent(usage: UsageSnapshot): number {
@@ -3550,8 +3557,12 @@ export function projectUsageStats(value: unknown): UsageStats {
     ...usageTotalKeys,
     "models",
     "models_truncated",
+    "usage_uncertain",
   ]);
   return {
+    ...(stats.usage_uncertain === undefined
+      ? {}
+      : { usageUncertain: boolean(stats.usage_uncertain, `${path}.usage_uncertain`) }),
     period: enumeration(stats.period, `${path}.period`, [
       "daily",
       "weekly",
@@ -3571,10 +3582,14 @@ export function projectLifetimeUsage(value: unknown): LifetimeUsage {
     ...usageTotalKeys,
     "models",
     "models_truncated",
+    "usage_uncertain",
     "first_request_at_ms",
     "last_request_at_ms",
   ]);
   return {
+    ...(lifetime.usage_uncertain === undefined
+      ? {}
+      : { usageUncertain: boolean(lifetime.usage_uncertain, `${path}.usage_uncertain`) }),
     ...projectUsageTotals(lifetime, path),
     models: projectModelBreakdown(lifetime.models, `${path}.models`),
     modelsTruncated: boolean(
@@ -3601,6 +3616,7 @@ export function projectLifetimeUsage(value: unknown): LifetimeUsage {
 export function projectUsageActivity(value: unknown): UsageActivity {
   const path = "usageActivity";
   const activity = object(value, path, [
+    "usage_uncertain",
     "days",
     "current_streak",
     "longest_streak",
@@ -3639,6 +3655,9 @@ export function projectUsageActivity(value: unknown): UsageActivity {
     };
   });
   return {
+    ...(activity.usage_uncertain === undefined
+      ? {}
+      : { usageUncertain: boolean(activity.usage_uncertain, `${path}.usage_uncertain`) }),
     days,
     currentStreak: number(
       activity.current_streak,

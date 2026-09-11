@@ -33,6 +33,11 @@ name and is not supported after the rename; its default native mode is unchanged
 
 ## Build from a checkout
 
+This checkout is the **UNPUBLISHED 0.7.4 source candidate**, not the published
+0.7.3 release installed above. Mandatory #382 physical acceptance is UNRUN;
+see [candidate gates](releases/v0.7.4.md). Build matching candidate extensions
+locally; the public catalog does not provide 0.7.4 bundles yet.
+
 On macOS or GNU/Linux, install Rust 1.86+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep). From the source checkout:
 
@@ -87,14 +92,15 @@ end-to-end example remains missing.
 ## Container
 
 The included **linux/amd64** image is a source-build route, not evidence of a
-published image:
+published image. The following local-only commands label the 0.7.4 source
+candidate; they do not pull a published image:
 
 ```sh
-scripts/build-octet-image.sh octet:0.7.3
+scripts/build-octet-image.sh octet:0.7.4
 docker run --rm -it \
   -e ANTHROPIC_API_KEY \
   -v "$PWD:/workspace" \
-  octet:0.7.3 --model claude-sonnet-4-6
+  octet:0.7.4 --model claude-sonnet-4-6
 ```
 
 The script builds a clean tracked Git snapshot, refuses tracked changes, and

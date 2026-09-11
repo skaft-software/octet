@@ -104,13 +104,41 @@ impl CodexResolver {
     }
 }
 
+/// Preserve only positively identified pre-send network failures. In particular,
+/// a token-response body failure may follow rotation and must stay indeterminate.
+fn resolution_error(error: anyhow::Error) -> AuthError {
+    if let Some(request) = error.downcast_ref::<reqwest::Error>() {
+        if request.is_connect() {
+            let network_failure = request.is_timeout()
+                || error.chain().any(|cause| {
+                    cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                        matches!(
+                            io.kind(),
+                            std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::NetworkDown
+                                | std::io::ErrorKind::NetworkUnreachable
+                                | std::io::ErrorKind::HostUnreachable
+                                | std::io::ErrorKind::TimedOut
+                        )
+                    })
+                });
+            if network_failure {
+                return AuthError::Unavailable;
+            }
+        }
+    }
+    AuthError::Resolve
+}
+
 #[async_trait::async_trait]
 impl CredentialResolver for CodexResolver {
     async fn resolve(&self) -> Result<ResolvedCredential, AuthError> {
         // AuthError deliberately drops details (they may contain credentials);
         // the actionable "run `octet --login codex`" guidance is surfaced at
         // registration time, not here.
-        let cred = self.load_valid().await.map_err(|_| AuthError::Resolve)?;
+        let cred = self.load_valid().await.map_err(resolution_error)?;
         let account_id = oauth::validate_subscription_token(&cred.tokens.access_token)
             .map_err(|_| AuthError::Resolve)?;
 
@@ -238,6 +266,137 @@ mod tests {
         assert_eq!(persisted.tokens.refresh_token, "rotated-refresh");
         assert_eq!(persisted.tokens.access_token, new_access);
         assert!(persisted.expires_at > now_unix());
+    }
+
+    #[tokio::test]
+    async fn pre_send_refresh_outage_preserves_rotation_and_recovers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (_dir, store) = store_with(now_unix().saturating_sub(10));
+        let original = store.load().unwrap().unwrap();
+        // Reserve a loopback port without listening: refusal cannot reach OAuth.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut resolver = CodexResolver::new(store);
+        resolver.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        resolver.token_url = format!("http://{address}/token");
+        let error = resolver.resolve().await.err().expect("refresh must fail");
+        assert!(matches!(error, AuthError::Unavailable));
+        assert!(!format!("{error:?} {error}").contains(&original.tokens.access_token));
+        assert_eq!(
+            resolver.store.load().unwrap().unwrap().tokens.refresh_token,
+            original.tokens.refresh_token
+        );
+
+        let listener = socket.listen(1).unwrap();
+        let access = jwt_with_account("acct_after_outage");
+        let body = serde_json::json!({
+            "access_token": access, "refresh_token": "rotated-after-outage", "expires_in": 3600
+        })
+        .to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut bytes = [0u8; 1024];
+                let count = stream.read(&mut bytes).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&bytes[..count]);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")?
+                                .trim()
+                                .parse::<usize>()
+                                .ok()
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                assert!(request.len() < 16 * 1024);
+            }
+            assert!(request.starts_with(b"POST /token "));
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let credential = resolver.resolve().await.unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            credential.extra_headers["chatgpt-account-id"],
+            "acct_after_outage"
+        );
+        assert_eq!(
+            resolver.store.load().unwrap().unwrap().tokens.refresh_token,
+            "rotated-after-outage"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_refresh_failures_do_not_authorize_rotation_replay() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for status in [400, 401, 429, 500, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_string("private provider detail"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (_dir, store) = store_with(now_unix().saturating_sub(10));
+            let mut resolver = CodexResolver::new(store);
+            resolver.token_url = format!("{}/token", server.uri());
+            let error = resolver.resolve().await.err().expect("refresh must fail");
+            assert!(matches!(error, AuthError::Resolve));
+            assert!(!format!("{error:?} {error}").contains("private provider detail"));
+            assert_eq!(
+                resolver.store.load().unwrap().unwrap().tokens.refresh_token,
+                "r"
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_refresh_response_remains_indeterminate() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0u8; 4096];
+            assert!(stream.read(&mut bytes).await.unwrap() > 0);
+            // The OAuth request reached the service; rotation may have happened.
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{")
+                .await
+                .unwrap();
+        });
+        let (_dir, store) = store_with(now_unix().saturating_sub(10));
+        let mut resolver = CodexResolver::new(store);
+        resolver.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        resolver.token_url = format!("http://{address}/token");
+        assert!(matches!(resolver.resolve().await, Err(AuthError::Resolve)));
+        server.await.unwrap();
+        assert_eq!(
+            resolver.store.load().unwrap().unwrap().tokens.refresh_token,
+            "r"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

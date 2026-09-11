@@ -81,6 +81,31 @@ pub enum AgentError {
         /// Bounded phase-only detail for diagnostics.
         detail: String,
     },
+    /// A provider attempt failed after bounded in-process recovery, or its
+    /// unresolved usage prevents enforcing a hard cumulative ceiling.
+    #[error("provider recovery stopped after {retries} replacements (failed-attempt usage unknown: {usage_unknown}): {source}")]
+    ProviderRecovery {
+        /// Replacement attempts admitted in this logical turn.
+        retries: usize,
+        /// Whether accepted inference has unaccounted usage.
+        usage_unknown: bool,
+        /// Last bounded provider failure, including its progress when available.
+        #[source]
+        source: AiError,
+    },
+    /// Unknown accepted-attempt usage prevents a conservative hard ceiling.
+    #[error(
+        "session contains unsettled provider usage; hard token or cost ceilings cannot be enforced"
+    )]
+    UsageUncertain,
+    /// A host-owned maximum outage duration expired during recovery.
+    #[error("network recovery exceeded the host outage limit of {limit:?} (failed-attempt usage unknown: {usage_unknown})")]
+    NetworkWaitLimit {
+        /// Host-configured elapsed outage allowance.
+        limit: Duration,
+        /// A cancelled opening may already have dispatched provider work.
+        usage_unknown: bool,
+    },
     /// Two tools were registered under the same name.
     #[error("duplicate tool name registered: {0}")]
     DuplicateTool(String),
@@ -168,6 +193,23 @@ pub enum AgentError {
 pub fn public_error_diagnostic(error: &AgentError, endpoint: &str, model: &str) -> String {
     match error {
         AgentError::Ai(error) => public_ai_error_diagnostic(error, endpoint, model),
+        AgentError::ProviderRecovery {
+            retries,
+            usage_unknown,
+            source,
+        } => {
+            let mut diagnostic = format!(
+                "replacements={retries} failed_usage={} ",
+                if *usage_unknown {
+                    "unknown"
+                } else {
+                    "not_observed"
+                }
+            );
+            diagnostic.push_str(&public_ai_error_diagnostic(source, endpoint, model));
+            truncate_public_diagnostic(&mut diagnostic);
+            diagnostic
+        }
         AgentError::IncompleteResponse { stop_reason } => {
             let mut diagnostic = provider_phase_diagnostic(endpoint, model, "response completion");
             append_provider_field(&mut diagnostic, "reason", Some(stop_reason));
@@ -182,7 +224,7 @@ pub fn public_error_diagnostic(error: &AgentError, endpoint: &str, model: &str) 
 }
 
 const AMBIGUOUS_ACCEPTANCE_HINT: &str =
-    "Provider acceptance is uncertain; octet did not replay the request. Inspect provider state before retrying explicitly.";
+    "Provider acceptance and failed-attempt usage are uncertain. Inspect provider state before retrying explicitly.";
 
 /// Format an inference-layer error for a user-facing retry or terminal event.
 /// The same allow-list is used for both paths so retry messages cannot expose
@@ -191,7 +233,7 @@ fn public_ai_error_diagnostic(error: &AiError, endpoint: &str, model: &str) -> S
     let context = |phase| provider_phase_diagnostic(endpoint, model, phase);
     match error {
         AiError::Http(http) => format_http_diagnostic(&context("HTTP response"), http),
-        AiError::Provider(provider) => {
+        AiError::Provider(provider) | AiError::ResponsesFailed(provider) => {
             let mut diagnostic = context("response body (provider error)");
             append_provider_field(&mut diagnostic, "code", provider.code.as_deref());
             append_provider_field(&mut diagnostic, "kind", provider.kind.as_deref());
@@ -204,7 +246,7 @@ fn public_ai_error_diagnostic(error: &AiError, endpoint: &str, model: &str) -> S
             truncate_public_diagnostic(&mut diagnostic);
             diagnostic
         }
-        AiError::Transport(transport) => {
+        AiError::Transport(transport) | AiError::NetworkUnavailable(transport) => {
             let phase = match (transport.phase, transport.timeout) {
                 (octet_ai::TransportPhase::Connect, false) => "connection",
                 (octet_ai::TransportPhase::Connect, true) => "connection timeout",
@@ -445,7 +487,9 @@ fn http_status_summary(status: u16) -> Option<&'static str> {
 
 fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
     match error {
-        AgentError::Ai(error) => Some(ai_error_phase(error)),
+        AgentError::Ai(error) | AgentError::ProviderRecovery { source: error, .. } => {
+            Some(ai_error_phase(error))
+        }
         AgentError::NetworkUnavailable { .. } => Some("connection"),
         // Handled with an extra `reason=` field by `public_error_diagnostic`;
         // kept here so the phase table stays exhaustive.
@@ -461,6 +505,8 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         | AgentError::ContextExceeded { .. }
         | AgentError::InvalidCompactionPolicy(_)
         | AgentError::Cancelled
+        | AgentError::UsageUncertain
+        | AgentError::NetworkWaitLimit { .. }
         | AgentError::RunEnded => None,
     }
 }
@@ -473,15 +519,17 @@ fn ai_error_phase(error: &AiError) -> &'static str {
         | AiError::Unsupported(_) => "request preparation",
         AiError::Auth(_) => "authentication",
         AiError::Http(_) => "HTTP response",
-        AiError::Transport(error) => match (error.phase, error.timeout) {
-            (octet_ai::TransportPhase::Connect, false) => "connection",
-            (octet_ai::TransportPhase::Connect, true) => "connection timeout",
-            (octet_ai::TransportPhase::ResponseHeaders, false) => "response headers",
-            (octet_ai::TransportPhase::ResponseHeaders, true) => "response headers timeout",
-            (octet_ai::TransportPhase::Body, false) => "response body",
-            (octet_ai::TransportPhase::Body, true) => "response body timeout",
-        },
-        AiError::Provider(_) => "response body (provider error)",
+        AiError::Transport(error) | AiError::NetworkUnavailable(error) => {
+            match (error.phase, error.timeout) {
+                (octet_ai::TransportPhase::Connect, false) => "connection",
+                (octet_ai::TransportPhase::Connect, true) => "connection timeout",
+                (octet_ai::TransportPhase::ResponseHeaders, false) => "response headers",
+                (octet_ai::TransportPhase::ResponseHeaders, true) => "response headers timeout",
+                (octet_ai::TransportPhase::Body, false) => "response body",
+                (octet_ai::TransportPhase::Body, true) => "response body timeout",
+            }
+        }
+        AiError::Provider(_) | AiError::ResponsesFailed(_) => "response body (provider error)",
         AiError::Decode(_) => "response decoding",
         AiError::Pricing(_) => "usage accounting",
         AiError::StreamProtocol(_) => "stream protocol",
@@ -632,6 +680,7 @@ pub struct Agent {
     max_session_tokens: Option<u64>,
     max_session_cost_microdollars: Option<u64>,
     provider_retries_enabled: bool,
+    max_network_wait: Option<Duration>,
     /// Explicit owner-only image presentation; never inherited by child agents.
     owner_tool_images_enabled: bool,
     /// Child sessions owned by the delegation manager are observed by their
@@ -786,70 +835,78 @@ impl Stream for Run<'_> {
 /// Clonable control handle for an active [`Run`].
 #[derive(Clone)]
 pub struct RunControl {
+    admission: Arc<std::sync::Mutex<bool>>,
     tx: mpsc::Sender<Control>,
     abort: Arc<AbortFlag>,
 }
 
 impl RunControl {
+    async fn send(&self, control: Control) -> Result<(), AgentError> {
+        let permit = self.tx.reserve().await.map_err(|_| AgentError::RunEnded)?;
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission {
+            return Err(AgentError::RunEnded);
+        }
+        permit.send(control);
+        Ok(())
+    }
+
+    fn try_send(&self, control: Control) -> Result<(), AgentError> {
+        let permit = self.tx.try_reserve().map_err(|_| AgentError::RunEnded)?;
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission {
+            return Err(AgentError::RunEnded);
+        }
+        permit.send(control);
+        Ok(())
+    }
+
     /// Injects input into the conversation at the next model-turn boundary of
     /// the active run (persisted to the session when applied).
     pub async fn steer(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.tx
-            .send(Control::Steer(input.into()))
-            .await
-            .map_err(|_| AgentError::RunEnded)
+        self.send(Control::Steer(input.into())).await
     }
 
     /// Attempts to enqueue steering without allowing a producer to wait behind
     /// the run's bounded control queue.
     pub(crate) fn try_steer(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.tx
-            .try_send(Control::Steer(input.into()))
-            .map_err(|_| AgentError::RunEnded)
+        self.try_send(Control::Steer(input.into()))
     }
 
     /// Queues input for after the current run settles: when the model completes
     /// a turn without tool calls, the run continues with this input instead of
     /// finishing.
     pub async fn follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.tx
-            .send(Control::FollowUp(input.into()))
-            .await
-            .map_err(|_| AgentError::RunEnded)
+        self.send(Control::FollowUp(input.into())).await
     }
 
     /// Requests a final answer at the next safe turn boundary. The supplied
     /// input is persisted like steering, but subsequent requests in this run
     /// expose no tools.
     pub async fn finish_now(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.tx
-            .send(Control::FinishNow(input.into()))
-            .await
-            .map_err(|_| AgentError::RunEnded)
+        self.send(Control::FinishNow(input.into())).await
     }
 
     /// Attempts to enqueue a follow-up without allowing a producer to wait
     /// behind the run's bounded control queue.
     pub(crate) fn try_follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.tx
-            .try_send(Control::FollowUp(input.into()))
-            .map_err(|_| AgentError::RunEnded)
+        self.try_send(Control::FollowUp(input.into()))
     }
 
     /// Changes how pending steering messages are delivered.
     pub async fn set_steering_mode(&self, mode: QueueDeliveryMode) -> Result<(), AgentError> {
-        self.tx
-            .send(Control::SetSteeringMode(mode))
-            .await
-            .map_err(|_| AgentError::RunEnded)
+        self.send(Control::SetSteeringMode(mode)).await
     }
 
     /// Changes how pending follow-up messages are delivered.
     pub async fn set_follow_up_mode(&self, mode: QueueDeliveryMode) -> Result<(), AgentError> {
-        self.tx
-            .send(Control::SetFollowUpMode(mode))
-            .await
-            .map_err(|_| AgentError::RunEnded)
+        self.send(Control::SetFollowUpMode(mode)).await
     }
 
     /// Aborts the run at the next safe boundary: the in-flight model stream is
@@ -2063,6 +2120,7 @@ fn retryable_before_generation(error: &AiError) -> bool {
         return retryable_before_generation(inner);
     }
     match error {
+        AiError::NetworkUnavailable(_) => true,
         AiError::Http(error) => error.is_safe_to_retry(),
         AiError::Transport(error) => {
             !error.timeout && error.phase == octet_ai::TransportPhase::Connect
@@ -2075,6 +2133,9 @@ fn is_replayable_network_failure(error: &AiError) -> bool {
     // Wrapping a failure never changes its acceptance ambiguity.
     if let AiError::StreamFailure { inner, .. } = error {
         return is_replayable_network_failure(inner);
+    }
+    if matches!(error, AiError::NetworkUnavailable(_)) {
+        return true;
     }
     matches!(
         error,
@@ -2095,13 +2156,16 @@ fn looks_like_context_error(error: &AiError) -> bool {
     // Transport timeouts often contain phrases such as "context deadline
     // exceeded". They are connectivity failures, not evidence that model
     // history is too large, and must never destroy full-fidelity context.
-    if matches!(error, AiError::Transport(_)) {
+    if !matches!(
+        error,
+        AiError::Http(_) | AiError::Provider(_) | AiError::ResponsesFailed(_)
+    ) {
         return false;
     }
     if matches!(error, AiError::Http(http) if http.status.as_u16() == 429)
         || matches!(
             error,
-            AiError::Provider(provider)
+            AiError::Provider(provider) | AiError::ResponsesFailed(provider)
                 if provider.code.as_deref().is_some_and(|code| {
                     let code = code.to_ascii_lowercase();
                     code.contains("rate_limit") || code.contains("throttl")
@@ -2111,6 +2175,28 @@ fn looks_like_context_error(error: &AiError) -> bool {
                 })
         )
     {
+        return false;
+    }
+    // Explicit auth/policy/quota codes outrank context-sounding text too.
+    // Context length itself still owns the established compaction path.
+    let (code, kind) = match error {
+        AiError::Provider(provider) | AiError::ResponsesFailed(provider) => {
+            (provider.code.as_deref(), provider.kind.as_deref())
+        }
+        AiError::Http(http) => (http.provider_code.as_deref(), None),
+        _ => unreachable!("context candidates were narrowed above"),
+    };
+    let veto = octet_ai::ProviderError {
+        code: code
+            .filter(|code| *code != "context_length_exceeded")
+            .map(str::to_owned),
+        kind: kind
+            .filter(|kind| *kind != "context_length_exceeded")
+            .map(str::to_owned),
+        message: String::new(),
+        request_id: None,
+    };
+    if veto.is_permanent() {
         return false;
     }
     let text = error.to_string().to_ascii_lowercase();
@@ -2142,7 +2228,14 @@ fn provider_requests_connection_refresh(error: &octet_ai::ProviderError) -> bool
         || (code.contains("websocket") && code.contains("connection") && code.contains("limit"))
 }
 
+fn permanent_provider_error(error: &octet_ai::ProviderError) -> bool {
+    error.is_permanent()
+}
+
 fn retryable_provider_error(error: &octet_ai::ProviderError) -> bool {
+    if permanent_provider_error(error) {
+        return false;
+    }
     if provider_requests_connection_refresh(error) {
         // The provider rejected the generation because its long-lived socket
         // expired. The WebSocket pool retires that socket, so a retry opens a
@@ -2192,7 +2285,7 @@ fn retryable_stream_start(error: &AiError) -> bool {
     // No visible output is not proof of nonacceptance. Only a safe connection
     // failure or an explicit provider rejection can authorize another request.
     retryable_before_generation(error)
-        || matches!(error, AiError::Provider(provider) if retryable_provider_error(provider))
+        || matches!(error, AiError::Provider(provider) | AiError::ResponsesFailed(provider) if retryable_provider_error(provider))
 }
 
 fn provider_retry_limit(error: &AiError) -> usize {
@@ -2213,16 +2306,535 @@ fn provider_retry_limit(error: &AiError) -> usize {
     }
 }
 
+// Only the host-declared Codex runtime and ordinary local function generation
+// qualify. Unknown opaque item kinds and server-side continuation/effect options
+// fail closed. Neither model names nor absence of output establish eligibility.
+fn qualified_inference_replacement(model: &Model, request: &Request) -> bool {
+    model.spec.protocol == octet_ai::Protocol::OpenAiResponses
+        && model.endpoint.runtime.responses_profile == octet_ai::ResponsesRuntimeProfile::Codex
+        && request.responses.as_ref().is_none_or(|options| {
+            options.previous_response_id.is_none()
+                && options.context_management.is_none()
+                && !options.store
+                && options.input.as_ref().is_none_or(|input| {
+                    input.items().iter().all(|item| {
+                        matches!(
+                            item.as_json()
+                                .get("type")
+                                .and_then(serde_json::Value::as_str),
+                            Some(
+                                "message"
+                                    | "reasoning"
+                                    | "function_call"
+                                    | "function_call_output"
+                                    | "compaction"
+                            )
+                        )
+                    })
+                })
+        })
+}
+
+fn interrupted_inference_error(error: &AiError) -> bool {
+    match error {
+        // This wrapper is codec-owned evidence that decoding failed inside an
+        // already-open provider stream, not while validating a local request.
+        // Pinned Codex skips malformed frame deserialization and retries its
+        // terminal EOF/ResponseCompleted parse failures. Keep that recovery
+        // authority bounded and qualified; structural/resource errors differ.
+        AiError::StreamFailure { inner, .. } => {
+            matches!(
+                inner.as_ref(),
+                AiError::Decode(
+                    octet_ai::DecodeError::Json(_) | octet_ai::DecodeError::InvalidUtf8
+                )
+            ) || interrupted_inference_error(inner)
+        }
+        AiError::Transport(error) => matches!(
+            error.phase,
+            octet_ai::TransportPhase::Body | octet_ai::TransportPhase::ResponseHeaders
+        ),
+        AiError::Http(error) => error.status.as_u16() == 408 && error.is_safe_to_retry(),
+        // Only terminal-boundary EOF errors qualify, never local request JSON,
+        // UTF-8, schema-validation, resource-limit or state-machine violations.
+        AiError::StreamProtocol(
+            octet_ai::StreamProtocolError::MissingFinish
+            | octet_ai::StreamProtocolError::PrematureEof,
+        ) => true,
+        AiError::ResponsesFailed(error) => !error.is_permanent(),
+        AiError::Provider(error) => {
+            !permanent_provider_error(error)
+                && error
+                    .code
+                    .as_deref()
+                    .into_iter()
+                    .chain(error.kind.as_deref())
+                    .any(|code| {
+                        matches!(
+                            code,
+                            "server_error"
+                                | "internal_error"
+                                | "overloaded_error"
+                                | "temporarily_unavailable"
+                                | "service_unavailable"
+                                | "websocket_connection_limit_reached"
+                                | "rate_limit_exceeded"
+                        )
+                    })
+        }
+        _ => false,
+    }
+}
+
+// Covers Codex's outer stream layer (six WS plus six HTTP logical attempts),
+// not its nested HTTP admission sends. Never reset on transport changes.
+const MAX_INFERENCE_REPLACEMENTS: usize = 11;
+// Five physical HTTP sends for each of six outer HTTP attempts. These are
+// independent of streamed-generation replacements, with a shared finite cap
+// covering six WS attempts plus thirty HTTP attempts at the Codex defaults.
+const MAX_OPENING_ADMISSION_REPLACEMENTS: usize = 29;
+const MAX_CUMULATIVE_PROVIDER_REPLACEMENTS: usize = 35;
+
+fn opening_transport_failure(error: &AiError) -> bool {
+    match error {
+        AiError::StreamFailure { inner, .. } => opening_transport_failure(inner),
+        AiError::Transport(error) => matches!(
+            error.phase,
+            octet_ai::TransportPhase::Connect | octet_ai::TransportPhase::ResponseHeaders
+        ),
+        _ => false,
+    }
+}
+
+fn http_server_failure(error: &AiError) -> bool {
+    match error {
+        AiError::StreamFailure { inner, .. } => http_server_failure(inner),
+        AiError::Http(error) => error.is_transient_server_error(),
+        _ => false,
+    }
+}
+
+fn http_usage_unknown(error: &AiError) -> bool {
+    match error {
+        AiError::StreamFailure { inner, .. } => http_usage_unknown(inner),
+        AiError::Http(error) => error.status.is_server_error() || error.status.as_u16() == 408,
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+struct ProviderRecoveryBudget {
+    admission: usize,
+    stream: usize,
+}
+
+impl ProviderRecoveryBudget {
+    fn limit(&self, total: usize, recovery: &PendingProviderRecovery) -> usize {
+        let consumed = if recovery.opening_admission() {
+            self.admission
+        } else if recovery.qualified && interrupted_inference_error(&recovery.error) {
+            self.stream
+        } else {
+            total
+        };
+        total
+            .saturating_add(recovery.replacement_limit().saturating_sub(consumed))
+            .min(MAX_CUMULATIVE_PROVIDER_REPLACEMENTS)
+    }
+
+    fn admit(&mut self, recovery: &PendingProviderRecovery) {
+        if recovery.opening_admission() {
+            self.admission += 1;
+        } else {
+            self.stream += 1;
+        }
+    }
+}
+
+struct PendingProviderRecovery {
+    error: AiError,
+    qualified: bool,
+    saw_generation: bool,
+    opened: bool,
+}
+
+impl PendingProviderRecovery {
+    fn waiting_for_network(&self) -> bool {
+        self.qualified
+            && !self.opened
+            && !self.saw_generation
+            && matches!(
+                &self.error,
+                AiError::Auth(octet_ai::AuthError::Unavailable) | AiError::NetworkUnavailable(_)
+            )
+    }
+
+    fn opening_admission(&self) -> bool {
+        self.qualified
+            && !self.saw_generation
+            && (opening_transport_failure(&self.error) || http_server_failure(&self.error))
+    }
+
+    fn replacement_limit(&self) -> usize {
+        if self.opening_admission() {
+            MAX_OPENING_ADMISSION_REPLACEMENTS
+        } else if self.qualified
+            && !self.opened
+            && !self.saw_generation
+            && matches!(self.error, AiError::Auth(octet_ai::AuthError::Unavailable))
+        {
+            MAX_NETWORK_RETRIES
+        } else if self.qualified && interrupted_inference_error(&self.error) {
+            MAX_INFERENCE_REPLACEMENTS
+        } else if !self.saw_generation
+            && if self.opened {
+                retryable_stream_start(&self.error)
+            } else {
+                retryable_before_generation(&self.error)
+            }
+        {
+            provider_retry_limit(&self.error)
+        } else {
+            0
+        }
+    }
+
+    fn usage_unknown(&self) -> bool {
+        self.saw_generation
+            // A replay-authorized gateway 5xx is not proof of zero billing.
+            || http_usage_unknown(&self.error)
+            || (self.opened && !retryable_before_generation(&self.error))
+            || interrupted_inference_error(&self.error)
+    }
+}
+
+async fn wait_network_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn network_wait_delay(run_id: &str, attempt: usize) -> Duration {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    run_id.hash(&mut hash);
+    attempt.hash(&mut hash);
+    let base = 5_000u64.saturating_mul(1u64 << attempt.min(4));
+    // Run-specific ±20% jitter; even the first retry waits at least four seconds.
+    // A saturated counter still waits at the cap rather than overflowing/spinning.
+    let jitter = 800 + hash.finish() % 401;
+    Duration::from_millis(
+        base.saturating_mul(jitter)
+            .saturating_div(1_000)
+            .min(60_000),
+    )
+}
+
 fn retry_after(error: &AiError, attempt: usize) -> Duration {
+    if let AiError::StreamFailure { inner, .. } = error {
+        return retry_after(inner, attempt);
+    }
     if let AiError::Http(error) = error {
         if let Some(delay) = error.retry_after {
-            return delay.min(Duration::from_secs(30));
+            return delay;
+        }
+    }
+    if let AiError::Provider(error) | AiError::ResponsesFailed(error) = error {
+        if error.code.as_deref() == Some("rate_limit_exceeded") {
+            if let Some(delay) = provider_rate_limit_delay(&error.message) {
+                return delay;
+            }
         }
     }
     // Keep retries bounded and add a small deterministic stagger in lieu of a
     // rand dependency. The provider's Retry-After always takes precedence.
     let base = 200u64.saturating_mul(1u64 << attempt.min(6));
     Duration::from_millis(base + (attempt as u64 * 37) % 100)
+}
+
+fn provider_rate_limit_delay(message: &str) -> Option<Duration> {
+    let lower = message.to_ascii_lowercase();
+    let hint = lower.split_once("try again in")?.1.trim_start();
+    let end = hint.find(|ch: char| !ch.is_ascii_digit() && ch != '.')?;
+    let value = hint[..end].parse::<f64>().ok()?;
+    let unit = hint[end..].trim_start();
+    let seconds = if unit.starts_with("ms") {
+        value / 1_000.0
+    } else if unit.starts_with('s') {
+        value
+    } else {
+        return None;
+    };
+    Duration::try_from_secs_f64(seconds).ok()
+}
+
+struct AuxiliaryRecovery<'a> {
+    session: &'a mut Session,
+    run_id: &'a str,
+    resource_owner: &'a str,
+    retry_hooks: &'a [Arc<dyn ProviderRetryHook>],
+    max_network_wait: Option<Duration>,
+    model: &'a Model,
+    qualified: bool,
+    enabled: bool,
+    hard_budget: bool,
+    abort: &'a AbortFlag,
+    events: &'a mpsc::UnboundedSender<AgentEvent>,
+    operation: crate::events::ProviderOperation,
+    session_id: &'a str,
+}
+
+impl AuxiliaryRecovery<'_> {
+    fn record_uncertainty(&mut self) -> Result<(), AgentError> {
+        let first = !self.session.has_uncertain_usage();
+        let recorded = self.session.record_usage_uncertainty(
+            self.model.endpoint.id.clone(),
+            self.model.spec.id.clone(),
+            match self.operation {
+                crate::events::ProviderOperation::LocalCompaction => "local_compaction",
+                crate::events::ProviderOperation::NativeCompaction => "native_compaction",
+                crate::events::ProviderOperation::TerminalGate => "terminal_gate",
+            },
+        );
+        if first {
+            let _ = self.events.send(AgentEvent::ProviderUsageUncertain);
+        }
+        recorded?;
+        Ok(())
+    }
+}
+
+// Auxiliary calls own an immutable, exclusively borrowed session snapshot until
+// they settle. No controls are committed or tool schema is dispatched inside
+// them, so a replacement may rebuild the same request from that snapshot.
+// This helper persists only uncertainty evidence, never completed usage/output
+// or main-answer retry events.
+async fn recover_auxiliary<T, F, Fut>(
+    mut context: AuxiliaryRecovery<'_>,
+    mut call: F,
+) -> Result<T, AgentError>
+where
+    F: FnMut(Option<tokio::time::Instant>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, AgentError>>,
+{
+    let mut retries = 0usize;
+    let mut recovery_budget = ProviderRecoveryBudget::default();
+    let mut network_waits = 0usize;
+    let mut network_deadline = None;
+    let mut usage_unknown = false;
+    loop {
+        let result = tokio::select! {
+            biased;
+            _ = context.abort.wait() => return Err(AgentError::Cancelled),
+            result = call(network_deadline) => result,
+        };
+        let error = match result {
+            Ok(value) => return Ok(value),
+            Err(AgentError::Ai(error)) => error,
+            Err(
+                error @ AgentError::NetworkWaitLimit {
+                    usage_unknown: true,
+                    ..
+                },
+            ) => {
+                context.record_uncertainty()?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        let presend = matches!(
+            &error,
+            AiError::Transport(octet_ai::TransportError {
+                phase: octet_ai::TransportPhase::Connect,
+                ..
+            }) | AiError::NetworkUnavailable(_)
+                | AiError::Auth(octet_ai::AuthError::Unavailable)
+        );
+        // A body/error response proves opening has recovered. A later
+        // interruption starts a new outage only after positive pre-send evidence.
+        if matches!(
+            &error,
+            AiError::Http(_)
+                | AiError::Provider(_)
+                | AiError::ResponsesFailed(_)
+                | AiError::StreamFailure { .. }
+                | AiError::StreamProtocol(_)
+                | AiError::Transport(octet_ai::TransportError {
+                    phase: octet_ai::TransportPhase::Body,
+                    ..
+                })
+        ) {
+            network_deadline = None;
+        }
+        let saw_generation = !presend
+            && !opening_transport_failure(&error)
+            && !http_server_failure(&error)
+            && !retryable_before_generation(&error);
+        let recovery = PendingProviderRecovery {
+            error,
+            qualified: context.qualified,
+            opened: !presend,
+            // complete() hides generation progress. Only explicit rejection
+            // or pre-send evidence can establish absence of generation.
+            saw_generation,
+        };
+        if recovery.usage_unknown() {
+            context.record_uncertainty()?;
+        }
+        usage_unknown |= recovery.usage_unknown();
+        let waiting = recovery.waiting_for_network();
+        if waiting && network_deadline.is_none() {
+            network_deadline = context
+                .max_network_wait
+                .and_then(|limit| tokio::time::Instant::now().checked_add(limit));
+        }
+        let limit = recovery_budget.limit(retries, &recovery);
+        if !context.enabled
+            || (!waiting && retries >= limit)
+            || (context.hard_budget && usage_unknown)
+        {
+            return Err(AgentError::ProviderRecovery {
+                retries,
+                usage_unknown,
+                source: recovery.error,
+            });
+        }
+        let delay = if waiting {
+            let delay = network_wait_delay(context.session_id, network_waits);
+            network_waits = network_waits.saturating_add(1);
+            delay
+        } else {
+            let delay = retry_after(&recovery.error, retries);
+            retries += 1;
+            delay
+        };
+        let decision_future = provider_retry_decision(ProviderRetryRequest {
+            hooks: context.retry_hooks,
+            context: ProviderRetryContext {
+                operation: Some(context.operation),
+                run_id: context.run_id.to_owned(),
+                resource_owner: context.resource_owner.to_owned(),
+                attempt: if waiting { network_waits } else { retries },
+                max_attempts: (!waiting).then_some(limit),
+                host_delay: delay,
+                kind: if waiting {
+                    ProviderRetryKind::WaitingForNetwork
+                } else if recovery.qualified && interrupted_inference_error(&recovery.error) {
+                    ProviderRetryKind::InterruptedInference
+                } else {
+                    ProviderRetryKind::BeforeGeneration
+                },
+            },
+            abort: context.abort,
+        });
+        let decision = tokio::select! {
+            biased;
+            _ = context.abort.wait() => return Err(AgentError::Cancelled),
+            _ = wait_network_deadline(network_deadline) => return Err(AgentError::NetworkWaitLimit { limit: context.max_network_wait.unwrap(), usage_unknown }),
+            decision = decision_future => decision,
+        };
+
+        if context.abort.is_set() {
+            return Err(AgentError::Cancelled);
+        }
+        if !decision.proceed {
+            return Err(AgentError::ProviderRecovery {
+                retries: retries.saturating_sub(usize::from(!waiting)),
+                usage_unknown,
+                source: recovery.error,
+            });
+        }
+        if !waiting {
+            recovery_budget.admit(&recovery);
+        }
+        let delay = delay.saturating_add(decision.additional_delay);
+        let _ = context.events.send(AgentEvent::ProviderOperationRetry {
+            operation: context.operation,
+            attempt: if waiting { network_waits } else { retries },
+            max_attempts: (!waiting).then_some(limit),
+            delay,
+            error: {
+                let mut diagnostic = public_ai_error_diagnostic(
+                    &recovery.error,
+                    &context.model.endpoint.id.0,
+                    &context.model.spec.id.0,
+                );
+                if usage_unknown {
+                    diagnostic = format!("failed_usage=unknown {diagnostic}");
+                }
+                truncate_public_diagnostic(&mut diagnostic);
+                diagnostic
+            },
+        });
+        tokio::select! {
+            biased;
+            _ = context.abort.wait() => return Err(AgentError::Cancelled),
+            _ = wait_network_deadline(network_deadline) => return Err(AgentError::NetworkWaitLimit { limit: context.max_network_wait.unwrap(), usage_unknown }),
+            _ = tokio::time::sleep(delay) => {},
+        }
+    }
+}
+
+// A reconnected response body has its provider deadlines, not the outage
+// deadline. AiClient::complete hides this boundary, so collect the stream here.
+async fn auxiliary_complete(
+    client: &AiClient,
+    model: &Model,
+    request: Request,
+    deadline: Option<tokio::time::Instant>,
+    max_network_wait: Option<Duration>,
+) -> Result<octet_ai::Response, AgentError> {
+    let client = client.track_request_dispatch();
+    let mut stream = tokio::select! {
+        biased;
+        _ = wait_network_deadline(deadline) => return Err(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: client.request_may_have_been_sent() }),
+        result = client.stream(model, request) => result?,
+    };
+    let mut response = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::Finished(value) = event? {
+            if let Some(error) = incomplete_responses_error(model, &value) {
+                return Err(error.into());
+            }
+            response = Some(value);
+        }
+    }
+    response
+        .ok_or_else(|| AiError::StreamProtocol(octet_ai::StreamProtocolError::MissingFinish).into())
+}
+
+async fn auxiliary_compact(
+    client: &AiClient,
+    model: &Model,
+    request: ResponsesCompactRequest,
+    deadline: Option<tokio::time::Instant>,
+    max_network_wait: Option<Duration>,
+) -> Result<octet_ai::ResponsesCompactResponse, AgentError> {
+    let client = client.track_request_dispatch();
+    let pending = tokio::select! {
+        biased;
+        _ = wait_network_deadline(deadline) => return Err(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: client.request_may_have_been_sent() }),
+        result = client.open_compact_responses(model, request) => result?,
+    };
+    Ok(pending.complete().await?)
+}
+
+// Responses maps only unknown response.incomplete reasons to Other. Treat
+// these terminal partial generations like response.failed before any assistant
+// or auxiliary usage commit; known length/filter reasons retain their semantics.
+fn incomplete_responses_error(model: &Model, response: &octet_ai::Response) -> Option<AiError> {
+    if model.spec.protocol == Protocol::OpenAiResponses {
+        if let StopReason::Other(reason) = &response.stop_reason {
+            return Some(AiError::ResponsesFailed(octet_ai::ProviderError {
+                code: Some(reason.clone()),
+                kind: None,
+                message: "Responses generation incomplete".into(),
+                request_id: None,
+            }));
+        }
+    }
+    None
 }
 
 struct ProviderRetryDecision {
@@ -2856,47 +3468,67 @@ fn usage_context_tokens(usage: &Usage) -> u64 {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static PROVIDER_CONTEXT_ENTRY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROVIDER_CONTEXT_USAGE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Provider usage is the best available tokenizer measurement of the prefix
 /// through its assistant response. Add structural estimates only for messages
 /// persisted after that response. Usage from before the latest compaction or
 /// from a different route/model is stale and must not retrigger compaction.
 fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
-    let branch = active_branch_entries(session);
-    let boundary = branch
-        .iter()
-        .rposition(|entry| {
-            matches!(
-                entry.value,
-                EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
-            )
-        })
-        .map_or(0, |index| index.saturating_add(1));
-
-    for (index, entry) in branch.iter().enumerate().skip(boundary).rev() {
-        if !matches!(entry.value, EntryValue::Message(Message::Assistant(_))) {
-            continue;
+    // Imported/legacy sessions may have history but no provider measurements.
+    if session.usage_records().is_empty() {
+        return None;
+    }
+    // Only the suffix after the newest usable measurement contributes. Walking
+    // backwards avoids allocating/copying the entire active branch on startup,
+    // context inspection, and capacity-cache rebuilds in long sessions.
+    let mut cursor = session.head_ref();
+    while let Some(id) = cursor {
+        #[cfg(test)]
+        PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let entry = session.entry(id)?;
+        match &entry.value {
+            EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. } => break,
+            EntryValue::Message(message) => {
+                if matches!(message, Message::Assistant(_)) {
+                    if let Some(record) = session.usage_records().iter().rev().find(|record| {
+                        #[cfg(test)]
+                        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(visits.get() + 1));
+                        matches!(
+                            &record.kind,
+                            crate::session::UsageRecordKind::AssistantTurn { assistant }
+                                if assistant == &entry.id
+                        ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
+                            && record.model.as_ref() == Some(&model.spec.id)
+                            && usage_context_tokens(&record.usage) > 0
+                    }) {
+                        // Estimate only after finding usable usage. Sessions with
+                        // no measurement must not serialize their entire history.
+                        let mut trailing = 0u64;
+                        let mut tail = session.head_ref();
+                        while let Some(tail_id) = tail.filter(|tail_id| *tail_id != id) {
+                            #[cfg(test)]
+                            PROVIDER_CONTEXT_ENTRY_VISITS
+                                .with(|visits| visits.set(visits.get() + 1));
+                            let tail_entry = session.entry(tail_id)?;
+                            if let EntryValue::Message(message) = &tail_entry.value {
+                                trailing = trailing.saturating_add(estimate_messages_tokens(
+                                    std::slice::from_ref(message),
+                                ));
+                            }
+                            tail = tail_entry.parent.as_ref();
+                        }
+                        return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+                    }
+                }
+            }
+            _ => {}
         }
-        let Some(record) = session.usage_records().iter().rev().find(|record| {
-            matches!(
-                &record.kind,
-                crate::session::UsageRecordKind::AssistantTurn { assistant }
-                    if assistant == &entry.id
-            ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
-                && record.model.as_ref() == Some(&model.spec.id)
-                && usage_context_tokens(&record.usage) > 0
-        }) else {
-            continue;
-        };
-        let trailing = branch[index.saturating_add(1)..]
-            .iter()
-            .filter_map(|entry| match &entry.value {
-                EntryValue::Message(message) => Some(message),
-                _ => None,
-            })
-            .fold(0u64, |total, message| {
-                total.saturating_add(estimate_messages_tokens(std::slice::from_ref(message)))
-            });
-        return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+        cursor = entry.parent.as_ref();
     }
     None
 }
@@ -3266,6 +3898,40 @@ fn session_total_tokens_for_own_context(session: &Session) -> u64 {
         })
 }
 
+fn record_delegated_usage_once(
+    session: &mut Session,
+    delegated: DelegatedUsage,
+) -> Result<(), SessionError> {
+    let already_recorded = session.usage_records().iter().any(|record| {
+        matches!(&record.kind, UsageRecordKind::DelegatedAgent { agent_id, turn_count, tool_call_count }
+            if *agent_id == delegated.agent_id && *turn_count == delegated.turn_count && *tool_call_count == delegated.tool_call_count)
+            && record.usage == delegated.usage && record.cost == delegated.cost
+            && record.endpoint.as_ref() == Some(&delegated.endpoint) && record.model.as_ref() == Some(&delegated.model)
+    });
+    if already_recorded {
+        return Ok(());
+    }
+    session.record_delegated_agent_usage(delegated)
+}
+
+// Child records are cumulative snapshots. Root uncertainty is a sticky aggregate
+// flag, not another physical failed attempt each time the same child is mirrored.
+fn mirror_delegated_uncertainty(
+    session: &mut Session,
+    model: &Model,
+    uncertain: bool,
+) -> Result<bool, SessionError> {
+    if !uncertain || session.has_uncertain_usage() {
+        return Ok(false);
+    }
+    session.record_usage_uncertainty(
+        model.endpoint.id.clone(),
+        model.spec.id.clone(),
+        "delegated_agent",
+    )?;
+    Ok(true)
+}
+
 fn reserve_request_tokens(
     session: &Session,
     input_tokens: u64,
@@ -3275,6 +3941,9 @@ fn reserve_request_tokens(
     let Some(limit) = limit else {
         return Ok(());
     };
+    if session.has_uncertain_usage() {
+        return Err(AgentError::UsageUncertain);
+    }
     let current = session_total_tokens_for_own_context(session);
     let reserved = input_tokens.saturating_add(output_tokens);
     if current >= limit || current.saturating_add(reserved) > limit {
@@ -3297,6 +3966,9 @@ fn reserve_request_cost(
     let Some(limit) = limit else {
         return Ok(());
     };
+    if session.has_uncertain_usage() {
+        return Err(AgentError::UsageUncertain);
+    }
     let current = session.total_cost_microdollars();
     let reserved = worst_case_request_cost(model, input_tokens, output_tokens)
         .ok_or(AgentError::CostUnavailable { limit })?;
@@ -3324,6 +3996,11 @@ fn assistant_text(response: &octet_ai::Response) -> Option<String> {
 }
 
 struct CompactionContext<'a> {
+    run_id: &'a str,
+    resource_owner: &'a str,
+    retry_hooks: &'a [Arc<dyn ProviderRetryHook>],
+    max_network_wait: Option<Duration>,
+    provider_retries_enabled: bool,
     client: &'a AiClient,
     /// Active model, used for context-window sizing and the normal request.
     model: &'a Model,
@@ -3615,11 +4292,34 @@ impl CompactionContext<'_> {
             reserved_output_tokens,
             self.max_session_cost_microdollars,
         )?;
-        let response = tokio::select! {
-            biased;
-            _ = self.abort.wait() => return Err(AgentError::Cancelled),
-            response = self.client.complete(self.compaction_model, request) => response?,
-        };
+        let response = recover_auxiliary(
+            AuxiliaryRecovery {
+                session: self.session,
+                run_id: self.run_id,
+                resource_owner: self.resource_owner,
+                retry_hooks: self.retry_hooks,
+                max_network_wait: self.max_network_wait,
+                model: self.compaction_model,
+                qualified: qualified_inference_replacement(self.compaction_model, &request),
+                enabled: self.provider_retries_enabled,
+                hard_budget: self.max_session_tokens.is_some()
+                    || self.max_session_cost_microdollars.is_some(),
+                abort: self.abort,
+                events: self.events,
+                operation: crate::events::ProviderOperation::LocalCompaction,
+                session_id: self.session_id,
+            },
+            |deadline| {
+                auxiliary_complete(
+                    self.client,
+                    self.compaction_model,
+                    request.clone(),
+                    deadline,
+                    self.max_network_wait,
+                )
+            },
+        )
+        .await?;
         // Cancellation wins a same-poll race and is checked again before the
         // first accounting or session commit.
         if self.abort.is_set() {
@@ -3812,11 +4512,49 @@ impl CompactionContext<'_> {
                 self.max_session_cost_microdollars,
             )?;
             let covered_through = self.session.head().ok_or(SessionError::EmptySession)?;
-            let response = tokio::select! {
-                biased;
-                _ = self.abort.wait() => return Err(AgentError::Cancelled),
-                response = self.client.compact_responses(self.model, request) => response?,
-            };
+            let response = recover_auxiliary(
+                AuxiliaryRecovery {
+                    session: self.session,
+                    run_id: self.run_id,
+                    resource_owner: self.resource_owner,
+                    retry_hooks: self.retry_hooks,
+                    max_network_wait: self.max_network_wait,
+                    model: self.model,
+                    qualified: self.model.endpoint.runtime.responses_profile
+                        == octet_ai::ResponsesRuntimeProfile::Codex
+                        && request.input.items().iter().all(|item| {
+                            matches!(
+                                item.as_json()
+                                    .get("type")
+                                    .and_then(serde_json::Value::as_str),
+                                Some(
+                                    "message"
+                                        | "reasoning"
+                                        | "function_call"
+                                        | "function_call_output"
+                                        | "compaction"
+                                )
+                            )
+                        }),
+                    enabled: self.provider_retries_enabled,
+                    hard_budget: self.max_session_tokens.is_some()
+                        || self.max_session_cost_microdollars.is_some(),
+                    abort: self.abort,
+                    events: self.events,
+                    operation: crate::events::ProviderOperation::NativeCompaction,
+                    session_id: self.session_id,
+                },
+                |deadline| {
+                    auxiliary_compact(
+                        self.client,
+                        self.model,
+                        request.clone(),
+                        deadline,
+                        self.max_network_wait,
+                    )
+                },
+            )
+            .await?;
             if self.abort.is_set() {
                 return Err(AgentError::Cancelled);
             }
@@ -4056,6 +4794,12 @@ impl CompactionContext<'_> {
 }
 
 struct TerminalGateContext<'a> {
+    run_id: &'a str,
+    resource_owner: &'a str,
+    retry_hooks: &'a [Arc<dyn ProviderRetryHook>],
+    max_network_wait: Option<Duration>,
+    provider_retries_enabled: bool,
+    events: &'a mpsc::UnboundedSender<AgentEvent>,
     client: &'a AiClient,
     model: &'a Model,
     session: &'a mut Session,
@@ -4110,11 +4854,34 @@ impl TerminalGateContext<'_> {
                 1,
                 self.max_session_cost_microdollars,
             )?;
-            let response = tokio::select! {
-                biased;
-                _ = self.abort.wait() => return Err(AgentError::Cancelled),
-                response = self.client.complete(self.model, request) => response?,
-            };
+            let response = recover_auxiliary(
+                AuxiliaryRecovery {
+                    session: self.session,
+                    run_id: self.run_id,
+                    resource_owner: self.resource_owner,
+                    retry_hooks: self.retry_hooks,
+                    max_network_wait: self.max_network_wait,
+                    model: self.model,
+                    qualified: qualified_inference_replacement(self.model, &request),
+                    enabled: self.provider_retries_enabled,
+                    hard_budget: self.max_session_tokens.is_some()
+                        || self.max_session_cost_microdollars.is_some(),
+                    abort: self.abort,
+                    events: self.events,
+                    operation: crate::events::ProviderOperation::TerminalGate,
+                    session_id: self.session_id,
+                },
+                |deadline| {
+                    auxiliary_complete(
+                        self.client,
+                        self.model,
+                        request.clone(),
+                        deadline,
+                        self.max_network_wait,
+                    )
+                },
+            )
+            .await?;
             if self.abort.is_set() {
                 return Err(AgentError::Cancelled);
             }
@@ -4204,6 +4971,7 @@ impl Agent {
             max_session_tokens: None,
             max_session_cost_microdollars: None,
             provider_retries_enabled: true,
+            max_network_wait: None,
             owner_tool_images_enabled: false,
             ultra_observation_managed: false,
             delegation: None,
@@ -4433,6 +5201,7 @@ impl Agent {
             max_session_tokens: self.max_session_tokens,
             max_session_cost_microdollars: self.max_session_cost_microdollars,
             provider_retries_enabled: self.provider_retries_enabled,
+            max_network_wait: self.max_network_wait,
         }
     }
 
@@ -4553,6 +5322,20 @@ impl Agent {
     pub fn set_provider_retries_enabled(&mut self, enabled: bool) {
         self.provider_retries_enabled = enabled;
         self.sync_delegation_runtime_settings();
+    }
+
+    /// Limits elapsed recovery for each definitely-pre-send outage, including
+    /// subsequent request opening. Successful opening ends the outage. `None` waits until
+    /// connectivity returns or cancellation; zero disables outage waiting.
+    /// This never extends external job deadlines or provider body deadlines.
+    pub fn set_max_network_wait(&mut self, limit: Option<Duration>) {
+        self.max_network_wait = limit;
+        self.sync_delegation_runtime_settings();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_network_wait(&self) -> Option<Duration> {
+        self.max_network_wait
     }
 
     /// Configure the model used for autonomous context summaries. Passing
@@ -4836,7 +5619,52 @@ impl Agent {
         )?;
         let covered_through = self.session.head().ok_or(SessionError::EmptySession)?;
         let operation_started = std::time::Instant::now();
-        let response = self.client.compact_responses(&self.model, request).await?;
+        let abort = AbortFlag::default();
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let response = recover_auxiliary(
+            AuxiliaryRecovery {
+                session: &mut self.session,
+                run_id: &self.session_id,
+                resource_owner: &self.resource_owner,
+                retry_hooks: &self.extensions.provider_retry_hooks,
+                max_network_wait: self.max_network_wait,
+                model: &self.model,
+                qualified: self.model.endpoint.runtime.responses_profile
+                    == octet_ai::ResponsesRuntimeProfile::Codex
+                    && request.input.items().iter().all(|item| {
+                        matches!(
+                            item.as_json()
+                                .get("type")
+                                .and_then(serde_json::Value::as_str),
+                            Some(
+                                "message"
+                                    | "reasoning"
+                                    | "function_call"
+                                    | "function_call_output"
+                                    | "compaction"
+                            )
+                        )
+                    }),
+
+                enabled: self.provider_retries_enabled,
+                hard_budget: self.max_session_tokens.is_some()
+                    || self.max_session_cost_microdollars.is_some(),
+                abort: &abort,
+                events: &events,
+                operation: crate::events::ProviderOperation::NativeCompaction,
+                session_id: &self.session_id,
+            },
+            |deadline| {
+                auxiliary_compact(
+                    &self.client,
+                    &self.model,
+                    request.clone(),
+                    deadline,
+                    self.max_network_wait,
+                )
+            },
+        )
+        .await?;
         let cost = self
             .model
             .spec
@@ -5117,7 +5945,9 @@ impl Agent {
 
         let (control_tx, mut control_rx) = mpsc::channel::<Control>(8);
         let abort = Arc::new(AbortFlag::default());
+        let control_admission = Arc::new(std::sync::Mutex::new(true));
         let control = RunControl {
+            admission: control_admission.clone(),
             tx: control_tx,
             abort: abort.clone(),
         };
@@ -5173,6 +6003,7 @@ impl Agent {
         let compaction_threshold_fraction = self.compaction_threshold_fraction;
         let compaction_keep_recent_tokens = self.compaction_keep_recent_tokens;
         let provider_retries_enabled = self.provider_retries_enabled;
+        let max_network_wait = self.max_network_wait;
         let owner_tool_images_enabled = self.owner_tool_images_enabled;
         let stream_delegation = self.delegation.clone();
         let run_delegation = self.delegation.clone();
@@ -5229,12 +6060,158 @@ impl Agent {
             let mut terminal_gate_requests = vec![initial_request];
             let mut terminal_action_receipts = Vec::<TerminalActionReceipt>::new();
             let mut context_retries = 0usize;
+            // Shared by open/body retries, re-preparation and transport fallback.
+            // Reset only on a complete successful assistant response.
+            let mut stream_retries = 0usize;
+            let mut recovery_budget = ProviderRecoveryBudget::default();
+            let mut network_retries = 0usize;
+            let mut network_deadline = None;
+            let mut failed_usage_unknown = session.has_uncertain_usage();
+            if failed_usage_unknown {
+                let event = AgentEvent::ProviderUsageUncertain;
+                notify_observers(&observers, &event);
+                yield event;
+            }
+            let mut pending_recovery: Option<PendingProviderRecovery> = None;
             let mut run_usage = Usage::default();
             let mut run_cost = CostAccumulator::default();
             let mut recent_tool_calls: VecDeque<(String, String)> =
                 VecDeque::with_capacity(MAX_RECENT_TOOL_CALLS);
 
             let mut reason: FinishReason = 'run: loop {
+                if let Some(recovery) = pending_recovery.take() {
+                    if recovery.usage_unknown() {
+                        let first = !session.has_uncertain_usage();
+                        if let Err(error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn") {
+                            if first {
+                                let event = AgentEvent::ProviderUsageUncertain;
+                                notify_observers(&observers, &event);
+                                yield event;
+                            }
+                            break 'run FinishReason::Failed(error.into());
+                        }
+                        if first {
+                            let event = AgentEvent::ProviderUsageUncertain;
+                            notify_observers(&observers, &event);
+                            yield event;
+                        }
+                    }
+                    failed_usage_unknown |= recovery.usage_unknown();
+                    let waiting_for_network = recovery.waiting_for_network();
+                    if waiting_for_network && network_deadline.is_none() {
+                        network_deadline = max_network_wait.and_then(|limit| tokio::time::Instant::now().checked_add(limit));
+                    }
+                    let retry_limit = recovery_budget.limit(stream_retries, &recovery);
+                    let hard_budget = max_session_tokens.is_some()
+                        || max_session_cost_microdollars.is_some();
+                    let eligible = provider_retries_enabled
+                        && (waiting_for_network || stream_retries < retry_limit)
+                        && !(hard_budget && failed_usage_unknown);
+                    let host_delay = if waiting_for_network {
+                        network_wait_delay(&effect_run_id, network_retries)
+                    } else {
+                        retry_after(&recovery.error, stream_retries)
+                    };
+                    let decision = if eligible {
+                        let decision_future = provider_retry_decision(ProviderRetryRequest {
+                            hooks: &provider_retry_hooks,
+                            context: ProviderRetryContext {
+                                operation: None,
+                                run_id: effect_run_id.clone(),
+                                resource_owner: resource_owner.clone(),
+                                attempt: if waiting_for_network { network_retries } else { stream_retries }.saturating_add(1),
+                                max_attempts: (!waiting_for_network).then_some(retry_limit),
+                                host_delay,
+                                kind: if waiting_for_network {
+                                    ProviderRetryKind::WaitingForNetwork
+                                } else if recovery.qualified && interrupted_inference_error(&recovery.error) {
+                                    ProviderRetryKind::InterruptedInference
+                                } else if recovery.opened {
+                                    ProviderRetryKind::StreamStart
+                                } else {
+                                    ProviderRetryKind::BeforeGeneration
+                                },
+                            },
+                            abort: &abort,
+                        });
+                        tokio::select! {
+                            biased;
+                            _ = abort.wait() => break 'run FinishReason::Aborted,
+                            _ = wait_network_deadline(network_deadline) => break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown }),
+                            decision = decision_future => decision,
+                        }
+                    } else {
+                        ProviderRetryDecision { proceed: false, additional_delay: Duration::ZERO }
+                    };
+                    if abort.is_set() {
+                        break 'run FinishReason::Aborted;
+                    }
+                    if !decision.proceed {
+                        let error = if (failed_usage_unknown && hard_budget)
+                            || (stream_retries > 0 && !is_replayable_network_failure(&recovery.error)) {
+                            AgentError::ProviderRecovery {
+                                retries: stream_retries,
+                                usage_unknown: failed_usage_unknown,
+                                source: recovery.error,
+                            }
+                        } else {
+                            provider_failure(recovery.error, stream_retries)
+                        };
+                        break 'run FinishReason::Failed(error);
+                    }
+                    if waiting_for_network {
+                        network_retries = network_retries.saturating_add(1);
+                    } else {
+                        recovery_budget.admit(&recovery);
+                        stream_retries += 1;
+                    }
+                    let delay = host_delay.saturating_add(decision.additional_delay);
+                    let mut diagnostic = provider_retry_diagnostic(&model, &recovery.error);
+                    if failed_usage_unknown {
+                        diagnostic = format!("failed_usage=unknown {diagnostic}");
+                        truncate_public_diagnostic(&mut diagnostic);
+                    }
+                    stream_context.provider_retry();
+                    let ev = if waiting_for_network {
+                        AgentEvent::ProviderWaitingForNetwork {
+                            attempt: network_retries, delay, error: diagnostic,
+                        }
+                    } else {
+                        AgentEvent::ProviderRetry {
+                            attempt: stream_retries, max_attempts: retry_limit,
+                            delay, error: diagnostic,
+                        }
+                    };
+                    notify_observers(&observers, &ev);
+                    yield ev;
+                    let wait = tokio::time::sleep(delay);
+                    tokio::pin!(wait);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = abort.wait() => break 'run FinishReason::Aborted,
+                            _ = wait_network_deadline(network_deadline) => break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown }),
+                            control = control_rx.recv(), if control_open => match control {
+                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::FinishNow(input)) => {
+                                    pending_steer.push(input);
+                                    answer_only = true;
+                                    finish_pending = true;
+                                    context_capacity.invalidate();
+                                }
+                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Some(Control::Abort) => break 'run FinishReason::Aborted,
+                                None => control_open = false,
+                            },
+                            _ = &mut wait => break,
+                        }
+                    }
+                    // Resume the ordinary safe preparation boundary, not a
+                    // stale clone: steering, FinishNow and tool snapshots agree.
+                }
+
                 // ── Drain control at the turn boundary ─────────────────────
                 while control_open {
                     match control_rx.try_recv() {
@@ -5345,6 +6322,11 @@ impl Agent {
                     mpsc::unbounded_channel::<AgentEvent>();
                 let capacity = {
                     let mut compaction = CompactionContext {
+                        run_id: &effect_run_id,
+                        resource_owner: &resource_owner,
+                        retry_hooks: &provider_retry_hooks,
+                        max_network_wait,
+                        provider_retries_enabled,
                         client: &client,
                         model: &model,
                         compaction_model: &compaction_model,
@@ -5376,6 +6358,20 @@ impl Agent {
                     let result = loop {
                         tokio::select! {
                             biased;
+                            _ = abort.wait() => break Err(AgentError::Cancelled),
+                            control = control_rx.recv(), if control_open => match control {
+                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::FinishNow(input)) => {
+                                    pending_steer.push(input);
+                                    answer_only = true;
+                                    finish_pending = true;
+                                }
+                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Some(Control::Abort) => { abort.set(); }
+                                None => control_open = false,
+                            },
                             Some(event) = compaction_event_rx.recv() => {
                                 notify_observers(&observers, &event);
                                 yield event;
@@ -5399,6 +6395,10 @@ impl Agent {
                         };
                     }
                 };
+                if !pending_steer.is_empty() {
+                    context_capacity.invalidate();
+                    continue 'run;
+                }
                 let input_tokens = capacity.input_tokens;
                 let request_max_output_tokens = capacity.max_output_tokens;
                 let messages = match session.context() {
@@ -5480,82 +6480,40 @@ impl Agent {
                 let ev = AgentEvent::TurnStarted;
                 notify_observers(&observers, &ev);
                 yield ev;
-                let request_for_retry = request;
-                let mut stream_retries = 0usize;
-                let opened = loop {
-                    match open_provider_stream(
-                        &client,
-                        &model,
-                        request_for_retry.clone(),
-                        &abort,
-                    )
-                    .await
-                    {
-                        Err(error)
-                            if provider_retries_enabled
-                                && stream_retries < provider_retry_limit(&error)
-                                && retryable_before_generation(&error) =>
-                        {
-                            let retry_limit = provider_retry_limit(&error);
-                            if abort.is_set() {
-                                break Ok(None);
+                let qualified = qualified_inference_replacement(&model, &request);
+                let opening_client = client.track_request_dispatch();
+                let opened = tokio::select! {
+                    biased;
+                    _ = abort.wait() => Ok(None),
+                    _ = wait_network_deadline(network_deadline) => {
+                        if opening_client.request_may_have_been_sent() {
+                            let first = !session.has_uncertain_usage();
+                            let recorded = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn");
+                            if first {
+                                let event = AgentEvent::ProviderUsageUncertain;
+                                notify_observers(&observers, &event);
+                                yield event;
                             }
-                            let host_delay = retry_after(&error, stream_retries);
-                            let retry_decision = provider_retry_decision(ProviderRetryRequest {
-                                hooks: &provider_retry_hooks,
-                                context: ProviderRetryContext {
-                                    run_id: effect_run_id.clone(),
-                                    resource_owner: resource_owner.clone(),
-                                    attempt: stream_retries.saturating_add(1),
-                                    max_attempts: retry_limit,
-                                    host_delay,
-                                    kind: ProviderRetryKind::BeforeGeneration,
-                                },
-                                abort: &abort,
-                            })
-                            .await;
-                            if !retry_decision.proceed {
-                                if abort.is_set() {
-                                    break Ok(None);
-                                }
-                                break Err(error);
+                            if let Err(error) = recorded {
+                                break 'run FinishReason::Failed(error.into());
                             }
-                            let delay = host_delay.saturating_add(retry_decision.additional_delay);
-                            stream_retries += 1;
-                            stream_context.provider_retry();
-                            let ev = AgentEvent::ProviderRetry {
-                                attempt: stream_retries,
-                                max_attempts: retry_limit,
-                                delay,
-                                error: provider_retry_diagnostic(&model, &error),
-                            };
-                            notify_observers(&observers, &ev);
-                            yield ev;
-                            let cancelled = tokio::select! {
-                                biased;
-                                _ = abort.wait() => true,
-                                _ = tokio::time::sleep(delay) => false,
-                            };
-                            if cancelled {
-                                break Ok(None);
-                            }
-                            // The retry is a distinct physical provider request.
-                            // Re-open its lifecycle after backoff so observers can
-                            // measure this attempt without charging sleep time to
-                            // request latency or losing its TTFT.
-                            let ev = AgentEvent::TurnStarted;
-                            notify_observers(&observers, &ev);
-                            yield ev;
+                            failed_usage_unknown = true;
                         }
-                        result => break result,
-                    }
+                        break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown });
+                    },
+                    result = open_provider_stream(&opening_client, &model, request, &abort) => result,
                 };
                 let mut response_stream = match opened {
                     Err(error) if context_retries < MAX_PROVIDER_RETRIES && looks_like_context_error(&error) => {
                         context_retries += 1;
                         let compacted = {
                             let mut compaction = CompactionContext {
-                                client: &client,
+                        run_id: &effect_run_id,
+                        resource_owner: &resource_owner,
+                        retry_hooks: &provider_retry_hooks,
+                        max_network_wait,
+                        provider_retries_enabled,
+                        client: &client,
                                 model: &model,
                                 compaction_model: &compaction_model,
                                 session,
@@ -5585,7 +6543,21 @@ impl Agent {
                             let result = loop {
                                 tokio::select! {
                                     biased;
-                                    Some(event) = compaction_event_rx.recv() => {
+                                    _ = abort.wait() => break Err(AgentError::Cancelled),
+                            control = control_rx.recv(), if control_open => match control {
+                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::FinishNow(input)) => {
+                                    pending_steer.push(input);
+                                    answer_only = true;
+                                    finish_pending = true;
+                                }
+                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Some(Control::Abort) => { abort.set(); }
+                                None => control_open = false,
+                            },
+                            Some(event) = compaction_event_rx.recv() => {
                                         notify_observers(&observers, &event);
                                         yield event;
                                     }
@@ -5608,10 +6580,18 @@ impl Agent {
                         continue 'run;
                     }
                     Err(error) => {
-                        break 'run FinishReason::Failed(provider_failure(error, stream_retries));
+                        pending_recovery = Some(PendingProviderRecovery {
+                            error, qualified, saw_generation: false, opened: false,
+                        });
+                        continue 'run;
                     }
                     Ok(None) => break 'run FinishReason::Aborted,
-                    Ok(Some(s)) => s,
+                    Ok(Some(s)) => {
+                        // Connectivity recovered. Body deadlines belong to the
+                        // provider; a later pre-send outage gets its own clock.
+                        network_deadline = None;
+                        s
+                    },
                 };
 
                 // ── Consume the stream, staying responsive to control ──────
@@ -5625,9 +6605,10 @@ impl Agent {
                     Abort,
                 }
                 let mut attempt_saw_generation = false;
-                let turn = 'consume: loop {
+                let turn = loop {
                     let next = tokio::select! {
-                        ev = response_stream.next() => Next::Event(ev),
+                        biased;
+                        _ = abort.wait() => Next::Abort,
                         c = control_rx.recv(), if control_open => Next::Ctl(c),
                         snapshot = async {
                             match &mut delegation_telemetry {
@@ -5635,7 +6616,16 @@ impl Agent {
                                 None => std::future::pending().await,
                             }
                         }, if delegation_telemetry.is_some() => Next::Delegation(snapshot),
-                        _ = abort.wait() => Next::Abort,
+                        ev = response_stream.next() => Next::Event(ev),
+                    };
+                    let next = match next {
+                        Next::Event(Some(Ok(StreamEvent::Finished(response)))) => {
+                            match incomplete_responses_error(&model, &response) {
+                                Some(error) => Next::Event(Some(Err(error))),
+                                None => Next::Event(Some(Ok(StreamEvent::Finished(response)))),
+                            }
+                        }
+                        next => next,
                     };
                     match next {
                         Next::Abort | Next::Ctl(Some(Control::Abort)) => {
@@ -5658,82 +6648,14 @@ impl Agent {
                             yield event;
                         }
                         Next::Delegation(None) => delegation_telemetry = None,
-                        Next::Event(None) => {
-                            let error = AiError::StreamProtocol(
-                                octet_ai::StreamProtocolError::MissingFinish,
-                            );
-                            let retry_candidate = provider_retries_enabled
-                                && !attempt_saw_generation
-                                && stream_retries < MAX_PROVIDER_RETRIES
-                                && retryable_stream_start(&error);
-                            let host_delay = retry_after(&error, stream_retries);
-                            let retry_decision = if retry_candidate {
-                                provider_retry_decision(ProviderRetryRequest {
-                                    hooks: &provider_retry_hooks,
-                                    context: ProviderRetryContext {
-                                        run_id: effect_run_id.clone(),
-                                        resource_owner: resource_owner.clone(),
-                                        attempt: stream_retries.saturating_add(1),
-                                        max_attempts: MAX_PROVIDER_RETRIES,
-                                        host_delay,
-                                        kind: ProviderRetryKind::StreamStart,
-                                    },
-                                    abort: &abort,
-                                })
-                                .await
-                            } else {
-                                ProviderRetryDecision {
-                                    proceed: false,
-                                    additional_delay: Duration::ZERO,
-                                }
+                        Next::Event(None) | Next::Event(Some(Err(_))) => {
+                            let error = match next {
+                                Next::Event(Some(Err(error))) => error,
+                                _ => AiError::StreamProtocol(octet_ai::StreamProtocolError::MissingFinish),
                             };
-                            if abort.is_set() {
-                                break 'consume Err(FinishReason::Aborted);
-                            }
-                            if retry_decision.proceed {
-                                let delay = host_delay.saturating_add(retry_decision.additional_delay);
-                                stream_retries += 1;
-                                stream_context.provider_retry();
-                                let ev = AgentEvent::ProviderRetry {
-                                    attempt: stream_retries,
-                                    max_attempts: MAX_PROVIDER_RETRIES,
-                                    delay,
-                                    error: provider_retry_diagnostic(&model, &error),
-                                };
-                                notify_observers(&observers, &ev);
-                                yield ev;
-                                let cancelled = tokio::select! {
-                                    _ = tokio::time::sleep(delay) => false,
-                                    _ = abort.wait() => true,
-                                };
-                                if cancelled {
-                                    break 'consume Err(FinishReason::Aborted);
-                                }
-                                // Count and time the physical replacement request,
-                                // including stream establishment and TTFT but not backoff.
-                                let ev = AgentEvent::TurnStarted;
-                                notify_observers(&observers, &ev);
-                                yield ev;
-                                let reopened = open_provider_stream(
-                                    &client,
-                                    &model,
-                                    request_for_retry.clone(),
-                                    &abort,
-                                )
-                                .await;
-                                match reopened {
-                                    Ok(Some(stream)) => {
-                                        response_stream = stream;
-                                        attempt_saw_generation = false;
-                                        continue 'consume;
-                                    }
-                                    Ok(None) => break 'consume Err(FinishReason::Aborted),
-                                    Err(error) => break Err(FinishReason::Failed(error.into())),
-                                }
-                            }
-                            break Err(FinishReason::Failed(error.into()));
-                        }
-                        Next::Event(Some(Err(mut error))) => {
+                            // Retire the failed stream before hooks, backoff,
+                            // compaction or any replacement can open a transport.
+                            drop(response_stream);
                             if !attempt_saw_generation
                                 && context_retries < MAX_PROVIDER_RETRIES
                                 && looks_like_context_error(&error)
@@ -5742,7 +6664,12 @@ impl Agent {
                                 context_retries += 1;
                                 let compacted = {
                                     let mut compaction = CompactionContext {
-                                        client: &client,
+                        run_id: &effect_run_id,
+                        resource_owner: &resource_owner,
+                        retry_hooks: &provider_retry_hooks,
+                        max_network_wait,
+                        provider_retries_enabled,
+                        client: &client,
                                         model: &model,
                                         compaction_model: &compaction_model,
                                         session,
@@ -5772,7 +6699,21 @@ impl Agent {
                                     let result = loop {
                                         tokio::select! {
                                             biased;
-                                            Some(event) = compaction_event_rx.recv() => {
+                                            _ = abort.wait() => break Err(AgentError::Cancelled),
+                            control = control_rx.recv(), if control_open => match control {
+                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::FinishNow(input)) => {
+                                    pending_steer.push(input);
+                                    answer_only = true;
+                                    finish_pending = true;
+                                }
+                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Some(Control::Abort) => { abort.set(); }
+                                None => control_open = false,
+                            },
+                            Some(event) = compaction_event_rx.recv() => {
                                                 notify_observers(&observers, &event);
                                                 yield event;
                                             }
@@ -5788,86 +6729,17 @@ impl Agent {
                                 match compacted {
                                     Ok(()) => continue 'run,
                                     Err(error) if matches!(&error, AgentError::Cancelled) => {
-                                        break Err(FinishReason::Aborted);
+                                        break 'run FinishReason::Aborted;
                                     }
                                     Err(error) => {
-                                        break Err(FinishReason::Failed(error));
+                                        break 'run FinishReason::Failed(error);
                                     }
                                 }
                             }
-                            while provider_retries_enabled
-                                && !attempt_saw_generation
-                                && stream_retries < provider_retry_limit(&error)
-                                && retryable_stream_start(&error)
-                            {
-                                let retry_limit = provider_retry_limit(&error);
-                                if abort.is_set() {
-                                    break 'consume Err(FinishReason::Aborted);
-                                }
-                                let host_delay = retry_after(&error, stream_retries);
-                                let retry_decision = provider_retry_decision(ProviderRetryRequest {
-                                    hooks: &provider_retry_hooks,
-                                    context: ProviderRetryContext {
-                                        run_id: effect_run_id.clone(),
-                                        resource_owner: resource_owner.clone(),
-                                        attempt: stream_retries.saturating_add(1),
-                                        max_attempts: retry_limit,
-                                        host_delay,
-                                        kind: ProviderRetryKind::StreamStart,
-                                    },
-                                    abort: &abort,
-                                })
-                                .await;
-                                if !retry_decision.proceed {
-                                    if abort.is_set() {
-                                        break 'consume Err(FinishReason::Aborted);
-                                    }
-                                    break;
-                                }
-                                let delay = host_delay.saturating_add(retry_decision.additional_delay);
-                                stream_retries += 1;
-                                stream_context.provider_retry();
-                                let ev = AgentEvent::ProviderRetry {
-                                    attempt: stream_retries,
-                                    max_attempts: retry_limit,
-                                    delay,
-                                    error: provider_retry_diagnostic(&model, &error),
-                                };
-                                notify_observers(&observers, &ev);
-                                yield ev;
-                                let cancelled = tokio::select! {
-                                    _ = tokio::time::sleep(delay) => false,
-                                    _ = abort.wait() => true,
-                                };
-                                if cancelled {
-                                    break 'consume Err(FinishReason::Aborted);
-                                }
-                                // Count and time the physical replacement request,
-                                // including stream establishment and TTFT but not backoff.
-                                let ev = AgentEvent::TurnStarted;
-                                notify_observers(&observers, &ev);
-                                yield ev;
-                                let reopened = open_provider_stream(
-                                    &client,
-                                    &model,
-                                    request_for_retry.clone(),
-                                    &abort,
-                                )
-                                .await;
-                                match reopened {
-                                    Ok(Some(stream)) => {
-                                        response_stream = stream;
-                                        attempt_saw_generation = false;
-                                        continue 'consume;
-                                    }
-                                    Ok(None) => break 'consume Err(FinishReason::Aborted),
-                                    Err(next_error) => error = next_error,
-                                }
-                            }
-                            break Err(FinishReason::Failed(provider_failure(
-                                error,
-                                stream_retries,
-                            )));
+                            pending_recovery = Some(PendingProviderRecovery {
+                                error, qualified, saw_generation: attempt_saw_generation, opened: true,
+                            });
+                            continue 'run;
                         }
                         Next::Event(Some(Ok(event))) => {
                             stream_context.observe_stream(&event);
@@ -5924,6 +6796,11 @@ impl Agent {
                 // prefix is accepted and restores the recovery budget for a
                 // later autonomous turn in the same run.
                 context_retries = 0;
+                stream_retries = 0;
+                recovery_budget = ProviderRecoveryBudget::default();
+                network_retries = 0;
+                network_deadline = None;
+                failed_usage_unknown = session.has_uncertain_usage();
                 // Max-turns counts completed provider turns. Context rejection
                 // and transport recovery happen within the same logical turn
                 // and must not consume the autonomous work budget.
@@ -6031,24 +6908,31 @@ impl Agent {
 
                 // Drain control before deciding whether a provisional candidate
                 // is terminal. New user input takes precedence over the gate.
-                while control_open {
-                    match control_rx.try_recv() {
-                        Ok(Control::Steer(input)) => pending_steer.push(input),
-                        Ok(Control::FollowUp(input)) => followups.push_back(input),
-                        Ok(Control::FinishNow(input)) => {
-                            pending_steer.push(input);
-                            answer_only = true;
-                            finish_pending = true;
-                            context_capacity.invalidate();
+                {
+                    let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
+                    while control_open {
+                        match control_rx.try_recv() {
+                            Ok(Control::Steer(input)) => pending_steer.push(input),
+                            Ok(Control::FollowUp(input)) => followups.push_back(input),
+                            Ok(Control::FinishNow(input)) => {
+                                pending_steer.push(input);
+                                answer_only = true;
+                                finish_pending = true;
+                                context_capacity.invalidate();
+                            }
+                            Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                            Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                            Ok(Control::Abort) => {
+                                abort.set();
+                                break;
+                            }
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
                         }
-                        Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
-                        Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
-                        Ok(Control::Abort) => {
-                            abort.set();
-                            break;
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
+                    }
+                    if !gated_candidate && calls.is_empty() && normal_end && !needs_continuation
+                        && pending_steer.is_empty() && followups.is_empty() {
+                        *admission = false;
                     }
                 }
 
@@ -6176,35 +7060,182 @@ impl Agent {
                             &assistant,
                             &terminal_action_receipts,
                         );
-                        let decision = TerminalGateContext {
-                            client: &client,
-                            model: &model,
-                            session,
-                            usage: &mut run_usage,
-                            run_cost: &mut run_cost,
-                            cache_retention,
-                            session_id: &session_id,
-                            max_session_tokens,
-                            max_session_cost_microdollars,
-                            abort: &abort,
+                        let decision = {
+                            let mut gate = TerminalGateContext {
+                                run_id: &effect_run_id,
+                                resource_owner: &resource_owner,
+                                retry_hooks: &provider_retry_hooks,
+                                max_network_wait,
+                                provider_retries_enabled,
+                                events: &compaction_event_tx,
+                                client: &client,
+                                model: &model,
+                                session,
+                                usage: &mut run_usage,
+                                run_cost: &mut run_cost,
+                                cache_retention,
+                                session_id: &session_id,
+                                max_session_tokens,
+                                max_session_cost_microdollars,
+                                abort: &abort,
+                            };
+                            let operation = gate.decide(capsule);
+                            tokio::pin!(operation);
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    _ = abort.wait() => break Err(AgentError::Cancelled),
+                                    control = control_rx.recv(), if control_open => match control {
+                                        Some(Control::Steer(input)) => pending_steer.push(input),
+                                        Some(Control::FollowUp(input)) => followups.push_back(input),
+                                        Some(Control::FinishNow(input)) => {
+                                            pending_steer.push(input);
+                                            answer_only = true;
+                                            finish_pending = true;
+                                        }
+                                        Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                        Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                        Some(Control::Abort) => { abort.set(); }
+                                        None => control_open = false,
+                                    },
+                                    Some(event) = compaction_event_rx.recv() => {
+                                        notify_observers(&observers, &event);
+                                        yield event;
+                                    }
+                                    result = &mut operation => break result,
+                                }
+                            }
+                        };
+                        while let Ok(event) = compaction_event_rx.try_recv() {
+                            notify_observers(&observers, &event);
+                            yield event;
                         }
-                        .decide(capsule)
-                        .await;
+                        let return_candidate = matches!(decision, Ok(TerminalGateDecision::Return));
+                        if return_candidate {
+                            let session_cost = (session.total_cost_microdollars() > 0
+                                || model.spec.pricing.is_some())
+                            .then(|| session.total_cost_microdollars());
+                            let ev = AgentEvent::TurnFinished {
+                                message: assistant.clone(),
+                                stop_reason: stop_reason.clone(),
+                                turn_usage,
+                                usage: run_usage,
+                                session_cost_microdollars: session_cost,
+                                run_cost_microdollars: run_cost.microdollars,
+                            };
+                            notify_observers(&observers, &ev);
+                            yield ev;
+                        }
+                        // Linearize successful submissions against terminal
+                        // admission, including the gate's final poll and the
+                        // TurnFinished suspension. Never hold this lock at yield.
+                        {
+                            let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
+                            while control_open {
+                                match control_rx.try_recv() {
+                                    Ok(Control::Steer(input)) => pending_steer.push(input),
+                                    Ok(Control::FollowUp(input)) => followups.push_back(input),
+                                    Ok(Control::FinishNow(input)) => {
+                                        pending_steer.push(input);
+                                        answer_only = true;
+                                        finish_pending = true;
+                                        context_capacity.invalidate();
+                                    }
+                                    Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                    Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                    Ok(Control::Abort) => abort.set(),
+                                    Err(mpsc::error::TryRecvError::Empty) => break,
+                                    Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
+                                }
+                            }
+                            if return_candidate && pending_steer.is_empty() && followups.is_empty() {
+                                *admission = false;
+                            }
+                        }
+                        if abort.is_set() {
+                            break 'run FinishReason::Aborted;
+                        }
+                        if decision.is_ok() {
+                            // Steering and follow-ups make this a normal intermediate
+                            // turn, so commit it without spending a gate request.
+                            if !pending_steer.is_empty() {
+                                if gated_candidate && !return_candidate {
+                                    let session_cost = (session.total_cost_microdollars() > 0
+                                        || model.spec.pricing.is_some())
+                                    .then(|| session.total_cost_microdollars());
+                                    let ev = AgentEvent::TurnFinished {
+                                        message: assistant.clone(),
+                                        stop_reason: stop_reason.clone(),
+                                        turn_usage,
+                                        usage: run_usage,
+                                        session_cost_microdollars: session_cost,
+                                        run_cost_microdollars: run_cost.microdollars,
+                                    };
+                                    notify_observers(&observers, &ev);
+                                    yield ev;
+                                }
+                                continue;
+                            }
+                            if !followups.is_empty() {
+                                if gated_candidate && !return_candidate {
+                                    let session_cost = (session.total_cost_microdollars() > 0
+                                        || model.spec.pricing.is_some())
+                                    .then(|| session.total_cost_microdollars());
+                                    let ev = AgentEvent::TurnFinished {
+                                        message: assistant.clone(),
+                                        stop_reason: stop_reason.clone(),
+                                        turn_usage,
+                                        usage: run_usage,
+                                        session_cost_microdollars: session_cost,
+                                        run_cost_microdollars: run_cost.microdollars,
+                                    };
+                                    notify_observers(&observers, &ev);
+                                    yield ev;
+                                }
+                                let queued = match follow_up_mode {
+                                    QueueDeliveryMode::All => followups.drain(..).collect::<Vec<_>>(),
+                                    QueueDeliveryMode::OneAtATime => {
+                                        vec![followups.pop_front().expect("follow-up queue is non-empty")]
+                                    }
+                                };
+                                let visible_tools = if answer_only {
+                                    &[][..]
+                                } else {
+                                    tool_defs.as_slice()
+                                };
+                                let observation = ContextObservation {
+                                    tracker: &stream_context,
+                                    model: &model,
+                                    system: &system,
+                                    tools: visible_tools,
+                                };
+                                match deliver_control_inputs(
+                                    queued,
+                                    ControlDeliveryKind::FollowUp,
+                                    session,
+                                    &control_prompt_metadata,
+                                    &mut terminal_gate_requests,
+                                    &observation,
+                                ) {
+                                    ControlDelivery::Completed { event } => {
+                                        if let Some(ev) = event {
+                                            notify_observers(&observers, &ev);
+                                            yield ev;
+                                        }
+                                    }
+                                    ControlDelivery::Interrupted { event, finish } => {
+                                        if let Some(ev) = event {
+                                            notify_observers(&observers, &ev);
+                                            yield ev;
+                                        }
+                                        break 'run finish;
+                                    }
+                                }
+                                continue;
+                            }
+                        }
                         match decision {
                             Ok(TerminalGateDecision::Return) => {
-                                let session_cost = (session.total_cost_microdollars() > 0
-                                    || model.spec.pricing.is_some())
-                                .then(|| session.total_cost_microdollars());
-                                let ev = AgentEvent::TurnFinished {
-                                    message: assistant.clone(),
-                                    stop_reason: stop_reason.clone(),
-                                    turn_usage,
-                                    usage: run_usage,
-                                    session_cost_microdollars: session_cost,
-                                    run_cost_microdollars: run_cost.microdollars,
-                                };
-                                notify_observers(&observers, &ev);
-                                yield ev;
                                 break 'run FinishReason::Completed;
                             }
                             Ok(TerminalGateDecision::Continue) => {
@@ -6850,6 +7881,7 @@ impl Agent {
                 // entries into the provider-required single user message.
             };
 
+            *control_admission.lock().unwrap_or_else(|error| error.into_inner()) = false;
             // A fully driven prompt always leaves an explicit durable restore
             // point, including controlled abort/max-turn/failure outcomes. A
             // dropped stream is not complete and never reaches this boundary.
@@ -6870,7 +7902,24 @@ impl Agent {
                     .settle_descendants(Duration::from_secs(2))
                     .await;
                 for delegated in delegation.delegated_usage_records() {
-                    if let Err(error) = session.record_delegated_agent_usage(DelegatedUsage {
+                    match mirror_delegated_uncertainty(session, &model, delegated.usage_uncertain) {
+                        Ok(true) => {
+                            let event = AgentEvent::ProviderUsageUncertain;
+                            notify_observers(&observers, &event);
+                            yield event;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            // Persistence failed, but observed uncertainty must
+                            // still stop presentation from claiming complete cost.
+                            let event = AgentEvent::ProviderUsageUncertain;
+                            notify_observers(&observers, &event);
+                            yield event;
+                            reason = FinishReason::Failed(error.into());
+                            break;
+                        }
+                    }
+                    if let Err(error) = record_delegated_usage_once(session, DelegatedUsage {
                         agent_id: delegated.agent_id,
                         turn_count: delegated.turn_count,
                         tool_call_count: delegated.tool_call_count,
@@ -7493,7 +8542,7 @@ mod tests {
                     timeout: true,
                     message: "stream idle beyond its timeout".into(),
                 })),
-                "phase=response body timeout hint=Provider acceptance is uncertain; octet did not replay the request. Inspect provider state before retrying explicitly. detail=stream idle beyond its timeout",
+                "phase=response body timeout hint=Provider acceptance and failed-attempt usage are uncertain. Inspect provider state before retrying explicitly. detail=stream idle beyond its timeout",
             ),
             (
                 AgentError::IncompleteResponse {
@@ -8476,6 +9525,279 @@ mod tests {
         );
     }
 
+    fn provider_context_estimate_reference(session: &Session, model: &Model) -> Option<u64> {
+        let branch = active_branch_entries(session);
+        let boundary = branch
+            .iter()
+            .rposition(|entry| {
+                matches!(
+                    entry.value,
+                    EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
+                )
+            })
+            .map_or(0, |index| index.saturating_add(1));
+
+        for (index, entry) in branch.iter().enumerate().skip(boundary).rev() {
+            if !matches!(entry.value, EntryValue::Message(Message::Assistant(_))) {
+                continue;
+            }
+            let Some(record) = session.usage_records().iter().rev().find(|record| {
+                matches!(
+                    &record.kind,
+                    crate::session::UsageRecordKind::AssistantTurn { assistant }
+                        if assistant == &entry.id
+                ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
+                    && record.model.as_ref() == Some(&model.spec.id)
+                    && usage_context_tokens(&record.usage) > 0
+            }) else {
+                continue;
+            };
+            let trailing = branch[index.saturating_add(1)..]
+                .iter()
+                .filter_map(|entry| match &entry.value {
+                    EntryValue::Message(message) => Some(message),
+                    _ => None,
+                })
+                .fold(0u64, |total, message| {
+                    total.saturating_add(estimate_messages_tokens(std::slice::from_ref(message)))
+                });
+            return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+        }
+        None
+    }
+
+    fn append_usage_fixture(session: &mut Session, model: &Model, tokens: u64) -> EntryId {
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("measured response".into())],
+                model: model.spec.id.clone(),
+                protocol: model.spec.protocol,
+            })))
+            .unwrap();
+        session
+            .record_assistant_usage(
+                assistant.clone(),
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                Usage {
+                    total_tokens: tokens,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        assistant
+    }
+
+    #[test]
+    fn provider_usage_suffix_matches_reference_across_branches_and_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("suffix.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let check = |session: &Session| {
+            assert_eq!(
+                provider_context_estimate(session, &model),
+                provider_context_estimate_reference(session, &model)
+            );
+        };
+        check(&session);
+        let measured = append_usage_fixture(&mut session, &model, 1234);
+        check(&session);
+        session
+            .append(user_message(UserInput::from("trailing λ message")))
+            .unwrap();
+        session
+            .append(EntryValue::Config {
+                model: None,
+                reasoning: Some("low".into()),
+                reasoning_mode: None,
+            })
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: octet_ai::ToolCallId("fixture-call".into()),
+                    content: vec![ToolResultPart::Text("tool result λ".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+        check(&session);
+        append_usage_fixture(&mut session, &model, 0);
+        check(&session);
+        let mut other_model = model.clone();
+        Arc::make_mut(&mut other_model.spec).id = octet_ai::ModelId("other-model".into());
+        append_usage_fixture(&mut session, &other_model, 9000);
+        check(&session);
+        let mut other_endpoint = model.clone();
+        Arc::make_mut(&mut other_endpoint.endpoint).id =
+            octet_ai::EndpointId("other-endpoint".into());
+        append_usage_fixture(&mut session, &other_endpoint, 9000);
+        check(&session);
+        let abandoned = session.head().unwrap();
+        session.checkout(measured.clone()).unwrap();
+        session
+            .append(user_message(UserInput::from("new branch")))
+            .unwrap();
+        check(&session);
+        append_usage_fixture(&mut session, &model, u64::MAX);
+        session
+            .append(user_message(UserInput::from("saturating suffix")))
+            .unwrap();
+        check(&session);
+        assert_eq!(provider_context_estimate(&session, &model), Some(u64::MAX));
+        session.checkout(abandoned).unwrap();
+        session.compact("summary", measured).unwrap();
+        check(&session);
+        assert_eq!(provider_context_estimate(&session, &model), None);
+        append_usage_fixture(&mut session, &model, 99);
+        check(&session);
+        session
+            .append_responses_compaction(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                octet_ai::ResponsesOutput::new(
+                    vec![octet_ai::ResponsesItem::new(serde_json::json!({
+                "type": "compaction", "id": "native-checkpoint", "encrypted_content": "opaque"
+            })).unwrap()],
+                ),
+            )
+            .unwrap();
+        check(&session);
+        assert_eq!(provider_context_estimate(&session, &model), None);
+        append_usage_fixture(&mut session, &model, 101);
+        check(&session);
+        drop(session);
+        let reopened = Session::open_read_only(directory.path().join("suffix.jsonl")).unwrap();
+        check(&reopened);
+    }
+
+    #[test]
+    fn provider_usage_entry_work_is_bounded_by_the_unmeasured_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("work.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        for history in [10, 100, 1000] {
+            while session.entries().len() < history {
+                session
+                    .append(user_message(UserInput::from("settled history")))
+                    .unwrap();
+            }
+            if session.usage_records().is_empty() {
+                PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(0));
+                assert_eq!(provider_context_estimate(&session, &model), None);
+                assert_eq!(PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.get()), 0);
+            }
+            append_usage_fixture(&mut session, &model, 1000);
+            session
+                .append(user_message(UserInput::from("fixed tail")))
+                .unwrap();
+            PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(0));
+            let estimate = provider_context_estimate(&session, &model);
+            assert_eq!(PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.get()), 3);
+            assert_eq!(
+                estimate,
+                provider_context_estimate_reference(&session, &model)
+            );
+        }
+    }
+
+    #[test]
+    fn provider_usage_abandoned_records_remain_an_explicit_scan_cost() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("abandoned.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let anchor = append_usage_fixture(&mut session, &model, 1234);
+        let mut other = model.clone();
+        Arc::make_mut(&mut other.spec).id = octet_ai::ModelId("other-model".into());
+        for records in [5, 20] {
+            for _ in 0..records {
+                append_usage_fixture(&mut session, &other, 99);
+            }
+            session.checkout(anchor.clone()).unwrap();
+            PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(0));
+            PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+            assert_eq!(provider_context_estimate(&session, &model), Some(1234));
+            assert_eq!(PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.get()), 1);
+            assert_eq!(
+                PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()),
+                session.usage_records().len()
+            );
+            assert_eq!(
+                provider_context_estimate(&session, &model),
+                provider_context_estimate_reference(&session, &model)
+            );
+        }
+    }
+
+    /// Offline matched microbenchmark, not provider or end-to-end launch latency.
+    /// Run with: cargo test --release --offline --locked -p octet-agent --lib
+    /// provider_usage_suffix_benchmark -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore = "manual matched timing experiment"]
+    fn provider_usage_suffix_benchmark() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let repetitions = 200;
+        for history in [100, 1000, 10_000] {
+            let mut session =
+                Session::create(directory.path().join(format!("benchmark-{history}.jsonl")))
+                    .unwrap();
+            while session.entries().len() < history {
+                session
+                    .append(user_message(UserInput::from("settled history")))
+                    .unwrap();
+            }
+            for scenario in ["unmeasured", "suffix"] {
+                if scenario == "suffix" {
+                    append_usage_fixture(&mut session, &model, 1000);
+                    session
+                        .append(user_message(UserInput::from("fixed tail")))
+                        .unwrap();
+                }
+                assert_eq!(
+                    provider_context_estimate(&session, &model),
+                    provider_context_estimate_reference(&session, &model)
+                );
+                for trial in 0..9 {
+                    // Alternate order to avoid systematically favoring warm caches.
+                    for candidate in if trial % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    } {
+                        let estimate = if candidate {
+                            provider_context_estimate
+                        } else {
+                            provider_context_estimate_reference
+                        };
+                        let start = std::time::Instant::now();
+                        for _ in 0..repetitions {
+                            std::hint::black_box(estimate(
+                                std::hint::black_box(&session),
+                                std::hint::black_box(&model),
+                            ));
+                        }
+                        println!("provider_usage_suffix scenario={scenario} history={history} trial={trial} candidate={candidate} repetitions={repetitions} elapsed_ns={}", start.elapsed().as_nanos());
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn provider_usage_baseline_skips_newer_unusable_records_and_counts_trailing_messages() {
         use octet_ai::{AssistantMessage, AssistantPart, ModelCatalog, ModelId, Protocol};
@@ -8720,6 +10042,53 @@ mod tests {
         assert_eq!(session.usage_records()[0].usage.total_tokens, 50_000);
     }
 
+    #[test]
+    fn repeated_delegated_uncertainty_mirroring_is_idempotent_and_keeps_known_subtotal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mirror.jsonl");
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut session = Session::create(&path).unwrap();
+        for pass in 0..3 {
+            assert_eq!(
+                mirror_delegated_uncertainty(&mut session, &model, true).unwrap(),
+                pass == 0
+            );
+            record_delegated_usage_once(
+                &mut session,
+                DelegatedUsage {
+                    agent_id: "child-1".into(),
+                    turn_count: 1,
+                    tool_call_count: 0,
+                    endpoint: model.endpoint.id.clone(),
+                    model: model.spec.id.clone(),
+                    usage: Usage {
+                        total_tokens: 10,
+                        input_tokens: 10,
+                        ..Usage::default()
+                    },
+                    cost: Some(octet_ai::Cost {
+                        input: 7,
+                        total: 7,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(session.usage_uncertainty_records().len(), 1);
+        assert_eq!(session.usage_records().len(), 1);
+        assert_eq!(session.total_cost_microdollars(), 7);
+        drop(session);
+        let mut session = Session::open(path).unwrap();
+        assert!(!mirror_delegated_uncertainty(&mut session, &model, true).unwrap());
+        assert!(session.has_uncertain_usage());
+        assert_eq!(session.usage_uncertainty_records().len(), 1);
+        assert_eq!(session.total_cost_microdollars(), 7);
+    }
+
     #[tokio::test]
     async fn abort_flag_wakes_waiters_and_stays_set() {
         let flag = Arc::new(AbortFlag::default());
@@ -8738,5 +10107,656 @@ mod tests {
             .await
             .expect("level-triggered wait");
         assert!(flag.is_set());
+    }
+}
+
+#[cfg(test)]
+mod inference_recovery_tests {
+    use super::*;
+
+    fn request() -> Request {
+        Request {
+            system: Some("system".into()),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(16),
+            temperature: None,
+            stop: Vec::new(),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: CacheRetention::default(),
+            session_id: None,
+        }
+    }
+
+    fn model() -> Model {
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Codex;
+        model
+    }
+
+    #[test]
+    fn qualification_uses_host_runtime_and_rejects_indeterminate_remote_options() {
+        let mut model = model();
+        let mut request = request();
+        assert!(qualified_inference_replacement(&model, &request));
+        Arc::make_mut(&mut model.spec).capabilities.responses_lite = true;
+        assert!(qualified_inference_replacement(&model, &request));
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Default;
+        assert!(!qualified_inference_replacement(&model, &request));
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Codex;
+        Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiChat;
+        assert!(!qualified_inference_replacement(&model, &request));
+        Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        for kind in [
+            "web_search_call",
+            "computer_call",
+            "mcp_call",
+            "future_effect",
+        ] {
+            request.responses = Some(ResponsesOptions::full_replay(
+                octet_ai::responses::ResponsesInput::new(vec![
+                    octet_ai::responses::ResponsesItem::new(serde_json::json!({"type": kind}))
+                        .unwrap(),
+                ]),
+            ));
+            assert!(!qualified_inference_replacement(&model, &request), "{kind}");
+        }
+        request.responses = Some(ResponsesOptions {
+            previous_response_id: Some("remote".into()),
+            ..Default::default()
+        });
+        assert!(!qualified_inference_replacement(&model, &request));
+        request.responses = Some(ResponsesOptions {
+            context_management: Some(serde_json::json!([])),
+            ..Default::default()
+        });
+        assert!(!qualified_inference_replacement(&model, &request));
+        request.responses = Some(ResponsesOptions {
+            store: true,
+            ..Default::default()
+        });
+        assert!(!qualified_inference_replacement(&model, &request));
+    }
+
+    #[test]
+    fn replacement_taxonomy_only_admits_explicit_transient_boundaries() {
+        for phase in [
+            octet_ai::TransportPhase::Body,
+            octet_ai::TransportPhase::ResponseHeaders,
+        ] {
+            for timeout in [true, false] {
+                let error = AiError::Transport(octet_ai::TransportError {
+                    phase,
+                    timeout,
+                    message: "interrupted".into(),
+                });
+                assert!(interrupted_inference_error(&error));
+                let recovery = PendingProviderRecovery {
+                    error,
+                    qualified: true,
+                    saw_generation: true,
+                    opened: true,
+                };
+                assert_eq!(recovery.replacement_limit(), MAX_INFERENCE_REPLACEMENTS);
+                assert!(recovery.usage_unknown());
+            }
+        }
+        for error in [
+            AiError::Decode(octet_ai::DecodeError::InvalidUtf8),
+            AiError::Decode(octet_ai::DecodeError::Json("broken".into())),
+            AiError::Decode(octet_ai::DecodeError::ResponseTooLarge),
+            AiError::Decode(octet_ai::DecodeError::TooManyStreamEvents),
+            AiError::StreamProtocol(octet_ai::StreamProtocolError::UnbalancedPart { index: 0 }),
+            AiError::StreamProtocol(octet_ai::StreamProtocolError::UnexpectedEvent("bad".into())),
+            AiError::Auth(octet_ai::AuthError::Resolve),
+            AiError::Canceled,
+            AiError::Provider(octet_ai::ProviderError {
+                code: Some("invalid_request_error".into()),
+                kind: None,
+                message: "please try again".into(),
+                request_id: None,
+            }),
+        ] {
+            assert!(!interrupted_inference_error(&error), "{error:?}");
+            let recovery = PendingProviderRecovery {
+                error,
+                qualified: true,
+                saw_generation: true,
+                opened: true,
+            };
+            assert_eq!(recovery.replacement_limit(), 0);
+        }
+        let failure = || {
+            AiError::Transport(octet_ai::TransportError {
+                phase: octet_ai::TransportPhase::Body,
+                timeout: false,
+                message: "reset".into(),
+            })
+        };
+        for saw_generation in [false, true] {
+            let recovery = PendingProviderRecovery {
+                error: failure(),
+                qualified: false,
+                saw_generation,
+                opened: true,
+            };
+            assert_eq!(recovery.replacement_limit(), 0);
+        }
+    }
+
+    #[test]
+    fn only_provider_stream_json_gets_qualified_parse_recovery() {
+        let wrap = |inner| AiError::StreamFailure {
+            inner: Box::new(inner),
+            progress: octet_ai::StreamProgress {
+                provider_events: 1,
+                decoded_events: 0,
+                content_bytes: 0,
+                buffered_bytes: 0,
+                first_body_seen: true,
+                elapsed_ms: 1,
+                last_event_ms: Some(1),
+            },
+        };
+        let malformed = wrap(AiError::Decode(octet_ai::DecodeError::Json(
+            "malformed provider frame".into(),
+        )));
+        assert!(interrupted_inference_error(&malformed));
+        assert!(interrupted_inference_error(&wrap(AiError::Decode(
+            octet_ai::DecodeError::InvalidUtf8
+        ))));
+        assert!(!interrupted_inference_error(&AiError::Decode(
+            octet_ai::DecodeError::InvalidUtf8
+        )));
+        assert_eq!(
+            PendingProviderRecovery {
+                error: malformed,
+                qualified: false,
+                saw_generation: true,
+                opened: true
+            }
+            .replacement_limit(),
+            0
+        );
+        for error in [
+            AiError::Decode(octet_ai::DecodeError::InvalidProviderField(
+                "usage overflow".into(),
+            )),
+            AiError::Decode(octet_ai::DecodeError::TooManyStreamEvents),
+            AiError::Decode(octet_ai::DecodeError::ResponseTooLarge),
+            AiError::StreamProtocol(octet_ai::StreamProtocolError::UnbalancedPart { index: 0 }),
+        ] {
+            assert!(!interrupted_inference_error(&wrap(error)));
+        }
+        assert!(!interrupted_inference_error(&AiError::Decode(
+            octet_ai::DecodeError::Json("local request serialization".into())
+        )));
+    }
+
+    #[test]
+    fn durable_uncertainty_blocks_later_token_and_cost_ceilings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("uncertain.jsonl");
+        let model = model();
+        let mut session = Session::create(&path).unwrap();
+        session
+            .record_usage_uncertainty(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                "assistant_turn",
+            )
+            .unwrap();
+        drop(session);
+        let session = Session::open(&path).unwrap();
+        assert!(matches!(
+            reserve_request_tokens(&session, 1, 1, Some(u64::MAX)),
+            Err(AgentError::UsageUncertain)
+        ));
+        assert!(matches!(
+            reserve_request_cost(&session, &model, 1, 1, Some(u64::MAX)),
+            Err(AgentError::UsageUncertain)
+        ));
+        assert!(reserve_request_tokens(&session, 1, 1, None).is_ok());
+        assert!(reserve_request_cost(&session, &model, 1, 1, None).is_ok());
+        for code in [
+            "usage_not_included",
+            "insufficient_quota",
+            "billing_hard_limit_reached",
+        ] {
+            let error = AiError::Provider(octet_ai::ProviderError {
+                code: Some(code.into()),
+                kind: Some("rate_limit_exceeded".into()),
+                message: "try again in 1s".into(),
+                request_id: None,
+            });
+            assert!(!interrupted_inference_error(&error));
+        }
+    }
+
+    #[test]
+    fn permanent_codes_and_generic_connect_errors_never_authorize_outage_waiting() {
+        let error = AiError::Provider(octet_ai::ProviderError {
+            code: Some("invalid_request_error".into()),
+            kind: Some("server_error".into()),
+            message: "please try again after timeout".into(),
+            request_id: None,
+        });
+        assert!(!retryable_stream_start(&error));
+        assert!(!interrupted_inference_error(&error));
+        assert!(!looks_like_context_error(&AiError::Decode(
+            octet_ai::DecodeError::Json("context_length_exceeded".into())
+        )));
+        let recovery = PendingProviderRecovery {
+            error: AiError::Transport(octet_ai::TransportError {
+                phase: octet_ai::TransportPhase::Connect,
+                timeout: false,
+                message: "invalid certificate".into(),
+            }),
+            qualified: true,
+            saw_generation: false,
+            opened: false,
+        };
+        assert!(!recovery.waiting_for_network());
+    }
+
+    #[test]
+    fn presend_credential_unavailability_has_no_unknown_billable_usage() {
+        for qualified in [false, true] {
+            let recovery = PendingProviderRecovery {
+                error: AiError::Auth(octet_ai::AuthError::Unavailable),
+                qualified,
+                saw_generation: false,
+                opened: false,
+            };
+            assert_eq!(
+                recovery.replacement_limit(),
+                if qualified { MAX_NETWORK_RETRIES } else { 0 }
+            );
+            assert!(!recovery.usage_unknown());
+        }
+    }
+
+    #[test]
+    fn retry_after_is_not_shortened_even_through_stream_failure_wrapper() {
+        let error = AiError::Http(octet_ai::HttpError {
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            request_id: None,
+            retry_after: Some(Duration::from_secs(120)),
+            provider_code: None,
+            body_snippet: None,
+            retryable: true,
+        });
+        assert_eq!(retry_after(&error, 0), Duration::from_secs(120));
+    }
+
+    struct StopRecovery;
+    #[async_trait::async_trait]
+    impl ProviderRetryHook for StopRecovery {
+        async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice {
+            assert_eq!(context.kind, ProviderRetryKind::InterruptedInference);
+            ProviderRetryAdvice::Stop
+        }
+    }
+
+    #[tokio::test]
+    async fn hard_token_ceiling_and_hook_veto_stop_interrupted_inference_before_replacement() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for hard_token_limit in [true, false] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("responses"))
+                .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: {\"type\":\"response.created\",\"response\":{\"id\":\"failed\"}}\n\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"interrupted\"}\n\n"))
+                .mount(&server).await;
+            let directory = tempfile::tempdir().unwrap();
+            let mut model = model();
+            Arc::make_mut(&mut model.endpoint).base_url =
+                url::Url::parse(&format!("{}/", server.uri())).unwrap();
+            Arc::make_mut(&mut model.endpoint).auth = octet_ai::Auth::bearer("synthetic");
+            let mut extensions = ExtensionHost::new();
+            if !hard_token_limit {
+                extensions.provider_retry_hook(StopRecovery);
+            }
+            let mut agent = Agent::new(AgentConfig {
+                client: AiClient::new(),
+                model,
+                session: Session::create(directory.path().join("session.jsonl")).unwrap(),
+                system: "system".into(),
+                sandbox: SandboxConfig::new(directory.path()),
+                effect_broker: EffectBroker::default(),
+                extensions,
+                max_turns: Some(1),
+                reasoning: ReasoningConfig::Off,
+                reasoning_mode: ReasoningMode::Standard,
+                cache_retention: CacheRetention::Short,
+                session_id: None,
+            })
+            .unwrap();
+            if hard_token_limit {
+                agent.set_max_session_tokens(Some(u64::MAX));
+            }
+            let error = agent.complete("finish").await.unwrap_err();
+            if hard_token_limit {
+                assert!(
+                    matches!(
+                        error,
+                        AgentError::ProviderRecovery {
+                            retries: 0,
+                            usage_unknown: true,
+                            ..
+                        }
+                    ),
+                    "{error:?}"
+                );
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sustained_network_recovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct OfflineTransport {
+        calls: AtomicUsize,
+        fail_until: usize,
+    }
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for OfflineTransport {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            _request: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.fail_until {
+                return Err(AiError::Auth(octet_ai::AuthError::Unavailable));
+            }
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content: vec![AssistantPart::Text("recovered".into())],
+                        model: model.id.clone(),
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn qualified_presend_outage_waits_beyond_finite_budget_and_is_cancellable() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Codex;
+        let client = AiClient::new();
+        let transport = Arc::new(OfflineTransport {
+            calls: AtomicUsize::new(0),
+            fail_until: usize::MAX,
+        });
+        client.register_host_stream_transport(model.endpoint.id.clone(), transport.clone());
+        let mut agent = Agent::new(AgentConfig {
+            client,
+            model,
+            session: Session::create(directory.path().join("session.jsonl")).unwrap(),
+            system: "system".into(),
+            sandbox: SandboxConfig::new(directory.path()),
+            effect_broker: EffectBroker::default(),
+            extensions: ExtensionHost::new(),
+            max_turns: Some(1),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: ReasoningMode::Standard,
+            cache_retention: CacheRetention::Short,
+            session_id: None,
+        })
+        .unwrap();
+        agent.set_max_session_tokens(Some(u64::MAX));
+        let mut run = agent.prompt("wait through the outage").await.unwrap();
+        let control = run.control();
+        let mut waits = 0;
+        let mut terminals = 0;
+        let started = tokio::time::Instant::now();
+        while let Some(event) = run.next().await {
+            match event {
+                AgentEvent::ProviderWaitingForNetwork { attempt, delay, .. } => {
+                    waits += 1;
+                    assert_eq!(attempt, waits);
+                    assert!((Duration::from_secs(4)..=Duration::from_secs(60)).contains(&delay));
+                    if waits == 20_200 {
+                        control.abort();
+                    }
+                }
+                AgentEvent::ProviderRetry { .. } => {
+                    panic!("pre-send waiting spent inference replacements")
+                }
+                AgentEvent::RunFinished { reason, .. } => {
+                    terminals += 1;
+                    assert!(matches!(reason, FinishReason::Aborted));
+                }
+                _ => {}
+            }
+        }
+        drop(run);
+        assert_eq!(terminals, 1);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), waits);
+        assert!(started.elapsed() > Duration::from_secs(14 * 24 * 60 * 60));
+        assert_eq!(agent.session().entries().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auxiliary_recovery_is_scoped_bounded_and_budget_conservative() {
+        use crate::events::ProviderOperation;
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        for operation in [
+            ProviderOperation::LocalCompaction,
+            ProviderOperation::NativeCompaction,
+            ProviderOperation::TerminalGate,
+        ] {
+            for hard_budget in [false, true] {
+                let (events, mut receiver) = mpsc::unbounded_channel();
+                let abort = AbortFlag::default();
+                let calls = AtomicUsize::new(0);
+                let directory = tempfile::tempdir().unwrap();
+                let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+                let result = recover_auxiliary(
+                    AuxiliaryRecovery {
+                        session: &mut session,
+                        run_id: "auxiliary-test",
+                        resource_owner: "auxiliary-test",
+                        retry_hooks: &[],
+                        max_network_wait: None,
+                        model: &model,
+                        qualified: true,
+                        enabled: true,
+                        hard_budget,
+                        abort: &abort,
+                        events: &events,
+                        operation,
+                        session_id: "auxiliary-test",
+                    },
+                    |_deadline| {
+                        let call = calls.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            if call == 0 {
+                                Err(AiError::StreamProtocol(
+                                    octet_ai::StreamProtocolError::PrematureEof,
+                                )
+                                .into())
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    },
+                )
+                .await;
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Ok(AgentEvent::ProviderUsageUncertain)
+                ));
+                if hard_budget {
+                    assert!(matches!(
+                        result,
+                        Err(AgentError::ProviderRecovery {
+                            retries: 0,
+                            usage_unknown: true,
+                            ..
+                        })
+                    ));
+                    assert!(receiver.try_recv().is_err());
+                } else {
+                    assert!(result.is_ok());
+                    assert!(
+                        matches!(receiver.try_recv().unwrap(), AgentEvent::ProviderOperationRetry { operation: observed, max_attempts: Some(11), .. } if observed == operation)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auxiliary_network_wait_obeys_host_outage_limit() {
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let abort = AbortFlag::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let result: Result<(), _> = recover_auxiliary(
+            AuxiliaryRecovery {
+                session: &mut session,
+                run_id: "auxiliary-test",
+                resource_owner: "auxiliary-test",
+                retry_hooks: &[],
+                max_network_wait: Some(Duration::from_secs(1)),
+                model: &model,
+                qualified: true,
+                enabled: true,
+                hard_budget: true,
+                abort: &abort,
+                events: &events,
+                operation: crate::events::ProviderOperation::LocalCompaction,
+                session_id: "bounded",
+            },
+            |_deadline| async { Err(AiError::Auth(octet_ai::AuthError::Unavailable).into()) },
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::NetworkWaitLimit { .. })));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AgentEvent::ProviderOperationRetry { .. })
+        ));
+    }
+
+    #[test]
+    fn network_backoff_is_bounded_and_jittered_even_after_counter_saturation() {
+        for attempt in [0, 1, 2, 3, 100, usize::MAX] {
+            let delay = network_wait_delay("run-a", attempt);
+            assert!((Duration::from_secs(4)..=Duration::from_secs(60)).contains(&delay));
+        }
+        assert_ne!(
+            network_wait_delay("run-a", 0),
+            network_wait_delay("run-b", 0)
+        );
+    }
+
+    #[test]
+    fn typed_unknown_failed_and_all_5xx_require_qualified_replacement_authority() {
+        for qualified in [false, true] {
+            let provider = || octet_ai::ProviderError {
+                code: Some("future_unknown_reason".into()),
+                kind: None,
+                message: "unknown".into(),
+                request_id: None,
+            };
+            for (error, expected) in [
+                (
+                    AiError::ResponsesFailed(provider()),
+                    if qualified { 11 } else { 0 },
+                ),
+                (AiError::Provider(provider()), 0),
+                (
+                    AiError::Http(octet_ai::HttpError {
+                        status: http::StatusCode::from_u16(520).unwrap(),
+                        request_id: None,
+                        retry_after: None,
+                        provider_code: None,
+                        body_snippet: None,
+                        retryable: false,
+                    }),
+                    if qualified { 29 } else { 0 },
+                ),
+            ] {
+                let recovery = PendingProviderRecovery {
+                    error,
+                    qualified,
+                    saw_generation: false,
+                    opened: true,
+                };
+                assert_eq!(recovery.replacement_limit(), expected);
+                assert!(recovery.usage_unknown());
+            }
+        }
+    }
+
+    #[test]
+    fn permanent_response_codes_veto_context_sounding_text_and_preserve_rate_hints() {
+        for code in [
+            "cyber_policy",
+            "bio_policy",
+            "invalid_prompt",
+            "misalignment_policy_violation",
+            "server_is_overloaded",
+            "slow_down",
+            "invalid_api_key",
+            "insufficient_quota",
+        ] {
+            let error = AiError::ResponsesFailed(octet_ai::ProviderError {
+                code: Some(code.into()),
+                kind: Some("context_length_exceeded".into()),
+                message: "context length exceeded; try again in 1s".into(),
+                request_id: None,
+            });
+            assert!(!looks_like_context_error(&error), "{code}");
+            assert!(!interrupted_inference_error(&error), "{code}");
+            assert!(!retryable_stream_start(&error), "{code}");
+        }
+        let error = AiError::ResponsesFailed(octet_ai::ProviderError {
+            code: Some("rate_limit_exceeded".into()),
+            kind: None,
+            message: "try again in 11054ms".into(),
+            request_id: None,
+        });
+        assert_eq!(retry_after(&error, 0), Duration::from_millis(11054));
     }
 }

@@ -332,6 +332,10 @@ struct ResponsesConnectionLimitServer {
 
 impl ResponsesConnectionLimitServer {
     async fn start() -> Self {
+        Self::with_http_failures(0).await
+    }
+
+    async fn with_http_failures(http_failures: usize) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let websocket_requests = Arc::new(AtomicUsize::new(0));
@@ -352,6 +356,7 @@ impl ResponsesConnectionLimitServer {
                                 stream,
                                 websocket_count,
                                 http_count,
+                                http_failures,
                             )
                             .await;
                         });
@@ -380,6 +385,7 @@ async fn handle_responses_connection_limit(
     mut stream: TcpStream,
     websocket_requests: Arc<AtomicUsize>,
     http_requests: Arc<AtomicUsize>,
+    http_failures: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0_u8; 4096];
     let count = stream.peek(&mut peek).await?;
@@ -424,14 +430,21 @@ async fn handle_responses_connection_limit(
             break;
         }
     }
-    http_requests.fetch_add(1, Ordering::SeqCst);
-    let body = concat!(
+    let attempt = http_requests.fetch_add(1, Ordering::SeqCst);
+    let completed_body = concat!(
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"http-response\"}}\n\n",
         "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\"}}\n\n",
         "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"recovered\"}\n\n",
         "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0}\n\n",
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"http-response\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n"
     );
+    let failed_body =
+        interrupted_responses_prefix("text") + &recovery_provider_error("server_error");
+    let body = if attempt < http_failures {
+        failed_body.as_str()
+    } else {
+        completed_body
+    };
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
@@ -7390,5 +7403,1978 @@ async fn real_read_tool_images_are_owner_opt_in_and_observers_stay_stripped() {
                     ))
                 ))
             )));
+    }
+}
+
+// #350: explicitly host-qualified Codex runtime, with all effects still local.
+fn recovery_codex_model(uri: &str) -> Model {
+    let mut model = scripted_responses_model(uri);
+    Arc::make_mut(&mut model.spec).pricing = Some(Pricing {
+        input: TokenRate(1),
+        output: TokenRate(1),
+        cache_read: TokenRate(1),
+        cache_write_5m: TokenRate(1),
+        cache_write_1h: None,
+        reasoning: None,
+        tiers: vec![],
+    });
+    Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+        octet_ai::ResponsesRuntimeProfile::Codex;
+    model
+}
+
+fn interrupted_responses_prefix(kind: &str) -> String {
+    let body = match kind {
+        "tool" => responses_tool_turn("failed", "failed-call"),
+        "reasoning" => {
+            include_str!("../../octet-ai/tests/fixtures/openai_responses/reasoning_summary.sse")
+                .to_owned()
+        }
+        _ => responses_text_turn(
+            "failed",
+            "discarded provisional text",
+            "response.completed",
+            "failed-opaque",
+        ),
+    };
+    body.lines()
+        .take_while(|line| !line.contains("\"type\":\"response.completed\""))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+fn recovery_provider_error(code: &str) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "type": "error", "code": code, "message": "synthetic provider interruption",
+            "request_id": "recovery-request"
+        })
+    )
+}
+
+async fn recovery_harness(bodies: Vec<String>) -> (Agent, MockServer, tempfile::TempDir, PathBuf) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Script {
+            bodies,
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let session_path = workspace.path().join("session.jsonl");
+    std::fs::write(workspace.path().join("lifecycle.txt"), "local result").unwrap();
+    let agent = build_responses_agent_from_session(
+        recovery_codex_model(&server.uri()),
+        Session::create(&session_path).unwrap(),
+        workspace.path(),
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    (agent, server, workspace, session_path)
+}
+
+#[tokio::test]
+async fn qualified_codex_interrupted_text_reasoning_and_provisional_tool_replace_before_commit() {
+    for kind in ["text", "reasoning", "tool"] {
+        let (mut agent, server, _workspace, session_path) = recovery_harness(vec![
+            interrupted_responses_prefix(kind) + &recovery_provider_error("server_error"),
+            responses_tool_turn("accepted", "accepted-call"),
+            responses_text_turn(
+                "final",
+                "successful answer",
+                "response.completed",
+                "accepted-opaque",
+            ),
+        ])
+        .await;
+        let mut run = agent.prompt("finish the work automatically").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        assert!(
+            matches!(assert_single_run_finished(&events), FinishReason::Completed),
+            "{kind}: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ProviderRetry { .. }))
+                .count(),
+            1,
+            "{kind}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+                .count(),
+            1,
+            "{kind}"
+        );
+        let requests = wire_requests(&server).await;
+        assert_eq!(requests.len(), 3, "{kind}");
+        let replacement = requests[1].to_string();
+        assert!(!replacement.contains("failed-call"));
+        assert!(!replacement.contains("discarded provisional text"));
+        assert!(!replacement.contains("Planning briefly."));
+        drop(agent);
+        let durable = std::fs::read_to_string(session_path).unwrap();
+        assert!(!durable.contains("failed-call"));
+        assert!(!durable.contains("discarded provisional text"));
+        assert!(!durable.contains("Planning briefly."));
+        assert!(!durable.contains("previous provider turn failed"));
+    }
+}
+
+#[tokio::test]
+async fn qualified_codex_premature_eof_replaces_without_user_prompt() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("text"),
+        responses_text_turn("ok", "recovered", "response.completed", "accepted"),
+    ])
+    .await;
+    assert_eq!(agent.complete("finish").await.unwrap().text, "recovered");
+    assert_eq!(wire_requests(&server).await.len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_codex_exhaustion_is_finite_and_reports_unknown_usage_and_replacements() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+    ])
+    .await;
+    let mut run = agent.prompt("finish").await.unwrap();
+    let events = collect_virtual_recovery(&mut run).await;
+    drop(run);
+    let FinishReason::Failed(error) = assert_single_run_finished(&events) else {
+        panic!("{events:?}")
+    };
+    assert!(matches!(
+        error,
+        octet_agent::AgentError::ProviderRecovery {
+            retries: 11,
+            usage_unknown: true,
+            ..
+        }
+    ));
+    let diagnostic = octet_agent::public_error_diagnostic(error, "codex", "model");
+    assert!(diagnostic.contains("replacements=11"), "{diagnostic}");
+    assert!(diagnostic.contains("failed_usage=unknown"), "{diagnostic}");
+    assert!(!diagnostic.contains("did not replay"));
+    assert_eq!(wire_requests(&server).await.len(), 12);
+}
+
+#[tokio::test]
+async fn qualified_codex_permanent_failures_do_not_replace() {
+    for error in [
+        recovery_provider_error("invalid_api_key"),
+        recovery_provider_error("invalid_request_error"),
+    ] {
+        let (mut agent, server, _workspace, _) = recovery_harness(vec![
+            interrupted_responses_prefix("text") + &error,
+            responses_text_turn("no", "must not replay", "response.completed", "no"),
+        ])
+        .await;
+        let mut run = agent.prompt("finish").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        assert!(matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Failed(_)
+        ));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ProviderRetry { .. })));
+        assert_eq!(wire_requests(&server).await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn qualified_codex_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+        responses_text_turn("no", "must not replay", "response.completed", "no"),
+    ])
+    .await;
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    let mut run = agent.prompt("bounded spending").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Failed(octet_agent::AgentError::ProviderRecovery {
+                retries: 0,
+                usage_unknown: true,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 1);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ProviderRetry { .. })));
+}
+
+#[tokio::test]
+async fn qualified_codex_replacement_wait_is_cancellable_without_tool_effects() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("tool") + &recovery_provider_error("server_error"),
+        responses_tool_turn("no", "never-execute"),
+    ])
+    .await;
+    let mut run = agent.prompt("cancel recovery").await.unwrap();
+    let control = run.control();
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        if matches!(event, AgentEvent::ProviderRetry { .. }) {
+            control.abort();
+        }
+        events.push(event);
+    }
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Aborted
+    ));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolStarted { .. })));
+    assert_eq!(wire_requests(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn qualified_codex_replacement_prepares_steering_and_finish_now_exactly_once() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("tool") + &recovery_provider_error("server_error"),
+        responses_text_turn(
+            "ok",
+            "finished without tools",
+            "response.completed",
+            "accepted",
+        ),
+    ])
+    .await;
+    let mut run = agent.prompt("finish my work").await.unwrap();
+    let control = run.control();
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        if matches!(event, AgentEvent::ProviderRetry { .. }) {
+            control.steer("new steering sentinel").await.unwrap();
+            control.finish_now("finish now sentinel").await.unwrap();
+        }
+        events.push(event);
+    }
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolStarted { .. })));
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0]["tools"].as_array().unwrap().is_empty());
+    assert!(requests[1]["tools"].as_array().is_none_or(Vec::is_empty));
+    assert_eq!(requests[1]["tool_choice"], "none");
+    let replacement = requests[1].to_string();
+    assert_eq!(replacement.matches("new steering sentinel").count(), 1);
+    assert_eq!(replacement.matches("finish now sentinel").count(), 1);
+    let delivered: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::SteeringDelivered { messages } => Some(messages.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delivered, [2]);
+}
+
+#[tokio::test]
+async fn qualified_codex_recovery_preserves_committed_mutations_without_replaying_effects() {
+    let mutation = |body: String| {
+        body.replace(r#""name":"read""#, r#""name":"bash""#)
+            .replace(
+                r#"{\"path\":\"lifecycle.txt\"}"#,
+                r#"{\"command\":\"printf x >> effects.txt\"}"#,
+            )
+    };
+    let (mut agent, server, workspace, session_path) = recovery_harness(vec![
+        mutation(responses_tool_turn("prior", "committed-call")),
+        mutation(interrupted_responses_prefix("tool")) + &recovery_provider_error("server_error"),
+        mutation(responses_tool_turn("accepted", "accepted-call")),
+        responses_text_turn("final", "effects settled", "response.completed", "accepted"),
+    ])
+    .await;
+    let mut run = agent.prompt("do the two local mutations").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("effects.txt")).unwrap(),
+        "xx"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(wire_requests(&server).await.len(), 4);
+    drop(agent);
+    assert!(!std::fs::read_to_string(session_path)
+        .unwrap()
+        .contains("failed-call"));
+}
+
+#[tokio::test]
+async fn qualified_codex_disabled_retries_remain_terminal() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+    ])
+    .await;
+    agent.set_provider_retries_enabled(false);
+    let mut run = agent.prompt("no retry").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Failed(_)
+    ));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ProviderRetry { .. })));
+    assert_eq!(wire_requests(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn qualified_codex_body_disconnect_recovers_in_the_same_run() {
+    let (uri, calls) = interrupted_body_server(
+        interrupted_responses_prefix("text"),
+        responses_text_turn("ok", "recovered", "response.completed", "accepted"),
+    )
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let mut agent = build_responses_agent_from_session(
+        recovery_codex_model(&uri),
+        Session::create(workspace.path().join("session.jsonl")).unwrap(),
+        workspace.path(),
+        Some(1),
+        "system",
+        ReasoningConfig::Off,
+    );
+    assert_eq!(agent.complete("finish").await.unwrap().text, "recovered");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn qualified_codex_terminal_gate_recovery_does_not_discard_main_answer() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        responses_text_turn("main", "accepted main answer", "response.completed", "main"),
+        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+        responses_text_turn("gate", "R", "response.completed", "gate"),
+    ])
+    .await;
+    agent.set_completion_policy(CompletionPolicy::TerminalGate);
+    let mut run = agent.prompt("complete and verify").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderOperationRetry {
+            operation: octet_agent::ProviderOperation::TerminalGate,
+            attempt: 1,
+            max_attempts: Some(11),
+            ..
+        }
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
+    assert_eq!(wire_requests(&server).await.len(), 3);
+}
+
+// Keep Tokio from auto-advancing provider I/O deadlines while the loopback
+// server is scheduled by the OS. Only observed retry delays advance the clock.
+async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEvent> {
+    let runnable = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let mut delay = None;
+    let mut events = Vec::new();
+    loop {
+        let next = run.next();
+        tokio::pin!(next);
+        if let Some(wait) = delay.take() {
+            assert!(futures_util::poll!(&mut next).is_pending());
+            tokio::time::advance(wait).await;
+        }
+        let Some(event) = next.await else { break };
+        delay = match &event {
+            AgentEvent::ProviderRetry { delay, .. }
+            | AgentEvent::ProviderWaitingForNetwork { delay, .. }
+            | AgentEvent::ProviderOperationRetry { delay, .. } => Some(*delay),
+            _ => None,
+        };
+        events.push(event);
+    }
+    runnable.abort();
+    events
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_codex_four_eofs_then_success_preserves_unknown_usage() {
+    let mut bodies = vec![interrupted_responses_prefix("text"); 4];
+    bodies.push(responses_text_turn(
+        "ok",
+        "recovered",
+        "response.completed",
+        "accepted",
+    ));
+    let (mut agent, server, workspace, session_path) = recovery_harness(bodies).await;
+    let mut run = agent.prompt("finish").await.unwrap();
+    let events = collect_virtual_recovery(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 5);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 4);
+    drop(agent);
+    let mut agent = build_responses_agent_from_session(
+        recovery_codex_model(&server.uri()),
+        Session::open(&session_path).unwrap(),
+        workspace.path(),
+        Some(4),
+        "system",
+        ReasoningConfig::Off,
+    );
+    let mut run = agent.prompt("later turn").await.unwrap();
+    assert!(matches!(
+        run.next().await,
+        Some(AgentEvent::ProviderUsageUncertain)
+    ));
+    drop(run);
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert!(matches!(
+        agent.complete("bounded later turn").await,
+        Err(octet_agent::AgentError::UsageUncertain)
+    ));
+    assert_eq!(wire_requests(&server).await.len(), 5);
+}
+
+struct OutageAfterFirstRequest {
+    calls: AtomicUsize,
+    offline_attempts: usize,
+}
+#[async_trait::async_trait]
+impl octet_ai::CredentialResolver for OutageAfterFirstRequest {
+    async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if (1..=self.offline_attempts).contains(&call) {
+            return Err(octet_ai::AuthError::Unavailable);
+        }
+        Ok(octet_ai::ResolvedCredential {
+            scheme: octet_ai::CredentialScheme::Bearer,
+            value: "synthetic".into(),
+            extra_headers: http::HeaderMap::new(),
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_codex_ws_http_cumulative_twelve_attempt_envelope() {
+    for failures in [10, 11] {
+        let server = ResponsesConnectionLimitServer::with_http_failures(failures).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let mut model = recovery_codex_model(&server.base_url);
+        let auth = Arc::new(OutageAfterFirstRequest {
+            calls: AtomicUsize::new(0),
+            offline_attempts: 20_200,
+        });
+        Arc::make_mut(&mut model.endpoint).auth = Auth::dynamic(auth.clone());
+        Arc::make_mut(&mut model.endpoint).transport =
+            octet_ai::EndpointTransport::WebSocketPreferred;
+        let mut agent = build_responses_agent_from_session(
+            model,
+            Session::create(workspace.path().join("session.jsonl")).unwrap(),
+            workspace.path(),
+            Some(1),
+            "system",
+            ReasoningConfig::Off,
+        );
+        let start = tokio::time::Instant::now();
+        let mut run = agent.prompt("recover").await.unwrap();
+        let events = collect_virtual_recovery(&mut run).await;
+        drop(run);
+        let result = assert_single_run_finished(&events);
+        if failures == 10 {
+            assert!(matches!(result, FinishReason::Completed), "{events:?}");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    FinishReason::Failed(octet_agent::AgentError::ProviderRecovery {
+                        retries: 11,
+                        ..
+                    })
+                ),
+                "{events:?}"
+            );
+        }
+        assert_eq!(server.websocket_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(server.http_requests.load(Ordering::SeqCst), 11);
+        assert!(agent.session().has_uncertain_usage());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ProviderWaitingForNetwork { .. }))
+                .count(),
+            20_200
+        );
+        assert!(start.elapsed() > Duration::from_secs(14 * 24 * 60 * 60));
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 20_212);
+    }
+}
+
+// Operation-callsite tests use the same public transport adapter as embedders,
+// with explicit virtual-time body delays rather than a live-provider claim.
+enum RecoveryStep {
+    GateControl(Arc<std::sync::Mutex<Option<RunControl>>>, u8),
+    Opening(octet_ai::TransportPhase),
+    HoldOpening,
+    Http(u16),
+    Offline,
+    Interrupted,
+    Reply(&'static str, Duration),
+}
+struct OperationRecoveryTransport {
+    steps: std::sync::Mutex<std::collections::VecDeque<RecoveryStep>>,
+    requests: std::sync::Mutex<Vec<octet_ai::Request>>,
+}
+#[async_trait::async_trait]
+impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
+    async fn stream(
+        &self,
+        model: octet_ai::HostStreamModel,
+        request: octet_ai::Request,
+        _: Vec<octet_ai::Diagnostic>,
+    ) -> Result<octet_ai::ResponseStream, octet_ai::AiError> {
+        self.requests.lock().unwrap().push(request);
+        let step = self
+            .steps
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected provider attempt");
+        match step {
+            RecoveryStep::HoldOpening => std::future::pending().await,
+            RecoveryStep::GateControl(holder, kind) => Ok(Box::pin(async_stream::stream! {
+                yield Ok(octet_ai::StreamEvent::Started { response_id: None });
+                let control = { holder.lock().unwrap().take().unwrap() };
+                submit_gate_boundary_control(&control, kind).await;
+                yield Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage { content: vec![AssistantPart::Text("R".into())], model: model.id, protocol: model.protocol },
+                    stop_reason: octet_ai::StopReason::EndTurn, usage: octet_ai::Usage::default(),
+                    cost: None, response_id: None, responses_output: None, diagnostics: Vec::new(),
+                }));
+            })),
+            RecoveryStep::Opening(phase) => {
+                Err(octet_ai::AiError::Transport(octet_ai::TransportError {
+                    phase,
+                    timeout: false,
+                    message: "synthetic opening failure".into(),
+                }))
+            }
+            RecoveryStep::Http(status) => Err(octet_ai::AiError::Http(octet_ai::HttpError {
+                status: http::StatusCode::from_u16(status).unwrap(),
+                request_id: None,
+                retry_after: None,
+                provider_code: Some("server_error".into()),
+                body_snippet: None,
+                retryable: true,
+            })),
+            RecoveryStep::Offline => Err(octet_ai::AiError::Auth(octet_ai::AuthError::Unavailable)),
+            RecoveryStep::Interrupted => Ok(Box::pin(futures_util::stream::iter([
+                Ok(octet_ai::StreamEvent::Started { response_id: None }),
+                Err(octet_ai::AiError::StreamProtocol(
+                    octet_ai::StreamProtocolError::PrematureEof,
+                )),
+            ]))),
+            RecoveryStep::Reply(text, delay) => Ok(Box::pin(async_stream::stream! {
+                yield Ok(octet_ai::StreamEvent::Started { response_id: None });
+                tokio::time::sleep(delay).await;
+                yield Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage { content: vec![AssistantPart::Text(text.into())], model: model.id, protocol: model.protocol },
+                    stop_reason: octet_ai::StopReason::EndTurn,
+                    usage: octet_ai::Usage::default(), cost: None, response_id: None,
+                    responses_output: None, diagnostics: Vec::new(),
+                }));
+            })),
+        }
+    }
+}
+fn operation_recovery_agent(
+    steps: Vec<RecoveryStep>,
+    extensions: ExtensionHost,
+) -> (Agent, Arc<OperationRecoveryTransport>, tempfile::TempDir) {
+    let transport = Arc::new(OperationRecoveryTransport {
+        steps: std::sync::Mutex::new(steps.into()),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let model = recovery_codex_model("http://127.0.0.1:1/");
+    let client = AiClient::new();
+    client.register_host_stream_transport(model.endpoint.id.clone(), transport.clone());
+    let workspace = tempfile::tempdir().unwrap();
+    let agent = Agent::new(AgentConfig {
+        client,
+        model,
+        session: Session::create(workspace.path().join("session.jsonl")).unwrap(),
+        system: "system".into(),
+        sandbox: SandboxConfig::new(workspace.path()),
+        effect_broker: EffectBroker::default(),
+        extensions,
+        max_turns: Some(4),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    (agent, transport, workspace)
+}
+
+#[tokio::test(start_paused = true)]
+async fn auxiliary_gate_healthy_reconnected_body_outlives_outage_deadline() {
+    let (mut agent, transport, _workspace) = operation_recovery_agent(
+        vec![
+            RecoveryStep::Reply("candidate", Duration::ZERO),
+            RecoveryStep::Offline,
+            RecoveryStep::Reply("R", Duration::from_secs(30)),
+        ],
+        ExtensionHost::new(),
+    );
+    agent.set_completion_policy(CompletionPolicy::TerminalGate);
+    agent.set_max_network_wait(Some(Duration::from_secs(10)));
+    let start = tokio::time::Instant::now();
+    let result = agent.complete("finish").await.unwrap();
+    assert!(matches!(result.reason, FinishReason::Completed));
+    assert!(start.elapsed() >= Duration::from_secs(34));
+    assert_eq!(transport.requests.lock().unwrap().len(), 3);
+    assert!(!agent.session().has_uncertain_usage());
+}
+
+#[tokio::test(start_paused = true)]
+async fn auxiliary_gate_services_more_than_channel_capacity_and_delivers_before_return() {
+    let (mut agent, transport, _workspace) = operation_recovery_agent(
+        vec![
+            RecoveryStep::Reply("candidate", Duration::ZERO),
+            RecoveryStep::Offline,
+            RecoveryStep::Reply("R", Duration::from_secs(30)),
+            RecoveryStep::Reply("steered", Duration::ZERO),
+            RecoveryStep::Reply("followed up", Duration::ZERO),
+            RecoveryStep::Reply("R", Duration::ZERO),
+        ],
+        ExtensionHost::new(),
+    );
+    agent.set_completion_policy(CompletionPolicy::TerminalGate);
+    let mut run = agent.prompt("finish").await.unwrap();
+    let control = run.control();
+    let mut sender = None;
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        if matches!(event, AgentEvent::ProviderOperationRetry { .. }) {
+            let control = control.clone();
+            sender = Some(tokio::spawn(async move {
+                for index in 0..12 {
+                    control
+                        .steer(format!("aux-steer-{index}-sentinel"))
+                        .await
+                        .unwrap();
+                }
+                control.follow_up("aux-followup-sentinel").await.unwrap();
+                control.finish_now("aux-finish-sentinel").await.unwrap();
+            }));
+        }
+        events.push(event);
+    }
+    sender.unwrap().await.unwrap();
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    let delivered: usize = events
+        .iter()
+        .map(|event| match event {
+            AgentEvent::SteeringDelivered { messages }
+            | AgentEvent::FollowUpDelivered { messages } => messages.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(delivered, 14);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    for request in requests.iter().skip(3) {
+        assert!(request.tools.is_empty());
+        assert_eq!(request.tool_choice, octet_ai::ToolChoice::None);
+    }
+    let durable = std::fs::read_to_string(agent.session().path()).unwrap();
+    for index in 0..12 {
+        assert_eq!(
+            durable
+                .matches(&format!("aux-steer-{index}-sentinel"))
+                .count(),
+            1
+        );
+    }
+}
+
+struct AuxiliaryRetryAdvice(octet_agent::ProviderRetryAdvice);
+#[async_trait::async_trait]
+impl octet_agent::ProviderRetryHook for AuxiliaryRetryAdvice {
+    async fn provider_retry(
+        &self,
+        context: &octet_agent::ProviderRetryContext,
+    ) -> octet_agent::ProviderRetryAdvice {
+        assert_eq!(
+            context.operation,
+            Some(octet_agent::ProviderOperation::TerminalGate)
+        );
+        assert_eq!(context.max_attempts, Some(11));
+        assert!(context.run_id.starts_with("run:"));
+        self.0
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn auxiliary_gate_retry_hook_stop_and_bounded_delay_are_honored() {
+    for stop in [true, false] {
+        let mut extensions = ExtensionHost::new();
+        extensions.provider_retry_hook(AuxiliaryRetryAdvice(if stop {
+            octet_agent::ProviderRetryAdvice::Stop
+        } else {
+            octet_agent::ProviderRetryAdvice::Delay {
+                additional: Duration::from_secs(500),
+            }
+        }));
+        let (mut agent, transport, _workspace) = operation_recovery_agent(
+            vec![
+                RecoveryStep::Reply("candidate", Duration::ZERO),
+                RecoveryStep::Interrupted,
+                RecoveryStep::Reply("R", Duration::ZERO),
+            ],
+            extensions,
+        );
+        agent.set_completion_policy(CompletionPolicy::TerminalGate);
+        let start = tokio::time::Instant::now();
+        let result = agent.complete("finish").await;
+        assert_eq!(result.is_err(), stop, "{result:?}");
+        assert_eq!(
+            transport.requests.lock().unwrap().len(),
+            if stop { 2 } else { 3 }
+        );
+        if !stop {
+            assert!(start.elapsed() >= Duration::from_secs(5));
+            assert!(start.elapsed() < Duration::from_secs(6));
+        }
+        assert!(agent.session().has_uncertain_usage());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn main_and_auxiliary_outage_limit_waits_until_actual_deadline() {
+    for auxiliary in [false, true] {
+        let mut steps = Vec::new();
+        if auxiliary {
+            steps.push(RecoveryStep::Reply("candidate", Duration::ZERO));
+        }
+        steps.push(RecoveryStep::Offline);
+        let (mut agent, transport, _workspace) =
+            operation_recovery_agent(steps, ExtensionHost::new());
+        if auxiliary {
+            agent.set_completion_policy(CompletionPolicy::TerminalGate);
+        }
+        agent.set_max_network_wait(Some(Duration::from_secs(1)));
+        let start = tokio::time::Instant::now();
+        assert!(matches!(
+            agent.complete("finish").await,
+            Err(octet_agent::AgentError::NetworkWaitLimit { .. })
+        ));
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        assert_eq!(
+            transport.requests.lock().unwrap().len(),
+            if auxiliary { 2 } else { 1 }
+        );
+        assert!(!agent.session().has_uncertain_usage());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_codex_postgeneration_rate_limit_honors_retry_hint() {
+    let error = "data: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"Please try again in 11.054s.\"}\n\n";
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("text") + error,
+        responses_text_turn("ok", "recovered", "response.completed", "accepted"),
+    ])
+    .await;
+    let mut run = agent.prompt("finish").await.unwrap();
+    let events = collect_virtual_recovery(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::ProviderRetry { delay, .. } if *delay == Duration::from_millis(11_054))));
+    assert_eq!(wire_requests(&server).await.len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn auxiliary_local_compaction_recovery_delivers_held_controls_before_main_request() {
+    let (mut agent, transport, workspace) = operation_recovery_agent(
+        vec![
+            RecoveryStep::Offline,
+            RecoveryStep::Reply("compacted summary", Duration::from_secs(30)),
+            RecoveryStep::Reply("answer", Duration::ZERO),
+        ],
+        ExtensionHost::new(),
+    );
+    agent
+        .replace_session_at_idle(session_with_authoritative_pressure(
+            &workspace.path().join("pressure.jsonl"),
+            180_000,
+        ))
+        .unwrap();
+    agent
+        .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
+        .unwrap();
+    agent.set_max_network_wait(Some(Duration::from_secs(10)));
+    let mut run = agent.prompt("new work").await.unwrap();
+    let control = run.control();
+    let mut events = Vec::new();
+    let mut sender = None;
+    while let Some(event) = run.next().await {
+        if matches!(
+            event,
+            AgentEvent::ProviderOperationRetry {
+                operation: octet_agent::ProviderOperation::LocalCompaction,
+                ..
+            }
+        ) {
+            let control = control.clone();
+            sender = Some(tokio::spawn(async move {
+                for index in 0..12 {
+                    control
+                        .steer(format!("compact-steer-{index}-sentinel"))
+                        .await
+                        .unwrap();
+                }
+                control.finish_now("compact-finish-sentinel").await.unwrap();
+            }));
+        }
+        events.push(event);
+    }
+    sender.expect("compaction was retried").await.unwrap();
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert_eq!(
+        agent
+            .session()
+            .usage_records()
+            .iter()
+            .filter(|record| matches!(record.kind, UsageRecordKind::Compaction))
+            .count(),
+        1
+    );
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let main = serde_json::to_string(&requests[2].messages).unwrap();
+    for index in 0..12 {
+        assert_eq!(
+            main.matches(&format!("compact-steer-{index}-sentinel"))
+                .count(),
+            1
+        );
+    }
+    assert!(requests[2].tools.is_empty());
+    assert_eq!(requests[2].tool_choice, octet_ai::ToolChoice::None);
+}
+
+struct CompactRejectedOnce(AtomicUsize);
+impl wiremock::Respond for CompactRejectedOnce {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(503)
+                .set_body_json(serde_json::json!({"error": {"code": "server_error"}}))
+        } else {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "output": [{"type": "compaction", "id": "compact-checkpoint", "encrypted_content": "opaque-checkpoint"}],
+                "usage": {"input_tokens": 10, "output_tokens": 2}
+            }))
+        }
+    }
+}
+#[tokio::test]
+async fn manual_native_compaction_uses_safe_recovery_before_one_checkpoint() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![responses_text_turn(
+        "main",
+        "prior answer",
+        "response.completed",
+        "main-opaque",
+    )])
+    .await;
+    Mock::given(method("POST"))
+        .and(path("responses/compact"))
+        .respond_with(CompactRejectedOnce(AtomicUsize::new(0)))
+        .expect(2)
+        .mount(&server)
+        .await;
+    agent.complete("initial task").await.unwrap();
+    let result = agent.compact_responses_native().await.unwrap();
+    assert!(matches!(
+        result.kind,
+        octet_agent::CompactionKind::NativeResponses { .. }
+    ));
+    assert_eq!(
+        agent
+            .session()
+            .usage_records()
+            .iter()
+            .filter(|record| matches!(record.kind, UsageRecordKind::Compaction))
+            .count(),
+        1
+    );
+    assert!(agent.session().has_uncertain_usage());
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[1], requests[2],
+        "immutable native snapshot must survive recovery"
+    );
+}
+
+struct HttpAdmissionScript {
+    status: u16,
+    http_failures: usize,
+    eof_failures: usize,
+    calls: AtomicUsize,
+}
+impl wiremock::Respond for HttpAdmissionScript {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < self.http_failures {
+            ResponseTemplate::new(self.status).set_body_json(serde_json::json!({"error": {"code": "server_error", "message": "gateway unavailable"}}))
+        } else if call < self.http_failures + self.eof_failures {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(interrupted_responses_prefix("text"))
+        } else {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_text_turn(
+                    "ok",
+                    "recovered",
+                    "response.completed",
+                    "accepted",
+                ))
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_http_admission_and_stream_budgets_are_independent_and_cumulatively_finite() {
+    for status in [503, 520] {
+        for (http_failures, eof_failures, requests, succeeds) in [
+            (6, 0, 7, true),
+            (11, 0, 12, true),
+            (28, 0, 29, true),
+            (20, 1, 22, true),
+            (29, 0, 30, true),
+            (30, 0, 30, false),
+            (24, 11, 36, true),
+            (25, 11, 36, false),
+            (20, 12, 32, false),
+        ] {
+            let (mut agent, server, _workspace, _) = recovery_harness(vec![]).await;
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("responses"))
+                .respond_with(HttpAdmissionScript {
+                    status,
+                    http_failures,
+                    eof_failures,
+                    calls: AtomicUsize::new(0),
+                })
+                .mount(&server)
+                .await;
+            let mut run = agent
+                .prompt("recover without replaying committed work")
+                .await
+                .unwrap();
+            let events = collect_virtual_recovery(&mut run).await;
+            drop(run);
+            assert_eq!(
+                matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                succeeds,
+                "http={http_failures} eof={eof_failures} {events:?}"
+            );
+            assert_eq!(
+                wire_requests(&server).await.len(),
+                requests,
+                "http={http_failures} eof={eof_failures}"
+            );
+            assert_eq!(
+                agent.session().usage_uncertainty_records().len(),
+                requests - usize::from(succeeds)
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, AgentEvent::ProviderUsageUncertain))
+                    .count(),
+                1
+            );
+            for event in &events {
+                if let AgentEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    ..
+                } = event
+                {
+                    assert!(*attempt <= *max_attempts);
+                    assert!(*max_attempts <= 35);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_admission_budget() {
+    for (status, code, hard_budget) in [
+        (500, "server_error", true),
+        (502, "server_error", true),
+        (503, "server_error", true),
+        (504, "server_error", true),
+        (520, "server_error", true),
+        (520, "cyber_policy", false),
+        (520, "slow_down", false),
+        (408, "request_timeout", true),
+        (503, "insufficient_quota", false),
+        (429, "insufficient_quota", false),
+        (401, "invalid_api_key", false),
+    ] {
+        let (mut agent, server, _workspace, _) = recovery_harness(vec![]).await;
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("responses"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_json(serde_json::json!({"error":{"code":code}})),
+            )
+            .mount(&server)
+            .await;
+        if hard_budget {
+            agent.set_max_session_cost_microdollars(Some(u64::MAX));
+        }
+        let mut run = agent
+            .prompt("do not exceed hard budget or retry permanent failures")
+            .await
+            .unwrap();
+        let events = collect_virtual_recovery(&mut run).await;
+        drop(run);
+        assert!(
+            matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
+            "{events:?}"
+        );
+        assert_eq!(wire_requests(&server).await.len(), 1);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
+        if status == 503 {
+            assert!(agent.session().has_uncertain_usage());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_uncertainty() {
+    for status in [503, 520] {
+        for gate in [false, true] {
+            for hard_budget in [false, true] {
+                let mut steps = Vec::new();
+                if gate {
+                    steps.push(RecoveryStep::Reply("candidate", Duration::ZERO));
+                }
+                steps.extend((0..20).map(|_| RecoveryStep::Http(status)));
+                steps.push(RecoveryStep::Interrupted);
+                steps.push(RecoveryStep::Reply(
+                    if gate { "R" } else { "summary" },
+                    Duration::ZERO,
+                ));
+                if !gate {
+                    steps.push(RecoveryStep::Reply("answer", Duration::ZERO));
+                }
+                let (mut agent, transport, workspace) =
+                    operation_recovery_agent(steps, ExtensionHost::new());
+                if gate {
+                    agent.set_completion_policy(CompletionPolicy::TerminalGate);
+                } else {
+                    agent
+                        .replace_session_at_idle(session_with_authoritative_pressure(
+                            &workspace.path().join("pressure.jsonl"),
+                            180_000,
+                        ))
+                        .unwrap();
+                    agent
+                        .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
+                        .unwrap();
+                }
+                if hard_budget {
+                    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+                }
+                let mut run = agent.prompt("recover auxiliary").await.unwrap();
+                let events = collect(&mut run).await;
+                drop(run);
+                assert_eq!(
+                    matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                    !hard_budget,
+                    "gate={gate} hard={hard_budget} {events:?}"
+                );
+                assert_eq!(
+                    transport.requests.lock().unwrap().len(),
+                    if hard_budget {
+                        1 + usize::from(gate)
+                    } else {
+                        23
+                    }
+                );
+                assert_eq!(
+                    agent.session().usage_uncertainty_records().len(),
+                    if hard_budget { 1 } else { 21 }
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, AgentEvent::ProviderUsageUncertain))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn manual_native_http_503_with_hard_budget_records_uncertainty_and_never_replaces() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![responses_text_turn(
+        "main",
+        "prior answer",
+        "response.completed",
+        "main-opaque",
+    )])
+    .await;
+    Mock::given(method("POST"))
+        .and(path("responses/compact"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    agent.complete("initial task").await.unwrap();
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert!(matches!(
+        agent.compact_responses_native().await,
+        Err(octet_agent::AgentError::ProviderRecovery {
+            retries: 0,
+            usage_unknown: true,
+            ..
+        })
+    ));
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert_eq!(
+        agent.session().usage_uncertainty_records()[0].operation,
+        "native_compaction"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 2);
+}
+
+struct HeldOutageRetryHook(Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl octet_agent::ProviderRetryHook for HeldOutageRetryHook {
+    async fn provider_retry(
+        &self,
+        context: &octet_agent::ProviderRetryContext,
+    ) -> octet_agent::ProviderRetryAdvice {
+        assert_eq!(
+            context.kind,
+            octet_agent::ProviderRetryKind::WaitingForNetwork
+        );
+        self.0.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn main_and_auxiliary_outage_deadline_preempts_pending_retry_hooks() {
+    for auxiliary in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut extensions = ExtensionHost::new();
+        extensions.provider_retry_hook(HeldOutageRetryHook(calls.clone()));
+        let mut steps = Vec::new();
+        if auxiliary {
+            steps.push(RecoveryStep::Reply("candidate", Duration::ZERO));
+        }
+        steps.push(RecoveryStep::Offline);
+        let (mut agent, transport, _workspace) = operation_recovery_agent(steps, extensions);
+        if auxiliary {
+            agent.set_completion_policy(CompletionPolicy::TerminalGate);
+        }
+        let limit = Duration::from_millis(10);
+        agent.set_max_network_wait(Some(limit));
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            agent.complete("finish").await,
+            Err(octet_agent::AgentError::NetworkWaitLimit { .. })
+        ));
+        assert_eq!(started.elapsed(), limit);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            transport.requests.lock().unwrap().len(),
+            1 + usize::from(auxiliary)
+        );
+        assert!(!agent.session().has_uncertain_usage());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_opening_transport_has_thirty_attempt_envelope_without_indefinite_waits() {
+    for phase in [
+        octet_ai::TransportPhase::Connect,
+        octet_ai::TransportPhase::ResponseHeaders,
+    ] {
+        for (opening_failures, body_failures, expected, success) in
+            [(29, 0, 30, true), (30, 0, 30, false), (20, 1, 22, true)]
+        {
+            for auxiliary in [false, true] {
+                let mut steps = Vec::new();
+                if auxiliary {
+                    steps.push(RecoveryStep::Reply("candidate", Duration::ZERO));
+                }
+                steps.extend((0..opening_failures).map(|_| RecoveryStep::Opening(phase)));
+                steps.extend((0..body_failures).map(|_| RecoveryStep::Interrupted));
+                steps.push(RecoveryStep::Reply(
+                    if auxiliary { "R" } else { "answer" },
+                    Duration::ZERO,
+                ));
+                let (mut agent, transport, _workspace) =
+                    operation_recovery_agent(steps, ExtensionHost::new());
+                if auxiliary {
+                    agent.set_completion_policy(CompletionPolicy::TerminalGate);
+                }
+                let mut run = agent.prompt("recover").await.unwrap();
+                let events = collect(&mut run).await;
+                drop(run);
+                assert_eq!(
+                    matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                    success,
+                    "{phase:?} {events:?}"
+                );
+                assert_eq!(
+                    transport.requests.lock().unwrap().len(),
+                    expected + usize::from(auxiliary)
+                );
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::ProviderWaitingForNetwork { .. }
+                        | AgentEvent::ProviderOperationRetry {
+                            max_attempts: None,
+                            ..
+                        }
+                )));
+                assert_eq!(
+                    agent.session().has_uncertain_usage(),
+                    phase == octet_ai::TransportPhase::ResponseHeaders || body_failures > 0
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_provider_stream_json_recovery_never_dispatches_provisional_tools() {
+    for malformed in [
+        "data: {invalid JSON}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":7}\n\n",
+    ] {
+        for hard_budget in [false, true] {
+            let (mut agent, server, _workspace, _) = recovery_harness(vec![
+                interrupted_responses_prefix("tool") + malformed,
+                responses_text_turn("ok", "recovered", "response.completed", "accepted"),
+            ]).await;
+            if hard_budget { agent.set_max_session_cost_microdollars(Some(u64::MAX)); }
+            let mut run = agent.prompt("recover malformed provider frame").await.unwrap();
+            let events = collect_virtual_recovery(&mut run).await;
+            drop(run);
+            assert_eq!(matches!(assert_single_run_finished(&events), FinishReason::Completed), !hard_budget, "{events:?}");
+            assert_eq!(wire_requests(&server).await.len(), if hard_budget { 1 } else { 2 });
+            assert_eq!(agent.session().usage_uncertainty_records().len(), 1, "{events:?}");
+            assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_malformed_provider_json_exhausts_finite_stream_budget() {
+    let (mut agent, server, _workspace, _) =
+        recovery_harness(vec!["data: {invalid JSON}\n\n".into()]).await;
+    let mut run = agent.prompt("bounded malformed recovery").await.unwrap();
+    let events = collect_virtual_recovery(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Failed(octet_agent::AgentError::ProviderRecovery {
+                retries: 11,
+                usage_unknown: true,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 12);
+}
+
+async fn submit_gate_boundary_control(control: &RunControl, kind: u8) {
+    match kind {
+        0 => control.steer("final-boundary-sentinel").await.unwrap(),
+        1 => control.follow_up("final-boundary-sentinel").await.unwrap(),
+        2 => control.finish_now("final-boundary-sentinel").await.unwrap(),
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_gate_final_poll_and_turn_finished_submission_boundaries_preserve_controls() {
+    for final_poll in [false, true] {
+        for kind in 0..3 {
+            let holder = Arc::new(std::sync::Mutex::new(None));
+            let gate = if final_poll {
+                RecoveryStep::GateControl(holder.clone(), kind)
+            } else {
+                RecoveryStep::Reply("R", Duration::ZERO)
+            };
+            let (mut agent, transport, _workspace) = operation_recovery_agent(
+                vec![
+                    RecoveryStep::Reply("first candidate", Duration::ZERO),
+                    gate,
+                    RecoveryStep::Reply("continued", Duration::ZERO),
+                    RecoveryStep::Reply("R", Duration::ZERO),
+                ],
+                ExtensionHost::new(),
+            );
+            agent.set_completion_policy(CompletionPolicy::TerminalGate);
+            let mut run = agent.prompt("finish").await.unwrap();
+            let control = run.control();
+            *holder.lock().unwrap() = Some(control.clone());
+            let mut submitted = final_poll;
+            let mut events = Vec::new();
+            while let Some(event) = run.next().await {
+                if !submitted && matches!(event, AgentEvent::TurnFinished { .. }) {
+                    submit_gate_boundary_control(&control, kind).await;
+                    submitted = true;
+                }
+                events.push(event);
+            }
+            assert!(matches!(
+                control.steer("too late").await,
+                Err(octet_agent::AgentError::RunEnded)
+            ));
+            drop(run);
+            assert!(
+                matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                "final_poll={final_poll} kind={kind} {events:?}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, AgentEvent::TurnFinished { .. }))
+                    .count(),
+                2
+            );
+            let delivered: usize = events
+                .iter()
+                .map(|event| match event {
+                    AgentEvent::SteeringDelivered { messages }
+                    | AgentEvent::FollowUpDelivered { messages } => messages.len(),
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(delivered, 1);
+            assert_eq!(transport.requests.lock().unwrap().len(), 4);
+            let durable = std::fs::read_to_string(agent.session().path()).unwrap();
+            assert_eq!(durable.matches("final-boundary-sentinel").count(), 1);
+            assert!(!durable.contains("too late"));
+        }
+    }
+}
+
+struct InvalidUtf8ThenSuccess(AtomicUsize);
+impl wiremock::Respond for InvalidUtf8ThenSuccess {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let body = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            let mut bytes = interrupted_responses_prefix("tool").into_bytes();
+            bytes.extend_from_slice(b"data: \xff\n\n");
+            bytes
+        } else {
+            responses_text_turn("ok", "recovered", "response.completed", "accepted").into_bytes()
+        };
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_bytes(body)
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn qualified_codec_wrapped_utf8_failure_recovers_without_provisional_effects() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![]).await;
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(InvalidUtf8ThenSuccess(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    let mut run = agent.prompt("recover malformed SSE bytes").await.unwrap();
+    let events = collect_virtual_recovery(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
+}
+
+#[tokio::test]
+async fn uncertainty_persistence_failure_still_warns_before_terminal_failure() {
+    use std::io::Write;
+    let (mut agent, _server, _workspace, path) =
+        recovery_harness(vec![interrupted_responses_prefix("text")]).await;
+    let mut run = agent.prompt("observe interrupted work").await.unwrap();
+    let mut injected = false;
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        if !injected && matches!(event, AgentEvent::OutputDelta { .. }) {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"\n")
+                .unwrap();
+            injected = true;
+        }
+        events.push(event);
+    }
+    drop(run);
+    assert!(injected);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Failed(octet_agent::AgentError::Session(_))
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ProviderUsageUncertain))
+            .count(),
+        1
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
+}
+
+#[tokio::test(start_paused = true)]
+async fn qualified_unknown_responses_terminals_replace_partial_without_tool_replay() {
+    for incomplete in [false, true] {
+        for (code, succeeds) in [
+            ("future_unknown_reason", true),
+            ("cyber_policy", false),
+            ("bio_policy", false),
+            ("invalid_prompt", false),
+            ("misalignment_policy_violation", false),
+            ("server_is_overloaded", false),
+            ("slow_down", false),
+            ("insufficient_quota", false),
+            ("invalid_api_key", false),
+        ] {
+            let failed = if incomplete {
+                responses_tool_turn("failed", "failed-call")
+                    .replace("response.completed", "response.incomplete")
+                    .replace(
+                        "\"usage\":",
+                        &format!("\"incomplete_details\":{{\"reason\":\"{code}\"}},\"usage\":"),
+                    )
+            } else {
+                interrupted_responses_prefix("tool")
+                    + &format!(
+                        "data: {}\n\n",
+                        serde_json::json!({
+                            "type": "response.failed", "response": {"error": {"code": code, "message": "try again"}}
+                        })
+                    )
+            };
+            let (mut agent, server, _workspace, session_path) = recovery_harness(vec![
+                failed,
+                responses_text_turn("ok", "recovered", "response.completed", "accepted"),
+            ])
+            .await;
+            let mut run = agent
+                .prompt("recover only unfinished generation")
+                .await
+                .unwrap();
+            let events = collect_virtual_recovery(&mut run).await;
+            drop(run);
+            assert_eq!(
+                matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                succeeds,
+                "incomplete={incomplete} code={code} {events:?}"
+            );
+            assert_eq!(
+                wire_requests(&server).await.len(),
+                if succeeds { 2 } else { 1 }
+            );
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
+            assert!(!std::fs::read_to_string(session_path)
+                .unwrap()
+                .contains("failed-call"));
+            assert!(agent.session().has_uncertain_usage());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn natural_turn_finished_submission_boundary_preserves_controls() {
+    for kind in 0..3 {
+        let (mut agent, transport, _workspace) = operation_recovery_agent(
+            vec![
+                RecoveryStep::Reply("first candidate", Duration::ZERO),
+                RecoveryStep::Reply("continued", Duration::ZERO),
+            ],
+            ExtensionHost::new(),
+        );
+        let mut run = agent.prompt("finish").await.unwrap();
+        let control = run.control();
+        let mut submitted = false;
+        let mut events = Vec::new();
+        while let Some(event) = run.next().await {
+            if !submitted && matches!(event, AgentEvent::TurnFinished { .. }) {
+                submit_gate_boundary_control(&control, kind).await;
+                submitted = true;
+            }
+            events.push(event);
+        }
+        assert!(matches!(
+            control.steer("too late").await,
+            Err(octet_agent::AgentError::RunEnded)
+        ));
+        drop(run);
+        assert!(matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Completed
+        ));
+        assert_eq!(transport.requests.lock().unwrap().len(), 2);
+        if kind == 2 {
+            let requests = transport.requests.lock().unwrap();
+            assert!(requests[1].tools.is_empty());
+            assert_eq!(requests[1].tool_choice, octet_ai::ToolChoice::None);
+        }
+        let durable = std::fs::read_to_string(agent.session().path()).unwrap();
+        assert_eq!(durable.matches("final-boundary-sentinel").count(), 1);
+        assert!(!durable.contains("too late"));
+    }
+}
+
+struct NativeOutageCredential {
+    calls: AtomicUsize,
+    hold_opening: bool,
+}
+#[async_trait::async_trait]
+impl octet_ai::CredentialResolver for NativeOutageCredential {
+    async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(octet_ai::AuthError::Unavailable);
+        }
+        if self.hold_opening {
+            std::future::pending::<()>().await;
+        }
+        Ok(octet_ai::ResolvedCredential {
+            scheme: octet_ai::CredentialScheme::Bearer,
+            value: "synthetic".into(),
+            extra_headers: http::HeaderMap::new(),
+        })
+    }
+}
+
+// Drive real loopback I/O without Tokio jumping straight to provider deadlines.
+async fn drive_native_virtual<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::pin!(future);
+    for _ in 0..10_000 {
+        for _ in 0..100 {
+            if let std::task::Poll::Ready(result) = futures_util::poll!(&mut future) {
+                return result;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(50)).await;
+    }
+    panic!("native recovery failed to settle within 500 virtual seconds");
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_compaction_calls_bound_reopening_but_not_healthy_reconnected_body() {
+    for autonomous in [false, true] {
+        for held_phase in ["credential", "headers", "body"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let uri = format!("http://{}", listener.local_addr().unwrap());
+            let compact_requests = Arc::new(AtomicUsize::new(0));
+            let server_requests = compact_requests.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    let (body_start, content_length) = loop {
+                        let count = socket.read(&mut buffer).await.unwrap();
+                        if count == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..count]);
+                        let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let start = end + 4;
+                        let length = String::from_utf8_lossy(&request[..start])
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or_default();
+                        break (start, length);
+                    };
+                    while request.len() - body_start < content_length {
+                        let count = socket.read(&mut buffer).await.unwrap();
+                        if count == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    let compact = request.starts_with(b"POST /responses/compact ");
+                    let body = if compact {
+                        server_requests.fetch_add(1, Ordering::SeqCst);
+                        if held_phase == "headers" {
+                            std::future::pending::<()>().await;
+                        }
+                        serde_json::json!({
+                            "output": [{"type":"compaction", "id":"bounded-native", "encrypted_content":"opaque"}],
+                            "usage": {"input_tokens": 10, "output_tokens": 2}
+                        }).to_string()
+                    } else {
+                        responses_text_turn("final", "done", "response.completed", "accepted")
+                    };
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", if compact {"application/json"} else {"text/event-stream"}, body.len()).as_bytes()).await.unwrap();
+                    if compact {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                    socket.write_all(body.as_bytes()).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                }
+            });
+            let workspace = tempfile::tempdir().unwrap();
+            let mut model = recovery_codex_model(&uri);
+            let credentials = Arc::new(NativeOutageCredential {
+                calls: AtomicUsize::new(0),
+                hold_opening: held_phase == "credential",
+            });
+            Arc::make_mut(&mut model.endpoint).auth = Auth::dynamic(credentials.clone());
+            Arc::make_mut(&mut model.endpoint).timeout = Duration::from_secs(60);
+            let mut session = Session::create(workspace.path().join("session.jsonl")).unwrap();
+            session
+                .append(EntryValue::Message(Message::User(UserMessage {
+                    content: vec![UserPart::Text("prior task".into())],
+                })))
+                .unwrap();
+            session.append_assistant_turn_with_metadata(
+                AssistantMessage { content: vec![AssistantPart::Text("prior answer".into())], model: model.spec.id.clone(), protocol: Protocol::OpenAiResponses },
+                model.endpoint.id.clone(), model.spec.id.clone(),
+                Usage { input_tokens: 180_000, total_tokens: 180_000, ..Usage::default() },
+                None, octet_ai::StopReason::EndTurn,
+                Some(octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"prior answer"}]})).unwrap()])), None,
+            ).unwrap();
+            let mut agent = build_responses_agent_from_session(
+                model,
+                session,
+                workspace.path(),
+                Some(4),
+                "system",
+                ReasoningConfig::Off,
+            );
+            agent.set_max_network_wait(Some(Duration::from_secs(10)));
+            let start = tokio::time::Instant::now();
+            let result = if autonomous {
+                agent
+                    .set_compaction_token_mode(
+                        octet_agent::AgentCompactionMode::NativeResponses,
+                        0.85,
+                        1,
+                    )
+                    .unwrap();
+                let output = drive_native_virtual(agent.complete("continue")).await;
+                output.and_then(|output| match output.reason {
+                    FinishReason::Completed => Ok(()),
+                    FinishReason::Failed(error) => Err(error),
+                    other => panic!("unexpected native outcome {other:?}"),
+                })
+            } else {
+                drive_native_virtual(agent.compact_responses_native())
+                    .await
+                    .map(|_| ())
+            };
+            if held_phase == "body" {
+                assert!(result.is_ok(), "autonomous={autonomous} {result:?}");
+                assert!(start.elapsed() >= Duration::from_secs(34));
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(octet_agent::AgentError::NetworkWaitLimit { .. })
+                    ),
+                    "autonomous={autonomous} phase={held_phase} {result:?}"
+                );
+                assert!(start.elapsed() >= Duration::from_secs(10));
+                assert!(start.elapsed() < Duration::from_secs(11));
+            }
+            assert_eq!(
+                compact_requests.load(Ordering::SeqCst),
+                usize::from(held_phase != "credential")
+            );
+            assert_eq!(
+                agent
+                    .session()
+                    .usage_records()
+                    .iter()
+                    .filter(|record| matches!(record.kind, UsageRecordKind::Compaction))
+                    .count(),
+                usize::from(held_phase == "body")
+            );
+            assert_eq!(
+                agent.session().has_uncertain_usage(),
+                held_phase == "headers"
+            );
+            if held_phase == "headers" {
+                let path = agent.session().path().to_owned();
+                drop(agent);
+                let mut resumed = build_responses_agent_from_session(
+                    recovery_codex_model(&uri),
+                    Session::open(&path).unwrap(),
+                    workspace.path(),
+                    Some(4),
+                    "system",
+                    ReasoningConfig::Off,
+                );
+                resumed.set_max_session_cost_microdollars(Some(u64::MAX));
+                assert!(matches!(
+                    resumed.complete("bounded resume").await,
+                    Err(octet_agent::AgentError::UsageUncertain)
+                ));
+                assert_eq!(compact_requests.load(Ordering::SeqCst), 1);
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unknown_responses_terminals_have_eleven_replacements_in_main_and_auxiliary_calls() {
+    for operation in ["main", "gate", "local"] {
+        let gate = operation == "gate";
+        let local = operation == "local";
+        for incomplete in [false, true] {
+            for failures in [11, 12] {
+                let failed = if incomplete {
+                    responses_text_turn("failed", "partial", "response.incomplete", "failed-opaque")
+                        .replace("max_output_tokens", "future_unknown_reason")
+                } else {
+                    interrupted_responses_prefix("text")
+                        + &format!(
+                            "data: {}\n\n",
+                            serde_json::json!({
+                                "type":"response.failed", "response":{"error":{"code":"future_unknown_reason", "message":"unknown"}}
+                            })
+                        )
+                };
+                let mut bodies = Vec::new();
+                if gate {
+                    bodies.push(responses_text_turn(
+                        "candidate",
+                        "answer",
+                        "response.completed",
+                        "accepted",
+                    ));
+                }
+                bodies.extend(std::iter::repeat_n(failed, failures));
+                bodies.push(responses_text_turn(
+                    "ok",
+                    if gate { "R" } else { "recovered" },
+                    "response.completed",
+                    "accepted",
+                ));
+                if local {
+                    bodies.push(responses_text_turn(
+                        "main",
+                        "done",
+                        "response.completed",
+                        "accepted",
+                    ));
+                }
+                let (mut agent, server, workspace, session_path) = recovery_harness(bodies).await;
+                if local {
+                    agent
+                        .replace_session_at_idle(session_with_authoritative_pressure(
+                            &workspace.path().join("pressure.jsonl"),
+                            180_000,
+                        ))
+                        .unwrap();
+                    agent
+                        .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
+                        .unwrap();
+                }
+                if gate {
+                    agent.set_completion_policy(CompletionPolicy::TerminalGate);
+                }
+                let mut run = agent.prompt("bounded terminal recovery").await.unwrap();
+                let events = collect_virtual_recovery(&mut run).await;
+                drop(run);
+                assert_eq!(
+                    matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                    failures == 11,
+                    "operation={operation} incomplete={incomplete} failures={failures} {events:?}"
+                );
+                assert_eq!(
+                    wire_requests(&server).await.len(),
+                    12 + usize::from(gate) + usize::from(local && failures == 11)
+                );
+                assert_eq!(agent.session().usage_uncertainty_records().len(), failures);
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| if gate || local {
+                            matches!(
+                                event,
+                                AgentEvent::ProviderOperationRetry {
+                                    operation: octet_agent::ProviderOperation::TerminalGate
+                                        | octet_agent::ProviderOperation::LocalCompaction,
+                                    ..
+                                }
+                            )
+                        } else {
+                            matches!(event, AgentEvent::ProviderRetry { .. })
+                        })
+                        .count(),
+                    11
+                );
+                assert!(!std::fs::read_to_string(session_path)
+                    .unwrap()
+                    .contains("failed-opaque"));
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn opening_outage_deadlines_preserve_unknown_usage_in_main_local_and_gate() {
+    for operation in ["main", "local", "gate"] {
+        let mut steps = Vec::new();
+        if operation == "gate" {
+            steps.push(RecoveryStep::Reply("candidate", Duration::ZERO));
+        }
+        steps.extend([RecoveryStep::Offline, RecoveryStep::HoldOpening]);
+        let (mut agent, transport, workspace) =
+            operation_recovery_agent(steps, ExtensionHost::new());
+        if operation == "gate" {
+            agent.set_completion_policy(CompletionPolicy::TerminalGate);
+        } else if operation == "local" {
+            agent
+                .replace_session_at_idle(session_with_authoritative_pressure(
+                    &workspace.path().join("pressure.jsonl"),
+                    180_000,
+                ))
+                .unwrap();
+            agent
+                .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
+                .unwrap();
+        }
+        agent.set_max_network_wait(Some(Duration::from_secs(10)));
+        let mut run = agent.prompt("recover opening").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        assert!(
+            matches!(
+                assert_single_run_finished(&events),
+                FinishReason::Failed(octet_agent::AgentError::NetworkWaitLimit {
+                    usage_unknown: true,
+                    ..
+                })
+            ),
+            "{operation}: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ProviderUsageUncertain))
+                .count(),
+            1
+        );
+        assert!(agent.session().has_uncertain_usage());
+        let request_count = transport.requests.lock().unwrap().len();
+        assert_eq!(request_count, if operation == "gate" { 3 } else { 2 });
+        let path = agent.session().path().to_owned();
+        drop(agent);
+        let mut resumed = build_responses_agent_from_session(
+            recovery_codex_model("http://127.0.0.1:1/"),
+            Session::open(&path).unwrap(),
+            workspace.path(),
+            Some(4),
+            "system",
+            ReasoningConfig::Off,
+        );
+        resumed.set_max_session_cost_microdollars(Some(u64::MAX));
+        assert!(matches!(
+            resumed.complete("bounded resume").await,
+            Err(octet_agent::AgentError::UsageUncertain)
+        ));
+        assert_eq!(transport.requests.lock().unwrap().len(), request_count);
     }
 }

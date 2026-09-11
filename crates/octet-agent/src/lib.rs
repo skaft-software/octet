@@ -135,7 +135,7 @@ pub use effect::{
 pub use events::{
     AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control,
     DelegationOrchestrationProvenance, DelegationPolicySource, DelegationTelemetryChild,
-    DelegationTelemetrySnapshot, FinishReason, OutputChannel, QueueDeliveryMode,
+    DelegationTelemetrySnapshot, FinishReason, OutputChannel, ProviderOperation, QueueDeliveryMode,
     ToolPolicyDecision,
 };
 pub use extension::{
@@ -223,8 +223,9 @@ pub use sandbox::{
 pub use session::{
     Checkpoint, Entry, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
     ExtensionMetadataProvenance, Session, SessionError, SessionRecord, SessionRunOutcome,
-    SessionRunOutcomeStatus, UsageRecord, UsageRecordKind, MAX_EXTENSION_ENTRY_METADATA_BYTES,
-    MAX_EXTENSION_ENTRY_METADATA_NAMESPACES, MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
+    SessionRunOutcomeStatus, UsageRecord, UsageRecordKind, UsageUncertaintyRecord,
+    MAX_EXTENSION_ENTRY_METADATA_BYTES, MAX_EXTENSION_ENTRY_METADATA_NAMESPACES,
+    MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
 };
 pub use skills::{
     ContentHash, LoadedSkill, SkillActivationId, SkillDescriptor, SkillId, SkillLoadError,

@@ -1,5 +1,10 @@
 # octet-mcp
 
+**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
+to published octet 0.7.3 and its matching bundle; local candidate sources or
+archives require a locally built octet 0.7.4. See
+[the open release gates](../../docs/releases/v0.7.4.md).
+
 Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool servers
 to octet. Start with a local stdio server you have reviewed and installed
 separately. The bridge never discovers or installs server software for you.
@@ -68,7 +73,7 @@ same semantic state used by the TUI and Serve.
 A local server runs with your OS authority. Neither configuration nor tool
 approval is a sandbox. Server trust does not approve every tool: only an exact,
 uncontradicted JSON `readOnlyHint: true` gets read-only classification. Unknown
-or destructive calls require host policy. The octet `0.7.3` coding product does
+or destructive calls require host policy. The octet `0.7.4` coding product does
 not issue approvals for those calls, so they fail closed with a tool error.
 Calls are never automatically replayed after an ambiguous failure; cancellation
 does not promise rollback.
@@ -87,7 +92,7 @@ are unsupported.
 
 ## Reference
 
-The bundle requires exactly octet `0.7.3`; its API remains `0.2`. The following
+The bundle requires exactly octet `0.7.4`; its API remains `0.2`. The following
 is a retained bundled-runtime contract, not a current SDK authoring guide.
 
 - <a id="security-and-authority"></a>[Security and authority](REFERENCE.md#security-and-authority).

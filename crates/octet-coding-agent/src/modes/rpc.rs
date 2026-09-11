@@ -50,13 +50,13 @@ enum RpcInput {
 }
 
 struct RpcOutput {
-    stdout: std::io::BufWriter<std::io::Stdout>,
+    stdout: Box<dyn std::io::Write>,
 }
 
 impl RpcOutput {
     fn new() -> Self {
         Self {
-            stdout: std::io::BufWriter::new(std::io::stdout()),
+            stdout: Box::new(std::io::BufWriter::new(std::io::stdout())),
         }
     }
 
@@ -1038,6 +1038,7 @@ fn state_value(
         "thinkingLevel": reasoning_label(&app.reasoning),
         "isStreaming": streaming,
         "isCompacting": false,
+        "usageUncertain": app.agent.session().has_uncertain_usage(),
         "steeringMode": settings.steering_mode,
         "followUpMode": settings.follow_up_mode,
         "sessionFile": app.agent.session().path(),
@@ -1172,6 +1173,7 @@ struct EventTranslator {
     last_assistant_text: String,
     retry_attempt: Option<usize>,
     pending_retry_end: Option<Value>,
+    usage_uncertain: bool,
 }
 
 impl EventTranslator {
@@ -1197,6 +1199,7 @@ impl EventTranslator {
             last_assistant_text: String::new(),
             retry_attempt: None,
             pending_retry_end: None,
+            usage_uncertain: app.agent.session().has_uncertain_usage(),
         }
     }
 
@@ -1470,6 +1473,37 @@ impl EventTranslator {
                     "errorMessage": error
                 }))?;
             }
+            AgentEvent::ProviderUsageUncertain => {
+                self.usage_uncertain = true;
+                output.send(json!({"type": "provider_usage_uncertain"}))?;
+            }
+            AgentEvent::ProviderOperationRetry {
+                operation,
+                attempt,
+                max_attempts,
+                delay,
+                error,
+            } => {
+                output.send(json!({
+                    "type": "provider_operation_retry", "operation": operation,
+                    "attempt": attempt, "maxAttempts": max_attempts,
+                    "delayMs": delay.as_millis(), "errorMessage": error,
+                }))?;
+            }
+            AgentEvent::ProviderWaitingForNetwork {
+                attempt,
+                delay,
+                error,
+            } => {
+                // A pre-send wait is not an assistant message or a discarded
+                // inference attempt; retain existing committed RPC history.
+                output.send(json!({
+                    "type": "provider_waiting_for_network",
+                    "attempt": attempt,
+                    "delayMs": delay.as_millis(),
+                    "errorMessage": error
+                }))?;
+            }
             AgentEvent::SteeringDelivered { messages } => {
                 self.deliver_queued(output, queue, true, messages)?;
             }
@@ -1714,6 +1748,7 @@ fn active_state_value(base: &Value, translator: &EventTranslator, queue: &QueueS
     let mut state = base.clone();
     if let Some(object) = state.as_object_mut() {
         object.insert("isStreaming".into(), Value::Bool(true));
+        object.insert("usageUncertain".into(), json!(translator.usage_uncertain));
         object.insert("messageCount".into(), json!(translator.messages.len()));
         object.insert("pendingMessageCount".into(), json!(queue.len()));
     }
@@ -2067,12 +2102,19 @@ fn context_usage_value(app: &App) -> Value {
 }
 
 fn session_stats_value(app: &App) -> Value {
+    let mut stats = session_stats_for_session(app.agent.session());
+    stats["sessionId"] = json!(session_id(app));
+    stats["contextUsage"] = context_usage_value(app);
+    stats
+}
+
+fn session_stats_for_session(session: &octet_agent::Session) -> Value {
     let mut user_messages = 0usize;
     let mut assistant_messages = 0usize;
     let mut tool_calls = 0usize;
     let mut tool_results = 0usize;
     let mut total_messages = 0usize;
-    for entry in app.agent.session().entries() {
+    for entry in session.entries() {
         match &entry.value {
             EntryValue::Message(Message::Assistant(message)) => {
                 assistant_messages = assistant_messages.saturating_add(1);
@@ -2104,7 +2146,7 @@ fn session_stats_value(app: &App) -> Value {
     }
 
     let mut usage = Usage::default();
-    for record in app.agent.session().usage_records() {
+    for record in session.usage_records() {
         usage.input_tokens = usage.input_tokens.saturating_add(record.usage.input_tokens);
         usage.output_tokens = usage
             .output_tokens
@@ -2122,8 +2164,7 @@ fn session_stats_value(app: &App) -> Value {
         .saturating_add(usage.cache_read_tokens)
         .saturating_add(usage.cache_write_tokens);
     json!({
-        "sessionFile": app.agent.session().path(),
-        "sessionId": session_id(app),
+        "sessionFile": session.path(),
         "userMessages": user_messages,
         "assistantMessages": assistant_messages,
         "toolCalls": tool_calls,
@@ -2136,8 +2177,8 @@ fn session_stats_value(app: &App) -> Value {
             "cacheWrite": usage.cache_write_tokens,
             "total": total_tokens
         },
-        "cost": dollars(app.agent.session().total_cost_microdollars()),
-        "contextUsage": context_usage_value(app)
+        "cost": dollars(session.total_cost_microdollars()),
+        "usageUncertain": session.has_uncertain_usage()
     })
 }
 
@@ -2681,6 +2722,233 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resumed_session_stats_mark_known_subtotals_without_changing_accounting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("accounting.jsonl");
+        let mut session = octet_agent::Session::create(&path).unwrap();
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                Usage {
+                    input_tokens: 80,
+                    output_tokens: 20,
+                    cache_read_tokens: 10,
+                    cache_write_tokens: 5,
+                    total_tokens: 115,
+                    ..Usage::default()
+                },
+                Some(Cost {
+                    total: 123,
+                    ..Cost::default()
+                }),
+            )
+            .unwrap();
+        drop(session);
+        let mut session = octet_agent::Session::open(&path).unwrap();
+        let certain = session_stats_for_session(&session);
+        assert_eq!(certain["usageUncertain"], false);
+        assert_eq!(certain["tokens"]["total"], 115);
+        assert_eq!(certain["cost"], dollars(123));
+        let known_records = serde_json::to_value(session.usage_records()).unwrap();
+        let head = session.head();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("openai".into()),
+                ModelId("gpt-4o-mini".into()),
+                "assistant_turn",
+            )
+            .unwrap();
+        let current = session_stats_for_session(&session);
+        drop(session);
+        let session = octet_agent::Session::open(&path).unwrap();
+        let resumed = session_stats_for_session(&session);
+        assert_eq!(current, resumed);
+        assert_eq!(resumed["usageUncertain"], true);
+        let mut expected = certain;
+        expected["usageUncertain"] = json!(true);
+        assert_eq!(resumed, expected);
+        assert_eq!(
+            serde_json::to_value(session.usage_records()).unwrap(),
+            known_records
+        );
+        assert_eq!(session.head(), head);
+    }
+
+    #[test]
+    fn repeated_network_waits_preserve_rpc_history_without_finite_retry_budget() {
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let capture = Capture::default();
+        let mut output = RpcOutput {
+            stdout: Box::new(capture.clone()),
+        };
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let committed = vec![
+            json!({"role": "assistant", "content": "COMMITTED"}),
+            json!({"role": "toolResult", "toolCallId": "call", "content": "DONE"}),
+        ];
+        let mut translator = EventTranslator {
+            endpoint: model.endpoint.id.0.clone(),
+            api: protocol_name(&model.spec.protocol).into(),
+            model,
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            channels: Vec::new(),
+            message_started: false,
+            message_timestamp: 0,
+            turn_open: true,
+            pending_turn: None,
+            pending_tool_results: Vec::new(),
+            expected_tools: 0,
+            tools: HashMap::new(),
+            messages: committed.clone(),
+            run_messages: committed.clone(),
+            last_assistant_text: "COMMITTED".into(),
+            retry_attempt: None,
+            pending_retry_end: None,
+            usage_uncertain: false,
+        };
+        let mut queue = QueueState::default();
+        translator
+            .observe(
+                AgentEvent::OutputDelta {
+                    channel: OutputChannel::Text,
+                    text: "STALE".into(),
+                },
+                &mut output,
+                &mut queue,
+            )
+            .unwrap();
+        translator
+            .observe(
+                AgentEvent::ProviderRetry {
+                    attempt: 1,
+                    max_attempts: 5,
+                    delay: std::time::Duration::ZERO,
+                    error: "disconnect".into(),
+                },
+                &mut output,
+                &mut queue,
+            )
+            .unwrap();
+        capture.0.lock().unwrap().clear();
+        for attempt in 1..=32 {
+            assert!(translator
+                .observe(
+                    AgentEvent::ProviderWaitingForNetwork {
+                        attempt,
+                        delay: std::time::Duration::from_millis(1234),
+                        error: "offline".into(),
+                    },
+                    &mut output,
+                    &mut queue
+                )
+                .unwrap()
+                .is_none());
+            assert_eq!(translator.messages, committed);
+            assert_eq!(translator.run_messages, committed);
+            assert_eq!(translator.last_assistant_text, "COMMITTED");
+            assert!(translator.partial_text.is_empty());
+            assert!(!translator.message_started);
+            assert!(translator.turn_open);
+            assert_eq!(translator.retry_attempt, Some(1));
+        }
+        let bytes = capture.0.lock().unwrap();
+        let frames: Vec<Value> = serde_json::Deserializer::from_slice(&bytes)
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 32);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(
+                *frame,
+                json!({"type": "provider_waiting_for_network",
+                "attempt": index + 1, "delayMs": 1234, "errorMessage": "offline"})
+            );
+        }
+        drop(bytes);
+        assert_eq!(
+            active_state_value(&json!({"usageUncertain": false}), &translator, &queue)
+                ["usageUncertain"],
+            false
+        );
+        translator.partial_text = "candidate awaiting gate".into();
+        let timestamp = translator.message_timestamp;
+        capture.0.lock().unwrap().clear();
+        assert!(translator
+            .observe(AgentEvent::ProviderUsageUncertain, &mut output, &mut queue)
+            .unwrap()
+            .is_none());
+        let frame: Value = serde_json::from_slice(&capture.0.lock().unwrap()).unwrap();
+        assert_eq!(frame, json!({"type": "provider_usage_uncertain"}));
+        assert_eq!(
+            active_state_value(&json!({"usageUncertain": false}), &translator, &queue)
+                ["usageUncertain"],
+            true
+        );
+        assert_eq!(translator.message_timestamp, timestamp);
+        assert_eq!(translator.partial_text, "candidate awaiting gate");
+        assert_eq!(translator.messages, committed);
+        assert!(translator.turn_open);
+        for (operation, name) in [
+            (
+                octet_agent::ProviderOperation::LocalCompaction,
+                "local_compaction",
+            ),
+            (
+                octet_agent::ProviderOperation::NativeCompaction,
+                "native_compaction",
+            ),
+            (
+                octet_agent::ProviderOperation::TerminalGate,
+                "terminal_gate",
+            ),
+        ] {
+            for max_attempts in [None, Some(5)] {
+                capture.0.lock().unwrap().clear();
+                assert!(translator
+                    .observe(
+                        AgentEvent::ProviderOperationRetry {
+                            operation,
+                            attempt: 8,
+                            max_attempts,
+                            delay: std::time::Duration::from_millis(1234),
+                            error: "offline".into(),
+                        },
+                        &mut output,
+                        &mut queue
+                    )
+                    .unwrap()
+                    .is_none());
+                assert_eq!(translator.partial_text, "candidate awaiting gate");
+                assert_eq!(translator.messages, committed);
+                assert_eq!(translator.run_messages, committed);
+                assert!(translator.turn_open);
+                assert_eq!(translator.retry_attempt, Some(1));
+                let frame: Value = serde_json::from_slice(&capture.0.lock().unwrap()).unwrap();
+                assert_eq!(
+                    frame,
+                    json!({"type": "provider_operation_retry", "operation": name,
+                    "attempt": 8, "maxAttempts": max_attempts, "delayMs": 1234, "errorMessage": "offline"})
+                );
+            }
+        }
+    }
 
     #[test]
     fn rpc_failure_diagnostic_includes_safe_operational_details() {

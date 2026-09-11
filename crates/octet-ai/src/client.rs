@@ -22,6 +22,147 @@ use crate::stream::{
 use crate::types::{EndpointId, Protocol, Request, Response, ToolDef};
 use crate::{ResponsesCompactRequest, ResponsesCompactResponse};
 
+/// A native compact response whose HTTP headers have actually arrived.
+///
+/// Both successful and non-success statuses reach this boundary before body or
+/// optional error-snippet reads. Dropping this value cancels the body; neither
+/// opening nor completion retries the request or resolves credentials again.
+#[must_use = "complete the response body or drop it to cancel"]
+pub struct PendingResponsesCompact {
+    response: reqwest::Response,
+    diagnostic_redactor: CredentialRedactor,
+    stream_idle_timeout: Duration,
+    stream_initial_timeout: Duration,
+    stream_deadline: Duration,
+    opened_at: Instant,
+}
+
+impl std::fmt::Debug for PendingResponsesCompact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingResponsesCompact")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PendingResponsesCompact {
+    /// Reads the bounded body under its own phase-specific timeouts.
+    /// Non-success responses retain their HTTP status and bounded diagnostics.
+    pub async fn complete(self) -> Result<ResponsesCompactResponse, AiError> {
+        let response = self.response;
+        let diagnostic_redactor = self.diagnostic_redactor;
+        let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .or_else(|| response.headers().get("request-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs);
+        if !status.is_success() {
+            let mut body = Vec::with_capacity(4096);
+            let mut body_stream = response.bytes_stream();
+            let started_at = self.opened_at;
+            while body.len() < 4096 {
+                match next_body_chunk(
+                    &mut body_stream,
+                    self.stream_idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
+                    self.stream_idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
+                    false,
+                    started_at,
+                    self.stream_deadline.min(MAX_ERROR_BODY_DEADLINE),
+                    "compact HTTP error response body",
+                )
+                .await
+                {
+                    Ok(Some(chunk)) => {
+                        let remaining = 4096 - body.len();
+                        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            let snippet = String::from_utf8_lossy(&body).into_owned();
+            let provider_code = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("error")
+                        .and_then(|error| error.get("code"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+            let retryable = matches!(
+                status,
+                http::StatusCode::REQUEST_TIMEOUT
+                    | http::StatusCode::TOO_MANY_REQUESTS
+                    | http::StatusCode::BAD_GATEWAY
+                    | http::StatusCode::SERVICE_UNAVAILABLE
+                    | http::StatusCode::GATEWAY_TIMEOUT
+            );
+            return Err(sanitize_ai_error(
+                &diagnostic_redactor,
+                HttpError {
+                    status,
+                    request_id,
+                    retry_after,
+                    provider_code,
+                    body_snippet: (!snippet.is_empty()).then_some(snippet),
+                    retryable,
+                }
+                .into(),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_COMPLETED_BODY_BYTES as u64)
+        {
+            return Err(DecodeError::BodyTooLarge.into());
+        }
+        let mut body = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or_default()
+                .min(MAX_COMPLETED_BODY_BYTES as u64) as usize,
+        );
+        let mut body_stream = response.bytes_stream();
+        let mut first_body_chunk = true;
+        let started_at = self.opened_at;
+        while let Some(chunk) = next_body_chunk(
+            &mut body_stream,
+            self.stream_idle_timeout,
+            self.stream_initial_timeout,
+            first_body_chunk,
+            started_at,
+            self.stream_deadline,
+            "compact response body",
+        )
+        .await
+        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?
+        {
+            first_body_chunk = false;
+            if body
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|size| size > MAX_COMPLETED_BODY_BYTES)
+            {
+                return Err(DecodeError::BodyTooLarge.into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|error| {
+            sanitize_ai_error(
+                &diagnostic_redactor,
+                AiError::Decode(DecodeError::Json(error.to_string())),
+            )
+        })
+    }
+}
+
 /// Hard cap on a buffered non-streaming response body before JSON decode
 /// (design §20). Crossing it is a [`DecodeError::BodyTooLarge`].
 const MAX_COMPLETED_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -211,11 +352,11 @@ fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiError) -> AiErr
                 MAX_PROVIDER_DIAGNOSTIC_BYTES,
             );
         }
-        AiError::Transport(error) => {
+        AiError::Transport(error) | AiError::NetworkUnavailable(error) => {
             error.message =
                 sanitize_diagnostic(redactor, &error.message, MAX_DIAGNOSTIC_METADATA_BYTES);
         }
-        AiError::Provider(error) => {
+        AiError::Provider(error) | AiError::ResponsesFailed(error) => {
             sanitize_optional_diagnostic(redactor, &mut error.code, MAX_DIAGNOSTIC_METADATA_BYTES);
             sanitize_optional_diagnostic(redactor, &mut error.kind, MAX_DIAGNOSTIC_METADATA_BYTES);
             error.message =
@@ -319,11 +460,33 @@ fn reqwest_transport_error(
         message.push_str(&details.join(": "));
     }
     truncate_transport_message(&mut message, 512);
-    AiError::Transport(TransportError {
+    let transient_pre_send = phase == TransportPhase::Connect
+        && error.is_connect()
+        && (timeout || transient_connection_source(&error));
+    let transport = TransportError {
         phase,
         timeout,
         message,
-    })
+    };
+    if transient_pre_send {
+        AiError::NetworkUnavailable(transport)
+    } else {
+        AiError::Transport(transport)
+    }
+}
+
+fn transient_connection_source(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(cause) = source {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(crate::error::transient_connection_io)
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 fn request_open_transport_error(error: reqwest::Error, operation: &str) -> AiError {
@@ -703,7 +866,7 @@ fn websocket_open_failure_is_replay_safe(error: &AiError) -> bool {
         AiError::Transport(TransportError {
             phase: TransportPhase::Connect,
             ..
-        })
+        }) | AiError::NetworkUnavailable(_)
     )
 }
 
@@ -901,6 +1064,7 @@ fn bedrock_response_stream(request: BedrockResponseStreamRequest) -> ResponseStr
 async fn stream_http(
     http: reqwest::Client,
     request: HttpStreamRequest,
+    request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
     stream_initial_timeout: Duration,
     stream_idle_timeout: Duration,
     stream_deadline: Duration,
@@ -959,6 +1123,9 @@ async fn stream_http(
     // consumed, which kills valid long-running SSE generations. Bound only
     // the pre-stream phase instead: after headers arrive, the caller owns
     // the stream lifetime and may cancel by dropping it.
+    if let Some(state) = &request_dispatch {
+        state.store(true, std::sync::atomic::Ordering::Release);
+    }
     let res = tokio::time::timeout(model.endpoint.timeout, builder.send())
         .await
         .map_err(|_| {
@@ -1502,6 +1669,8 @@ async fn stream_http(
 /// SSE, so each message is wrapped in the codec's private event view.
 #[allow(clippy::too_many_arguments)]
 fn responses_websocket_stream(
+    pool: ResponsesWsPool,
+    pool_key: Option<String>,
     model: Model,
     mut events: mpsc::Receiver<Result<serde_json::Value, AiError>>,
     diagnostics: Vec<crate::error::Diagnostic>,
@@ -1628,9 +1797,18 @@ fn responses_websocket_stream(
             }
         }
     };
-    let sanitized_event_stream = raw_event_stream
-        .map(move |event| event.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error)));
-    crate::stream::guard(sanitized_event_stream)
+    let guarded = crate::stream::guard(raw_event_stream);
+    Box::pin(guarded.then(move |event| {
+        let pool = pool.clone();
+        let pool_key = pool_key.clone();
+        let redactor = diagnostic_redactor.clone();
+        async move {
+            if event.is_err() {
+                pool.disable(pool_key.as_deref()).await;
+            }
+            event.map_err(|error| sanitize_ai_error(&redactor, error))
+        }
+    }))
 }
 
 /// Client wrapper for executing AI service requests.
@@ -1642,6 +1820,7 @@ pub struct AiClient {
     stream_initial_timeout: Duration,
     stream_idle_timeout: Duration,
     stream_deadline: Duration,
+    request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for AiClient {
@@ -1651,6 +1830,29 @@ impl Default for AiClient {
 }
 
 impl AiClient {
+    /// Clones this client with fresh, sticky dispatch tracking for one attempt.
+    /// The original client is unaffected. Do not reuse this clone for a new attempt.
+    pub fn track_request_dispatch(&self) -> Self {
+        let mut client = self.clone();
+        client.request_dispatch = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        client
+    }
+
+    /// Whether a tracked attempt may have reached a provider or opaque host transport.
+    /// False is meaningful only on a fresh tracked clone. True is conservative:
+    /// it establishes neither actual transmission nor acceptance or billing.
+    pub fn request_may_have_been_sent(&self) -> bool {
+        self.request_dispatch
+            .as_ref()
+            .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    fn mark_request_dispatch(&self) {
+        if let Some(state) = &self.request_dispatch {
+            state.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     /// Creates a new AiClient using the default reqwest client.
     ///
     /// [`Self::try_new`] is available to callers that need to handle client
@@ -1678,6 +1880,7 @@ impl AiClient {
             stream_initial_timeout: DEFAULT_STREAM_INITIAL_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             stream_deadline: DEFAULT_STREAM_DEADLINE,
+            request_dispatch: None,
         })
     }
 
@@ -1690,6 +1893,7 @@ impl AiClient {
             stream_initial_timeout: DEFAULT_STREAM_INITIAL_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             stream_deadline: DEFAULT_STREAM_DEADLINE,
+            request_dispatch: None,
         }
     }
 
@@ -1868,6 +2072,7 @@ impl AiClient {
                 &model.spec.id,
                 crate::CompatibilityMode::Strict,
             )?;
+            self.mark_request_dispatch();
             let stream = transport
                 .stream(HostStreamModel::from(model), request, diagnostics)
                 .await?;
@@ -1993,6 +2198,7 @@ impl AiClient {
             if let Ok(body) =
                 serde_json::from_slice::<serde_json::Value>(&fallback_request.parts.body)
             {
+                self.mark_request_dispatch();
                 let result = self
                     .responses_ws
                     .request(
@@ -2007,6 +2213,8 @@ impl AiClient {
                 match result {
                     Ok(events) => {
                         return Ok(responses_websocket_stream(
+                            self.responses_ws.clone(),
+                            websocket_key.clone(),
                             model.clone(),
                             events,
                             fallback_request.pre_send_diagnostics.clone(),
@@ -2029,6 +2237,7 @@ impl AiClient {
         stream_http(
             self.http.clone(),
             fallback_request,
+            self.request_dispatch.clone(),
             self.stream_initial_timeout,
             self.stream_idle_timeout,
             self.stream_deadline,
@@ -2044,8 +2253,24 @@ impl AiClient {
     pub async fn compact_responses(
         &self,
         model: &Model,
-        mut request: ResponsesCompactRequest,
+        request: ResponsesCompactRequest,
     ) -> Result<ResponsesCompactResponse, AiError> {
+        self.open_compact_responses(model, request)
+            .await?
+            .complete()
+            .await
+    }
+
+    /// Sends one native compact request and returns at actual HTTP header arrival.
+    ///
+    /// This includes non-2xx responses: their optional diagnostic body is read
+    /// only by [`PendingResponsesCompact::complete`]. Callers can bound opening
+    /// independently without cancelling a healthy body at an outage deadline.
+    pub async fn open_compact_responses(
+        &self,
+        model: &Model,
+        mut request: ResponsesCompactRequest,
+    ) -> Result<PendingResponsesCompact, AiError> {
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         if model.spec.endpoint != model.endpoint.id {
@@ -2121,6 +2346,7 @@ impl AiClient {
                 headers.append(key.clone(), value);
             }
         }
+        self.mark_request_dispatch();
         let response = tokio::time::timeout(
             model.endpoint.timeout,
             self.http.post(url).headers(headers).body(body).send(),
@@ -2135,115 +2361,13 @@ impl AiClient {
         })?
         .map_err(|error| request_open_transport_error(error, "compact request"))
         .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
-        let status = response.status();
-        let request_id = response
-            .headers()
-            .get("x-request-id")
-            .or_else(|| response.headers().get("request-id"))
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(Duration::from_secs);
-        if !status.is_success() {
-            let mut body = Vec::with_capacity(4096);
-            let mut body_stream = response.bytes_stream();
-            let started_at = Instant::now();
-            while body.len() < 4096 {
-                match next_body_chunk(
-                    &mut body_stream,
-                    self.stream_idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
-                    self.stream_idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
-                    false,
-                    started_at,
-                    self.stream_deadline.min(MAX_ERROR_BODY_DEADLINE),
-                    "compact HTTP error response body",
-                )
-                .await
-                {
-                    Ok(Some(chunk)) => {
-                        let remaining = 4096 - body.len();
-                        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                    }
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            let snippet = String::from_utf8_lossy(&body).into_owned();
-            let provider_code = serde_json::from_slice::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("error")
-                        .and_then(|error| error.get("code"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                });
-            let retryable = matches!(
-                status,
-                http::StatusCode::REQUEST_TIMEOUT
-                    | http::StatusCode::TOO_MANY_REQUESTS
-                    | http::StatusCode::BAD_GATEWAY
-                    | http::StatusCode::SERVICE_UNAVAILABLE
-                    | http::StatusCode::GATEWAY_TIMEOUT
-            );
-            return Err(sanitize_ai_error(
-                &diagnostic_redactor,
-                HttpError {
-                    status,
-                    request_id,
-                    retry_after,
-                    provider_code,
-                    body_snippet: (!snippet.is_empty()).then_some(snippet),
-                    retryable,
-                }
-                .into(),
-            ));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_COMPLETED_BODY_BYTES as u64)
-        {
-            return Err(DecodeError::BodyTooLarge.into());
-        }
-        let mut body = Vec::with_capacity(
-            response
-                .content_length()
-                .unwrap_or_default()
-                .min(MAX_COMPLETED_BODY_BYTES as u64) as usize,
-        );
-        let mut body_stream = response.bytes_stream();
-        let mut first_body_chunk = true;
-        let started_at = Instant::now();
-        while let Some(chunk) = next_body_chunk(
-            &mut body_stream,
-            self.stream_idle_timeout,
-            self.stream_initial_timeout,
-            first_body_chunk,
-            started_at,
-            self.stream_deadline,
-            "compact response body",
-        )
-        .await
-        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?
-        {
-            first_body_chunk = false;
-            if body
-                .len()
-                .checked_add(chunk.len())
-                .is_none_or(|size| size > MAX_COMPLETED_BODY_BYTES)
-            {
-                return Err(DecodeError::BodyTooLarge.into());
-            }
-            body.extend_from_slice(&chunk);
-        }
-        serde_json::from_slice(&body).map_err(|error| {
-            sanitize_ai_error(
-                &diagnostic_redactor,
-                AiError::Decode(DecodeError::Json(error.to_string())),
-            )
+        Ok(PendingResponsesCompact {
+            response,
+            diagnostic_redactor,
+            stream_idle_timeout: self.stream_idle_timeout,
+            stream_initial_timeout: self.stream_initial_timeout,
+            stream_deadline: self.stream_deadline,
+            opened_at: Instant::now(),
         })
     }
 
@@ -2365,6 +2489,66 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn client_generated_websocket_errors_fence_pool_before_publication() {
+        let catalog = crate::catalog::ModelCatalog::builtin().unwrap();
+        let id = catalog
+            .models()
+            .find(|model| model.protocol == Protocol::OpenAiResponses)
+            .unwrap()
+            .id
+            .clone();
+        let model = catalog.resolve(&id).unwrap();
+        for deadline in [Duration::ZERO, Duration::from_secs(5)] {
+            let pool = ResponsesWsPool::default();
+            let (sender, receiver) = mpsc::channel(1);
+            sender
+                .send(Ok(serde_json::json!({
+                    "type": "error", "code": "invalid_request_error", "message": "invalid"
+                })))
+                .await
+                .unwrap();
+            // No actor exists to observe receiver closure or perform cleanup.
+            // Both a client deadline and decoded provider error must fence the
+            // session themselves before exposing failure to the consumer.
+            let mut stream = responses_websocket_stream(
+                pool.clone(),
+                Some("poisoned".into()),
+                model.clone(),
+                receiver,
+                Vec::new(),
+                Vec::new(),
+                false,
+                CredentialRedactor::default(),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                deadline,
+            );
+            loop {
+                match stream.next().await {
+                    Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                    None => panic!("expected client failure"),
+                }
+            }
+            let error = pool
+                .request(
+                    Some("poisoned"),
+                    url::Url::parse("ws://127.0.0.1:9/").unwrap(),
+                    http::HeaderMap::new(),
+                    serde_json::json!({}),
+                    ResponsesWsLiveness::for_response_idle(Duration::from_secs(5)),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("disabled after an earlier failure"));
+            drop(sender);
+        }
+    }
+
+    #[tokio::test]
     async fn declared_request_runtime_compresses_without_provider_identity() {
         let original = bytes::Bytes::from(vec![b'a'; 128 * 1024]);
         let mut headers = http::HeaderMap::new();
@@ -2409,7 +2593,8 @@ mod tests {
             .send()
             .await
             .expect_err("the released listener must refuse the connection");
-        let AiError::Transport(error) = request_open_transport_error(error, "request") else {
+        let AiError::NetworkUnavailable(error) = request_open_transport_error(error, "request")
+        else {
             unreachable!()
         };
         assert_eq!(error.phase, TransportPhase::Connect);
@@ -2418,6 +2603,178 @@ mod tests {
         assert!(!error.message.contains(secret));
         assert!(!error.message.contains("/private/catalog"));
         assert!(!error.message.contains(&address.to_string()));
+    }
+
+    #[tokio::test]
+    async fn stalled_tls_connect_timeout_is_network_unavailable_before_post() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            // No TLS acknowledgement, so HTTP POST cannot have been sent.
+            let _ = release_rx.await;
+        });
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(50))
+            .build()
+            .unwrap()
+            .post(format!("https://{address}/responses"))
+            .body("not accepted")
+            .send()
+            .await
+            .unwrap_err();
+        let error = request_open_transport_error(error, "request");
+        assert!(
+            matches!(error, AiError::NetworkUnavailable(ref transport)
+            if transport.phase == TransportPhase::Connect && transport.timeout),
+            "{error:?}"
+        );
+        drop(release);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_tls_handshake_is_not_network_unavailable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut hello = [0_u8; 4096];
+            assert!(socket.read(&mut hello).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+        });
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("https://{address}/responses"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect());
+        let error = request_open_transport_error(error, "request");
+        assert!(
+            matches!(error, AiError::Transport(ref transport)
+            if transport.phase == TransportPhase::Connect && !transport.timeout),
+            "{error:?}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_after_post_is_not_network_unavailable() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let count = socket.read(&mut request).await.unwrap();
+            assert!(count > 0, "POST reached the server before disconnect");
+        });
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/responses"))
+            .body("may already be accepted")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(!error.is_connect());
+        assert!(matches!(
+            request_open_transport_error(error, "request"),
+            AiError::Transport(TransportError {
+                phase: TransportPhase::ResponseHeaders,
+                ..
+            })
+        ));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn invalid_certificate_configuration_is_not_network_unavailable() {
+        let certificate = reqwest::Certificate::from_der(b"invalid certificate").unwrap();
+        let error = reqwest::Client::builder()
+            .add_root_certificate(certificate)
+            .build()
+            .unwrap_err();
+        assert!(!matches!(
+            request_open_transport_error(error, "request"),
+            AiError::NetworkUnavailable(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dns_failure_requires_typed_transient_evidence() {
+        struct FailedDns(std::io::ErrorKind);
+        impl reqwest::dns::Resolve for FailedDns {
+            fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                let kind = self.0;
+                Box::pin(async move {
+                    Err(Box::new(std::io::Error::new(kind, "connection refused"))
+                        as Box<dyn std::error::Error + Send + Sync>)
+                })
+            }
+        }
+        for (kind, transient) in [
+            (std::io::ErrorKind::TimedOut, true),
+            (std::io::ErrorKind::NetworkUnreachable, true),
+            (std::io::ErrorKind::NotFound, false),
+            (std::io::ErrorKind::Other, false),
+        ] {
+            let error = reqwest::Client::builder()
+                .no_proxy()
+                .dns_resolver(Arc::new(FailedDns(kind)))
+                .build()
+                .unwrap()
+                .post("http://offline.invalid/responses")
+                .send()
+                .await
+                .unwrap_err();
+            assert!(error.is_connect());
+            assert_eq!(
+                matches!(
+                    request_open_transport_error(error, "request"),
+                    AiError::NetworkUnavailable(_)
+                ),
+                transient,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_source_classification_uses_io_kinds_not_messages() {
+        for kind in [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::NetworkDown,
+            std::io::ErrorKind::NetworkUnreachable,
+            std::io::ErrorKind::HostUnreachable,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(transient_connection_source(&std::io::Error::new(
+                kind,
+                "invalid certificate"
+            )));
+        }
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(!transient_connection_source(&std::io::Error::new(
+                kind,
+                "connection refused; timed out"
+            )));
+        }
     }
 
     #[test]

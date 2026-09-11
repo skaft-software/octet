@@ -214,6 +214,8 @@ export interface ModelUsage extends UsageTotals {
 }
 
 export interface UsageBreakdown extends UsageTotals {
+  /** Unknown retained usage has no reliable period; numbers are known subtotals. */
+  usageUncertain?: boolean;
   models: ModelUsage[];
   modelsTruncated: boolean;
 }
@@ -234,6 +236,7 @@ export interface UsageActivityDay {
 }
 
 export interface UsageActivity {
+  usageUncertain?: boolean;
   days: UsageActivityDay[];
   currentStreak: number;
   longestStreak: number;
@@ -330,6 +333,8 @@ export interface AgentRunTelemetry {
 
 /** Complete replayable context and run-lifecycle projection. */
 export interface ContextUsage {
+  /** Durable session accounting is incomplete, including after restart. */
+  usageUncertain?: boolean;
   usage: UsageSnapshot;
   compactions: number;
   status: ContextStatus;

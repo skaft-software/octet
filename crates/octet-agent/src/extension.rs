@@ -97,6 +97,10 @@ pub enum ProviderRetryKind {
     BeforeGeneration,
     /// A stream ended before generating any provider content.
     StreamStart,
+    /// A host-qualified local-tool inference was interrupted before commit.
+    InterruptedInference,
+    /// A qualified request could not be sent; waiting has no finite retry count.
+    WaitingForNetwork,
 }
 
 /// Largest additional delay a provider-retry hook may add to one host retry.
@@ -108,14 +112,18 @@ pub const MAX_PROVIDER_RETRY_ADDITIONAL_DELAY: Duration = Duration::from_secs(5)
 /// Read-only context for a typed provider-retry advisory hook.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRetryContext {
+    /// Auxiliary operation, or `None` for the main assistant request.
+    pub operation: Option<crate::events::ProviderOperation>,
     /// Host-created run identity.
     pub run_id: String,
     /// Host-derived resource owner for the session/run.
     pub resource_owner: String,
     /// One-based replacement-attempt number about to be made.
     pub attempt: usize,
-    /// Authoritative maximum replacement attempts for this failure class.
-    pub max_attempts: usize,
+    /// Cumulative ceiling given the current failure class's remaining allowance,
+    /// or `None` for cancellable definitely-pre-send network waiting. The ceiling
+    /// may change with failure class, never exceeding the host's shared cap.
+    pub max_attempts: Option<usize>,
     /// Host-selected minimum delay, including any provider `Retry-After`.
     pub host_delay: Duration,
     /// Safe failure classification.

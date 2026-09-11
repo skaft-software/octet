@@ -6584,6 +6584,19 @@ fn max_and_ultra_working_rainbow_fades_for_two_seconds_only() {
 }
 
 #[test]
+fn activity_shimmer_clock_can_cross_long_labels() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
+    shell.begin_run("codex");
+    let mut state = shell.state.borrow_mut();
+    assert!(state.has_active_status_shimmer());
+    for frame in 1..=48 {
+        state.advance_status_shimmer();
+        assert_eq!(state.status_shimmer_frame, frame);
+    }
+}
+
+#[test]
 fn collapsed_activity_shimmer_repaints_only_the_status_style() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
@@ -12203,5 +12216,497 @@ fn shell_backspace_atomically_removes_paste_and_attachment_chips() {
             assert!(matches!(composed.parts.as_slice(),
                 [octet_agent::InputPart::Text(text)] if text == "keep"));
         }
+    }
+}
+
+fn retry_event(attempt: usize) -> AgentEvent {
+    AgentEvent::ProviderRetry {
+        attempt,
+        max_attempts: 3,
+        delay: Duration::from_secs(5),
+        error: "diagnostic-only cause".into(),
+    }
+}
+
+#[test]
+fn provider_retry_removes_closed_reasoning_and_text_without_removing_independent_rows() {
+    for application_viewport in [false, true] {
+        let (mut shell, bytes) = emulated_shell_with_mode(
+            crate::tui::theme::test_theme(),
+            80,
+            12,
+            true,
+            application_viewport,
+        );
+        let id = shell.begin_run("test");
+        shell.on_run_event(
+            id,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Reasoning,
+                text: "rejected reasoning\n".repeat(40),
+            },
+        );
+        shell.on_run_event(
+            id,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: "rejected answer\n".repeat(40),
+            },
+        );
+        shell.on_run_event(
+            id,
+            &AgentEvent::OutputMedia {
+                index: 2,
+                media: octet_ai::Media::image_bytes(
+                    bytes::Bytes::from_static(b"rejected-media"),
+                    mime::IMAGE_PNG,
+                ),
+            },
+        );
+        shell.notice("independent notice");
+        {
+            let mut state = shell.state.borrow_mut();
+            state.set_subagent_activity(subagent_transcript_test_view(true));
+            let index = state
+                .transcript
+                .iter()
+                .position(|block| {
+                    matches!(block,
+                TranscriptBlock::Notice(text) if text == "independent notice")
+                })
+                .unwrap();
+            state.transcript_selection = Some(TranscriptSelection {
+                anchor: TranscriptPosition {
+                    block: index,
+                    offset: 0,
+                    trailing_affinity: false,
+                },
+                focus: TranscriptPosition {
+                    block: index,
+                    offset: 5,
+                    trailing_affinity: false,
+                },
+            });
+        }
+        shell.render();
+        bytes.lock().unwrap().clear();
+        shell.on_run_event(id, &retry_event(1));
+        shell.render();
+        let snapshot = shell.debug_snapshot();
+        assert!(!snapshot.contains("rejected"), "{snapshot}");
+        assert!(snapshot.contains("independent notice"));
+        {
+            let state = shell.state.borrow();
+            let selected = state
+                .transcript_selection
+                .as_ref()
+                .expect("independent selection survives");
+            assert!(
+                matches!(&state.transcript[selected.anchor.block], TranscriptBlock::Notice(text) if text == "independent notice")
+            );
+            let worker = state
+                .subagent_activity_block
+                .expect("independent worker survives");
+            assert!(
+                matches!(&state.transcript[worker], TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some())
+            );
+        }
+        shell.select_all_transcript();
+        let copy = shell.copy_selected_plain_text().unwrap();
+        assert!(!copy.contains("rejected"));
+        assert!(!copy.contains("diagnostic-only"));
+        assert!(copy.contains("independent notice"));
+        if !application_viewport {
+            assert!(
+                bytes
+                    .lock()
+                    .unwrap()
+                    .windows(4)
+                    .any(|part| part == b"\x1b[3J"),
+                "offscreen rejection must replay native saved history"
+            );
+        }
+        shell.on_run_event(id, &retry_event(2));
+        let state = shell.state.borrow();
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter(|block| matches!(block,
+            TranscriptBlock::Reasoning(reasoning) if reasoning.retry_activity.is_some()))
+                .count(),
+            1
+        );
+        assert_eq!(state.transcript.len(), state.transcript_commit_ids.len());
+        assert_eq!(state.transcript.len(), state.block_revisions.len());
+    }
+}
+
+#[test]
+fn provider_retry_countdown_is_typed_and_stops_at_attempt_start_and_cancellation() {
+    let mut shell = InteractiveShell::test_shell();
+    let id = shell.begin_run("test");
+    shell.on_run_event(id, &retry_event(1));
+    assert!(
+        strip_terminal_sequences(&render_shell(&shell.state.borrow(), 80).join("\n"))
+            .contains("Retrying 1/3 in 5s")
+    );
+    {
+        let state = shell.state.borrow();
+        let TranscriptBlock::Reasoning(block) = &state.transcript[state.active_reasoning.unwrap()]
+        else {
+            panic!()
+        };
+        let retry = block.retry_activity.as_ref().unwrap();
+        assert_eq!(retry.label_at(retry.observed_at), "Retrying 1/3 in 5s");
+        assert_eq!(
+            retry.label_at(retry.observed_at + Duration::from_secs(6)),
+            "Retrying 1/3"
+        );
+    }
+    shell.on_run_event(id, &AgentEvent::TurnStarted);
+    assert!(
+        !strip_terminal_sequences(&render_shell(&shell.state.borrow(), 80).join("\n"))
+            .contains("Retrying")
+    );
+    shell.on_run_event(id, &retry_event(2));
+    shell.set_run_preparing(id, "cancelling");
+    assert!(
+        !strip_terminal_sequences(&render_shell(&shell.state.borrow(), 80).join("\n"))
+            .contains("Retrying")
+    );
+    shell.interrupt_run(id);
+    shell.on_run_event(id, &retry_event(3));
+    assert!(
+        !strip_terminal_sequences(&render_shell(&shell.state.borrow(), 80).join("\n"))
+            .contains("Retrying"),
+        "stale retry must not reopen activity"
+    );
+}
+
+#[test]
+fn provider_retry_preserves_accepted_turn_output() {
+    let mut shell = InteractiveShell::test_shell();
+    let id = shell.begin_run("test");
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "accepted reasoning".into(),
+        },
+    );
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "accepted answer".into(),
+        },
+    );
+    shell.on_run_event(
+        id,
+        &AgentEvent::TurnFinished {
+            message: octet_ai::AssistantMessage {
+                content: vec![octet_ai::AssistantPart::Text("accepted answer".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: octet_ai::Protocol::OpenAiResponses,
+            },
+            stop_reason: octet_ai::StopReason::EndTurn,
+            turn_usage: octet_ai::Usage::default(),
+            usage: octet_ai::Usage::default(),
+            session_cost_microdollars: None,
+            run_cost_microdollars: 0,
+        },
+    );
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "rejected second turn".into(),
+        },
+    );
+    shell.on_run_event(id, &retry_event(1));
+    let snapshot = shell.debug_snapshot();
+    assert!(snapshot.contains("accepted answer"));
+    assert!(snapshot.contains("accepted reasoning"));
+    assert!(!snapshot.contains("rejected second turn"));
+}
+
+#[test]
+fn provider_retry_activity_clears_on_output_and_compaction_and_survives_resize() {
+    for output in [true, false] {
+        let mut shell = InteractiveShell::test_shell();
+        let id = shell.begin_run("test");
+        shell.on_run_event(id, &retry_event(1));
+        shell.set_size(46, 8);
+        assert!(
+            strip_terminal_sequences(&render_shell(&shell.state.borrow(), 46).join("\n"))
+                .contains("Retrying 1/3")
+        );
+        if output {
+            shell.on_run_event(
+                id,
+                &AgentEvent::OutputDelta {
+                    channel: OutputChannel::Reasoning,
+                    text: "new reasoning".into(),
+                },
+            );
+        } else {
+            shell.on_run_event(
+                id,
+                &AgentEvent::CompactionStarted {
+                    reason: octet_agent::CompactionReason::Overflow,
+                },
+            );
+        }
+        let state = shell.state.borrow();
+        assert!(state.transcript.iter().all(|block| !matches!(block,
+            TranscriptBlock::Reasoning(block) if block.retry_activity.is_some())));
+    }
+}
+
+#[test]
+fn provider_retry_network_wait_has_no_invented_retry_limit() {
+    let now = Instant::now();
+    let activity = assistant_block::RetryActivity {
+        operation: None,
+        attempt: 17,
+        max_attempts: None,
+        delay: Duration::from_secs(60),
+        observed_at: now,
+    };
+    assert_eq!(
+        activity.label_at(now),
+        "Waiting for network · attempt 17 in 60s"
+    );
+    assert_eq!(
+        activity.label_at(now + Duration::from_secs(61)),
+        "Waiting for network · attempt 17"
+    );
+}
+
+#[test]
+fn provider_retry_network_wait_replaces_one_activity_without_rollback() {
+    let mut shell = InteractiveShell::test_shell();
+    let id = shell.begin_run("test");
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "accepted reasoning".into(),
+        },
+    );
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "accepted answer".into(),
+        },
+    );
+    shell.on_run_event(
+        id,
+        &AgentEvent::TurnFinished {
+            message: octet_ai::AssistantMessage {
+                content: vec![octet_ai::AssistantPart::Text("accepted answer".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: octet_ai::Protocol::OpenAiResponses,
+            },
+            stop_reason: octet_ai::StopReason::EndTurn,
+            turn_usage: octet_ai::Usage::default(),
+            usage: octet_ai::Usage::default(),
+            session_cost_microdollars: None,
+            run_cost_microdollars: 0,
+        },
+    );
+    shell.notice("independent network notice");
+    for attempt in [1, 2] {
+        shell.on_run_event(
+            id,
+            &AgentEvent::ProviderWaitingForNetwork {
+                attempt,
+                delay: Duration::from_secs(60),
+                error: "diagnostic-only network cause".into(),
+            },
+        );
+        let state = shell.state.borrow();
+        let frame = strip_terminal_sequences(&render_shell(&state, 120).join("\n"));
+        assert!(
+            frame.contains(&format!("Waiting for network · attempt {attempt}")),
+            "{frame}"
+        );
+        assert!(!frame.contains("diagnostic-only"));
+        assert!(frame.contains("independent network notice"));
+        assert!(frame.contains("accepted answer"));
+        assert!(state.provisional_blocks.is_empty());
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter(|block| matches!(block,
+            TranscriptBlock::Reasoning(block) if block.retry_activity.is_some()))
+                .count(),
+            1
+        );
+    }
+    shell.on_run_event(id, &AgentEvent::TurnStarted);
+    assert!(
+        !strip_terminal_sequences(&render_shell(&shell.state.borrow(), 120).join("\n"))
+            .contains("Waiting for network")
+    );
+}
+
+#[test]
+fn provider_retry_auxiliary_activity_preserves_answer_and_compaction_phase() {
+    use octet_agent::ProviderOperation;
+    for operation in [
+        ProviderOperation::LocalCompaction,
+        ProviderOperation::NativeCompaction,
+        ProviderOperation::TerminalGate,
+    ] {
+        for max_attempts in [Some(3), None] {
+            let mut shell = InteractiveShell::test_shell();
+            let id = shell.begin_run("test");
+            shell.on_run_event(
+                id,
+                &AgentEvent::OutputDelta {
+                    channel: OutputChannel::Text,
+                    text: "retained main answer".into(),
+                },
+            );
+            // This test also proves the auxiliary event does not invalidate
+            // the still-provisional candidate while a terminal gate checks it.
+            let owned = shell.state.borrow().provisional_blocks.clone();
+            if operation != ProviderOperation::TerminalGate {
+                let mut state = shell.state.borrow_mut();
+                let index = state.active_reasoning.unwrap();
+                let TranscriptBlock::Reasoning(block) = &mut state.transcript[index] else {
+                    panic!()
+                };
+                block.reasoning_heading = Some("Compacting context".into());
+                state.run_label = "compacting".into();
+            }
+            let phase = shell.state.borrow().run.current().unwrap().phase().clone();
+            shell.on_run_event(
+                id,
+                &AgentEvent::ProviderOperationRetry {
+                    operation,
+                    attempt: 2,
+                    max_attempts,
+                    delay: Duration::from_secs(60),
+                    error: "diagnostic-only auxiliary cause".into(),
+                },
+            );
+            let state = shell.state.borrow();
+            assert_eq!(state.provisional_blocks, owned);
+            assert_eq!(state.run.current().unwrap().phase(), &phase);
+            let frame = strip_terminal_sequences(&render_shell(&state, 160).join("\n"));
+            assert!(frame.contains("retained main answer"));
+            let label = match operation {
+                ProviderOperation::LocalCompaction => "Local compaction",
+                ProviderOperation::NativeCompaction => "Native compaction",
+                ProviderOperation::TerminalGate => "Final-answer check",
+            };
+            assert!(frame.contains(label), "{frame}");
+            assert!(
+                frame.contains(if max_attempts.is_some() {
+                    "Retrying 2/3"
+                } else {
+                    "Waiting for network"
+                }),
+                "{frame}"
+            );
+            assert!(!frame.contains("diagnostic-only"));
+            assert!(state.has_active_status_timer());
+            if operation != ProviderOperation::TerminalGate {
+                assert_eq!(state.run_label, "compacting");
+            }
+        }
+    }
+}
+
+#[test]
+fn provider_usage_uncertain_survives_success_settlement_and_resume() {
+    let mut shell = InteractiveShell::test_shell();
+    let id = shell.begin_run("test");
+    shell.on_run_event(id, &AgentEvent::ProviderUsageUncertain);
+    shell.on_run_event(
+        id,
+        &AgentEvent::TurnFinished {
+            message: octet_ai::AssistantMessage {
+                content: vec![octet_ai::AssistantPart::Text("accepted answer".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: octet_ai::Protocol::OpenAiResponses,
+            },
+            stop_reason: octet_ai::StopReason::EndTurn,
+            turn_usage: octet_ai::Usage {
+                total_tokens: 15,
+                ..Default::default()
+            },
+            usage: octet_ai::Usage {
+                total_tokens: 15,
+                ..Default::default()
+            },
+            session_cost_microdollars: Some(4_200),
+            run_cost_microdollars: 4_200,
+        },
+    );
+    shell.on_run_event(
+        id,
+        &AgentEvent::RunFinished {
+            head: octet_agent::EntryId("accepted".into()),
+            reason: octet_agent::FinishReason::Completed,
+        },
+    );
+    let footer = plain_footer(&shell, 120, Instant::now());
+    assert!(footer.contains("subtotal"), "{footer}");
+    assert!(footer.contains("+ ?"), "{footer}");
+    let telemetry = status_telemetry::status_telemetry(&shell.state.borrow(), Instant::now());
+    assert!(telemetry.contains("totals unknown"));
+    assert!(telemetry.contains("Session subtotal"));
+    assert!(!telemetry.contains("(exact)"));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("uncertain.jsonl");
+    let mut session = octet_agent::Session::create(&path).unwrap();
+    session
+        .record_usage_uncertainty(
+            octet_ai::EndpointId("codex".into()),
+            octet_ai::ModelId("test".into()),
+            "assistant_turn",
+        )
+        .unwrap();
+    drop(session);
+    shell
+        .hydrate(&octet_agent::Session::open(&path).unwrap())
+        .unwrap();
+    assert!(shell.state.borrow().usage_uncertain);
+    assert!(plain_footer(&shell, 120, Instant::now()).contains("usage/cost unknown"));
+    shell.begin_run("test");
+    assert!(
+        shell.state.borrow().usage_uncertain,
+        "next run cannot reset session uncertainty"
+    );
+    let fresh = octet_agent::Session::create(directory.path().join("fresh.jsonl")).unwrap();
+    shell.hydrate(&fresh).unwrap();
+    assert!(
+        !shell.state.borrow().usage_uncertain,
+        "replacing the session clears only the old session's uncertainty"
+    );
+}
+
+#[test]
+fn provider_usage_uncertain_never_infers_zero_from_pricing() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.state.borrow_mut().price_display = PriceDisplay::ExplicitZero;
+    let id = shell.begin_run("test");
+    shell.on_run_event(id, &AgentEvent::ProviderUsageUncertain);
+    let footer = plain_footer(&shell, 120, Instant::now());
+    assert!(footer.contains("usage/cost unknown"), "{footer}");
+    assert!(!footer.contains("$0"));
+    let telemetry = status_telemetry::status_telemetry(&shell.state.borrow(), Instant::now());
+    assert!(!telemetry.contains("$0"));
+    for width in [46, 80, 120] {
+        let frame = render_shell(&shell.state.borrow(), width);
+        assert!(frame
+            .iter()
+            .all(|line| visible_width(line) <= usize::from(width)));
     }
 }

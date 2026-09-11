@@ -150,6 +150,65 @@ a backpressured evidence event. The web store replaces sidebar/command-center PR
 evidence only from the catalog stream, so a delayed session envelope cannot
 regress a newer hosted or inventory projection.
 
+## Incomplete provider accounting
+
+A durable session `usage_uncertainty` record does not move its head or create a
+usage ledger row. The lightweight catalog/index replay accepts and validates it,
+so resumed sessions remain listable and searchable and retain every known usage
+record. Idle snapshots project `context.usageUncertain` directly from session
+evidence, even if the host stopped before a run outcome was committed. Live
+uncertainty publishes the same flag through `context.updated`; it never invents
+a completed outcome.
+
+The host retains a separate owner-private, bounded append-only
+`usage-v1/usage-uncertainty.jsonl` log containing JSON session-ID strings. One
+synced marker per session is enough to make accounting incomplete; duplicate
+live publications and startup backfill are idempotent. A torn final write is
+truncated on reopen, while complete malformed records (including blank lines)
+fail closed. Like known inference accounting, these content-free markers survive
+permanent session deletion. Known request ordinals, token buckets, model rows, timestamps, and
+request counts are unchanged; unknown attempts are never zero-token requests.
+
+An append, sync, quota, or record-consistency failure latches the host store
+unavailable for further writes until reopen/replay; no later append may follow
+a potentially partial record. APIs continue to expose only known subtotals with
+`usage_uncertain: true`, even when the failed marker never reached disk. Reopen
+repairs torn tails and syncs both replayed logs before trusting idempotent
+retries. Permanent deletion requires available accounting and successfully
+copies the quiesced session's final known rows and uncertainty marker before
+writing deletion intent. Persistence failure therefore retains the transcript
+as the recovery source.
+
+Startup accounting also inspects archived projects. A genuinely missing session
+is distinct from a corrupt or unreadable existing transcript; an inaccessible
+registered project root is not proof that its separately stored transcripts
+were deleted. Incomplete source inspection conservatively flags all accounting
+queries and blocks deletion, while readable sources still contribute their known
+rows. Reopen retries inspection without inventing unknown request ordinals or
+persisting synthetic session IDs.
+
+Live context uncertainty is published independently of host-marker success.
+Idle manual compaction reconciles accounting on both success and failure, even
+when only uncertainty evidence changed and no conversation entry was appended.
+The open composer receives `context.updated` without waiting for another run;
+a persistence error remains a command error, never a fabricated completion.
+
+The usage stats, lifetime, and activity APIs expose optional `usage_uncertain`
+flags (camel-case `usageUncertain` in the web projection). Unknown evidence has
+no reliable timestamp, so **every period conservatively warns** while any marker
+is retained; no date or period is invented. The web usage page labels numbers as
+known subtotals and explains incomplete activity. The session composer keeps
+usage/cost unknown visible after resume, independently of completion-review UI
+and independently of the next-turn context cost estimate.
+
+These are additive default-false fields, omitted on the wire when false. Existing
+payloads and known-usage JSONL remain unchanged; graphical protocol and accounting
+store versions are unchanged. Updated readers accept absent flags. As with other
+strict DTO additions, older clients that reject unknown fields need the matching
+web bundle to consume a flagged payload. Serve is experimental and its package
+pins the exact host version; hosts and clients must use the matching bundle,
+not an older strict client.
+
 ## Local transport
 
 The described host binds only to IPv4 loopback and retains strict host/origin

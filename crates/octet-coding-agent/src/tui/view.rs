@@ -953,6 +953,8 @@ pub(crate) struct ShellState {
     overlay: Option<ShellOverlay>,
     tool_panels: HashMap<ToolCallId, usize>,
     active_text: Option<usize>,
+    /// Stable block identities owned by the unfinished inference attempt.
+    provisional_blocks: Vec<u64>,
     active_reasoning: Option<usize>,
     /// Once keyboard navigation requests a semantic viewport, rendering stays
     /// application-owned for the rest of this shell. Mouse capture remains an
@@ -1016,6 +1018,8 @@ pub(crate) struct ShellState {
     /// Cumulative session cost in microdollars (1/1,000,000 USD).
     /// `None` when no priced model has been used yet in this session.
     pub(crate) session_cost_microdollars: Option<u64>,
+    /// Sticky session-wide unknown usage; numeric spend is only a subtotal.
+    pub(crate) usage_uncertain: bool,
     pub(crate) max_session_cost_microdollars: Option<u64>,
     /// Latest-turn raw cache-read rate, refreshed at idle boundaries.
     ///
@@ -1732,6 +1736,10 @@ impl ShellState {
                 _ => false,
             };
             if updated {
+                let id = self.transcript_commit_ids[index];
+                if !self.provisional_blocks.contains(&id) {
+                    self.provisional_blocks.push(id);
+                }
                 if channel == OutputChannel::Text {
                     self.register_active_event(index);
                 }
@@ -1778,6 +1786,8 @@ impl ShellState {
                     .with_activity_started_at(activity_started_at),
             )),
         });
+        self.provisional_blocks
+            .push(self.transcript_commit_ids[index]);
         match channel {
             OutputChannel::Text => {
                 self.active_text = Some(index);
@@ -1797,37 +1807,23 @@ impl ShellState {
     /// These blocks have no corresponding persisted assistant message and a
     /// replacement attempt will stream a fresh version of the same turn.
     fn discard_streaming_blocks(&mut self) {
-        let mut indices = [self.active_text.take(), self.active_reasoning.take()]
-            .into_iter()
-            .flatten()
+        let owned = std::mem::take(&mut self.provisional_blocks);
+        let indices = self
+            .transcript_commit_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, id)| owned.contains(id).then_some(index))
             .collect::<Vec<_>>();
-        indices.sort_unstable();
-        indices.dedup();
-        let removed = indices.len();
         for index in indices.into_iter().rev() {
-            if index >= self.transcript.len() {
-                continue;
-            }
-            self.unregister_active_event(index);
-            self.reindex_subagent_activity_after_removal(index);
-            self.transcript.remove(index);
-            self.transcript_commit_ids.remove(index);
-            self.block_revisions.remove(index);
-            self.reindex_active_events_after_removal(index);
-            for panel_index in self.tool_panels.values_mut() {
-                if *panel_index > index {
-                    *panel_index -= 1;
-                }
+            self.remove_transient_activity_block(index);
+        }
+        // The empty activity row is presentation, not accepted model output.
+        if let Some(index) = self.active_reasoning {
+            if matches!(self.transcript.get(index), Some(TranscriptBlock::Reasoning(block)) if block.text.is_empty())
+            {
+                self.remove_transient_activity_block(index);
             }
         }
-        if !self.follow_tail {
-            self.new_output_count = self.new_output_count.saturating_sub(removed);
-        }
-        // Durable coordinates into removed blocks cannot be repaired without
-        // guessing which retry text corresponds to the old byte offset.
-        self.transcript_selection = None;
-        self.pending_selection_anchor = None;
-        self.invalidate_transcript_layout();
     }
 
     fn close_streaming_blocks(&mut self) {
@@ -1860,6 +1856,7 @@ impl ShellState {
     /// active, so this boundary only finalizes the text and repairs a missing
     /// status. Only an authoritative run outcome removes that transient row.
     fn finish_turn_streaming_blocks(&mut self) {
+        self.provisional_blocks.clear();
         if let Some(index) = self.active_text.take() {
             self.unregister_active_event(index);
             if let Some(TranscriptBlock::Assistant(assistant)) = self.transcript.get_mut(index) {
@@ -1972,7 +1969,7 @@ impl ShellState {
         if !self.has_active_status_shimmer() {
             return;
         }
-        self.status_shimmer_frame = self.status_shimmer_frame.wrapping_add(1) % 12;
+        self.status_shimmer_frame = self.status_shimmer_frame.wrapping_add(1);
         let active = self
             .active_event_blocks
             .iter()
@@ -1999,7 +1996,7 @@ impl ShellState {
                 matches!(
                     self.transcript.get(*index),
                     Some(TranscriptBlock::Reasoning(reasoning))
-                        if !reasoning.finished && reasoning.activity_started_at.is_some()
+                        if !reasoning.finished && (reasoning.activity_started_at.is_some() || reasoning.retry_activity.is_some())
                 )
             })
     }
@@ -2017,7 +2014,7 @@ impl ShellState {
                 matches!(
                     self.transcript.get(*index),
                     Some(TranscriptBlock::Reasoning(reasoning))
-                        if !reasoning.finished && reasoning.activity_started_at.is_some()
+                        if !reasoning.finished && (reasoning.activity_started_at.is_some() || reasoning.retry_activity.is_some())
                 )
             })
             .collect::<Vec<_>>();
@@ -2596,7 +2593,18 @@ impl InteractiveShell {
     }
 
     pub fn set_run_preparing(&mut self, id: RunId, summary: impl Into<String>) {
-        self.state.borrow_mut().run.set_preparing(id, summary);
+        let mut state = self.state.borrow_mut();
+        if state.run.current_id() != Some(id) {
+            return;
+        }
+        if let Some(index) = state.active_reasoning {
+            if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index) {
+                if block.retry_activity.take().is_some() {
+                    state.touch_block(index);
+                }
+            }
+        }
+        state.run.set_preparing(id, summary);
     }
 
     pub fn set_awaiting_provider(&mut self, id: RunId) {
@@ -2604,6 +2612,7 @@ impl InteractiveShell {
     }
 
     fn append_outcome(state: &mut ShellState, outcome: RunOutcome) {
+        state.provisional_blocks.clear();
         if let Some(run) = state.run.current() {
             state.session_work_elapsed = state
                 .session_work_elapsed
@@ -2661,7 +2670,26 @@ impl InteractiveShell {
         if !update.accepted {
             return;
         }
+        if matches!(
+            event,
+            AgentEvent::TurnStarted
+                | AgentEvent::OutputDelta { .. }
+                | AgentEvent::OutputMedia { .. }
+                | AgentEvent::CompactionStarted { .. }
+                | AgentEvent::ToolStarted { .. }
+                | AgentEvent::TurnFinished { .. }
+                | AgentEvent::RunFinished { .. }
+        ) {
+            if let Some(index) = state.active_reasoning {
+                if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index) {
+                    if block.retry_activity.take().is_some() {
+                        state.touch_block(index);
+                    }
+                }
+            }
+        }
         match event {
+            AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
             AgentEvent::OutputDelta { channel, text } => {
                 if state.turn_generation_started_at.is_none() {
                     state.turn_generation_started_at = Some(Instant::now());
@@ -2706,8 +2734,73 @@ impl InteractiveShell {
             AgentEvent::ProviderRetry { .. } | AgentEvent::CandidateRejected { .. } => {
                 state.discard_streaming_blocks();
                 state.open_working_status();
+                if let AgentEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    delay,
+                    ..
+                } = event
+                {
+                    if let Some(index) = state.active_reasoning {
+                        if let Some(TranscriptBlock::Reasoning(block)) =
+                            state.transcript.get_mut(index)
+                        {
+                            block.retry_activity = Some(assistant_block::RetryActivity {
+                                operation: None,
+                                attempt: *attempt,
+                                max_attempts: Some(*max_attempts),
+                                delay: *delay,
+                                observed_at: Instant::now(),
+                            });
+                            state.touch_block(index);
+                        }
+                    }
+                }
                 state.turn_generation_started_at = None;
                 state.turn_streamed_output_bytes = 0;
+            }
+            AgentEvent::ProviderOperationRetry {
+                operation,
+                attempt,
+                max_attempts,
+                delay,
+                ..
+            } => {
+                // Auxiliary recovery updates only its mutable activity. It must
+                // never discard or re-finalize the main answer's blocks.
+                state.open_working_status();
+                if let Some(index) = state.active_reasoning {
+                    if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index)
+                    {
+                        block.retry_activity = Some(assistant_block::RetryActivity {
+                            operation: Some(*operation),
+                            attempt: *attempt,
+                            max_attempts: *max_attempts,
+                            delay: *delay,
+                            observed_at: Instant::now(),
+                        });
+                        state.touch_block(index);
+                    }
+                }
+            }
+            AgentEvent::ProviderWaitingForNetwork { attempt, delay, .. } => {
+                // A definitely pre-send failure owns no provisional answer.
+                // In particular, do not invalidate unrelated/auxiliary output.
+                state.open_working_status();
+                if let Some(index) = state.active_reasoning {
+                    if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index)
+                    {
+                        block.reasoning_heading = Some("Working".into());
+                        block.retry_activity = Some(assistant_block::RetryActivity {
+                            operation: None,
+                            attempt: *attempt,
+                            max_attempts: None,
+                            delay: *delay,
+                            observed_at: Instant::now(),
+                        });
+                        state.touch_block(index);
+                    }
+                }
             }
             AgentEvent::SteeringDelivered { messages } => {
                 state.close_streaming_blocks();
@@ -3056,6 +3149,7 @@ impl InteractiveShell {
             .then(|| session.total_cost_microdollars());
         let mut state = self.state.borrow_mut();
         state.session_cost_microdollars = session_cost_microdollars;
+        state.usage_uncertain |= session.has_uncertain_usage();
         state.telemetry_model = telemetry_model;
         state.cache_hit_rate_basis_points = state
             .selected_model_owns_telemetry()
@@ -5403,6 +5497,7 @@ impl InteractiveShell {
         state.reset_terminal_images();
         state.tool_image_budget = image_budget;
         state.transcript.clear();
+        state.provisional_blocks.clear();
         state.active_event_blocks.clear();
         state.transcript_commit_ids.clear();
         state.block_revisions.clear();
@@ -5418,6 +5513,7 @@ impl InteractiveShell {
         state.turn_generation_started_at = None;
         state.turn_streamed_output_bytes = 0;
         state.turn_output_tokens_before_generation = 0;
+        state.usage_uncertain = session.has_uncertain_usage();
         state.session_cost_microdollars = session
             .usage_records()
             .iter()

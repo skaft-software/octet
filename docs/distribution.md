@@ -11,14 +11,19 @@ their original `skaft-software/ygg` signing identity; v0.7.1 and later use the n
 identity. Existing clone and release-asset URLs redirect to the same repository.
 Do not recreate the old name.
 
+**Source checkout: 0.7.4 UNPUBLISHED candidate.** Mandatory #382 physical
+acceptance remains UNRUN; no candidate tag, assets or public installation is
+available. See [candidate notes](releases/v0.7.4.md). Public commands below
+remain pinned to published 0.7.3.
+
 ## Package identities
 
-These are the current source and signed GitHub package identities. The
-`0.7.3` distribution version does not establish registry availability or change
-independent API and schema versions. See the [0.7.3 release](releases/v0.7.3.md)
-for verified assets and channel boundaries.
+These are the 0.7.4 candidate source identities, not signed GitHub packages.
+The distribution version does not establish publication or change independent
+API and schema versions. See the [0.7.3 release](releases/v0.7.3.md) for the
+latest published assets and channel boundaries.
 
-| Surface | 0.7.3 source identity |
+| Surface | 0.7.4 candidate source identity |
 | --- | --- |
 | Product and native commands | lowercase octet; `octet`, `octet-host` |
 | Core crates | `octet-ai`, `octet-agent`, `octet-coding-agent`, `octet-migrate-types` |
@@ -27,7 +32,7 @@ for verified assets and channel boundaries.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and first-party extension distribution versions | `0.7.3`; installed compatibility `requires_octet = "=0.7.3"` |
+| Product, SDK and first-party extension distribution versions | `0.7.4` (unpublished); installed compatibility `requires_octet = "=0.7.4"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |

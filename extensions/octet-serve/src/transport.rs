@@ -2876,6 +2876,7 @@ mod tests {
             period: crate::UsagePeriod,
         ) -> Result<crate::UsageStats, ServiceError> {
             Ok(crate::UsageStats {
+                usage_uncertain: false,
                 period,
                 prompt_tokens: 11,
                 completion_tokens: 7,
@@ -2903,6 +2904,7 @@ mod tests {
 
         async fn usage_lifetime(&self) -> Result<crate::LifetimeUsage, ServiceError> {
             Ok(crate::LifetimeUsage {
+                usage_uncertain: false,
                 prompt_tokens: 110,
                 completion_tokens: 70,
                 cache_read_tokens: 30,
@@ -2931,6 +2933,7 @@ mod tests {
 
         async fn usage_activity(&self) -> Result<crate::UsageActivity, ServiceError> {
             Ok(crate::UsageActivity {
+                usage_uncertain: false,
                 days: vec![crate::UsageActivityDay {
                     date: "2025-01-02".into(),
                     tokens: 21,

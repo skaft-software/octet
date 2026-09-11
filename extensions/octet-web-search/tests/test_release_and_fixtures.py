@@ -47,9 +47,9 @@ class ReleaseAndFixtureTests(unittest.TestCase):
         manifest = (ROOT / "extension.toml").read_text(encoding="utf-8")
         for exact in (
             'name = "octet-web-search"',
-            'version = "0.7.3"',
+            'version = "0.7.4"',
             'api_version = "0.2"',
-            'requires_octet = "=0.7.3"',
+            'requires_octet = "=0.7.4"',
             'command = "extension.py"',
             'tools = ["web_search", "web_fetch", "web_find"]',
             'commands = ["web-search"]',

@@ -1053,6 +1053,7 @@ pub(crate) struct DelegationRuntimeSettings {
     pub(crate) max_session_tokens: Option<u64>,
     pub(crate) max_session_cost_microdollars: Option<u64>,
     pub(crate) provider_retries_enabled: bool,
+    pub(crate) max_network_wait: Option<Duration>,
 }
 
 pub(crate) struct DelegationTemplate {
@@ -1114,6 +1115,7 @@ struct ManagerState {
 pub(crate) struct DelegatedUsageRecord {
     pub(crate) agent_id: String,
     pub(crate) usage: Usage,
+    pub(crate) usage_uncertain: bool,
     pub(crate) cost: Option<Cost>,
     pub(crate) turn_count: u64,
     pub(crate) tool_call_count: u64,
@@ -1171,6 +1173,7 @@ struct AgentRecord {
     active_tools: BTreeMap<String, String>,
     recent_tools: VecDeque<ChildToolActivity>,
     usage: Usage,
+    usage_uncertain: bool,
     cost: Option<Cost>,
     cost_microdollars: Option<u64>,
     deadline_at_ms: Option<u64>,
@@ -1489,7 +1492,11 @@ impl DelegationManager {
                     output_tokens: record.usage.output_tokens,
                     reasoning_tokens: record.usage.reasoning_tokens,
                     total_tokens: record.usage.total_tokens,
-                    cost: record.cost,
+                    cost: if record.usage_uncertain {
+                        None
+                    } else {
+                        record.cost
+                    },
                     cost_microdollars: record.cost_microdollars,
                     elapsed_ms: elapsed_end.saturating_sub(started),
                     failure_class: failure_class_for_child,
@@ -2033,6 +2040,7 @@ impl DelegationManager {
                     active_tools: BTreeMap::new(),
                     recent_tools: VecDeque::new(),
                     usage: Usage::default(),
+                    usage_uncertain: false,
                     cost: (extension_policy.is_some()
                         && self.template.model.spec.pricing.is_some())
                     .then_some(Cost::default()),
@@ -2611,6 +2619,7 @@ impl DelegationManager {
             agent.set_max_session_cost_microdollars(runtime.max_session_cost_microdollars);
         }
         agent.set_provider_retries_enabled(runtime.provider_retries_enabled);
+        agent.set_max_network_wait(runtime.max_network_wait);
         if extension_policy.is_none() {
             let binding = DelegationBinding {
                 manager: Arc::clone(self),
@@ -2855,6 +2864,9 @@ impl DelegationManager {
                     };
                     self.update_agent_tool_finished(&identity.id, &id.0, is_error);
                 }
+                Next::Event(Some(AgentEvent::ProviderUsageUncertain)) => {
+                    self.mark_agent_usage_uncertain(&identity.id);
+                }
                 Next::Event(Some(AgentEvent::CandidateRejected {
                     usage,
                     session_cost_microdollars,
@@ -2988,6 +3000,21 @@ impl DelegationManager {
         self.publish_telemetry(None, None);
     }
 
+    fn mark_agent_usage_uncertain(&self, id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = state.records.get_mut(id) else {
+            return;
+        };
+        record.usage_uncertain = true;
+        record.cost_microdollars = None;
+        drop(state);
+        self.changed.notify_waiters();
+        self.publish_telemetry(None, None);
+    }
+
     fn update_agent_usage(
         &self,
         id: &str,
@@ -3006,7 +3033,7 @@ impl DelegationManager {
             record.turn_count = record.turn_count.saturating_add(1);
         }
         record.usage = usage;
-        if cost_microdollars.is_some() {
+        if !record.usage_uncertain && cost_microdollars.is_some() {
             record.cost_microdollars = cost_microdollars;
         }
         drop(state);
@@ -3034,7 +3061,12 @@ impl DelegationManager {
         };
         record.usage = usage;
         record.cost = aggregate_cost;
-        record.cost_microdollars = aggregate_cost.map(|cost| cost.total);
+        record.usage_uncertain = session.has_uncertain_usage();
+        record.cost_microdollars = if record.usage_uncertain {
+            None
+        } else {
+            aggregate_cost.map(|cost| cost.total)
+        };
         record.active_tools.clear();
         drop(state);
         self.changed.notify_waiters();
@@ -4116,6 +4148,7 @@ impl DelegationManager {
             .map(|record| DelegatedUsageRecord {
                 agent_id: record.identity.id.clone(),
                 usage: record.usage,
+                usage_uncertain: record.usage_uncertain,
                 cost: record.cost,
                 turn_count: record.turn_count,
                 tool_call_count: record.tool_call_count,
@@ -4941,6 +4974,7 @@ fn agent_record_value(record: &AgentRecord) -> Value {
             })
             .collect::<Vec<_>>(),
         "usage": record.usage,
+        "usage_uncertain": record.usage_uncertain,
         "cost_microdollars": record.cost_microdollars,
         "deadline_at_ms": record.deadline_at_ms,
     })
@@ -5237,6 +5271,7 @@ mod tests {
                 max_session_tokens: None,
                 max_session_cost_microdollars: None,
                 provider_retries_enabled: true,
+                max_network_wait: None,
             }),
         }
     }
@@ -5633,6 +5668,7 @@ mod tests {
                     active_tools: BTreeMap::new(),
                     recent_tools: VecDeque::new(),
                     usage: Usage::default(),
+                    usage_uncertain: false,
                     cost: None,
                     cost_microdollars: None,
                     deadline_at_ms: None,
@@ -6043,6 +6079,7 @@ mod tests {
                 active_tools: BTreeMap::new(),
                 recent_tools: VecDeque::new(),
                 usage: Usage::default(),
+                usage_uncertain: false,
                 cost: None,
                 cost_microdollars: None,
                 deadline_at_ms: None,
@@ -7426,6 +7463,115 @@ mod tests {
     }
 
     #[test]
+    fn child_unknown_usage_is_sticky_and_preserves_the_known_subtotal_for_root_mirroring() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .get_mut(&identity.id)
+            .unwrap()
+            .extension_principal = Some("test-extension".into());
+        let usage = Usage {
+            input_tokens: 7,
+            output_tokens: 4,
+            total_tokens: 11,
+            ..Usage::default()
+        };
+        manager.update_agent_usage(&identity.id, usage, Some(7), true);
+        manager.mark_agent_usage_uncertain(&identity.id);
+        manager.update_agent_usage(&identity.id, usage, Some(7), true);
+        {
+            let state = manager.state.lock().unwrap();
+            let value = agent_record_value(state.records.get(&identity.id).unwrap());
+            assert_eq!(value["usage_uncertain"], true);
+            assert!(value["cost_microdollars"].is_null());
+        }
+        let mut session = Session::create(directory.path().join("accounting-child.jsonl")).unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("codex".into()),
+                octet_ai::ModelId("model".into()),
+                "inference",
+            )
+            .unwrap();
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("codex".into()),
+                octet_ai::ModelId("model".into()),
+                usage,
+                Some(Cost {
+                    total: 7,
+                    ..Cost::default()
+                }),
+            )
+            .unwrap();
+        manager.update_agent_session_accounting(&identity.id, &session, true);
+        let records = manager.extension_usage_records(ROOT_AGENT_ID);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].usage_uncertain);
+        assert_eq!(records[0].usage, usage);
+        assert_eq!(records[0].cost.unwrap().total, 7);
+        let state = manager.state.lock().unwrap();
+        let value = agent_record_value(state.records.get(&identity.id).unwrap());
+        assert_eq!(value["usage_uncertain"], true);
+        assert!(value["cost_microdollars"].is_null());
+    }
+
+    #[test]
+    fn root_outage_limit_updates_bound_child_template() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let mut root = Agent::new(AgentConfig {
+            client: manager.template.client.clone(),
+            model: manager.template.model.clone(),
+            session: Session::create(directory.path().join("root-limit.jsonl")).unwrap(),
+            system: "test".into(),
+            sandbox: manager.template.sandbox.clone(),
+            effect_broker: manager.template.effect_broker.clone(),
+            extensions: manager.template.extensions.clone(),
+            max_turns: Some(4),
+            reasoning: manager.template.reasoning.clone(),
+            reasoning_mode: manager.template.reasoning_mode,
+            cache_retention: manager.template.cache_retention,
+            session_id: None,
+        })
+        .unwrap();
+        root.set_delegation_binding(manager.root_binding()).unwrap();
+        for (index, limit) in [
+            Some(Duration::from_secs(13)),
+            Some(Duration::from_secs(17)),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            root.set_max_network_wait(limit);
+            assert_eq!(
+                manager.template.runtime.read().unwrap().max_network_wait,
+                limit
+            );
+            let identity = AgentIdentity {
+                id: format!("child-{index}"),
+                path: format!("/root/child-{index}"),
+                depth: 1,
+            };
+            let child = manager
+                .build_child_agent(
+                    Session::create(directory.path().join(format!("limit-child-{index}.jsonl")))
+                        .unwrap(),
+                    &identity,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(child.max_network_wait(), limit);
+        }
+    }
+
+    #[test]
     fn child_uses_runtime_settings_updated_after_delegation_activation() {
         let directory = tempfile::tempdir().unwrap();
         let manager = writable_manager(directory.path());
@@ -7446,6 +7592,7 @@ mod tests {
         settings.max_session_tokens = Some(84_000);
         settings.max_session_cost_microdollars = Some(42);
         settings.provider_retries_enabled = false;
+        settings.max_network_wait = Some(Duration::from_secs(17));
         binding.update_runtime_settings(settings);
 
         let session = Session::create(directory.path().join("child.jsonl")).unwrap();
@@ -7466,6 +7613,7 @@ mod tests {
         assert_eq!(child.output_modalities(), &audio);
         assert_eq!(child.max_output_tokens(), 777);
         assert_eq!(child.max_session_tokens(), Some(84_000));
+        assert_eq!(child.max_network_wait(), Some(Duration::from_secs(17)));
         let settings = manager.template.runtime.read().unwrap();
         assert_eq!(settings.max_session_tokens, Some(84_000));
         assert_eq!(settings.max_session_cost_microdollars, Some(42));
@@ -7612,6 +7760,7 @@ mod tests {
                     active_tools: BTreeMap::new(),
                     recent_tools: VecDeque::new(),
                     usage: Usage::default(),
+                    usage_uncertain: false,
                     cost: None,
                     cost_microdollars: None,
                     deadline_at_ms: None,

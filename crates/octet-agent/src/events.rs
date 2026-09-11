@@ -158,6 +158,18 @@ pub struct ToolPolicyDecision {
     pub policy: EffectiveToolPolicy,
 }
 
+/// Auxiliary provider operation whose recovery must not invalidate main output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderOperation {
+    /// Local handoff-summary inference.
+    LocalCompaction,
+    /// Native Responses compact endpoint.
+    NativeCompaction,
+    /// Tool-free final-answer acceptance gate.
+    TerminalGate,
+}
+
 /// Events emitted by a [`Run`](crate::Run).
 ///
 /// All events are non-error: a successfully started run always emits exactly
@@ -205,11 +217,46 @@ pub enum AgentEvent {
     ProviderRetry {
         /// One-based retry attempt number.
         attempt: usize,
-        /// Maximum retries allowed for this logical turn.
+        /// Cumulative ceiling for the current failure class. Separate admission
+        /// and stream allowances may change this ceiling; it never exceeds the
+        /// shared finite replacement cap.
         max_attempts: usize,
         /// Backoff before opening the replacement provider stream.
         delay: Duration,
         /// Sanitized cause of the interrupted attempt.
+        error: String,
+    },
+
+    /// A host-qualified request could not be sent and is waiting for network.
+    /// No finite inference replacement budget is consumed. Cancellation and
+    /// externally owned job deadlines remain authoritative. This event carries
+    /// no rejected answer content: provisional output was already invalidated
+    /// by `ProviderRetry` before any preceding inference replacement.
+    ProviderWaitingForNetwork {
+        /// One-based connection wait count in this logical model turn.
+        attempt: usize,
+        /// Minimum delay before re-preparing the next physical request.
+        delay: Duration,
+        /// Bounded, sanitized pre-send failure diagnostic.
+        error: String,
+    },
+
+    /// The session has accepted provider work whose usage could not be settled.
+    /// Sticky across successful turns and resume: subsequent usage/cost values
+    /// are known subtotals, not complete totals. Never cleared by a retry.
+    ProviderUsageUncertain,
+
+    /// Operation-scoped auxiliary recovery; never discards main-answer output.
+    ProviderOperationRetry {
+        /// Actual provider operation being retried.
+        operation: ProviderOperation,
+        /// One-based replacement or connection-wait count for this operation.
+        attempt: usize,
+        /// Finite replacement limit, or no count limit for pre-send waiting.
+        max_attempts: Option<usize>,
+        /// Cancellable minimum backoff.
+        delay: Duration,
+        /// Sanitized diagnostic containing the actual operation's route/model.
         error: String,
     },
 

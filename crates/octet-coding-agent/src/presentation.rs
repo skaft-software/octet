@@ -520,6 +520,7 @@ pub struct RunPresentation {
     changed_files: BTreeSet<String>,
     tool_calls: usize,
     warnings: usize,
+    usage_uncertain: bool,
 }
 
 impl RunPresentation {
@@ -691,6 +692,7 @@ impl RunTracker {
             changed_files: BTreeSet::new(),
             tool_calls: 0,
             warnings: 0,
+            usage_uncertain: false,
         });
         Ok(id)
     }
@@ -818,7 +820,18 @@ impl RunTracker {
                     );
                 }
             }
-            AgentEvent::ProviderRetry { .. } | AgentEvent::CandidateRejected { .. } => {
+            // Auxiliary recovery belongs to the operation already in progress;
+            // it must not reset the main answer or its compaction phase.
+            AgentEvent::ProviderOperationRetry { .. } => {}
+            AgentEvent::ProviderUsageUncertain => {
+                if !run.usage_uncertain {
+                    run.usage_uncertain = true;
+                    run.warnings = run.warnings.saturating_add(1);
+                }
+            }
+            AgentEvent::ProviderRetry { .. }
+            | AgentEvent::ProviderWaitingForNetwork { .. }
+            | AgentEvent::CandidateRejected { .. } => {
                 let provider = run.provider.clone();
                 run.transition(RunPhase::AwaitingProvider { provider }, now);
             }
@@ -1409,6 +1422,78 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_usage_remains_one_warning_after_success() {
+        let now = Instant::now();
+        let mut tracker = RunTracker::default();
+        let id = tracker.begin_at("openai-codex", now).unwrap();
+        tracker.apply_event_at(id, &text_event(OutputChannel::Text), now);
+        for _ in 0..3 {
+            assert!(tracker
+                .apply_event_at(id, &AgentEvent::ProviderUsageUncertain, now)
+                .outcome
+                .is_none());
+            assert_eq!(
+                tracker.current().unwrap().phase(),
+                &RunPhase::StreamingResponse
+            );
+        }
+        let update = tracker.apply_event_at(id, &finished(FinishReason::Completed), now);
+        assert!(matches!(
+            update.outcome,
+            Some(RunOutcome::CompletedWithWarnings { warnings: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn network_wait_keeps_the_same_run_live_until_actual_settlement() {
+        let now = Instant::now();
+        let mut tracker = RunTracker::default();
+        let id = tracker.begin_at("openai-codex", now).unwrap();
+        for attempt in 1..=8 {
+            let update = tracker.apply_event_at(
+                id,
+                &AgentEvent::ProviderWaitingForNetwork {
+                    attempt,
+                    delay: Duration::from_secs(60),
+                    error: "connection unavailable".into(),
+                },
+                now + Duration::from_secs(attempt as u64),
+            );
+            assert!(update.outcome.is_none());
+            assert_eq!(tracker.current_id(), Some(id));
+            assert!(matches!(
+                tracker.current().unwrap().phase(),
+                RunPhase::AwaitingProvider { .. }
+            ));
+        }
+        tracker.apply_event_at(
+            id,
+            &text_event(OutputChannel::Text),
+            now + Duration::from_secs(10),
+        );
+        assert_eq!(
+            tracker.current().unwrap().phase(),
+            &RunPhase::StreamingResponse
+        );
+        assert!(tracker
+            .apply_event_at(
+                id,
+                &finished(FinishReason::Completed),
+                now + Duration::from_secs(11)
+            )
+            .outcome
+            .is_some());
+        assert!(tracker
+            .apply_event_at(
+                id,
+                &finished(FinishReason::Completed),
+                now + Duration::from_secs(12)
+            )
+            .outcome
+            .is_none());
+    }
+
+    #[test]
     fn lifecycle_labels_are_friendly_and_run_phases_do_not_regress() {
         let lifecycle = octet_ai::ProviderLifecycle {
             state: octet_ai::ProviderLifecycleState::Loading,
@@ -1554,6 +1639,37 @@ mod tests {
                 summary: "compacting".into()
             }
         );
+
+        for operation in [
+            octet_agent::ProviderOperation::LocalCompaction,
+            octet_agent::ProviderOperation::NativeCompaction,
+        ] {
+            let update = tracker.apply_event_at(
+                id,
+                &AgentEvent::ProviderOperationRetry {
+                    operation,
+                    attempt: 9,
+                    max_attempts: None,
+                    delay: Duration::from_secs(60),
+                    error: "connection unavailable".into(),
+                },
+                now + Duration::from_millis(500),
+            );
+            assert!(update.outcome.is_none());
+            assert_eq!(
+                tracker.current().unwrap().phase(),
+                &RunPhase::Preparing {
+                    summary: "compacting".into(),
+                }
+            );
+            assert_eq!(
+                tracker
+                    .current()
+                    .unwrap()
+                    .phase_elapsed_at(now + Duration::from_millis(500)),
+                Duration::from_millis(500)
+            );
+        }
 
         tracker.apply_event_at(
             id,

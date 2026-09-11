@@ -18,7 +18,7 @@ workspace = true
 benchmarks = []
 
 [dependencies]
-octet-ai = { version = "=0.7.3", path = "../octet-ai" }
+octet-ai = { version = "=0.7.4", path = "../octet-ai" }
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
 serde = { version = "1", features = ["derive"] }
@@ -68,7 +68,7 @@ path = "examples/session_bench.rs"
 required-features = ["benchmarks"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "test-util"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 wiremock = "=0.6.4"
 pretty_assertions = "1"

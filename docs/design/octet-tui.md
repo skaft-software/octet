@@ -43,6 +43,16 @@ vocabulary that uses that hierarchy without adding a second TUI.
   exact backend-byte capture to an explicit file or a unique file in an existing
   directory; these traces are sensitive because they include displayed content.
 
+## Startup identity
+
+The eight-bar byte mark retains its model-blended gradient and finite colour
+sweep on true-colour terminals. ANSI256 and ANSI16 instead use one
+background-balanced model accent uniformly across all bars, without brightening
+animation. With no model accent, the theme's model accent is used. Explicit
+custom splash colours keep precedence; no-colour output uses terminal-default
+foreground. Geometry and the terminal background are unchanged. User-customized
+ANSI16 palettes can still affect actual contrast.
+
 ## Transcript and input
 
 The transcript is semantic blocks rather than a terminal framebuffer. Wrapped
@@ -232,8 +242,10 @@ subdued `Ctrl+O` hint; when no heading exists it contains only the hint. Ordinar
 body prose is never inferred as a label, and provider text is sanitized before
 display. The shimmer advances on the renderer thread at a bounded 80 ms cadence,
 changes style rather than text or geometry, and invalidates only the active
-status block.
-
+status block. Each sweep spans the label's terminal-cell width plus its marker
+and trailing highlight clearance, at one cell per tick. Long labels such as
+`Compacting context` therefore receive a complete sweep; grapheme clusters stay
+intact and reduced-motion/no-color rendering remains static.
 Before any model delta, an opted-in endpoint readiness update may temporarily
 replace `Working` with `Provider queued`, `Loading Provider`, or `Provider
 ready`, plus bounded sanitized detail. It reuses the active status block rather
@@ -384,3 +396,40 @@ normal success, and collapsed failures keep a bounded actionable reason.
 - Safe presentation commands execute immediately.
 - Model, reasoning, session, compaction, reload, and checkout work is queued in
   order and applied after the active `Run` releases its Agent borrow.
+
+## Interrupted inference presentation
+
+`ProviderRetry` invalidates every model block owned by the unfinished attempt,
+including reasoning already closed when public text began. Ownership uses stable
+transcript identities, not a suffix boundary: independently arriving notices and
+worker activity survive removal, with selection, active indices, and layout
+caches rebased through the ordinary removal path. `TurnFinished` releases that
+ownership at the accepted assistant boundary. Generated media is not inserted
+provisionally by the interactive event consumer, so a rejected media payload
+cannot enter disclosure or copy.
+
+`ProviderWaitingForNetwork` updates that activity without rolling back output:
+a definitely pre-send failure has no new provisional answer to discard. It shows
+`Waiting for network` and an attempt count without inventing a finite denominator.
+
+Retry activity is one typed, presentation-only record on the mutable `Working`
+row. Repeated retries replace it rather than appending causes to the transcript.
+Its countdown derives from the observed backoff; once the delay elapses it says
+`Retrying`, not an invented provider deadline. `TurnStarted`, meaningful output,
+compaction/tool transitions, cancellation admission, and settlement end that
+backoff presentation. Raw causes remain with the event/diagnostic consumers;
+print, plain, and RPC output retain their existing contracts. Removing rejected
+output already above the native viewport can require saved-line clear and full
+replay. Quiet notices do not promise an undisturbed native scrollback position.
+
+API waiting is independently scheduled from animation: the real renderer thread
+wakes for status shimmer at 80 ms, elapsed time at one-second boundaries, and
+resize polling at 100 ms, without a busy frame loop. The gated-loopback PTY
+regression (`real_octet_held_api_wait_pty_contract`) exercises held ordinary and
+manual-compaction requests, actual ANSI style changes, keyboard echo and resize,
+500 ms input/cancellation budgets, static no-color motion, and bounded idle and
+active frame counts. The interactive driver fixtures separately cover delayed
+success, timeout, transport failure, and cancellation. These deterministic
+fixtures do not establish the cause of every reported freeze: expensive layout
+still shares a shell mutex with input, and real terminal/live-provider and
+long-duration soak qualification remain separate.

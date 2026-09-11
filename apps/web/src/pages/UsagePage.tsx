@@ -67,6 +67,7 @@ function summaryDetail(
   usage: UsageBreakdown,
   lifetime: LifetimeUsage | null,
 ): string {
+  if (usage.usageUncertain) return `${fullNumber.format(usage.requestCount)} requests with recorded usage`;
   if (range !== "all" || !lifetime) return requestLabel(usage.requestCount);
   if (usage.requestCount === 0) return lifetimeRange(lifetime);
   return `${requestLabel(usage.requestCount)} · ${lifetimeRange(lifetime)}`;
@@ -206,6 +207,14 @@ export function UsagePage({
         </div>
       ) : null}
 
+      {visibleUsage?.usageUncertain || lifetime?.usageUncertain || activity?.usageUncertain ? (
+        <p role="status">
+          Usage and cost incomplete: some provider usage is unknown. All numbers,
+          model rows, and activity are known subtotals only. Unknown usage cannot
+          be assigned to a date or period.
+        </p>
+      ) : null}
+
       {usageLoading ? (
         <section className="usage-summary is-loading" aria-live="polite">
           <span>Loading usage…</span>
@@ -213,7 +222,7 @@ export function UsagePage({
       ) : visibleUsage ? (
         <section className="usage-summary" aria-label={`${label} usage summary`}>
           <div className="usage-total">
-            <span>Total tokens</span>
+            <span>{visibleUsage.usageUncertain ? "Known token subtotal" : "Total tokens"}</span>
             <strong title={metricTitle(visibleUsage.totalTokens)}>
               {compactNumber.format(visibleUsage.totalTokens)}
             </strong>
@@ -262,7 +271,9 @@ export function UsagePage({
             <span>
               {visibleUsage.modelsTruncated
                 ? `${fullNumber.format(visibleUsage.models.length)}+ shown`
-                : `${fullNumber.format(visibleUsage.models.length)} used`}
+                : visibleUsage.usageUncertain
+                  ? `${fullNumber.format(visibleUsage.models.length)} with recorded usage`
+                  : `${fullNumber.format(visibleUsage.models.length)} used`}
             </span>
           ) : null}
         </header>
@@ -283,7 +294,7 @@ export function UsagePage({
                   <th scope="col">Cache read</th>
                   <th scope="col">Cache write</th>
                   <th scope="col">Output</th>
-                  <th scope="col">Total</th>
+                  <th scope="col">{visibleUsage.usageUncertain ? "Known subtotal" : "Total"}</th>
                 </tr>
               </thead>
               <tbody>
@@ -334,7 +345,9 @@ export function UsagePage({
           </div>
         ) : visibleUsage ? (
           <p className="usage-model-empty">
-            No completed model calls in this period.
+            {visibleUsage.usageUncertain
+              ? "No known model usage in this period; unknown usage is retained separately."
+              : "No completed model calls in this period."}
           </p>
         ) : null}
 

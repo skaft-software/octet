@@ -3056,6 +3056,9 @@ function contextTelemetryDescription(
   if (session.context.status.lastCompaction?.succeeded === false) {
     details.push("Last compaction failed without changing context");
   }
+  if (session.context.usageUncertain) {
+    details.push("Usage and cost incomplete: some provider usage is unknown; numeric accounting is a known subtotal");
+  }
   if (contextCost) details.push(`Estimated next-turn input cost ~${contextCost}`);
   return details.join("; ");
 }
@@ -4444,6 +4447,7 @@ function Composer({
               }
             >
               <span>{session.contextPercent}%</span>
+              {session.context.usageUncertain ? <strong>Usage / cost unknown</strong> : null}
               {contextActivity ? (
                 <>
                   <span aria-hidden="true">·</span>

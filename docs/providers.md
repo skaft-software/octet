@@ -272,9 +272,24 @@ uses persisted route-affine opaque replay. The
 [WebSocket implementation](../crates/octet-ai/src/responses_ws.rs) and
 [recovery boundary](tools.md#recovery-and-security) distinguish a recognized
 pre-generation connection-lifetime rejection (socket retirement, safe HTTP retry)
-from an accepted POST or body disconnect. Body disconnects remain terminal even
-before visible output. Deterministic regressions are not live-provider recovery
-qualification.
+from an accepted POST or body disconnect. By default, ambiguous accepted requests
+are not replayed, even before visible output. The agent has a narrow exception
+for host-qualified Codex Responses requests (including Lite) with local function
+tools: before assistant commit it may discard provisional output and replace
+interrupted inference from durable context. This can duplicate remote generation
+and incur unknown charges; it does not replay committed local tool effects or
+prove remote cancellation. The developing candidate separates finite streamed-inference replacement
+and HTTP-admission retry budgets, without resetting on transport fallback.
+These bound attempts, not confirmed accepted generations or charges; eligibility
+and hard ceilings can stop recovery earlier. Only
+positively classified pre-send outages enter sustained, cancellable network
+waiting. Unknown failed-attempt usage blocks replacement under hard cumulative
+cost/token ceilings. Unknown exposure is durably recorded independently of known
+usage: later success, resume, or checkout does not restore complete totals.
+Displayed numeric usage/cost is then a known subtotal; a fork starts independent
+accounting. See [candidate recovery qualification](qualification/v0.7.4-recovery.md)
+for the source comparison and outstanding live/endurance evidence; Codex parity
+is not established.
 
 ## Astra source limits
 

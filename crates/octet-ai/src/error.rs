@@ -53,9 +53,19 @@ pub enum AiError {
     /// Transport/connection/network error.
     #[error("{0}")]
     Transport(#[from] TransportError),
+    /// Positively classified transient connection failure before request send.
+    /// Unlike generic Connect errors, this excludes unclassified DNS, TLS,
+    /// certificate and configuration failures. It never describes an accepted
+    /// request and does not authorize replay of post-send work.
+    #[error("{0}")]
+    NetworkUnavailable(TransportError),
     /// Provider error frame inside a 2xx stream.
     #[error("Provider error: {0}")]
     Provider(#[from] ProviderError),
+    /// Native Responses `response.failed` terminal, not an arbitrary error frame.
+    /// This provenance alone does not authorize retry or establish zero usage.
+    #[error("Provider error: {0}")]
+    ResponsesFailed(ProviderError),
     /// JSON/UTF-8 decoding error.
     #[error("Decode error: {0}")]
     Decode(#[from] DecodeError),
@@ -98,15 +108,29 @@ pub struct HttpError {
 }
 
 impl HttpError {
+    /// All HTTP 5xx statuses, with permanent provider codes vetoed.
+    /// Only host-qualified finite replacement policy may use this broader hint;
+    /// it is not evidence of nonacceptance and ignores the legacy retryable flag.
+    pub fn is_transient_server_error(&self) -> bool {
+        self.status.is_server_error()
+            && !self
+                .provider_code
+                .as_deref()
+                .is_some_and(permanent_provider_code)
+    }
+
     /// Checks if the error is safe to retry.
     pub fn is_safe_to_retry(&self) -> bool {
         self.retryable
+            && !self
+                .provider_code
+                .as_deref()
+                .is_some_and(permanent_provider_code)
             && matches!(
                 self.status,
-                // These statuses indicate that the request did not produce a
-                // usable model response and are routinely transient at API
-                // gateways. The agent only invokes this before any generated
-                // bytes, so replaying the POST is safe there.
+                // Transient status eligibility is not proof of nonacceptance
+                // or zero usage. Callers own request-shape authorization,
+                // finite replacement budgets, and uncertain-usage accounting.
                 http::StatusCode::REQUEST_TIMEOUT
                     | http::StatusCode::INTERNAL_SERVER_ERROR
                     | http::StatusCode::TOO_MANY_REQUESTS
@@ -115,6 +139,37 @@ impl HttpError {
                     | http::StatusCode::GATEWAY_TIMEOUT
             )
     }
+}
+
+fn permanent_provider_code(code: &str) -> bool {
+    matches!(
+        code,
+        "server_is_overloaded"
+            | "slow_down"
+            | "invalid_prompt"
+            | "bio_policy"
+            | "cyber_policy"
+            | "misalignment_policy_violation"
+            | "invalid_request_error"
+            | "invalid_api_key"
+            | "authentication_error"
+            | "unauthorized"
+            | "permission_denied"
+            | "forbidden"
+            | "not_found"
+            | "model_not_found"
+            | "insufficient_quota"
+            | "usage_not_included"
+            | "billing_not_active"
+            | "account_deactivated"
+            | "organization_deactivated"
+            | "billing_hard_limit_reached"
+            | "quota_exceeded"
+            | "context_length_exceeded"
+    ) || code
+        .parse::<u16>()
+        .ok()
+        .is_some_and(|status| (400..500).contains(&status) && status != 408 && status != 429)
 }
 
 /// Network/connection error.
@@ -127,6 +182,20 @@ pub struct TransportError {
     pub timeout: bool,
     /// Sanitized error message. Never contains credentials/URL userinfo.
     pub message: String,
+}
+
+/// Only OS-typed transient failures qualify; error text is never a classifier.
+pub(crate) fn transient_connection_io(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NetworkDown
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::TimedOut
+    )
 }
 
 /// Phases of request execution.
@@ -153,6 +222,19 @@ pub struct ProviderError {
     pub message: String,
     /// Request identifier.
     pub request_id: Option<String>,
+}
+
+impl ProviderError {
+    /// Typed code/kind retry veto, independent of provider message text.
+    /// Includes pinned Responses overload denials (`server_is_overloaded`,
+    /// `slow_down`), not ordinary transient `overloaded_error`.
+    pub fn is_permanent(&self) -> bool {
+        self.code
+            .as_deref()
+            .into_iter()
+            .chain(self.kind.as_deref())
+            .any(permanent_provider_code)
+    }
 }
 
 /// Stream protocol state machine violations.
@@ -307,6 +389,10 @@ pub enum AuthError {
     /// third-party resolver errors may contain credentials.
     #[error("Credential resolution failed")]
     Resolve,
+    /// Credential-service connection failed before transmitting a refresh request.
+    /// This does not authorize replay of an accepted token-rotation request.
+    #[error("Credential service unavailable before request transmission")]
+    Unavailable,
     /// An environment-backed credential was not available.
     #[error("Credential environment variable is missing: {0}")]
     MissingEnvironment(String),
@@ -491,6 +577,42 @@ mod tests {
         let display = format!("{}", err);
         assert!(display.contains("401"));
         assert!(!display.contains("Authorization"));
+    }
+
+    #[test]
+    fn qualified_server_status_hint_keeps_permanent_veto_and_legacy_whitelist() {
+        for status in 500..600 {
+            let mut error = HttpError {
+                status: StatusCode::from_u16(status).unwrap(),
+                request_id: None,
+                retry_after: None,
+                provider_code: None,
+                body_snippet: None,
+                retryable: false,
+            };
+            assert!(error.is_transient_server_error(), "{status}");
+            assert!(!error.is_safe_to_retry());
+            error.retryable = true;
+            if status == 520 {
+                assert!(!error.is_safe_to_retry());
+            }
+            for code in [
+                "invalid_prompt",
+                "bio_policy",
+                "cyber_policy",
+                "misalignment_policy_violation",
+                "insufficient_quota",
+                "usage_not_included",
+                "context_length_exceeded",
+                "401",
+                "server_is_overloaded",
+                "slow_down",
+            ] {
+                error.provider_code = Some(code.into());
+                assert!(!error.is_transient_server_error(), "{status} {code}");
+                assert!(!error.is_safe_to_retry(), "{status} {code}");
+            }
+        }
     }
 
     #[test]

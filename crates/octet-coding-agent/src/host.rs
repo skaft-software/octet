@@ -978,6 +978,47 @@ async fn run_request(
                     )
                     .await?;
             }
+            AgentEvent::ProviderUsageUncertain => {
+                emitter
+                    .emit("provider_usage_uncertain", serde_json::json!({}))
+                    .await?;
+            }
+            AgentEvent::ProviderOperationRetry {
+                operation,
+                attempt,
+                max_attempts,
+                delay,
+                error,
+            } => {
+                emitter
+                    .emit(
+                        "provider_operation_retry",
+                        serde_json::json!({
+                            "operation": operation,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "delay_ms": delay.as_millis(),
+                            "error": clip_text(&error, 16 * 1024),
+                        }),
+                    )
+                    .await?;
+            }
+            AgentEvent::ProviderWaitingForNetwork {
+                attempt,
+                delay,
+                error,
+            } => {
+                emitter
+                    .emit(
+                        "provider_waiting_for_network",
+                        serde_json::json!({
+                            "attempt": attempt,
+                            "delay_ms": delay.as_millis(),
+                            "error": clip_text(&error, 16 * 1024),
+                        }),
+                    )
+                    .await?;
+            }
             AgentEvent::SteeringDelivered { messages } => {
                 emitter
                     .emit(

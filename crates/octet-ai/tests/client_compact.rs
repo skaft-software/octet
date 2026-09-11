@@ -732,3 +732,204 @@ async fn raw_compact_reasoning_rejects_before_auth_and_network_on_both_routes() 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
+
+#[tokio::test]
+async fn compact_http_429_permanent_codes_override_retry_after() {
+    for (code, safe) in [
+        ("insufficient_quota", false),
+        ("quota_exceeded", false),
+        ("rate_limit_exceeded", true),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses/compact"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "7")
+                    .set_body_json(serde_json::json!({"error": {"code": code}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = AiClient::new()
+            .compact_responses(
+                &model(&format!("{}/", server.uri()), Protocol::OpenAiResponses),
+                compact_request(ResponsesInput::default(), None),
+            )
+            .await
+            .unwrap_err();
+        let AiError::Http(error) = error else {
+            panic!("expected HTTP failure")
+        };
+        assert_eq!(error.provider_code.as_deref(), Some(code));
+        assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
+        assert_eq!(error.is_safe_to_retry(), safe);
+    }
+}
+
+// Explicit gates, rather than server sleeps, prove whether opening observes
+// headers or waits for a body. Each server accepts exactly one physical POST.
+fn gated_compact_server(
+    status: u16,
+    hold_headers: bool,
+) -> (
+    String,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release, gate) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        drain_request(&mut stream);
+        let body = if status == 200 {
+            r#"{"output":[]}"#
+        } else {
+            r#"{"error":{"code":"invalid_prompt","message":"compact-secret"}}"#
+        };
+        if hold_headers && gate.recv_timeout(Duration::from_secs(3)).is_err() {
+            return;
+        }
+        if write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nRetry-After: 71\r\nX-Request-Id: compact-request\r\nConnection: close\r\n\r\n", body.len()).is_err() {
+            return;
+        }
+        if !hold_headers && gate.recv_timeout(Duration::from_secs(3)).is_err() {
+            return;
+        }
+        let _ = stream.write_all(body.as_bytes());
+    });
+    (format!("http://{address}/"), release, server)
+}
+
+#[tokio::test]
+async fn compact_open_can_be_cancelled_at_outage_deadline_while_headers_are_held() {
+    let (url, release, server) = gated_compact_server(200, true);
+    let client = AiClient::new();
+    let model = model(&url, Protocol::OpenAiResponses);
+    let opening =
+        client.open_compact_responses(&model, compact_request(ResponsesInput::default(), None));
+    assert!(tokio::time::timeout(Duration::from_millis(30), opening)
+        .await
+        .is_err());
+    // Dropping opening does not start a detached read or autonomous replay.
+    drop(release);
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn compact_headers_end_opening_before_healthy_body_or_error_snippet() {
+    for status in [200, 520] {
+        let (url, release, server) = gated_compact_server(status, false);
+        let client = AiClient::new();
+        let model = model(&url, Protocol::OpenAiResponses);
+        let outage_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let pending = tokio::time::timeout_at(
+            outage_deadline,
+            client.open_compact_responses(&model, compact_request(ResponsesInput::default(), None)),
+        )
+        .await
+        .expect("actual headers must end opening before any body is released")
+        .unwrap();
+        assert!(!format!("{pending:?}").contains("compact-secret"));
+        let completion = tokio::spawn(pending.complete());
+        tokio::time::sleep_until(outage_deadline + Duration::from_millis(10)).await;
+        assert!(
+            !completion.is_finished(),
+            "body must remain independently pending after outage deadline"
+        );
+        release.send(()).unwrap();
+        let result = completion.await.unwrap();
+        if status == 200 {
+            assert!(result.unwrap().output.items().is_empty());
+        } else {
+            let AiError::Http(error) = result.unwrap_err() else {
+                panic!("lost HTTP status");
+            };
+            assert_eq!(error.status.as_u16(), 520);
+            assert_eq!(error.retry_after, Some(Duration::from_secs(71)));
+            assert_eq!(error.request_id.as_deref(), Some("compact-request"));
+            assert_eq!(error.provider_code.as_deref(), Some("invalid_prompt"));
+            assert!(!error.is_transient_server_error());
+            assert!(!format!("{error:?}").contains("compact-secret"));
+        }
+        server.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn compact_open_body_keeps_separate_timeout_and_optional_snippet_status() {
+    for status in [200, 520] {
+        let (url, release, server) = gated_compact_server(status, false);
+        let client =
+            AiClient::new().with_stream_timeouts(Duration::from_millis(20), Duration::from_secs(2));
+        let pending = client
+            .open_compact_responses(
+                &model(&url, Protocol::OpenAiResponses),
+                compact_request(ResponsesInput::default(), None),
+            )
+            .await
+            .unwrap();
+        let error = pending.complete().await.unwrap_err();
+        match error {
+            AiError::Transport(error) if status == 200 => {
+                assert_eq!(error.phase, TransportPhase::Body);
+                assert!(error.timeout);
+            }
+            AiError::Http(error) if status == 520 => {
+                assert_eq!(error.status.as_u16(), 520);
+                assert!(error.body_snippet.is_none());
+                assert_eq!(error.retry_after, Some(Duration::from_secs(71)));
+            }
+            other => panic!("wrong body failure: {other:?}"),
+        }
+        drop(release);
+        server.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn compact_completion_never_reresolves_rotating_credentials_or_replays() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Rotating(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl octet_ai::CredentialResolver for Rotating {
+        async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+            let generation = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(octet_ai::ResolvedCredential {
+                scheme: octet_ai::CredentialScheme::Bearer,
+                value: format!("compact-key-{generation}").into(),
+                extra_headers: Default::default(),
+            })
+        }
+    }
+    let server = MockServer::start().await;
+    for generation in [1, 2] {
+        Mock::given(method("POST"))
+            .and(header(
+                "authorization",
+                format!("Bearer compact-key-{generation}"),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"output":[]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut model = model(&format!("{}/", server.uri()), Protocol::OpenAiResponses);
+    Arc::make_mut(&mut model.endpoint).auth =
+        Auth::Dynamic(Arc::new(Rotating(resolutions.clone())));
+    let client = AiClient::new();
+    for generation in [1, 2] {
+        let pending = client
+            .open_compact_responses(&model, compact_request(ResponsesInput::default(), None))
+            .await
+            .unwrap();
+        assert_eq!(resolutions.load(Ordering::SeqCst), generation);
+        pending.complete().await.unwrap();
+        assert_eq!(resolutions.load(Ordering::SeqCst), generation);
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}

@@ -587,6 +587,9 @@ impl AgentRunTelemetry {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextUsage {
+    /// Durable session usage/cost is incomplete; numeric accounting is a known subtotal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usage_uncertain: bool,
     /// Usage counters.
     pub usage: UsageSnapshot,
     /// Number of completed compactions.

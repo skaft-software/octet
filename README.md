@@ -14,6 +14,9 @@ and lets you add tools through subprocess extensions.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
+**Source checkout: 0.7.4 UNPUBLISHED candidate.** The [candidate notes](docs/releases/v0.7.4.md)
+track the open #382 physical acceptance gate. Latest published release: 0.7.3.
+
 ## Install
 
 **Native installer:** macOS Apple silicon/Intel and GNU/Linux x86-64:

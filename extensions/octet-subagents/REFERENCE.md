@@ -1,8 +1,13 @@
 # octet-subagents reference
 
+**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
+to published octet 0.7.3 and its matching bundle; local candidate sources or
+archives require a locally built octet 0.7.4. See
+[the open release gates](../../docs/releases/v0.7.4.md).
+
 [Usage guide](README.md). This is the bundled API `0.2` runtime contract, not a
-current extension-authoring example. Distribution `0.7.3` targets exactly octet
-`0.7.3`; the API remains `0.2`.
+current extension-authoring example. Distribution `0.7.4` targets exactly octet
+`0.7.4`; the API remains `0.2`.
 
 The executable launches named, single-purpose child conversations through the
 host-owned `agent_sessions` service. It is not an agent team, graph/recipe runtime,
@@ -84,16 +89,16 @@ use the graph/recipe spike, built-in team mailboxes, or another scheduler.
 
 ## Install, enable, and trust
 
-The bundle requires [octet 0.7.3](../../docs/installation.md) and
-has one root directory named `octet-subagents`. Once the matching signed public
-bundle is published, install it with:
+The candidate bundle requires octet 0.7.4 and has one root directory named
+`octet-subagents`. With published [octet 0.7.3](../../docs/installation.md),
+the catalog command installs the published 0.7.3 bundle:
 
 ```console
 octet extension install octet-subagents
 ```
 
-For a reviewed local archive instead, use
-`octet extension install --path ./octet-subagents-0.7.3.tar.gz`.
+For candidate-only testing with a locally built octet 0.7.4 and reviewed local
+archive, use `octet extension install --path ./octet-subagents-0.7.4.tar.gz`.
 
 Installation/discovery is inert: it never enables, persists a trust grant, or
 starts the process. The bundle is disabled by default. Default full access

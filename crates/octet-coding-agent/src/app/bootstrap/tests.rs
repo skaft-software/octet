@@ -3631,3 +3631,182 @@ async fn custom_binary_profiles_discover_cache_and_send_distinct_controls() {
         server.verify().await;
     }
 }
+
+#[tokio::test]
+async fn custom_catalog_discovery_bounds_batches_and_isolates_endpoints_and_offline_cache() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::auth::custom::CredentialStore::new(directory.path().join("custom.json"));
+    let mut registry: crate::auth::custom::CustomRegistry =
+        serde_json::from_value(serde_json::json!({"version": 1, "providers": {}})).unwrap();
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::channel(5);
+    let mut releases = Vec::new();
+    let mut servers = Vec::new();
+    for provider in ["alpha", "beta", "delta", "epsilon", "gamma"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        registry.providers.insert(
+            provider.into(),
+            serde_json::from_value(serde_json::json!({
+                "base_url": format!("http://{address}/v1/"), "api_key": format!("{provider}-fixture-token"),
+                "auto_discover": true,
+                "models": [{"api_name": provider, "context_window": 32000}]
+            }))
+            .unwrap(),
+        );
+        let (release, wait) = tokio::sync::oneshot::channel();
+        releases.push(release);
+        let started = started_tx.clone();
+        servers.push(tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut bytes = [0; 1024];
+                let read = socket.read(&mut bytes).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&bytes[..read]);
+                if request.windows(4).any(|part| part == b"\r\n\r\n") { break; }
+                assert!(request.len() < 16 * 1024);
+            }
+            assert!(request.starts_with(b"GET /v1/models "));
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.contains(&format!("authorization: bearer {provider}-fixture-token\r\n")));
+            started.send(provider).await.unwrap();
+            let _ = wait.await;
+            let body = serde_json::json!({"data": [
+                {"id": provider, "context_window": 64000},
+                {"id": format!("{provider}-discovered"), "context_window": 48000}
+            ]}).to_string();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }));
+    }
+    registry.providers.insert(
+        "z-broken".into(),
+        serde_json::from_value(serde_json::json!({
+            "base_url": "not a URL", "auth": {"kind": "none"}, "auto_discover": true
+        }))
+        .unwrap(),
+    );
+    store.save_registry(&registry).unwrap();
+    let original = std::fs::read(store.path()).unwrap();
+    let worker_store = store.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut catalog = ModelCatalog::default();
+        register_custom_openai_endpoints_from_store(&mut catalog, &worker_store, false).unwrap();
+        catalog
+    });
+    // Hold the first batch: all four jobs must overlap, but the fifth must
+    // wait. Deadlines are deadlock guards, not startup performance thresholds.
+    let overlap = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut admitted = Vec::new();
+        for _ in 0..4 {
+            admitted.push(started_rx.recv().await.unwrap());
+        }
+        admitted.sort_unstable();
+        admitted
+    })
+    .await;
+    let premature_fifth = tokio::time::timeout(Duration::from_millis(100), started_rx.recv()).await;
+    for release in releases {
+        let _ = release.send(());
+    }
+    let online = worker.await.unwrap();
+    for server in servers {
+        server.await.unwrap();
+    }
+    assert_eq!(overlap.unwrap(), ["alpha", "beta", "delta", "epsilon"]);
+    assert!(
+        premature_fifth.is_err(),
+        "fifth registration escaped the batch bound"
+    );
+    assert_eq!(started_rx.recv().await, Some("gamma"));
+    let mut offline = ModelCatalog::default();
+    register_custom_openai_endpoints_from_store(&mut offline, &store, true).unwrap();
+    for provider in ["alpha", "beta", "delta", "epsilon", "gamma"] {
+        let id = ModelId(format!("custom/{provider}/{provider}"));
+        let discovered = ModelId(format!("custom/{provider}/{provider}-discovered"));
+        assert!(online.resolve(&discovered).is_ok());
+        assert!(offline.resolve(&discovered).is_ok());
+        for other in ["alpha", "beta", "delta", "epsilon", "gamma"] {
+            if other != provider {
+                let foreign = ModelId(format!("custom/{provider}/{other}-discovered"));
+                assert!(online.resolve(&foreign).is_err());
+                assert!(offline.resolve(&foreign).is_err());
+            }
+        }
+        let online = online.resolve(&id).unwrap();
+        let offline = offline.resolve(&id).unwrap();
+        assert_eq!(online.spec.limits.context_window, 32000);
+        assert_eq!(
+            online.spec.limits.context_window,
+            offline.spec.limits.context_window
+        );
+        assert_eq!(online.endpoint.id, offline.endpoint.id);
+        assert_eq!(
+            online.endpoint.base_url.as_str(),
+            registry.providers[provider].credential.base_url
+        );
+        assert_eq!(online.endpoint.base_url, offline.endpoint.base_url);
+    }
+    assert_eq!(std::fs::read(store.path()).unwrap(), original);
+}
+
+/// Matched startup-catalog measurement with scheduled loopback inventory delay.
+/// This does not measure inference or terminal paint.
+#[tokio::test]
+#[ignore = "manual matched timing experiment"]
+async fn custom_catalog_startup_benchmark() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(100))
+                .set_body_json(serde_json::json!({"data": [{"id": "fixture"}]})),
+        )
+        .mount(&server)
+        .await;
+    for trial in 0..9 {
+        for candidate in if trial % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let directory = tempfile::tempdir().unwrap();
+            let store =
+                crate::auth::custom::CredentialStore::new(directory.path().join("custom.json"));
+            let registry: crate::auth::custom::CustomRegistry = serde_json::from_value(serde_json::json!({
+                "version": 1, "providers": {
+                    "alpha": {"base_url": format!("{}/v1/", server.uri()), "auth": {"kind": "none"}, "auto_discover": true},
+                    "beta": {"base_url": format!("{}/v1/", server.uri()), "auth": {"kind": "none"}, "auto_discover": true}
+                }
+            })).unwrap();
+            store.save_registry(&registry).unwrap();
+            tokio::task::spawn_blocking(move || {
+                for scenario in ["cold", "cached", "offline"] {
+                    let start = std::time::Instant::now();
+                    let mut catalog = ModelCatalog::default();
+                    if candidate {
+                        register_custom_openai_endpoints_from_store(&mut catalog, &store, scenario == "offline").unwrap();
+                    } else {
+                        // Original serial orchestration, same registration/cache code.
+                        let registry = store.load_registry().unwrap().unwrap();
+                        for (id, provider) in registry.providers {
+                            let mut provider_catalog = ModelCatalog::default();
+                            register_custom_openai_provider(&mut provider_catalog, &store, &id, &provider, false, scenario == "offline").unwrap();
+                            merge_provider_catalog(&mut catalog, provider_catalog).unwrap();
+                        }
+                    }
+                    let elapsed = start.elapsed().as_nanos();
+                    for provider in ["alpha", "beta"] {
+                        assert!(catalog.resolve(&ModelId(format!("custom/{provider}/fixture"))).is_ok());
+                    }
+                    println!("custom_catalog_startup scenario={scenario} trial={trial} candidate={candidate} elapsed_ns={elapsed}");
+                }
+            }).await.unwrap();
+        }
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 36);
+}

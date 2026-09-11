@@ -1,7 +1,7 @@
 ---
 name: octet-subagents
 description: Delegate bounded tasks to up to 8 host-owned octet workers (32 per owner) with inherited models and the parent's full standard tool scope by default; optionally narrow to read-only for pure investigations, steer active workers or resume finished ones with subagent_continue, then integrate the evidence without team-chat or graph orchestration.
-version: 0.7.3
+version: 0.7.4
 required-tools:
   - subagent_spawn
   - subagent_status

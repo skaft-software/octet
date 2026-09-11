@@ -1,5 +1,10 @@
 # octet-subagents
 
+**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
+to published octet 0.7.3 and its matching bundle; local candidate sources or
+archives require a locally built octet 0.7.4. See
+[the open release gates](../../docs/releases/v0.7.4.md).
+
 Delegate a bounded task to a background worker while the parent continues other
 work. octet owns the child conversations, permissions, persistence, limits, and
 shutdown. This is not an agent team, swarm, or second model loop.
@@ -49,8 +54,8 @@ octet extension install octet-subagents
 octet --enable-extension octet-subagents
 ```
 
-For a reviewed local archive instead, use
-`octet extension install --path ./octet-subagents-0.7.3.tar.gz`.
+For candidate-only testing with a locally built octet 0.7.4 and reviewed local
+archive, use `octet extension install --path ./octet-subagents-0.7.4.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
 starts nothing; the bundle stays disabled until explicitly enabled. Default full
 access (`unsafe_host`) implicitly trusts it without saving a grant. Optional
@@ -90,7 +95,7 @@ prompt. `/subagents inspect <name-or-id>` provides cached detail and
 
 ## Reference
 
-Bundle `0.7.3` requires exactly octet `0.7.3` and retains API `0.2`. The detailed
+Bundle `0.7.4` requires exactly octet `0.7.4` and retains API `0.2`. The detailed
 contract is a bundled-runtime reference, not a current extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.

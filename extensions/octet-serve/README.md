@@ -2,9 +2,10 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. Octet 0.7.3 packages target signed distribution with
-public installation; these implementation contracts do not imply complete feature
-or live-provider acceptance.
+Serve remains experimental. This checkout is the UNPUBLISHED octet 0.7.4
+source candidate; mandatory #382 physical acceptance remains UNRUN. Published
+packages remain 0.7.3. These implementation contracts do not imply complete
+feature or live-provider acceptance.
 
 ## Focused checks
 
@@ -88,8 +89,9 @@ contains the adapter into private `App`. Source-level extraction behind a stable
 Runtime API is deferred; the default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface. See [architecture](../../docs/experimental/octet-serve/architecture.md).
 
-The signed package requires exactly `=0.7.3`; its
-[publication is tracked](../../docs/releases/v0.7.3.md). It declares three targets:
+The candidate package requires exactly `=0.7.4`; its
+[open release gates are tracked](../../docs/releases/v0.7.4.md). It is unpublished
+and declares three targets:
 
 - GNU/Linux x86_64: `x86_64-unknown-linux-gnu`;
 - macOS x86_64;

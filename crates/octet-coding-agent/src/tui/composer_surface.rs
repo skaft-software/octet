@@ -757,7 +757,15 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
             | crate::presentation::PriceDisplay::Priced => None,
         }
     };
-    if let Some(cost) = cost {
+    if state.usage_uncertain {
+        segments.push(StatusFooterSegment::new(
+            FooterKind::Cost,
+            vec![match state.displayed_session_cost_microdollars() {
+                Some(cost) => format!("subtotal {} + ?", format_microdollars(cost)),
+                None => "usage/cost unknown".to_owned(),
+            }],
+        ));
+    } else if let Some(cost) = cost {
         segments.push(StatusFooterSegment::new(
             FooterKind::Cost,
             vec![format!("session {cost}")],

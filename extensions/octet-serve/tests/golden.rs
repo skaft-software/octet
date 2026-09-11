@@ -89,6 +89,7 @@ fn snapshot() -> SessionSnapshot {
         model: model_selection(),
         authority: AuthorityProfile::Workspace,
         context: ContextUsage {
+            usage_uncertain: false,
             usage: UsageSnapshot {
                 input_tokens: 120,
                 output_tokens: 45,

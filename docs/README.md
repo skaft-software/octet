@@ -53,6 +53,7 @@
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
+- [0.7.4 UNPUBLISHED source candidate](releases/v0.7.4.md) — #382 physical gate open
 - [0.7.3 release notes](releases/v0.7.3.md)
 - [0.7.1 release notes](releases/v0.7.1.md)
 - [Roadmap](https://github.com/orgs/skaft-software/projects/5)

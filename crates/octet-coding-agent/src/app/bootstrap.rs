@@ -3172,30 +3172,68 @@ fn register_custom_openai_endpoints_from_store(
     let Some(registry) = store.load_registry()? else {
         return Ok(());
     };
-    for (provider_id, provider) in registry.providers {
-        let legacy_single_endpoint =
-            registry.legacy_single_endpoint && provider_id == crate::auth::custom::ENDPOINT_ID;
-        let mut provider_catalog = ModelCatalog::default();
-        if let Err(error) = register_custom_openai_provider(
-            &mut provider_catalog,
-            store,
-            &provider_id,
-            &provider,
-            legacy_single_endpoint,
-            offline,
-        ) {
-            let label = provider.label.trim();
-            let label = if label.is_empty() {
-                &provider_id
-            } else {
-                label
+    // Custom inventories are independent and have provider-specific cache
+    // paths. Bound concurrency rather than multiplying a cold endpoint's
+    // discovery deadline by every configured provider. Join and merge in the
+    // original registry order before publishing a complete catalog.
+    const MAX_CONCURRENT_CUSTOM_PROVIDERS: usize = 4;
+    let providers = registry.providers.iter().collect::<Vec<_>>();
+    for batch in providers.chunks(MAX_CONCURRENT_CUSTOM_PROVIDERS) {
+        std::thread::scope(|scope| {
+            let build = |provider_id: &String, provider: &crate::auth::custom::CustomProvider| {
+                let legacy_single_endpoint = registry.legacy_single_endpoint
+                    && provider_id == crate::auth::custom::ENDPOINT_ID;
+                let mut provider_catalog = ModelCatalog::default();
+                register_custom_openai_provider(
+                    &mut provider_catalog,
+                    store,
+                    provider_id,
+                    provider,
+                    legacy_single_endpoint,
+                    offline,
+                )?;
+                Ok::<_, anyhow::Error>(provider_catalog)
             };
-            crate::output::stderr!("warning: custom provider {label:?} unavailable: {error}");
-            continue;
-        }
-        if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
-            crate::output::stderr!("warning: custom provider {provider_id:?} unavailable: {error}");
-        }
+            let jobs = batch
+                .iter()
+                .map(|&(provider_id, provider)| {
+                    // No threads for offline/manual inventories or a single provider.
+                    if offline || !provider.credential.auto_discover || batch.len() == 1 {
+                        return None;
+                    }
+                    std::thread::Builder::new()
+                        .name("octet-custom-catalog".into())
+                        .spawn_scoped(scope, move || build(provider_id, provider))
+                        .ok()
+                })
+                .collect::<Vec<_>>();
+            for (&(provider_id, provider), job) in batch.iter().zip(jobs) {
+                // Thread-resource exhaustion falls back to the same validation
+                // and discovery path instead of silently dropping a provider.
+                let result = match job {
+                    Some(job) => job.join().unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!("custom model discovery thread panicked"))
+                    }),
+                    None => build(provider_id, provider),
+                };
+                match result {
+                    Ok(provider_catalog) => {
+                        if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
+                            crate::output::stderr!(
+                                "warning: custom provider {provider_id:?} unavailable: {error}"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let label = provider.label.trim();
+                        let label = if label.is_empty() { provider_id } else { label };
+                        crate::output::stderr!(
+                            "warning: custom provider {label:?} unavailable: {error}"
+                        );
+                    }
+                }
+            }
+        });
     }
     Ok(())
 }

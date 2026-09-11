@@ -1,11 +1,13 @@
 use sexy_tui_rs::{strip_terminal_sequences, Color, RichRenderer};
+use std::time::Instant;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::assistant_block::AssistantBlock;
 use super::{activity_elbow, finish_transcript_block, fit_line, subdued_text};
 use crate::tui::terminal::ColorDepth;
 use crate::tui::theme::OctetTheme;
 
-const ACTIVITY_SHIMMER_FRAMES: usize = 12;
 /// The status label starts two cells after its margin dot (`• `). Keeping the
 /// dot in the same coordinate space makes the shimmer travel through it before
 /// crossing the label.
@@ -58,7 +60,10 @@ fn activity_shimmer_color(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> (u8, u8, u8) {
-    let center = (shimmer_frame % ACTIVITY_SHIMMER_FRAMES) as isize - ACTIVITY_LABEL_OFFSET;
+    // Sweep at one terminal cell per tick, including the marker and enough
+    // trailing space for the highlight to leave the entire label before looping.
+    let cycle = label.width() + ACTIVITY_LABEL_OFFSET as usize + 2;
+    let center = (shimmer_frame % cycle) as isize - ACTIVITY_LABEL_OFFSET;
     let shadow_strength = match (index - center).unsigned_abs() {
         0 => 100,
         1 => 78,
@@ -96,7 +101,8 @@ fn activity_shimmer_label(
         return static_label();
     };
     let mut rendered = String::with_capacity(label.len().saturating_mul(20));
-    for (index, character) in label.chars().enumerate() {
+    let mut index = 0;
+    for grapheme in label.graphemes(true) {
         let color = activity_shimmer_color(
             model,
             shadow,
@@ -105,9 +111,8 @@ fn activity_shimmer_label(
             shimmer_frame,
             rainbow_strength,
         );
-        let mut encoded = [0; 4];
-        let character = character.encode_utf8(&mut encoded);
-        rendered.push_str(&theme.rgb_fg(color, character));
+        rendered.push_str(&theme.rgb_fg(color, grapheme));
+        index += grapheme.width();
     }
     theme.bold(&rendered)
 }
@@ -135,10 +140,16 @@ pub(super) fn activity_shimmer_marker(
     let Some((model, shadow)) = activity_shimmer_palette(theme, reasoning) else {
         return static_marker();
     };
+    let retry_label = reasoning
+        .retry_activity
+        .as_ref()
+        .map(|retry| retry.label_at(Instant::now()));
     let color = activity_shimmer_color(
         model,
         shadow,
-        activity_label(reasoning),
+        retry_label
+            .as_deref()
+            .unwrap_or_else(|| activity_label(reasoning)),
         ACTIVITY_MARKER_INDEX,
         shimmer_frame,
         rainbow_strength,
@@ -197,16 +208,26 @@ fn collapsed_reasoning_lines_at(
         return Vec::new();
     }
     if reasoning.is_working_activity() {
+        let label = reasoning
+            .retry_activity
+            .as_ref()
+            .map(|retry| retry.label_at(Instant::now()));
         return vec![activity_status_line(
             theme,
             reasoning,
-            "Working",
+            label.as_deref().unwrap_or("Working"),
             shimmer_frame,
             rainbow_strength,
         )];
     }
     if reasoning.text.is_empty() && !reasoning.show_reasoning_hint {
-        let label = reasoning.reasoning_heading.as_deref().unwrap_or("Thinking");
+        let retry_label = reasoning
+            .retry_activity
+            .as_ref()
+            .map(|retry| retry.label_at(Instant::now()));
+        let label = retry_label
+            .as_deref()
+            .unwrap_or_else(|| reasoning.reasoning_heading.as_deref().unwrap_or("Thinking"));
         return vec![activity_status_line(
             theme,
             reasoning,
@@ -450,6 +471,43 @@ mod tests {
     }
 
     #[test]
+    fn shimmer_reaches_every_grapheme_and_loops_at_the_label_width() {
+        let theme = theme::test_theme();
+        let reasoning =
+            AssistantBlock::streaming_reasoning("").with_model_lab(Some(ModelLab::Alibaba));
+        let model = theme.model_rgb(Some(ModelLab::Alibaba)).unwrap();
+        let peak = format!("{};{};{}", model.0, model.1, model.2);
+        for label in [
+            "",
+            "A",
+            "Working",
+            "Thinking",
+            "Compacting context",
+            "A considerably longer activity label",
+            "压缩 e\u{301} 👩‍💻 context",
+        ] {
+            let cycle = label.width() + ACTIVITY_LABEL_OFFSET as usize + 2;
+            let mut cell = 0;
+            for (index, grapheme) in label.graphemes(true).enumerate() {
+                let frame = cell + ACTIVITY_LABEL_OFFSET as usize;
+                let rendered = activity_shimmer_label(&theme, &reasoning, label, frame, 0);
+                assert_eq!(strip_terminal_sequences(&rendered), label);
+                assert_eq!(
+                    foreground_color_codes(&rendered)[index],
+                    peak,
+                    "{label}: {index}"
+                );
+                assert!(!rendered.contains("\x1b[48;"));
+                cell += grapheme.width();
+            }
+            assert_eq!(
+                activity_shimmer_label(&theme, &reasoning, label, 0, 0),
+                activity_shimmer_label(&theme, &reasoning, label, cycle, 0),
+            );
+        }
+    }
+
+    #[test]
     fn max_rainbow_shimmer_moves_right_at_one_status_frame_per_step() {
         let theme = theme::test_theme();
         let reasoning =
@@ -489,6 +547,37 @@ mod tests {
             "•",
         );
         assert_eq!(first, expected);
+    }
+
+    #[test]
+    fn retry_marker_uses_the_displayed_label_shimmer_cycle() {
+        use super::super::assistant_block::RetryActivity;
+        let theme = theme::test_theme();
+        let mut reasoning =
+            AssistantBlock::streaming_reasoning("").with_model_lab(Some(ModelLab::Alibaba));
+        reasoning.retry_activity = Some(RetryActivity {
+            operation: None,
+            attempt: 12,
+            max_attempts: None,
+            delay: Duration::ZERO,
+            observed_at: Instant::now(),
+        });
+        let label = reasoning
+            .retry_activity
+            .as_ref()
+            .unwrap()
+            .label_at(Instant::now());
+        let model = theme.model_rgb(Some(ModelLab::Alibaba)).unwrap();
+        let shadow = theme.composer_idle_rgb(model);
+        for frame in 0..64 {
+            assert_eq!(
+                activity_shimmer_marker(&theme, &reasoning, frame, 0, "•"),
+                theme.rgb_fg(
+                    activity_shimmer_color(model, shadow, &label, ACTIVITY_MARKER_INDEX, frame, 0),
+                    "•"
+                ),
+            );
+        }
     }
 
     #[test]

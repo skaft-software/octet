@@ -1,8 +1,13 @@
 # octet-mcp reference
 
+**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
+to published octet 0.7.3 and its matching bundle; local candidate sources or
+archives require a locally built octet 0.7.4. See
+[the open release gates](../../docs/releases/v0.7.4.md).
+
 [Usage guide](README.md). This is the bundled API `0.2` implementation contract,
-not a current extension-authoring example. Distribution `0.7.3` requires exactly
-octet `0.7.3`; these version numbers are independent.
+not a current extension-authoring example. Distribution `0.7.4` requires exactly
+octet `0.7.4`; these version numbers are independent.
 
 One resident extension process owns every explicitly configured
 [Model Context Protocol](https://modelcontextprotocol.io/) server session and
@@ -48,7 +53,7 @@ An explicitly read-only tool may run without an additional prompt. Every
 `unknown` or `destructive` call goes through the negotiated host
 `policy/evaluate` service. If policy intents are unavailable, evaluation fails,
 or the host denies the intent, the bridge fails closed. It uses a one-use
-approval retry only when the host actually negotiates `approvals`; octet `0.7.3`'s
+approval retry only when the host actually negotiates `approvals`; octet `0.7.4`'s
 coding product does not currently enable approval issuance, so those calls are
 denied with an explanatory tool error. An MCP tool call is never automatically
 replayed after timeout, cancellation, crash, or an ambiguous disconnect.
@@ -135,7 +140,7 @@ below does not override this warning.
 
 ## Requirements and installation
 
-- octet exactly `0.7.3` (`requires_octet = "=0.7.3"`)
+- octet exactly `0.7.4` (`requires_octet = "=0.7.4"`)
 - Python 3.9 or newer on `PATH`
 - separately installed MCP server executables
 

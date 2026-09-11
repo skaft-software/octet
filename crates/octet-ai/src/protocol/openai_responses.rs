@@ -1191,7 +1191,17 @@ struct ResponsesIncompleteDetailsDto {
 
 #[derive(Deserialize)]
 struct ResponsesResponseFailedBlock {
-    error: ResponsesErrorDto,
+    error: Option<ResponsesFailedErrorDto>,
+}
+
+// Native failed terminals permit absent/null error messages. Keep typed policy
+// denials even without prose, without relaxing arbitrary top-level error DTOs.
+#[derive(Default, Deserialize)]
+struct ResponsesFailedErrorDto {
+    code: Option<String>,
+    message: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1660,10 +1670,13 @@ pub(crate) fn decode_stream_event(
             emit_event(&mut events, builder, StreamEvent::Finished(resp))?;
         }
         ResponsesSseEvent::ResponseFailed { response } => {
-            return Err(AiError::Provider(ProviderError {
-                code: response.error.code,
-                kind: response.error.kind,
-                message: response.error.message,
+            let error = response.error.unwrap_or_default();
+            return Err(AiError::ResponsesFailed(ProviderError {
+                code: error.code,
+                kind: error.kind,
+                message: error
+                    .message
+                    .unwrap_or_else(|| "response.failed event received".into()),
                 request_id: None,
             }));
         }
@@ -2680,7 +2693,7 @@ mod fixture_tests {
         };
     }
 
-    async fn run(name: &'static [u8], chunk: usize) -> Result<Vec<StreamEvent>, AiError> {
+    async fn run(name: &[u8], chunk: usize) -> Result<Vec<StreamEvent>, AiError> {
         let model = harness::model(Protocol::OpenAiResponses, None);
         harness::drive(&model, decode_stream_event, name, chunk).await
     }
@@ -2948,14 +2961,91 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     }
 
     #[tokio::test]
-    async fn response_failed_becomes_provider_error() {
+    async fn failed_terminal_without_prose_preserves_policy_veto() {
+        for error in [
+            serde_json::json!({"code":"cyber_policy"}),
+            serde_json::json!({"type":"invalid_prompt", "message":null}),
+            serde_json::Value::Null,
+        ] {
+            let permanent = !error.is_null();
+            let terminal = serde_json::json!({"type":"response.failed","response":{"error":error}});
+            let wire = format!("data: {terminal}\n\n");
+            let AiError::ResponsesFailed(provider) = run(wire.as_bytes(), 0).await.unwrap_err()
+            else {
+                panic!("lost terminal provenance or policy veto");
+            };
+            assert_eq!(provider.is_permanent(), permanent);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_terminals_preserve_unknown_and_permanent_code_kind() {
+        for (code, permanent) in [
+            ("unknown_failure", false),
+            ("overloaded_error", false),
+            ("server_is_overloaded", true),
+            ("slow_down", true),
+            ("invalid_prompt", true),
+            ("bio_policy", true),
+            ("cyber_policy", true),
+            ("misalignment_policy_violation", true),
+            ("context_length_exceeded", true),
+            ("insufficient_quota", true),
+            ("usage_not_included", true),
+            ("authentication_error", true),
+        ] {
+            for field in ["code", "type"] {
+                let mut error = serde_json::json!({"message":"retry transient server_error"});
+                error[field] = serde_json::json!(code);
+                let terminal =
+                    serde_json::json!({"type":"response.failed","response":{"error":error}});
+                let wire = format!("data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\"}}}}\n\ndata: {terminal}\n\n");
+                let AiError::ResponsesFailed(provider) = run(wire.as_bytes(), 0).await.unwrap_err()
+                else {
+                    panic!("lost response.failed provenance");
+                };
+                assert_eq!(provider.is_permanent(), permanent, "{field}={code}");
+                assert_eq!(
+                    if field == "code" {
+                        provider.code
+                    } else {
+                        provider.kind
+                    }
+                    .as_deref(),
+                    Some(code)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_unknown_reason_is_distinct_from_successful_known_terminals() {
+        for (reason, stop) in [
+            (
+                "upstream_disconnect",
+                StopReason::Other("upstream_disconnect".into()),
+            ),
+            ("content_filter", StopReason::Refusal),
+            ("max_output_tokens", StopReason::MaxTokens),
+        ] {
+            let wire = String::from_utf8(fx!("incomplete_max_tokens.sse").to_vec())
+                .unwrap()
+                .replace("max_output_tokens", reason);
+            let events = run(wire.as_bytes(), 0).await.unwrap();
+            assert_eq!(harness::finished(&events).stop_reason, stop);
+            assert_eq!(text_of(&events), "partial");
+        }
+    }
+
+    #[tokio::test]
+    async fn response_failed_retains_terminal_provenance() {
         let err = run(fx!("response_failed.sse"), 0).await.unwrap_err();
         match err {
-            AiError::Provider(p) => {
+            AiError::ResponsesFailed(p) => {
                 assert_eq!(p.code.as_deref(), Some("server_error"));
                 assert_eq!(p.message, "boom");
             }
-            other => panic!("expected Provider, got {other:?}"),
+            other => panic!("expected ResponsesFailed, got {other:?}"),
         }
     }
 

@@ -131,6 +131,37 @@ describe("usage page", () => {
     ]);
   });
 
+  it("labels incomplete daily and lifetime numbers as known subtotals", async () => {
+    const user = userEvent.setup();
+    render(<UsagePage
+      loadStats={vi.fn(async (period: UsagePeriod) => ({ ...stats(period), usageUncertain: true }))}
+      loadLifetime={vi.fn(async () => ({ ...stats("weekly"), usageUncertain: true }))}
+      loadActivity={vi.fn(async () => ({ days: [], currentStreak: 0, longestStreak: 0 }))}
+    />);
+    expect(await screen.findByRole("status")).toHaveTextContent("Usage and cost incomplete");
+    expect(screen.getByText("Known token subtotal")).toBeVisible();
+    expect(screen.getByText("3 requests with recorded usage")).toBeVisible();
+    expect(screen.queryByText("Total tokens")).toBeNull();
+    const today = screen.getByRole("region", { name: "Today usage summary" });
+    expect(within(today).getByText("260")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "All time" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Unknown usage cannot be assigned to a date or period");
+    expect(screen.getByText("Known token subtotal")).toBeVisible();
+    expect(screen.getByText("6 requests with recorded usage")).toBeVisible();
+  });
+
+  it("does not describe unknown-only accounting as no completed calls", async () => {
+    const usage = { ...stats("daily"), usageUncertain: true, models: [], requestCount: 0, totalTokens: 0 };
+    render(<UsagePage
+      loadStats={vi.fn(async () => usage)}
+      loadLifetime={vi.fn(async () => usage)}
+      loadActivity={vi.fn(async () => ({ days: [], currentStreak: 0, longestStreak: 0 }))}
+    />);
+    expect(await screen.findByRole("status")).toHaveTextContent("some provider usage is unknown");
+    expect(screen.getByText("No known model usage in this period; unknown usage is retained separately.")).toBeVisible();
+    expect(screen.queryByText("No completed model calls in this period.")).toBeNull();
+  });
+
   it("offers a retry when a usage projection cannot be loaded", async () => {
     const user = userEvent.setup();
     const loadStats = vi
