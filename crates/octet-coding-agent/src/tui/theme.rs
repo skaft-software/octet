@@ -1230,7 +1230,8 @@ const STANDARD_SYNTAX_COLORS: &[(&str, &str, &str)] = &[
 ];
 
 const STANDARD_DIFF_COLORS: &[(&str, &str, &str)] = &[
-    ("diff_added_marker", "#67d391", "#087a45"),
+    // Preserve green hue and readable contrast after fixed-palette quantization.
+    ("diff_added_marker", "#67d391", "#08652d"),
     ("diff_removed_marker", "#ff7d8a", "#b4233a"),
 ];
 
@@ -2373,6 +2374,41 @@ mod tests {
                         "{:?} {:?} {token} on {surface}",
                         theme.source(),
                         background
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ansi256_diff_surfaces_preserve_syntax_contrast_and_distinction() {
+        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::Ansi256);
+        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+            let theme = default_theme_for(background, capabilities);
+            let quantized = |token| ansi256_rgb(nearest_ansi256(required_rgb_token(&theme, token)));
+            for added in [
+                required_rgb_token(&theme, "diff_added_marker"),
+                quantized("diff_added_marker"),
+            ] {
+                assert!(
+                    added.green > added.red && added.green > added.blue,
+                    "{background:?}: added marker must remain green: {added:?}"
+                );
+            }
+            // Subtle surfaces may quantize together; signed markers retain distinction.
+            assert_ne!(
+                quantized("diff_added_marker"),
+                quantized("diff_removed_marker")
+            );
+            for surface in ["diff_added_bg", "diff_removed_bg"] {
+                for token in STANDARD_SYNTAX_COLORS
+                    .iter()
+                    .map(|(token, _, _)| *token)
+                    .chain(["diff_added_marker", "diff_removed_marker"])
+                {
+                    assert!(
+                        contrast(quantized(token), quantized(surface)) >= 4.5,
+                        "{background:?}: {token} on {surface}"
                     );
                 }
             }
