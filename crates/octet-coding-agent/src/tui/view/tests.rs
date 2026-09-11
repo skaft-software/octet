@@ -8500,6 +8500,105 @@ fn streamed_markdown_settles_into_rich_structure() {
 }
 
 #[test]
+fn colour_modes_confirmation_survives_model_resize_and_repeated_frames() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use crate::tui::theme::TerminalBackground;
+
+    for depth in [
+        ColorDepth::TrueColor,
+        ColorDepth::Ansi256,
+        ColorDepth::Ansi16,
+        ColorDepth::None,
+    ] {
+        for unicode in [false, true] {
+            for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+                let theme = crate::tui::theme::test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, unicode, depth),
+                );
+                let mut shell = InteractiveShell::test_shell_with_theme(theme);
+                shell.set_size(80, 24);
+                shell.open_panel(Panel::SelectList {
+                    surface: OrdinarySurfaceMetadata::new("Approve tool effect?"),
+                    items: vec!["Deny".into(), "Approve".into()],
+                    descriptions: vec![Some("writes src/lib.rs".into()); 2],
+                    selected: 0,
+                    filter: String::new(),
+                    action: PanelAction::Confirmation,
+                });
+                shell.panel_input(&panel_key(crossterm::event::KeyCode::Down));
+                shell.panel_input(&panel_key(crossterm::event::KeyCode::Char('x')));
+                for (provider, model) in [("anthropic", "claude-sonnet-4"), ("openai", "gpt-5.6")] {
+                    shell.set_identity(provider, model, "off");
+                    for width in [40, 80, 160, 40] {
+                        shell.set_size(width, 24);
+                        let frame = render_panel(&shell.state.borrow(), width);
+                        assert_eq!(frame, render_panel(&shell.state.borrow(), width));
+                        let text = strip_terminal_sequences(&frame.join("\n"));
+                        assert!(text.contains("Deny") && text.contains("Approve"));
+                        assert_eq!(text.matches("writes src/lib.rs").count(), 1);
+                        assert!(!text.contains("Filter"));
+                        assert!(panel_state(&shell).2.is_empty());
+                        if !unicode {
+                            assert!(text.is_ascii(), "{text:?}");
+                        }
+                        if depth == ColorDepth::None {
+                            assert!(!frame.join("").contains('\x1b'));
+                        }
+                    }
+                }
+                shell.set_size(80, 5);
+                assert!(shell
+                    .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                    .is_none());
+                assert!(shell.has_panel());
+                shell.set_size(80, 6);
+                let (result, action) = shell
+                    .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                    .expect("resized selected action is visible");
+                assert_eq!(result, PanelResult::Confirm(1));
+                assert!(matches!(action, PanelAction::Confirmation));
+                shell.close_panel();
+                shell
+                    .state
+                    .borrow_mut()
+                    .push_block(TranscriptBlock::Outcome(OutcomeBlock::new(
+                        RunOutcome::Completed {
+                            elapsed: Duration::from_secs(1),
+                            summary: crate::presentation::RunSummary {
+                                files_changed: 1,
+                                tool_calls: 1,
+                                warnings: 0,
+                            },
+                        },
+                        None,
+                    )));
+                shell
+                    .state
+                    .borrow_mut()
+                    .push_block(TranscriptBlock::Outcome(OutcomeBlock::new(
+                        RunOutcome::Failed {
+                            elapsed: Duration::from_secs(2),
+                            reason: "permission denied".into(),
+                        },
+                        None,
+                    )));
+                shell.set_size(80, 24);
+                let frame = render_shell(&shell.state.borrow(), 80);
+                assert_eq!(frame, render_shell(&shell.state.borrow(), 80));
+                let text = strip_terminal_sequences(&frame.join("\n"));
+                for label in ["completed", "failed", "permission denied"] {
+                    assert!(text.contains(label), "{text:?}");
+                }
+                if !unicode {
+                    assert!(text.replace(CURSOR_MARKER, "").is_ascii(), "{text:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn full_tui_colour_modes_preserve_readable_content_and_supported_encoding() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::TerminalBackground;
