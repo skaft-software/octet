@@ -8548,11 +8548,9 @@ fn colour_modes_confirmation_survives_model_resize_and_repeated_frames() {
                     }
                 }
                 shell.set_size(80, 5);
-                assert!(
-                    shell
-                        .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
-                        .is_none()
-                );
+                assert!(shell
+                    .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+                    .is_none());
                 assert!(shell.has_panel());
                 shell.set_size(80, 6);
                 let (result, action) = shell
