@@ -29,6 +29,8 @@ class ReleaseSmokeTests(unittest.TestCase):
         self.assertTrue(manifest["capabilities"]["process"])
         self.assertTrue(manifest["capabilities"]["network"])
         self.assertTrue(manifest["contributes"]["presentation"])
+        self.assertTrue(manifest["contributes"]["confirmations"])
+        self.assertEqual(manifest["contributes"]["hooks"], ["before_prompt"])
         self.assertEqual(manifest["contributes"]["commands"], ["mcp"])
 
     def test_release_catalog_and_executable_include_the_self_contained_runtime(self):
@@ -40,12 +42,28 @@ class ReleaseSmokeTests(unittest.TestCase):
             "vendor/octet_extension/__init__.py",
             "vendor/octet_extension/extension.py",
             "vendor/octet_extension/protocol.py",
+            "octet_mcp/auth.py",
+            "octet_mcp/auth_runtime.py",
+            "octet_mcp/auth_service.py",
+            "octet_mcp/auth_store.py",
+            "octet_mcp/http_2026.py",
+            "octet_mcp/interactions.py",
+            "octet_mcp/oauth.py",
+            "octet_mcp/oauth_callback.py",
+            "octet_mcp/oauth_http.py",
+            "octet_mcp/oauth_transport.py",
+            "octet_mcp/protocol_2026.py",
+            "octet_mcp/resources.py",
             "octet_mcp/runtime.py",
             "octet_mcp/streamable_http.py",
             "config.schema.json",
             "config.example.json",
             "fixtures/configs/real-local.json",
             "README.md",
+            "REFERENCE.md",
+            "QUALIFICATION.md",
+            "qualification/baseline.json",
+            "skills/octet-mcp/SKILL.md",
             "CHANGELOG.md",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)

@@ -197,7 +197,7 @@ class McpHttp2026Client(McpStreamableHttpClient):
         budget = [0, 0, 0] if method in ELIGIBLE_METHODS else None
         round_progress = progress
         if progress is not None and interaction_handler is not None:
-            round_progress = lambda value: progress(interaction_handler.redact_result(value))
+            round_progress = lambda value: progress(interaction_handler.redact_payload(value))
 
         def send(round_method: str, round_params: Mapping[str, Any], **kwargs: Any) -> Any:
             previous_headers = getattr(self._wire, "headers", None)

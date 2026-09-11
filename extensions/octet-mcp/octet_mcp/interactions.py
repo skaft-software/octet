@@ -37,6 +37,10 @@ import time
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlsplit
 
+from .catalog import (
+    _ALLOWED_AUDIO_MIME, _ALLOWED_IMAGE_MIME, _validate_value,
+    render_resource_content, ToolInputError, ToolResultError,
+)
 from .protocol import McpCancelled, McpError, McpProtocolError, McpTimeout
 
 MAX_MRTR_ROUNDS = 4  # continuations, in addition to the original request
@@ -256,6 +260,7 @@ class InteractionHandler:
     request_input: Callable[..., Optional[str]]
     confirm: Callable[..., bool]
     server_label: str
+    output_schema: Optional[Mapping[str, Any]] = None
     _usage: _Usage = field(default_factory=_Usage, init=False)
 
     @property
@@ -415,8 +420,80 @@ class InteractionHandler:
         action = action.strip() if action is not None else "cancel"
         return {"action": action if action in {"accept", "decline", "cancel"} else "cancel"}
 
-    def redact_result(self, value: Any) -> Any:
-        """Suppress direct private echoes; transformed server data is still untrusted."""
+    def redact_result(self, value: Any, *, method: str) -> Any:
+        """Keep protocol structure/status distinct from redactable server data.
+
+        The method comes from the admitted operation, not a server discriminator.
+        Only known field names and finite protocol literals are exempt. Arbitrary
+        structured content, metadata and extensions remain data. Check raw string
+        types and the captured output schema before type-changing redaction;
+        downstream validation still rejects unrepresentable redacted payloads.
+        """
+        if method == "tools/call" and isinstance(value, dict) and "structuredContent" in value:
+            try:
+                _validate_value(value["structuredContent"], self.output_schema or {}, "$", 0)
+            except ToolInputError:
+                raise McpError("invalid_result", "MCP structured content violates outputSchema or structural bounds") from None
+        data = self.redact_payload
+
+        def string(item: Any) -> str:
+            if not isinstance(item, str):
+                raise McpError("invalid_result", "MCP result string field was malformed")
+            return data(item)
+
+        def record(item: Any, fields: Mapping[str, Callable[[Any], Any]]) -> Any:
+            if not isinstance(item, dict):
+                return data(item)
+            return {key if key in fields else data(key):
+                    fields[key](child) if key in fields else data(child)
+                    for key, child in item.items()}
+
+        def literal(allowed: Any) -> Callable[[Any], Any]:
+            return lambda item: item if isinstance(item, str) and item in allowed else data(item)
+
+        def array(item: Any, transform: Callable[[Any], Any]) -> Any:
+            return [transform(child) for child in item] if isinstance(item, list) else data(item)
+
+        def resource(item: Any) -> Any:
+            fields = {**dict.fromkeys(("uri", "text", "blob", "mimeType"), string), "_meta": data}
+            return record(item, fields)
+
+        def content(item: Any) -> Any:
+            kind = item.get("type") if isinstance(item, dict) else None
+            if kind in ("resource", "resource_link"):
+                # Reuse the side-effect-free validator/renderer before masking:
+                # extension metadata keys can be redacted, not hide invalid data.
+                try:
+                    render_resource_content(item)
+                except ToolResultError:
+                    raise McpError("invalid_result", "MCP resource content was malformed") from None
+            fields = {"type": literal({"text", "image", "audio", "resource", "resource_link"}),
+                      "annotations": data, "_meta": data}
+            if kind == "text":
+                fields["text"] = string
+            elif kind in ("image", "audio"):
+                fields["data"] = string
+                fields["mimeType"] = literal(_ALLOWED_IMAGE_MIME if kind == "image" else _ALLOWED_AUDIO_MIME)
+            elif kind == "resource":
+                fields["resource"] = resource
+            elif kind == "resource_link":
+                fields.update(dict.fromkeys(("uri", "name", "title", "description", "mimeType"), string))
+                fields.update(dict.fromkeys(("size", "icons"), data))
+            return record(item, fields)
+
+        fields = {"resultType": literal({"complete"}), "_meta": data}
+        if method == "tools/call":
+            fields.update({
+                "isError": lambda item: item if type(item) is bool else data(item),
+                "content": lambda item: array(item, content),
+                "structuredContent": data,
+            })
+        else:  # operation() admits only tools/call or resources/read.
+            fields["contents"] = lambda item: array(item, resource)
+        return record(value, fields)
+
+    def redact_payload(self, value: Any) -> Any:
+        """Suppress direct private echoes in data, never interpret it as protocol."""
         private = tuple(self._usage.private)
         def redact(item: Any) -> Any:
             if isinstance(item, str):
@@ -439,7 +516,7 @@ class InteractionHandler:
 def make_interaction_handler(
     extension: Any, *, owner: Mapping[str, Any], parent_request_id: int,
     cancellation: Any, deadline: float, is_active: Callable[[Mapping[str, Any], int], bool],
-    server_label: str, private_ui: bool = False,
+    server_label: str, private_ui: bool = False, output_schema: Optional[Mapping[str, Any]] = None,
 ) -> Optional[InteractionHandler]:
     """Host-only factory; unavailable/headless composition advertises nothing."""
     if private_ui is not True or getattr(extension, "api_version", None) != "0.2":
@@ -459,7 +536,7 @@ def make_interaction_handler(
         return None
     return InteractionHandler(
         tuple(owner[k] for k in _OWNER_KEYS), parent_request_id, cancellation, deadline,
-        is_active, extension.request_input, extension.confirm, label,
+        is_active, extension.request_input, extension.confirm, label, output_schema,
     )
 
 
@@ -514,7 +591,7 @@ def run_operation(
                 field = {"tools/call": "content", "resources/read": "contents"}.get(method)
                 if field is not None and not isinstance(result.get(field), list):
                     raise McpProtocolError("invalid_result", "MCP complete operation omitted its required content array")
-                return handler.redact_result(result) if handler else result
+                return handler.redact_result(result, method=method) if handler else result
             if kind != "input_required":
                 raise McpProtocolError("invalid_result_type", "MCP result type was unsupported")
             if method not in ELIGIBLE_METHODS:

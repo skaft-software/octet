@@ -13,6 +13,12 @@ Octet implementation status, and evidence of actually executed journeys.
 implementation contracts. Existing local stdio must be **verified, not rebuilt**;
 local-stdio computer-use integrations do not depend on qualifying remote HTTP.
 
+[qualification/candidate.json](qualification/candidate.json) separately records
+this stack's immutable implementation commit, local test outcomes, unsigned
+artifact digests and current bounded feature assessments. The initial assessment
+and `baseline.json` remain unchanged below; their unrun journeys/open gates are
+not rewritten as passes. The ledger checker does not qualify the candidate report.
+
 ## Immutable baselines
 
 | Baseline | Pin | Meaning |

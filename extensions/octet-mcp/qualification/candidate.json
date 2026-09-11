@@ -1,0 +1,574 @@
+{
+  "schema": "octet.mcp.candidate-evidence.v1",
+  "date": "2026-09-10",
+  "reproduction_note": "Run host/package commands at the repository/package root as indicated; Cargo was serialized with a shared external target directory. Test-module placeholders mean the explicit sorted glob exclusion, not a reported unrun command. Browser reproduction uses existing local node_modules and provisioned fixture browsers, without installation.",
+  "source_anchor": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+  "source_note": "This clean commit contains the complete implementation/tests. The following evidence-only commit does not change implementation/test bytes. Unsigned local artifacts below were built from this source anchor, before this report was added.",
+  "baseline": {
+    "commit": "60b1c2cdd204b9aa926896f1514874676f72d4d3",
+    "ledger": "baseline.json",
+    "ledger_sha256": "764fe79d7f9ce867861a3355d651a5141d2da8bf46c25fdf56ca9bceaa6e4a62",
+    "unchanged": true
+  },
+  "environment": {
+    "os": "macOS 27.0 (arm64)",
+    "rust": "1.97.1",
+    "python": [
+      "3.14.7",
+      "3.12.13",
+      "3.9.6"
+    ]
+  },
+  "qualification": {
+    "status": "not-qualified",
+    "production_http": false,
+    "full_codex_parity": false,
+    "release_gates_closed": [],
+    "issue_179": "open",
+    "issue_383": "open"
+  },
+  "visibility": "Only bounded summaries, source pins and digests are committed. Raw logs and unsigned artifacts remain local; rerun commands for review. Digests identify evidence, not independent or live qualification. The baseline checker verifies baseline.json, not the meaning of this candidate report.",
+  "artifacts": [
+    {
+      "kind": "unsigned-extension-archive",
+      "source_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "name": "octet-mcp-0.7.3.tar.gz",
+      "sha256": "d86c56488660ab1df2fdf5f9ad212279d08b9995b2319aba125deb78407986c0"
+    },
+    {
+      "kind": "unsigned-serve-enabled-development-binary",
+      "source_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "name": "octet",
+      "sha256": "df634b9113d2206c82ab0eb9be925cb72558a8c8bace91a98d94ac95dc3a78ad"
+    },
+    {
+      "kind": "embedded-web-bundle-manifest",
+      "path": "extensions/octet-serve/web/bundle.sha256",
+      "value": "f0dbf9ef3b8a5ab48a720a23754d8b003d8816585ce297e640f1b8bf676275fb"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "E-PY314",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -v",
+      "outcome": "passed: 304 tests; Python 3.14.7; package-root cwd",
+      "reference": "local-run:python-314-secure",
+      "evidence_sha256": "99718e75d7bd60dd3119ceb771d06f7013933622b4c1a5233c64c26bf818f683",
+      "related_ids": [
+        "G-STDIO",
+        "G-HTTP",
+        "G-2026",
+        "G-AUTH",
+        "G-SURFACES"
+      ]
+    },
+    {
+      "id": "E-PY312",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -t . -v",
+      "outcome": "passed: 304 tests; Python 3.12.13; package-root cwd",
+      "reference": "local-run:python-312-secure",
+      "evidence_sha256": "a42cc11ee62f204ffd9d4e5a781ce16b67febdfac38a77928070d2744e382597",
+      "related_ids": [
+        "G-STDIO",
+        "G-HTTP",
+        "G-2026",
+        "G-AUTH",
+        "G-SURFACES"
+      ]
+    },
+    {
+      "id": "E-PY39",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "PYTHONDONTWRITEBYTECODE=1 python3.9 -m unittest -v <all tests/test_*.py modules except test_release>",
+      "outcome": "passed: 298 tests; Python 3.9.6; six release tests excluded (tomllib unavailable)",
+      "reference": "local-run:python-39-secure",
+      "evidence_sha256": "9daff8b165d42131071e4d14c7d1bd0575357ecbac2ef51f8147faeca9a8cf1c",
+      "related_ids": [
+        "G-STDIO",
+        "G-HTTP",
+        "G-2026",
+        "G-AUTH"
+      ]
+    },
+    {
+      "id": "E-LAYER3",
+      "candidate_commit": "55449d37b64f389090db97769de7487d54a8a285",
+      "reproduce_command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -v",
+      "outcome": "passed: 128 tests; separately archived layer; committed payload compared byte-for-byte with tested slice",
+      "reference": "local-run:layer3-tests",
+      "evidence_sha256": "a2ae60664e4919ac1c38a574357dd61da1113806adb9dc4450fa2a905fc3e7ba",
+      "related_ids": [
+        "G-STDIO",
+        "G-HTTP",
+        "G-2026",
+        "G-AUTH"
+      ]
+    },
+    {
+      "id": "E-LAYER4",
+      "candidate_commit": "b979343c4694e323b3375b1e68f83a255372b60d",
+      "reproduce_command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -v",
+      "outcome": "passed: 192 tests; separately archived layer; committed payload compared byte-for-byte with tested slice",
+      "reference": "local-run:layer4-tests",
+      "evidence_sha256": "fdb1ac5736fb1a28a2b704a2d7dd7992c4ea5cf24edd75730daea6a1d615e98e",
+      "related_ids": [
+        "G-STDIO",
+        "G-HTTP",
+        "G-2026",
+        "G-AUTH"
+      ]
+    },
+    {
+      "id": "E-LAYER5",
+      "candidate_commit": "3833ca4529115a7c560bf0a14ae018aa09a44be6",
+      "reproduce_command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -v",
+      "outcome": "passed: 232 tests; separately archived layer; committed payload compared byte-for-byte with tested slice",
+      "reference": "local-run:layer5-tests",
+      "evidence_sha256": "8e3c9e74670ea07d2b9895f714d3ed7e57b0149230f575049269ec4e158b1c00",
+      "related_ids": [
+        "G-STDIO",
+        "G-HTTP",
+        "G-2026",
+        "G-AUTH"
+      ]
+    },
+    {
+      "id": "E-HOST-CORE",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo test -p octet-agent --lib --locked --offline",
+      "outcome": "passed: 505 tests",
+      "reference": "local-run:final-agent",
+      "evidence_sha256": "e4c8530fe6be251729b9534a85a06efd261ee3d0f8a36fca20221efafd37b8bf",
+      "related_ids": [
+        "MCP-026",
+        "MCP-027",
+        "MCP-028",
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-HOST-TUI",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo test -p octet-coding-agent --lib --locked --offline",
+      "outcome": "passed: 1154 tests; includes vt100 terminal-buffer complete-preview/private-input regressions",
+      "reference": "local-run:final-coding-default",
+      "evidence_sha256": "174e87e2b259827747a186c96d1ee2e49cd3932b9a57c45bbfe8bd9adfeb91cd",
+      "related_ids": [
+        "MCP-026",
+        "MCP-028",
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-HOST-SERVE",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo test -p octet-coding-agent --lib --features serve --locked --offline",
+      "outcome": "passed: 1249 tests; private input denied without public events; command completion/timeout clears pending real pickers",
+      "reference": "local-run:final-coding-serve",
+      "evidence_sha256": "c9525c7b8ed3a094a18973c18e6267fcae6a13f2f8bb742c2f6da016dafe4c0f",
+      "related_ids": [
+        "MCP-026",
+        "MCP-028",
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-CHECK",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo check --workspace --all-targets --all-features --locked --offline",
+      "outcome": "passed",
+      "reference": "local-run:final-workspace-check",
+      "evidence_sha256": "44fd94451e4ea37e6092011cfa90f186729b52c575e3a611a666b6b300c4ce75",
+      "related_ids": [
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-CLIPPY",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings",
+      "outcome": "passed",
+      "reference": "local-run:final-clippy",
+      "evidence_sha256": "ca1eebb3128eba9a682254bcb7d581dd3db2e373255378edc90b3c8acbb3e938",
+      "related_ids": [
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-FMT",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo fmt --all -- --check",
+      "outcome": "passed; newly changed Rust was formatted before final tests",
+      "reference": "local-run:final-fmt",
+      "evidence_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "related_ids": [
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-BUILD",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo build -p octet-coding-agent --bin octet --features serve --locked --offline",
+      "outcome": "passed on clean source anchor; unsigned development binary",
+      "reference": "local-run:anchor-build",
+      "evidence_sha256": "8950be1e8f4499f41b8e38ef15f09a0e2671be53a43aa5dec4d794320908881d",
+      "related_ids": [
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-WEB",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "npm test -- --run (apps/web)",
+      "outcome": "passed: 274 tests in 32 files; earlier unchanged reruns hit timeouts, final unchanged full rerun passed",
+      "reference": "local-run:mcp-host-verify-final-web",
+      "evidence_sha256": "201199c8158f2f8b8a24d158357d7bbe35adf34d098fc6d90814745a687ad384",
+      "related_ids": [
+        "MCP-026",
+        "MCP-028",
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-WEB-APPROVAL",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "./node_modules/.bin/playwright test --workers=1 --grep \"renders an explicit approval decision|keeps the complete large approval preview inspectable\" (apps/web)",
+      "outcome": "passed: 10 Playwright tests in five viewport projects; mocked application protocol, not live MCP/OAuth",
+      "reference": "local-run:mcp-host-verify-playwright",
+      "evidence_sha256": "f400383630e98993a3374aa2d32c19a2f530622759989380d44edb361a727814",
+      "related_ids": [
+        "MCP-026",
+        "MCP-028",
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-EMBEDDED",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "cargo test --manifest-path extensions/octet-serve/Cargo.toml --lib embedded_web --locked --offline",
+      "outcome": "passed: 3 embedded bundle integrity tests; same generated web payload",
+      "reference": "local-run:mcp-host-verify-embedded",
+      "evidence_sha256": "d2178d17ae3c3fa228d3766cba2d568f79f85aad71752c00336bca31b1ae87f9",
+      "related_ids": [
+        "G-PRODUCT"
+      ]
+    },
+    {
+      "id": "E-LEDGER",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "python3 -B qualification/check.py --verify-local-snapshot",
+      "outcome": "passed: ledger and immutable input source integrity only",
+      "reference": "local-run:anchor-ledger",
+      "evidence_sha256": "00939c63b71fd91dd6a039fa6d5b488bfa429b5a0f6ff9e940811328e80dc88e",
+      "related_ids": [
+        "G-SOURCE"
+      ]
+    },
+    {
+      "id": "E-NOT-QUALIFIED",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "python3 -B qualification/check.py --require-qualified",
+      "outcome": "failed as intended: exit 1; all release/live gates remain open",
+      "reference": "local-run:anchor-qualification",
+      "evidence_sha256": "981bf25416d12f54ce3e017486bcdbb6afbe30fc2b30c463228f4c824bbcbcb0",
+      "related_ids": [
+        "G-CLAIM"
+      ]
+    },
+    {
+      "id": "E-PACKAGED-RUNTIME",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "python3 -B -m unittest -v <all tests/test_*.py modules except test_release>",
+      "outcome": "passed: 298 tests on Python 3.14.7, running inside the extracted immutable archive; checkout-only release tests excluded",
+      "reference": "local-run:package-anchor-tests",
+      "evidence_sha256": "5c04a995dbef2be731fd8435945f58e17a1e699f121c8c01fbc90e9707096299",
+      "related_ids": [
+        "G-STDIO",
+        "G-HTTP",
+        "G-2026",
+        "G-AUTH"
+      ]
+    },
+    {
+      "id": "E-PACKAGE",
+      "candidate_commit": "c40a5ce120c0f85357bc1413d8404e0213f67e29",
+      "reproduce_command": "scripts/package-octet-extension-release.sh octet-mcp <temporary-output> v0.7.3",
+      "outcome": "passed on clean source anchor; every packaged regular file compared to Git; extracted entrypoint --check-config passed",
+      "reference": "local-run:package-anchor",
+      "evidence_sha256": "d27fd758f9d4806f9a31652e2da32bd1ed5ae9f579a31c2078cc511f6fee5077",
+      "related_ids": [
+        "G-SOURCE",
+        "G-PRODUCT"
+      ]
+    }
+  ],
+  "assessments": [
+    {
+      "id": "MCP-001",
+      "status": "implemented",
+      "boundary": "Existing default resident stdio retained and regression-tested; no replacement manager.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-002",
+      "status": "partial",
+      "boundary": "Legacy initialization retained; only explicit 2026-07-28 HTTP selects modern mode. Modern stdio and full compatibility fallback remain absent.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-003",
+      "status": "implemented",
+      "boundary": "Explicit modern HTTP discovery and per-request metadata; not a general conformance certification.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-004",
+      "status": "implemented",
+      "boundary": "Bounded schema-derived method/name/primitive parameter headers, pinned per call; unsupported annotations reject.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-005",
+      "status": "partial",
+      "boundary": "Legacy/modern JSON and SSE framing plus controlled DNS/TLS regressions; external network/platform qualification unrun.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-006",
+      "status": "partial",
+      "boundary": "Legacy session lifecycle/recovery retained under owner fences; modern mode does not establish sessions.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-007",
+      "status": "implemented",
+      "boundary": "Shared deadlines/cancellation and bounded controls; no ambiguous action replay or rollback promise.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-008",
+      "status": "missing",
+      "boundary": "Modern subscriptions/listen and resource subscriptions are not implemented.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-009",
+      "status": "implemented",
+      "boundary": "Transactional bounded catalogs, retained schemas and call/dispatch epoch fencing.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-010",
+      "status": "partial",
+      "boundary": "Explicit refresh and legacy tool-change handling; no cross-owner cache. Modern subscriptions/freshness qualification remain open.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-011",
+      "status": "partial",
+      "boundary": "Bounded acyclic local references/composition/constraints; unsupported keywords/dialects/recursion reject. Structured-only output is explicitly rendered.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-012",
+      "status": "partial",
+      "boundary": "Bounded existing media and resource-bearing results; URI contents are untrusted data, not host fetch permission.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-013",
+      "status": "implemented",
+      "boundary": "Synthetic resource list/template/read tools use existing connections and opaque URIs; subscriptions separately absent.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-014",
+      "status": "missing",
+      "boundary": "Prompts/get/completions remain unsupported; baseline scope distinction retained.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-015",
+      "status": "partial",
+      "boundary": "Bounded flat primitive/enum private forms; credential-like and advanced forms deny. Full-fit TUI only; Serve private channel absent.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-016",
+      "status": "partial",
+      "boundary": "Private manual HTTPS URL interaction; no opening/fetching. TUI display bounds and unrun real URL/OAuth journeys remain.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-017",
+      "status": "implemented",
+      "boundary": "Eligible modern HTTP tool/resource MRTR fixes original arguments, exact operation-local state/IDs and shared budgets; no failure replay.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-018",
+      "status": "missing",
+      "boundary": "Sampling is not implemented or advertised.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-019",
+      "status": "missing",
+      "boundary": "Roots are not implemented or advertised.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-020",
+      "status": "partial",
+      "boundary": "Bounded numeric progress and safe diagnostics; modern subscription logging surface is not implemented.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-021",
+      "status": "partial",
+      "boundary": "Unauthenticated/bearer paths and explicit private setup exist; arbitrary static headers are unsupported.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-022",
+      "status": "partial",
+      "boundary": "Configured exact issuer plus protected-resource/OAuth/OIDC discovery; transport WWW-Authenticate challenges are not yet carried into login.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-023",
+      "status": "partial",
+      "boundary": "Pre-registered public-client PKCE, state/issuer/resource checks and manual loopback/callback completion; no live account or combined frontend qualification.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-024",
+      "status": "partial",
+      "boundary": "Reviewed pre-registered public clients only; no Octet-published CIMD identity or dynamic registration.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-025",
+      "status": "partial",
+      "boundary": "Durable owner/config/issuer/client/scope keys, plaintext private store, expiry/rotating refresh and local logout; no remote grant revocation or secure erasure.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-026",
+      "status": "partial",
+      "boundary": "Generic exact-call Ask/one-use redemption with full preview and dispatch fences. This does not complete #383 typed app/origin/fresh-observation automation policy.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-027",
+      "status": "partial",
+      "boundary": "Nine retained HTTP defect boundaries have candidate fixes/regressions; source tests do not qualify privileged networks, sensitive credentials or all platforms.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-028",
+      "status": "partial",
+      "boundary": "Stock SDK/runtime/manager composition and TUI/Serve reducers tested. Private input requires full-fit TUI with write logging off; Serve cancels. Combined product/live qualification unrun.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-029",
+      "status": "missing",
+      "boundary": "Deprecated standalone HTTP+SSE remains unsupported.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-030",
+      "status": "missing",
+      "boundary": "Tasks and additional protocol extensions remain unsupported.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-031",
+      "status": "missing",
+      "boundary": "Enterprise-managed authorization remains absent; no full Codex parity claim.",
+      "qualification": "not-qualified"
+    },
+    {
+      "id": "MCP-032",
+      "status": "missing",
+      "boundary": "Codex-specific forms/verification/app extensions remain absent; standard interactions are not excluded by that distinction.",
+      "qualification": "not-qualified"
+    }
+  ],
+  "retained_http_defects": [
+    "D-HTTP-01",
+    "D-HTTP-02",
+    "D-HTTP-03",
+    "D-HTTP-04",
+    "D-HTTP-05",
+    "D-HTTP-06",
+    "D-HTTP-07",
+    "D-HTTP-08",
+    "D-HTTP-09"
+  ],
+  "defect_regressions": {
+    "D-HTTP-01": [
+      "tests.test_streamable_http_hardening: test_checked_address_is_the_connect_address_and_original_hostname_is_tls_identity",
+      "tests.test_http_tls_journey: numeric TLS/SNI/Host, wrong-host and untrusted-certificate tests"
+    ],
+    "D-HTTP-02": [
+      "tests.test_owner_lifecycle: distinct owner/instance/generation, settlement, credential lookup and catalog-epoch tests",
+      "tests.test_runtime_http: stock SDK/runtime/manager composition and owner refusal"
+    ],
+    "D-HTTP-03": [
+      "tests.test_streamable_http_hardening: test_stalled_dns_process_is_reaped_on_timeout_cancellation_and_close"
+    ],
+    "D-HTTP-04": [
+      "tests.test_streamable_http_hardening: test_server_request_with_same_id_is_not_the_client_response",
+      "tests.test_streamable_http_hardening: test_sse_redacts_payload_not_json_syntax_or_peer_ids",
+      "tests.test_streamable_http_hardening: test_real_loopback_catalog_cannot_promote_bearer_through_mrtr_discriminator"
+    ],
+    "D-HTTP-05": [
+      "tests.test_streamable_http_hardening: test_control_fanout_budget_is_shared_across_post_and_resume",
+      "tests.test_streamable_http_hardening: test_control_replies_and_cancellations_use_one_bounded_tracked_pool"
+    ],
+    "D-HTTP-06": [
+      "tests.test_streamable_http_hardening: aggregate body/event budget tests across resumptions"
+    ],
+    "D-HTTP-07": [
+      "tests.test_streamable_http_hardening: unterminated, short-body and chunked terminator/trailer tests"
+    ],
+    "D-HTTP-08": [
+      "tests.test_streamable_http_hardening: empty event-ID cursor reset, omitted-ID and partial-ID tests"
+    ],
+    "D-HTTP-09": [
+      "tests.test_streamable_http_hardening: test_initialize_and_initialized_notification_share_one_deadline",
+      "tests.test_streamable_http_hardening: test_startup_catalog_pages_share_remaining_initialize_deadline"
+    ]
+  },
+  "unqualified_journeys": [
+    "J-STDIO",
+    "J-VERSION",
+    "J-HEADERS",
+    "J-HTTP",
+    "J-ISOLATION",
+    "J-CATALOG",
+    "J-ELICITATION",
+    "J-AUTH-DISCOVERY",
+    "J-AUTH-LIFECYCLE",
+    "J-RECOVERY",
+    "J-SHOPIFY-BASE",
+    "J-SHOPIFY-UCP",
+    "J-WIX",
+    "J-CUSTOMER-OAUTH",
+    "J-PRODUCT",
+    "J-OPTIONAL",
+    "J-ENTERPRISE"
+  ],
+  "limitations": [
+    "No live Shopify storefront /api/mcp or /api/ucp/mcp, Wix account, customer OAuth, checkout, purchase or enterprise journey was executed. Storefront/TLS/issuer fixtures do not substitute for them.",
+    "The combined real Serve/browser lifecycle harness could not start: required Chromium headless executable unavailable. No browser was installed to bypass that blocker.",
+    "Private TUI context is escaped and full-fit only, bounded to 16 KiB raw/escaped and 4096 answer bytes. OCTET_TUI_WRITE_LOG must be unset. Serve private input remains unavailable, including non-secret ToolProgress input; command setup is headless.",
+    "Parent command completion/timeout and tool-owner settlement are tested. Child-only UI cancellation while its parent remains active is not independently qualified.",
+    "Full workspace test/doc-test, audit/deny, release-signing/distribution, cross-platform and credentialed live gates were not executed for this final candidate. Relevant crate suites, workspace check/clippy and controlled web tests are not a waiver.",
+    "Published 0.7.3 does not acquire these changes. Use the matching source host/bundle and retain the process-owner experimental HTTP gate; API remains 0.2."
+  ]
+}
