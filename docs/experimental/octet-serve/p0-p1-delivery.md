@@ -2,15 +2,15 @@
 
 # Historical Serve acceptance checklist
 
-**Historical evidence, not a current delivery plan or octet 0.7.0 pass.** The
+**Historical evidence, not a current delivery plan or current-release pass.** The
 P0/P1 labels and checked rows below retain the inherited hardening checkpoint's
 scope. They record the July 27 comparison audit and its follow-up evidence;
 fixture-only behavior did not count as production implementation. Unchecked
 rows record gaps at that checkpoint, not promised features.
 
-No checks were rerun for this documentation proposal. Current-source
-reconciliation and live-provider/media/recovery/capture qualification remain
-deferred. Read the [Serve guide](README.md) for usage,
+The checked results below have not been rerun or relabeled as 0.7.5 evidence.
+They do not qualify current live-provider/media/recovery/capture behavior.
+Read the [Serve guide](README.md) for usage and release availability,
 [implementation reference](current-state.md) for source-attributed coverage, and
 [historical validation](current-state.md#validation-evidence) for the original
 command-level matrix. Current work tracking belongs on the
@@ -176,8 +176,10 @@ pull-request integration are not generalized end to end.
       command/domain policies.
 
 The unchecked runtime rows are intentionally unavailable rather than synthesized
-from UI state. The production authority catalog advertises `FullAccess` only;
-child-agent capability remains false, and MCP, extension/skill, and LSP status
+from UI state. Current authority choices and their enforcement limits are
+described in the [implementation reference](current-state.md#agent-interaction);
+these historical checks do not qualify narrower per-session sandboxes.
+Child-agent capability remains false, and MCP, extension/skill, and LSP status
 must stay limited to facts supplied by real host integrations.
 
 ## Hardening closure

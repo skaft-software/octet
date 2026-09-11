@@ -1,7 +1,7 @@
 name = "octet-subagents"
-version = "0.7.4"
+version = "0.7.5"
 api_version = "0.2"
-requires_octet = "=0.7.4"
+requires_octet = "=0.7.5"
 description = "Claude Code-like background workers over host-owned octet agent sessions, with per-spawn mutation grants and continue/resume"
 
 [entrypoint]

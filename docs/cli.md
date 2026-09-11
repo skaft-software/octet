@@ -150,8 +150,10 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The four official executable bundles and Serve 0.7.0 are published with verified
-signatures and public installation. Catalog forms select an exact-version package:
+The four official executable bundles and the separate Serve application must
+match octet 0.7.5. Availability, signed assets, and public-install verification
+are recorded on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+Catalog forms select the package matching the running host version:
 
 ```text
 octet extension install NAME
@@ -198,6 +200,24 @@ disabled and untrusted until activated. Exact import/restore, plan/preflight,
 compatibility profile, bounds, and gaps stay in [Pi migration](pi-migration.md).
 
 ## Updates and legacy inputs
+
+`/changelog` opens this binary's **current-version** release notes in the
+interactive TUI, including without a configured model. The read-only report uses
+rich Markdown, starts at the first row, and supports Up/Down, PageUp/PageDown,
+Home, and End; Escape or Left closes it. It remains available during active work
+without interrupting the run or adding notes to the conversation. The muted
+`/changelog · what's new` hint sits directly below the splash version, with a
+shorter fallback in narrow terminals. When startup finds a newer stable release,
+an accent update hint follows it; `octet update` uses rich Markdown inline-code
+styling rather than visible backticks. A late result appears once as a UI-only
+notice with the same rich action instead of repainting historical splash rows.
+
+Release notes are compiled into the binary: no network fetch, workspace file, or
+model request is used. Plain and print modes reject the command with guidance to
+open the interactive TUI; RPC returns its existing error response for prompt,
+steer, or follow-up invocations. Serve treats it as an unsupported boundary,
+without inferring an answer. None of these paths sends release-note requests to
+a provider or changes an API version.
 
 `/update` checks for a newer release and directs you to `octet update` to install;
 that is an update command contract, not a verified octet channel. Do not treat it

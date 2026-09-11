@@ -1092,6 +1092,7 @@ async fn prepare_prompt(
     command: &Value,
 ) -> anyhow::Result<(UserInput, usize, Value)> {
     let original = required_string(command, "message")?.to_owned();
+    crate::commands::reject_tui_changelog(&original)?;
     let mut expanded = expand_skill_command(
         app.skills.as_ref(),
         &original,
@@ -1805,6 +1806,7 @@ fn queued_input(
     workspace: &Path,
     registered_tools: &[String],
 ) -> anyhow::Result<QueuedInput> {
+    crate::commands::reject_tui_changelog(raw)?;
     let expanded = expand_queued_prompt(skills, prompts, workspace, registered_tools, raw)?;
     let input = input_from_command(command, expanded)?;
     let mut display_input = input.clone();
@@ -2721,6 +2723,29 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn changelog_rpc_prompt_and_queue_reject_without_session_mutation() {
+        let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
+        let head = app.agent.session().head();
+        for invocation in ["/changelog", "/chang"] {
+            let command = serde_json::json!({"type": "prompt", "message": invocation});
+            let error = super::prepare_prompt(&mut app, &command).await.unwrap_err();
+            assert!(error.to_string().contains("interactive TUI"));
+            let error = super::queued_input(
+                &command,
+                invocation,
+                app.skills.as_ref(),
+                app.prompts.as_ref(),
+                &app.config.workspace,
+                &app.agent.registered_tool_names(),
+            )
+            .err()
+            .expect("TUI command must not be queued");
+            assert!(error.to_string().contains("interactive TUI"));
+            assert_eq!(app.agent.session().head(), head);
+        }
+    }
     use super::*;
 
     #[test]

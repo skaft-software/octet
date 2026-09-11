@@ -102,10 +102,18 @@ paths and asks the model to read them for octet questions/changes. Shell-install
 layouts use matching `share/octet/`; `OCTET_PACKAGE_DIR` or `OCTET_DATA_DIR`
 overrides that root. Cargo-channel layouts embed the text assets and materialize
 a versioned copy under the Cargo root's `share/octet/`, refreshed after a Cargo
-update. These are source layout contracts, **not evidence of published channels**.
+update. The finite [public documentation inventory](package-assets.txt) also
+includes linked security, licensing, extension-reference and source-text files.
+Native, npm and container layouts retain the listed non-text assets; the embedded
+fallback remains text-only. npm normalizes Git ignore metadata filenames on
+installation; [the npm packaging contract](release/npm-trusted-publishing.md#local-release-gate)
+records that exception. Reference files do not install or enable extensions.
+These are source layout contracts, **not evidence of published channels**.
 
 From a source checkout, the prompt instead points to its `README.md`, `docs/`,
 `examples/`, `sdk/`, `crates/`, and `octet-coding-agent` crate. The
-[documentation index](README.md) is canonical. `https://skaft.org/octet` is a
-proposed source website identity, not publication verification or a requirement
-for reading these contracts. [Availability](installation.md#binary-availability).
+[documentation index](README.md) is canonical. The public manual is hosted at
+[the octet website](https://skaft.org/octet/); compare its displayed release
+version with the binary. Website deployment and package publication are verified
+independently, and neither is required to read the bundled contracts offline.
+[Availability](installation.md#binary-availability).

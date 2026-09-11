@@ -80,6 +80,7 @@ import hashlib
 import os
 import pathlib
 import re
+import runpy
 import shutil
 import stat
 import sys
@@ -93,6 +94,10 @@ native_directory = pathlib.Path(sys.argv[4])
 staging_directory = pathlib.Path(sys.argv[5])
 template_directory = pathlib.Path(sys.argv[6])
 epoch = int(sys.argv[7])
+
+verification = runpy.run_path(str(template_directory.parent.parent / "scripts/verify-octet-npm.py"))
+documentation_files = verification["DOCUMENTATION_FILES"]
+documentation_extras = verification["DOCUMENTATION_EXTRAS"]
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_BYTES = 160 * 1024 * 1024
@@ -179,7 +184,7 @@ def validate_archive(target, archive, expected_digest):
     destination.mkdir(parents=True, exist_ok=False)
     seen = set()
     expanded = 0
-    required = {"octet", "octet-host", "LICENSE", "README.md"}
+    required = {"octet", "octet-host", "LICENSE", "README.md"} | documentation_files
     with tarfile.open(archive, mode="r:gz") as source:
         members = source.getmembers()
         if len(members) > MAX_ENTRIES:
@@ -196,7 +201,8 @@ def validate_archive(target, archive, expected_digest):
             seen.add(name)
             relative = "/".join(parts[1:])
             if relative and not (
-                relative in required
+                (relative in required and member.isfile())
+                or (member.isdir() and any(path.startswith(relative + "/") for path in documentation_extras))
                 or relative in {"docs", "examples", "sdk"}
                 or relative.startswith("docs/")
                 or relative.startswith("examples/")
@@ -223,10 +229,10 @@ def validate_archive(target, archive, expected_digest):
             destination_path.chmod(0o755 if member.mode & 0o111 else 0o644)
     extracted_members = {
         candidate.relative_to(destination).as_posix()
-        for candidate in destination.rglob("*")
+        for candidate in destination.rglob("*") if candidate.is_file()
     }
     if not required.issubset(extracted_members):
-        fail(f"native release archive is missing a required native or documentation root: {archive.name}")
+        fail(f"native release archive is missing a required native or inventoried documentation file: {archive.name}")
     for binary_name in ("octet", "octet-host"):
         binary = destination / binary_name
         if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
@@ -334,7 +340,8 @@ for target, (package_name, operating_system, cpu, _) in TARGETS.items():
     copy_file(source / "octet-host", platform / "bin/octet-host", executable=True)
     (platform / "share/octet/.octet-version").parent.mkdir(parents=True, exist_ok=True)
     (platform / "share/octet/.octet-version").write_text(version + "\n", encoding="utf-8")
-    copy_file(source / "README.md", platform / "share/octet/README.md")
+    for name in sorted(documentation_extras):
+        copy_file(source / name, platform / "share/octet" / name)
     copy_tree(source / "docs", platform / "share/octet/docs")
     copy_tree(source / "examples", platform / "share/octet/examples")
     copy_tree(source / "sdk", platform / "share/octet/sdk")
@@ -367,6 +374,74 @@ EOF
         printf 'npm pack did not produce exactly one tarball for %s\n' "$label" >&2
         exit 1
     fi
+    # npm's packlist drops .gitignore and files matched by nested ignore rules,
+    # even under the manifest's files allowlist. Restore only explicit inventory
+    # members from our checksum-validated private stage, never checkout bytes.
+    # Do this BEFORE the output is exposed to checksum/provenance generation.
+    python3 - "$script_directory/verify-octet-npm.py" "$version" \
+        "${packed_files[0]}" "$expected_name" "$stage" "$source_date_epoch" <<'PYRESTORE'
+import gzip
+import io
+import pathlib
+import runpy
+import stat
+import sys
+import tarfile
+
+verifier, version, packed, artifact, staged, epoch = sys.argv[1:]
+verification = runpy.run_path(verifier)
+expected = next(item for item in verification["expected_packages"](version) if item.artifact == artifact)
+path, stage = pathlib.Path(packed), pathlib.Path(staged)
+inspection = verification["inspect_tarball"](path, expected)
+verification["check_manifest"](inspection, version)
+verification["scan_secrets"](inspection)
+missing = {}
+if expected.platform is not None:
+    for name in sorted(verification["DOCUMENTATION_FILES"]):
+        relative = "share/octet/" + name
+        source = stage / relative
+        # Stage parents and files were created only from the validated archive.
+        if not stat.S_ISREG(source.lstat().st_mode):
+            raise SystemExit(f"inventoried staged documentation is not a regular file: {relative}")
+        data = source.read_bytes()
+        if relative in inspection.contents:
+            if inspection.contents[relative] != data:
+                raise SystemExit(f"npm changed inventoried documentation bytes: {relative}")
+        elif "package/" + relative in inspection.members:
+            raise SystemExit(f"npm replaced inventoried documentation with a directory: {relative}")
+        else:
+            member = tarfile.TarInfo("package/" + relative)
+            member.mode = stat.S_IMODE(source.stat().st_mode)
+            member.size = len(data)
+            missing[member.name] = member
+            inspection.contents[relative] = data
+
+if missing:
+    # Rebuild in sorted order with fixed tar/gzip metadata. Existing members have
+    # already passed path/type/size/permission checks; added paths are finite.
+    temporary = path.with_suffix(".restored")
+    members = {**inspection.members, **missing}
+    with temporary.open("xb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=int(epoch), compresslevel=9) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                for name, original in sorted(members.items()):
+                    member = tarfile.TarInfo(name)
+                    member.type = original.type
+                    member.mode = original.mode
+                    member.mtime = int(epoch)
+                    member.size = original.size
+                    data = inspection.contents.get(name.removeprefix("package/"))
+                    archive.addfile(member, io.BytesIO(data) if data is not None else None)
+    # Restored bytes still must pass every normal gate, including secret scans.
+    inspection = verification["inspect_tarball"](temporary, expected)
+    verification["validate"](inspection, version)
+    verification["check_documentation_bytes"](inspection, stage / "share/octet")
+    temporary.replace(path)
+else:
+    verification["validate"](inspection, version)
+    if expected.platform is not None:
+        verification["check_documentation_bytes"](inspection, stage / "share/octet")
+PYRESTORE
     mv "${packed_files[0]}" "$output_directory/$expected_name"
 done
 

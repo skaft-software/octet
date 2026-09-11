@@ -91,13 +91,128 @@ fn frame_coalesce_delay(last_render: Option<Instant>, now: Instant) -> Duration 
         .unwrap_or_default()
 }
 
-fn render_poll_interval(welcome: bool, status_animation: bool) -> Duration {
-    if welcome {
-        RENDER_INTERVAL
-    } else if status_animation {
-        STATUS_ANIMATION_INTERVAL
-    } else {
-        RESIZE_POLL_INTERVAL
+/// A presentation clock keeps its monotonic phase across semantic wakes and
+/// expensive frames. Missed ticks select one current frame, never a replay burst.
+struct AnimationClock {
+    interval: Duration,
+    last_tick: Option<Instant>,
+}
+
+impl AnimationClock {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_tick: None,
+        }
+    }
+
+    fn set_active(&mut self, active: bool, now: Instant) {
+        if active {
+            self.last_tick.get_or_insert(now);
+        } else {
+            self.last_tick = None;
+        }
+    }
+
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.last_tick
+            .map(|last| (last + self.interval).saturating_duration_since(now))
+    }
+
+    fn take_ticks(&mut self, now: Instant) -> usize {
+        let Some(last) = self.last_tick else { return 0 };
+        let elapsed = now.duration_since(last).as_nanos();
+        let ticks = elapsed / self.interval.as_nanos();
+        if ticks > 0 {
+            let remainder = Duration::from_nanos((elapsed % self.interval.as_nanos()) as u64);
+            self.last_tick = Some(now - remainder);
+        }
+        ticks as usize
+    }
+}
+
+struct AnimationSchedule {
+    status: AnimationClock,
+    event_dot: AnimationClock,
+    timer: AnimationClock,
+}
+
+impl AnimationSchedule {
+    fn new() -> Self {
+        Self {
+            status: AnimationClock::new(STATUS_ANIMATION_INTERVAL),
+            event_dot: AnimationClock::new(EVENT_DOT_TOGGLE_INTERVAL),
+            timer: AnimationClock::new(STATUS_TIMER_INTERVAL),
+        }
+    }
+
+    fn observe(&mut self, state: &ShellState, now: Instant) {
+        self.status.set_active(
+            thinking_spinner_animating(state) || status_shimmer_animating(state),
+            now,
+        );
+        self.event_dot.set_active(event_dot_animating(state), now);
+        self.timer.set_active(status_timer_active(state), now);
+    }
+
+    fn remaining(&self, now: Instant) -> Duration {
+        [&self.status, &self.event_dot, &self.timer]
+            .into_iter()
+            .filter_map(|clock| clock.remaining(now))
+            .fold(RESIZE_POLL_INTERVAL, Duration::min)
+    }
+
+    fn poll_interval(&self, welcome: bool, now: Instant) -> Duration {
+        let remaining = self.remaining(now);
+        if welcome {
+            remaining.min(RENDER_INTERVAL)
+        } else {
+            remaining
+        }
+    }
+
+    fn advance(&mut self, state: &mut ShellState, now: Instant) {
+        // Semantic state may have changed during coalescing or lock acquisition.
+        // Never advance an old status, or use a pre-coalescing due flag.
+        self.observe(state, now);
+        let event_ticks = self.event_dot.take_ticks(now);
+        if event_ticks > 0 {
+            state.advance_event_dot_animation_by(event_ticks);
+        }
+        let status_ticks = self.status.take_ticks(now);
+        if status_ticks > 0 {
+            if thinking_spinner_animating(state) {
+                state.advance_thinking_spinner(status_ticks);
+            }
+            if status_shimmer_animating(state) {
+                state.advance_status_shimmer_by(status_ticks);
+            }
+        }
+        if self.timer.take_ticks(now) > 0 {
+            state.advance_status_timer();
+        }
+    }
+}
+
+/// Render notifications carry no semantic data. Fold them only until the frame
+/// deadline, then inspect at most one queued command (the production capacity)
+/// for Stop. A producer continuously refilling that slot cannot starve painting.
+fn coalesce_render_commands(rx: &Receiver<RenderCommand>, last_render: Option<Instant>) -> bool {
+    let now = Instant::now();
+    let deadline = now + frame_coalesce_delay(last_render, now);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return !matches!(
+                rx.try_recv(),
+                Ok(RenderCommand::Stop) | Err(mpsc::TryRecvError::Disconnected)
+            );
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(RenderCommand::Render) => {}
+            Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+        }
     }
 }
 
@@ -150,6 +265,28 @@ pub(super) fn render_loop(
     application_viewport: bool,
     clear_on_start: bool,
 ) {
+    render_loop_with_terminal(
+        terminal,
+        state,
+        size,
+        rx,
+        application_viewport,
+        clear_on_start,
+        synchronize_terminal_size,
+    );
+}
+
+// The same loop is exercised with an in-memory terminal and resize probe in
+// tests, without reading/changing the test runner's physical terminal state.
+pub(super) fn render_loop_with_terminal(
+    terminal: impl sexy_tui_rs::Terminal + 'static,
+    state: SharedState,
+    size: TerminalSize,
+    rx: Receiver<RenderCommand>,
+    application_viewport: bool,
+    clear_on_start: bool,
+    synchronize_size: impl Fn(&SharedState, &TerminalSize) -> bool,
+) {
     let mut tui = TUI::new(Box::new(terminal));
     // Removing bounded live activity must not clear saved lines merely because
     // the frame contracted. Offscreen semantic mutations still use Pi's replay.
@@ -171,39 +308,17 @@ pub(super) fn render_loop(
     tui.start();
 
     let mut last_render: Option<Instant> = None;
-    let mut last_event_dot_toggle = Instant::now();
-    let mut last_status_animation = Instant::now();
-    let mut last_status_timer_update = Instant::now();
+    let mut animations = AnimationSchedule::new();
     loop {
-        // The welcome card uses the terminal-frame wake; active status text
-        // sleeps until its own 80 ms frame. Model, tool, and input events still
-        // preempt either timer immediately.
-        let (welcome, event_dot, thinking_spinner, status_shimmer, status_timer) = {
+        let welcome = {
             let shell = state.borrow();
-            let welcome = welcome_animating(&shell, Instant::now());
-            let event_dot = event_dot_animating(&shell);
-            let thinking_spinner = thinking_spinner_animating(&shell);
-            let status_shimmer = status_shimmer_animating(&shell);
-            let status_timer = status_timer_active(&shell);
-            (
-                welcome,
-                event_dot,
-                thinking_spinner,
-                status_shimmer,
-                status_timer,
-            )
+            let now = Instant::now();
+            animations.observe(&shell, now);
+            welcome_animating(&shell, now)
         };
-        if !event_dot {
-            last_event_dot_toggle = Instant::now();
-        }
-        let status_animation = thinking_spinner || status_shimmer;
-        if !status_animation {
-            last_status_animation = Instant::now();
-        }
-        if !status_timer {
-            last_status_timer_update = Instant::now();
-        }
-        let poll = render_poll_interval(welcome, status_animation);
+        // Sleep only to the next deadline, not for a fresh full interval after
+        // every event/layout. Model, tool, input and Stop preempt the timeout.
+        let poll = animations.poll_interval(welcome, Instant::now());
         let command = match rx.recv_timeout(poll) {
             Ok(command) => Some(command),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -214,85 +329,35 @@ pub(super) fn render_loop(
         }
 
         let resized = if command.is_none() {
-            synchronize_terminal_size(&state, &size)
+            synchronize_size(&state, &size)
         } else {
             false
         };
-        let advance_event_dot =
-            event_dot && last_event_dot_toggle.elapsed() >= EVENT_DOT_TOGGLE_INTERVAL;
-        let advance_status_animation =
-            status_animation && last_status_animation.elapsed() >= STATUS_ANIMATION_INTERVAL;
-        let advance_status_timer =
-            status_timer && last_status_timer_update.elapsed() >= STATUS_TIMER_INTERVAL;
-        let semantic_command = matches!(command, Some(RenderCommand::Render));
+        // The idle poll also services diagnostics emitted by lifecycle workers.
+        // They enter semantic rows, never the physical terminal stream.
+        let semantic_command = matches!(command, Some(RenderCommand::Render))
+            || (crate::output::has_tui_diagnostics() && !state.borrow().startup_pending);
         if !render_wake_requires_frame(
             semantic_command,
             resized,
             welcome,
-            advance_event_dot || advance_status_animation || advance_status_timer,
+            animations.remaining(Instant::now()).is_zero(),
         ) {
             continue;
         }
 
-        // Coalesce everything already queued into the latest semantic state.
-        let mut stop = false;
-        while let Ok(next) = rx.try_recv() {
-            if matches!(next, RenderCommand::Stop) {
-                stop = true;
-                break;
-            }
-        }
-        if stop {
+        if !coalesce_render_commands(&rx, last_render) {
             break;
         }
-
-        // Bound high-throughput model streams to one frame per terminal refresh
-        // without bringing back the old uninterruptible animation sleep. The
-        // receiver remains live during the short deadline: more semantic work
-        // is folded into the pending frame, and Stop takes effect immediately.
-        if let Some(last) = last_render {
-            let delay = frame_coalesce_delay(Some(last), Instant::now());
-            let deadline = Instant::now() + delay;
-            while !delay.is_zero() && Instant::now() < deadline {
-                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                    Ok(RenderCommand::Render) => {}
-                    Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        stop = true;
-                        break;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                }
-            }
-        }
-        if stop {
-            break;
-        }
-
-        if welcome || advance_event_dot || advance_status_animation || advance_status_timer {
+        {
             let mut shell = state.borrow_mut();
-            if welcome {
-                // The animated card is a bounded cache prefix. Repaint that
-                // prefix without reflowing the complete transcript on every
-                // 16 ms tick.
+            let now = Instant::now();
+            if welcome_animating(&shell, now) {
+                // The animated card is a bounded cache prefix, not a reason to
+                // reflow the complete transcript on every 16 ms tick.
                 shell.invalidate_transcript();
             }
-            if advance_event_dot {
-                shell.advance_event_dot_animation();
-                last_event_dot_toggle = Instant::now();
-            }
-            if advance_status_animation {
-                if thinking_spinner {
-                    shell.advance_thinking_spinner();
-                }
-                if status_shimmer {
-                    shell.advance_status_shimmer();
-                }
-                last_status_animation = Instant::now();
-            }
-            if advance_status_timer {
-                shell.advance_status_timer();
-                last_status_timer_update = Instant::now();
-            }
+            animations.advance(&mut shell, now);
         }
         tui.request_render();
         last_render = Some(Instant::now());
@@ -305,7 +370,7 @@ pub(super) fn render_loop(
 mod scheduler_tests {
     use std::time::{Duration, Instant};
 
-    use super::{frame_coalesce_delay, render_poll_interval, render_wake_requires_frame};
+    use super::*;
 
     #[test]
     fn active_state_without_a_concrete_wake_never_requests_a_frame() {
@@ -321,13 +386,246 @@ mod scheduler_tests {
     }
 
     #[test]
-    fn status_animation_sleeps_until_its_next_frame() {
-        assert_eq!(render_poll_interval(true, true), Duration::from_millis(16));
-        assert_eq!(render_poll_interval(false, true), Duration::from_millis(80));
+    fn animation_deadlines_keep_the_remainder_after_late_frames() {
+        let start = Instant::now();
+        let mut clock = AnimationClock::new(STATUS_ANIMATION_INTERVAL);
+        clock.set_active(true, start);
         assert_eq!(
-            render_poll_interval(false, false),
-            Duration::from_millis(100)
+            clock.remaining(start + Duration::from_millis(50)),
+            Some(Duration::from_millis(30))
         );
+        assert_eq!(clock.take_ticks(start + Duration::from_millis(95)), 1);
+        assert_eq!(
+            clock.remaining(start + Duration::from_millis(95)),
+            Some(Duration::from_millis(65))
+        );
+        assert_eq!(clock.take_ticks(start + Duration::from_millis(245)), 2);
+        assert_eq!(
+            clock.remaining(start + Duration::from_millis(245)),
+            Some(Duration::from_millis(75))
+        );
+        assert_eq!(clock.take_ticks(start + Duration::from_millis(245)), 0);
+    }
+
+    #[test]
+    fn animation_phase_is_independent_of_semantic_traffic_and_frame_cost() {
+        let start = Instant::now();
+        for times in [
+            (0..=4000).collect::<Vec<_>>(),
+            (0..=4000).step_by(80).collect(),
+            vec![0, 63, 79, 81, 149, 159, 175, 241, 570, 1310, 3999, 4000],
+        ] {
+            let mut clock = AnimationClock::new(STATUS_ANIMATION_INTERVAL);
+            clock.set_active(true, start);
+            let mut phase = 0;
+            for ms in times {
+                let now = start + Duration::from_millis(ms);
+                clock.set_active(true, now);
+                phase += clock.take_ticks(now);
+                assert_eq!(phase as u64, ms / 80, "wake at {ms} ms");
+                assert_eq!(
+                    clock.remaining(now),
+                    Some(Duration::from_millis(80 - ms % 80))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_compaction_frames_keep_elapsed_phase_without_replay() {
+        use super::super::InteractiveShell;
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_run_label("compacting");
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        schedule.observe(&state, start);
+        let revision = state.block_revisions[0];
+        // Sixteen paints in 2050 ms are valid: phase follows all 25 elapsed
+        // ticks, while each late wake invalidates the status only once.
+        for (index, ms) in (1..=15).map(|step| step * 128).chain([2050]).enumerate() {
+            let now = start + Duration::from_millis(ms);
+            schedule.advance(&mut state, now);
+            assert_eq!(state.status_shimmer_frame as u64, ms / 80);
+            assert_eq!(state.block_revisions[0], revision + index as u64 + 1);
+            schedule.advance(&mut state, now);
+            assert_eq!(state.block_revisions[0], revision + index as u64 + 1);
+        }
+        assert_eq!(state.status_shimmer_frame, 25);
+        assert_eq!(state.block_revisions[0], revision + 16);
+        assert_eq!(
+            schedule.poll_interval(false, start + Duration::from_millis(2050)),
+            Duration::from_millis(30)
+        );
+    }
+
+    #[test]
+    fn long_compaction_delay_invalidates_only_one_current_status_frame() {
+        use super::super::{InteractiveShell, TranscriptBlock};
+        let mut shell = InteractiveShell::test_shell();
+        shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Notice("history".into()));
+        shell.set_run_label("compacting");
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        schedule.observe(&state, start);
+        let revisions = state.block_revisions.clone();
+        schedule.advance(&mut state, start + Duration::from_secs(300));
+        assert_eq!(state.status_shimmer_frame, 3750);
+        assert_eq!(state.block_revisions[0], revisions[0]);
+        assert_eq!(state.block_revisions[1], revisions[1] + 1);
+        schedule.advance(&mut state, start + Duration::from_secs(300));
+        assert_eq!(state.block_revisions[1], revisions[1] + 1);
+        assert_eq!(
+            schedule.poll_interval(false, start + Duration::from_secs(300)),
+            STATUS_ANIMATION_INTERVAL
+        );
+    }
+
+    #[test]
+    fn animation_schedule_rechecks_transitions_after_coalescing() {
+        use super::super::InteractiveShell;
+        let mut shell = InteractiveShell::test_shell();
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        schedule.observe(&shell.state.borrow(), start);
+        assert_eq!(schedule.poll_interval(false, start), RESIZE_POLL_INTERVAL);
+        // The status appears after the receiver wakes, before the frame lock.
+        shell.set_run_label("compacting");
+        schedule.advance(
+            &mut shell.state.borrow_mut(),
+            start + Duration::from_millis(10),
+        );
+        assert_eq!(
+            schedule.poll_interval(true, start + Duration::from_millis(89)),
+            Duration::from_millis(1)
+        );
+        schedule.advance(
+            &mut shell.state.borrow_mut(),
+            start + Duration::from_millis(95),
+        );
+        assert_eq!(shell.state.borrow().status_shimmer_frame, 1);
+        // A semantic frame at 89 ms may coalesce beyond the 90 ms deadline;
+        // selecting the due phase uses 95 ms, not a stale pre-coalescing flag.
+        assert_eq!(
+            schedule.poll_interval(false, start + Duration::from_millis(95)),
+            Duration::from_millis(75)
+        );
+        shell.set_run_label("idle");
+        schedule.advance(
+            &mut shell.state.borrow_mut(),
+            start + Duration::from_secs(1),
+        );
+        assert!(schedule.status.last_tick.is_none());
+        shell.set_run_label("compacting");
+        schedule.advance(
+            &mut shell.state.borrow_mut(),
+            start + Duration::from_secs(10),
+        );
+        assert_eq!(
+            shell.state.borrow().status_shimmer_frame,
+            0,
+            "inactive time is not replayed"
+        );
+    }
+
+    #[test]
+    fn status_and_tool_dot_clocks_keep_independent_cadences() {
+        use super::super::{
+            summarize_tool, InteractiveShell, ToolCallId, ToolPanel, TranscriptBlock,
+        };
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_run_label("compacting");
+        let args = serde_json::json!({"path":"src/lib.rs"});
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        let index = state.transcript.len();
+        state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("read".into()),
+            "read".into(),
+            args.to_string(),
+            summarize_tool("read", &args),
+            String::new(),
+            false,
+            false,
+            None,
+            None,
+        ))));
+        state.register_active_event(index);
+        schedule.observe(&state, start);
+        for ms in [80, 480, 500, 1600, 2000] {
+            schedule.advance(&mut state, start + Duration::from_millis(ms));
+            assert_eq!(state.status_shimmer_frame as u64, ms / 80);
+            assert_eq!(state.event_dot_visible, (ms / 500) % 2 == 0);
+        }
+    }
+
+    #[test]
+    fn reduced_motion_timer_keeps_its_own_deadline() {
+        use super::super::InteractiveShell;
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        let mut shell =
+            InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_with(
+                TerminalCapabilities::test(true, true, ColorDepth::None),
+            ));
+        shell.begin_run("openai");
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        schedule.observe(&state, start);
+        assert!(schedule.status.last_tick.is_none());
+        assert!(schedule.event_dot.last_tick.is_none());
+        assert_eq!(
+            schedule.poll_interval(false, start + Duration::from_millis(990)),
+            Duration::from_millis(10)
+        );
+        let revisions = state.block_revisions.clone();
+        schedule.advance(&mut state, start + Duration::from_millis(3050));
+        assert_eq!(state.status_shimmer_frame, 0);
+        assert_eq!(state.block_revisions[0], revisions[0] + 1);
+        assert_eq!(
+            schedule
+                .timer
+                .remaining(start + Duration::from_millis(3050)),
+            Some(Duration::from_millis(950))
+        );
+    }
+
+    #[test]
+    fn optional_spinner_skips_missed_frames_without_hurrying_tool_dots() {
+        use super::super::InteractiveShell;
+        let theme = crate::tui::theme::test_theme_from_source("[tokens]\nthinking_spinner = true");
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_run_label("compacting");
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        assert!(thinking_spinner_animating(&state));
+        schedule.observe(&state, start);
+        schedule.advance(&mut state, start + Duration::from_millis(1040));
+        assert_eq!(state.event_spinner_frame, 3);
+        assert!(state.event_dot_visible);
+        assert_eq!(state.status_shimmer_frame, 13);
+    }
+
+    #[test]
+    fn queued_notifications_have_a_fixed_drain_budget_and_stop_preempts_wait() {
+        let (tx, rx) = mpsc::channel();
+        // Use a larger synthetic queue to prove that even an expired deadline
+        // consumes at most one slot; production uses sync_channel(1).
+        for _ in 0..1000 {
+            tx.send(RenderCommand::Render).unwrap();
+        }
+        assert!(coalesce_render_commands(&rx, None));
+        assert_eq!(rx.try_iter().count(), 999);
+        tx.send(RenderCommand::Stop).unwrap();
+        assert!(!coalesce_render_commands(&rx, Some(Instant::now())));
+        drop(tx);
+        assert!(!coalesce_render_commands(&rx, None));
     }
 
     #[test]
@@ -390,11 +688,24 @@ impl ShellComponent {
     fn uses_application_viewport(&self, state: &ShellState) -> bool {
         self.mouse_application_viewport || state.application_viewport_requested
     }
+
+    fn borrow_for_render(&self) -> MutexGuard<'_, ShellState> {
+        let mut state = self.state.borrow_mut();
+        if !state.startup_pending {
+            // Admit and materialize each diagnostic under the same shell lock:
+            // concurrent session hydration cannot erase it before its first
+            // frame. Producers never hold this lock (only the output queue).
+            for message in crate::output::take_tui_diagnostics() {
+                state.push_block(super::TranscriptBlock::Notice(message));
+            }
+        }
+        state
+    }
 }
 
 impl Component for ShellComponent {
     fn render(&self, width: u16) -> Vec<String> {
-        let state = self.state.borrow();
+        let state = self.borrow_for_render();
         if state.startup_pending {
             // TUI::start paints immediately. Keep the renderer/input lifecycle
             // live for onboarding, but do not cache or publish a provisional
@@ -421,7 +732,7 @@ impl Component for ShellComponent {
     }
 
     fn render_update(&self, width: u16) -> Option<FrameUpdate> {
-        let state = self.state.borrow();
+        let state = self.borrow_for_render();
         Some(if self.uses_application_viewport(&state) {
             state.native_animation_viewport_top.set(None);
             render_shell_viewport_update(
@@ -448,7 +759,7 @@ impl Component for ShellComponent {
         width: u16,
         cursor: Option<CommitCursor>,
     ) -> Option<FrameUpdate> {
-        let state = self.state.borrow();
+        let state = self.borrow_for_render();
         if state.startup_pending {
             // Setup is a bounded transient surface, never a committed prefix.
             // Leave ShellFrameState uninitialized until the first ready frame;

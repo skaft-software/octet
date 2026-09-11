@@ -1,11 +1,15 @@
 # Web acceptance
 
 Maintainer acceptance criteria, **not a current test result**. The web-first gate
-requires observed evidence for every applicable item below. Published package
-and public-install results are recorded in the
-[0.7.0 release verification](../../releases/v0.7.0.md#release-verification).
-Those checks and historical fixtures do not claim every manual journey below
-passed. Live-provider/native-audio checks are optional and **NOT RUN**.
+requires observed evidence for every applicable item below. For the octet 0.7.5
+source, see the [release notes](../../releases/v0.7.5.md); publication, signed
+assets, and public-install results belong to the
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+[0.7.4](../../releases/v0.7.4.md) is a published immutable release, not a 0.7.5
+pass. Package smoke and historical fixtures do not establish every manual
+journey, actual-terminal/SSH behavior, private-LAN access, or endurance.
+Live-provider/native-host audio checks are optional and **NOT RUN** in this
+source review.
 
 For local usage, see the [Serve guide](README.md). Consult
 [implementation limits](current-state.md#what-remains-fixture-only-specified-or-absent)
@@ -143,4 +147,4 @@ tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).
   and an allowlisted child environment. Credentialed provider checks require
   separate approval. The packaging workflow defaults and historical v0.4.0
   waiver in [configured-provider acceptance](provider-acceptance.md) do not
-  waive the [octet 0.7.0 release gates](../../releases/v0.7.0.md).
+  waive current deterministic CI, security, signing, or public-install gates.

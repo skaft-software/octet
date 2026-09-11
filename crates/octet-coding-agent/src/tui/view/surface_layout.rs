@@ -30,7 +30,9 @@ fn transcript_surface_kind(block: &TranscriptBlock) -> &'static str {
         TranscriptBlock::Tool(_) => "tool",
         TranscriptBlock::Shell(_) => "shell",
         TranscriptBlock::Outcome(_) => "outcome",
-        TranscriptBlock::Notice(_) | TranscriptBlock::NoticeStatus { .. } => "notice",
+        TranscriptBlock::UpdateAvailable(_)
+        | TranscriptBlock::Notice(_)
+        | TranscriptBlock::NoticeStatus { .. } => "notice",
         TranscriptBlock::Compaction(_) => "compaction",
     }
 }
@@ -46,6 +48,7 @@ fn uses_event_marker_gutter(block: &TranscriptBlock) -> bool {
             | TranscriptBlock::Reasoning(_)
             | TranscriptBlock::Tool(_)
             | TranscriptBlock::Shell(_)
+            | TranscriptBlock::UpdateAvailable(_)
             | TranscriptBlock::Notice(_)
             | TranscriptBlock::NoticeStatus { .. }
     )
@@ -103,7 +106,9 @@ fn natural_surface_width(block: &TranscriptBlock, theme: &OctetTheme) -> u16 {
     let inner_prefix = match block {
         TranscriptBlock::User { .. } => 2,
         TranscriptBlock::Tool(_) => 8,
-        TranscriptBlock::Notice(_) | TranscriptBlock::NoticeStatus { .. } => 0,
+        TranscriptBlock::UpdateAvailable(_)
+        | TranscriptBlock::Notice(_)
+        | TranscriptBlock::NoticeStatus { .. } => 0,
         TranscriptBlock::Shell(_) => visible_width(theme.glyph("shell")).saturating_add(1),
         TranscriptBlock::Compaction(_) => visible_width(theme.glyph("note")).saturating_add(1),
         TranscriptBlock::Assistant(_)

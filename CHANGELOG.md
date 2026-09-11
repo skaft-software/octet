@@ -2,29 +2,41 @@
 
 ## [Unreleased]
 
-### 0.7.4 source candidate — UNPUBLISHED
+## [0.7.5] - 2026-09-11
 
-- Align product, SDK, Serve, installer, image and four official bundle source
-  distribution versions to 0.7.4; independent API and schema versions are unchanged.
-- Add host-qualified Codex interrupted-inference recovery and separately paced
-  pre-send network waiting without restarting tasks or replaying committed tools.
-  Recovery also covers auxiliary provider operations and preserves accepted controls.
-- Persist unknown failed-attempt usage across resume, distinguish known subtotals
-  from complete totals, and fail closed on unresolved hard-budget exposure.
-- Add quiet attempt-owned rollback and operation-scoped recovery status. Full
-  #350/#346 acceptance, live interruption and wall-clock endurance remain open;
-  see the [recovery qualification boundary](docs/qualification/v0.7.4-recovery.md).
-- Maintenance #411 is already merged, including #403, #357, #208, #201 and #361.
-- The three medium-severity GitHub Vitest alerts are fixed on main.
-- Overlap independent custom-provider discovery in bounded foreground batches,
-  preserving validation, cache isolation and deterministic catalog publication.
-- Avoid whole-branch reference allocation during provider-usage reconciliation;
-  retain explicit limits and [matched local evidence](docs/benchmarks/v0.7.4-performance.md).
-- Improve ANSI256 Light added-diff contrast while retaining green semantics (#412).
-  No physical terminal-acceptance pass is claimed.
-- Mandatory #382 physical acceptance remains **UNRUN**, blocking publication.
-  No 0.7.4 tags or assets are claimed. Public installation commands remain
-  pinned to 0.7.3. See [candidate notes](docs/releases/v0.7.4.md).
+- Repair stale startup splash rows after model switches.
+- Keep activity and compaction shimmer on a monotonic clock, skipping missed
+  frames instead of replaying them in bursts.
+- Group live model, reasoning, context and cumulative cost in the default footer,
+  with the working directory right-aligned and safe narrow-terminal fallbacks.
+- Add honest installer/updater progress on stderr; success requires the exact
+  installed version, not just a completed download.
+- Add a quiet, non-blocking startup update notice and a rich, scrollable
+  `/changelog` command with a splash reminder.
+- Avoid misleading project-skill warnings when the same root is already a user
+  skill directory, without relaxing actual project trust checks.
+- Correct stale publication-status documentation shipped with 0.7.4, and retain
+  linked public reference files across documentation package layouts.
+- Bound installer-script downloads independently of curl's version, and bound
+  both pre- and post-install version checks by time and output size.
+
+## [0.7.4] - 2026-09-11
+
+- Add host-qualified Codex interrupted-inference recovery and separately paced,
+  cancellable pre-send waiting without restarting tasks or replaying committed tools.
+- Preserve accepted controls and durable failed-attempt usage uncertainty across
+  resume, including truthful known subtotals and hard-budget enforcement.
+- Keep API-wait presentation responsive with attempt-owned rollback,
+  operation-scoped recovery status and length-adaptive activity shimmer.
+- Fix three medium-severity Vitest alerts and scoped maintenance (#411).
+- Overlap independent provider discovery in bounded batches and reduce usage
+  reconciliation allocation; retain [matched measurement limits](docs/benchmarks/v0.7.4-performance.md).
+- Improve ANSI256 Light added-diff contrast and limited-colour splash logos.
+- Publish signed native/Serve packages and four exact-host executable bundles.
+  Independent APIs and schemas remain unchanged; registry channels are separate.
+- See [release verification and the documentation correction](docs/releases/v0.7.4.md).
+  A subsequently reported Ghostty-to-SSH model-switch regression is addressed
+  in 0.7.5; weeks-long endurance and full Codex parity are not claimed.
 
 ## [0.7.3] - 2026-09-09
 
@@ -917,6 +929,10 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Every bundled theme retains its authored palette, while the compiled default follows the selected model lab and resets cleanly after theme switches.
 - Batched tool results retain independent bounded output allowances so a large early result cannot starve later calls in the same turn.
 
+[0.7.5]: https://github.com/skaft-software/octet/releases/tag/v0.7.5
+[0.7.4]: https://github.com/skaft-software/octet/releases/tag/v0.7.4
+[0.7.3]: https://github.com/skaft-software/octet/releases/tag/v0.7.3
+[0.7.2]: https://github.com/skaft-software/octet/releases/tag/v0.7.2
 [0.7.1]: https://github.com/skaft-software/octet/releases/tag/v0.7.1
 [0.7.0]: https://github.com/skaft-software/ygg/releases/tag/v0.7.0
 [0.6.7]: https://github.com/skaft-software/ygg/releases/tag/v0.6.7

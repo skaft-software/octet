@@ -39,6 +39,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/context` | Context composition and effective capacity. |
 | `/cost` | Turn/session usage and cost accounting, including durable delegated spend. |
 | `/cache` | Provider-reported prompt-cache diagnostics. |
+| `/changelog` | Read the current version's bundled release notes in a scrollable rich-Markdown TUI report; no network or model request. |
 | `/update` | Check for a newer release; install with `octet update`, subject to [channel availability](installation.md#binary-availability). |
 | `/name [name]` | Show or rename the current session. |
 | `/export [path]` | Export the current session with redaction. |

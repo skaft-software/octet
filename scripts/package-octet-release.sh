@@ -90,46 +90,66 @@ cp "$binary" "$package_directory/octet"
 cp "$host_binary" "$package_directory/octet-host"
 chmod 0755 "$package_directory/octet" "$package_directory/octet-host"
 
-# Copy only paths known to Git under the public package roots. This excludes
-# ignored and untracked workstation files regardless of their location.
-git -C "$source_directory" ls-files -z -- LICENSE README.md docs examples sdk > "$asset_manifest"
-python3 - "$source_directory" "$package_directory" "$asset_manifest" <<'PY'
+# The finite public inventory is shared with embedded Git/Cargo documentation.
+# Git membership excludes untracked workstation content even at inventoried paths.
+git -C "$source_directory" ls-files -z > "$asset_manifest"
+python3 - "$source_directory" "$package_directory" "$asset_manifest" <<'PYASSETS'
 import os
 import pathlib
+import re
 import shutil
 import stat
 import sys
 
 source = pathlib.Path(sys.argv[1])
 package = pathlib.Path(sys.argv[2])
-entries = pathlib.Path(sys.argv[3]).read_bytes().split(b"\0")
-allowed_roots = {"LICENSE", "README.md", "docs", "examples", "sdk"}
+tracked = set(pathlib.Path(sys.argv[3]).read_bytes().split(b"\0"))
+inventory = source / "docs/package-assets.txt"
+if inventory.is_symlink() or not inventory.is_file() or b"docs/package-assets.txt" not in tracked:
+    raise SystemExit("documentation inventory must be a tracked regular file")
 copied = set()
-for raw in entries:
-    if not raw:
+for line in inventory.read_text(encoding="utf-8").splitlines():
+    if not line or line.startswith("#"):
         continue
-    relative = pathlib.Path(os.fsdecode(raw))
-    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
-        raise SystemExit(f"unsafe tracked release path: {relative}")
-    if relative.parts[0] not in allowed_roots:
-        raise SystemExit(f"unexpected tracked release path: {relative}")
-    source_path = source / relative
-    metadata = source_path.lstat()
+    kind, separator, name = line.partition(" ")
+    if (kind not in {"text", "asset"} or not separator
+        or not re.fullmatch(r"[A-Za-z0-9_./-]+", name)
+        or any(part in {"", ".", ".."} for part in name.split("/"))
+        or name in copied or os.fsencode(name) not in tracked):
+        raise SystemExit(f"unsafe, duplicate, or untracked documentation asset: {name}")
+    relative = pathlib.Path(name)
+    source_path = source
+    for component in relative.parts:
+        source_path /= component
+        metadata = source_path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or (source_path != source / relative and not stat.S_ISDIR(metadata.st_mode)):
+            raise SystemExit(f"documentation asset traverses a link or non-directory: {name}")
     if not stat.S_ISREG(metadata.st_mode):
-        raise SystemExit(f"release assets must be regular files: {relative}")
+        raise SystemExit(f"release assets must be regular files: {name}")
+    if kind == "text":
+        source_path.read_text(encoding="utf-8")
+    elif relative.parts[0] != "docs":
+        raise SystemExit(f"non-text documentation assets must be under docs/: {name}")
     destination = package / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source_path, destination)
     destination.chmod(0o755 if metadata.st_mode & 0o111 else 0o644)
-    copied.add(relative.as_posix())
+    copied.add(name)
 
-for required_file in ("LICENSE", "README.md"):
+public_roots = {
+    os.fsdecode(name) for name in tracked
+    if name.startswith((b"docs/", b"examples/", b"sdk/"))
+}
+if public_roots - copied:
+    raise SystemExit("public documentation is missing from docs/package-assets.txt: " + ", ".join(sorted(public_roots - copied)))
+
+for required_file in ("LICENSE", "README.md", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md"):
     if required_file not in copied:
         raise SystemExit(f"tracked {required_file} is missing from release assets")
 for required in ("docs", "examples", "sdk"):
     if not any(path.startswith(required + "/") for path in copied):
         raise SystemExit(f"tracked {required}/ assets are missing from the release package")
-PY
+PYASSETS
 
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$source_directory" log -1 --format=%ct HEAD)}
 case "$source_date_epoch" in

@@ -1,10 +1,13 @@
 # octet Extension Protocol Reference
 
-**Identity boundary:** octet 0.7.0 uses only octet first-party names, including
-`octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`. Retained API
-numbers 0.1/0.2/0.3 do not imply aliases for old Ygg wire names or imports.
-First-party shipped SDK/extension distributions are version 0.7.0; independent
-examples keep their own versions.
+**Identity boundary:** octet 0.7.5 source uses only octet first-party names,
+including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
+Retained API numbers 0.1/0.2/0.3 do not imply aliases for old Ygg wire names or
+imports. The source SDK distributions and four official executable bundles are
+version `0.7.5`; the Pi compatibility bridge and independent examples keep their
+own versions. This is not SDK registry publication. Version-matched assets and
+public-install verification belong to the
+[v0.7.5 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
 
 > **Legacy API versions:** `0.1` (frozen compatibility) and `0.2`
 > (supported stateful wire). API `0.3` is defined by the generated
@@ -86,7 +89,7 @@ The **first** host request, sent immediately after the child process starts.
   "method": "initialize",
   "params": {
     "api_version": "0.1",
-    "octet_version": "0.7.0",
+    "octet_version": "0.7.5",
     "extension": {
       "name": "hello-world",
       "version": "0.1.0",
@@ -236,7 +239,7 @@ If `lifecycle_events` is negotiated and the subscription list is omitted or
 empty, all six events are subscribed. Otherwise it must be an exact subset of
 the six names above. A non-empty subscription without the feature is invalid.
 
-The working-tree coding host conditionally appends `agent_sessions` to
+The coding host conditionally appends `agent_sessions` to
 `optional_features` only for the trusted, enabled first-party
 `octet-subagents` extension when its child-session service can be bound. The
 service is available independently of the selected reasoning effort; Ultra is
@@ -1283,7 +1286,9 @@ next-boundary rule.
 
 ---
 
-### 2.13 `agent/spawn` (API `0.2`, working tree)
+<a id="213-agentspawn-api-02-working-tree"></a>
+
+### 2.13 `agent/spawn` (API `0.2`)
 
 Requires the conditionally offered `agent_sessions` feature and an active
 host model-tool or declared-command parent. Create one bounded in-harness child
@@ -1351,7 +1356,9 @@ effective `policy`, host-owned `created_at_ms`/`started_at_ms`/
 
 ---
 
-### 2.14 `agent/message` (API `0.2`, working tree)
+<a id="214-agentmessage-api-02-working-tree"></a>
+
+### 2.14 `agent/message` (API `0.2`)
 
 Send steering input to an owned child while preserving the child session:
 
@@ -1375,7 +1382,9 @@ message is capped at 128 KiB.
 
 ---
 
-### 2.15 `agent/follow_up` (API `0.2`, working tree)
+<a id="215-agentfollow_up-api-02-working-tree"></a>
+
+### 2.15 `agent/follow_up` (API `0.2`)
 
 Queue a subsequent run on an owned child:
 
@@ -1407,7 +1416,9 @@ and a child without a timeout stays unlimited.
 
 ---
 
-### 2.16 `agent/list` (API `0.2`, working tree)
+<a id="216-agentlist-api-02-working-tree"></a>
+
+### 2.16 `agent/list` (API `0.2`)
 
 Request `{ "parent_request_id": 2 }`. Success returns the extension
 `principal`, derived `resource_owner`, `persistence_error`, and `agents`. Each
@@ -1448,7 +1459,9 @@ active owner and fails closed.
 
 ---
 
-### 2.17 `agent/wait` (API `0.2`, working tree)
+<a id="217-agentwait-api-02-working-tree"></a>
+
+### 2.17 `agent/wait` (API `0.2`)
 
 Request `{ "parent_request_id": 2, "timeout_ms": 30000 }`. The timeout
 defaults to 30 seconds and is clamped to 1..=60,000 ms. The request returns
@@ -1459,7 +1472,9 @@ cancels the wait.
 
 ---
 
-### 2.18 `agent/interrupt` (API `0.2`, working tree)
+<a id="218-agentinterrupt-api-02-working-tree"></a>
+
+### 2.18 `agent/interrupt` (API `0.2`)
 
 Request `{ "parent_request_id": 2, "target": "agent-1" }`. Success returns
 `agent_id`, `agent_path`, `previous_status`, and `interrupt_requested`. The host

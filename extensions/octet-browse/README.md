@@ -1,9 +1,9 @@
 # octet Browse
 
-**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
-to published octet 0.7.3 and its matching bundle; local candidate sources or
-archives require a locally built octet 0.7.4. See
-[the open release gates](../../docs/releases/v0.7.4.md).
+**Distribution version: 0.7.5.** Catalog commands below require version-matched
+published assets. Source checkouts and local archives require exactly octet 0.7.5.
+See the [release record](../../docs/releases/v0.7.5.md) for publication and
+installation evidence.
 
 Use a visible, isolated Chromium window to inspect pages and perform bounded
 browser actions. Sign in manually; octet Browse never uses your normal browser
@@ -13,8 +13,8 @@ profile.
 
 ## Install the bundle
 
-With [octet 0.7.3 installed](../../docs/installation.md), once the matching signed
-public bundle is published, install it, then explicitly enable it:
+With [octet 0.7.5 installed](../../docs/installation.md), install the matching
+signed public bundle, then explicitly enable it:
 
 ```console
 octet extension install octet-browse
@@ -67,8 +67,8 @@ before removing only the locked, sentinel-verified isolated profile.
 ## Reference
 
 The bundled runtime still uses API `0.2`; these are usage and implementation
-references, not current extension-authoring examples. Bundle `0.7.4` requires
-exactly octet `0.7.4` and `playwright==1.57.0`.
+references, not current extension-authoring examples. Bundle `0.7.5` requires
+exactly octet `0.7.5` and `playwright==1.57.0`.
 
 - <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
 - <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.

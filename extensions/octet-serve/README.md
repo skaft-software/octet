@@ -2,10 +2,11 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. This checkout is the UNPUBLISHED octet 0.7.4
-source candidate; mandatory #382 physical acceptance remains UNRUN. Published
-packages remain 0.7.3. These implementation contracts do not imply complete
-feature or live-provider acceptance.
+Serve remains experimental. This checkout's source distribution is 0.7.5;
+public packages must match exactly. The [source notes](../../docs/releases/v0.7.5.md)
+describe changes; the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5)
+records publication and installation evidence. These implementation contracts do not
+imply complete feature or live-provider acceptance.
 
 ## Focused checks
 
@@ -89,17 +90,17 @@ contains the adapter into private `App`. Source-level extraction behind a stable
 Runtime API is deferred; the default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface. See [architecture](../../docs/experimental/octet-serve/architecture.md).
 
-The candidate package requires exactly `=0.7.4`; its
-[open release gates are tracked](../../docs/releases/v0.7.4.md). It is unpublished
-and declares three targets:
+The source package requires exactly octet `=0.7.5`. Use version-matched published
+assets or a matching local build and reviewed local archive. See
+[distribution channels](../../docs/distribution.md). It declares three targets:
 
 - GNU/Linux x86_64: `x86_64-unknown-linux-gnu`;
 - macOS x86_64;
 - macOS arm64.
 
-Linux musl is unsupported. Signed 0.7.3 package publication and public
-installation results are tracked in the release record. A matching local archive can
-also be installed offline. See
+Linux musl is unsupported. Signed package publication and public installation
+results belong to their version-pinned release record. A matching local archive
+can also be installed offline. See
 [package usage](../../docs/experimental/octet-serve/README.md#install-or-update-a-package).
 
 The source-described `.github/workflows/release-serve.yml` contract accepts only
@@ -113,7 +114,7 @@ existing canonical release. Repair/source tags use
 `scripts/package-octet-serve-release.sh` is the local reproducibility and
 package-layout gate before separately authorized publication.
 
-[octet 0.7.3](../../docs/releases/v0.7.3.md) records current release gates.
+[octet 0.7.4](../../docs/releases/v0.7.4.md) retains historical published-release evidence.
 The earlier [octet 0.7.0](../../docs/releases/v0.7.0.md#release-verification) includes signed
 Serve artifacts and verified public installation. Live-provider/native-audio checks
 are optional and **NOT RUN**; package smoke does not establish full live-feature

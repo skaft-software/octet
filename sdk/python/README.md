@@ -1,7 +1,8 @@
 # octet-extension-sdk
 
-**0.7.4 is an UNPUBLISHED source candidate**; see
-[release gates](../../docs/releases/v0.7.4.md).
+This checkout's source distribution is **0.7.5**, not a claim of SDK registry
+publication. For version-matched published native assets and installation
+evidence, see the [octet 0.7.5 release record](../../docs/releases/v0.7.5.md).
 
 Python has generated API `0.3` contract models and canonical-wire validators in
 `octet_extension.api_v03`. Use the [current extension guide](../../docs/extensions.md)
@@ -22,7 +23,7 @@ python3 -m pip install ./sdk/python
 ```
 
 This installs the source package, not proof of current-API runtime parity or
-registry publication. Its source distribution version is `0.7.4`, independent
+registry publication. Its source distribution version is `0.7.5`, independent
 of the extension API version. Native octet publication does not publish the SDK
 to PyPI. Imports and wire names
 use `octet_extension`, `octet_version`, `requires_octet`, and `OCTET_*`, with no

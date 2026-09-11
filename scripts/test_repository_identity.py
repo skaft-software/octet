@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -114,6 +115,46 @@ class RepositoryIdentityTests(unittest.TestCase):
                 self.assertEqual(lines[0], expected)
                 escaped_version = version.replace(".", r"\.")
                 self.assertEqual(lines[1], rf"^https://github\.com/{expected}/\.github/workflows/release-octet\.yml@refs/tags/(v{escaped_version}|octet-binaries-v{escaped_version})$")
+
+
+class ReleaseDocumentationTests(unittest.TestCase):
+    """Bundled user docs must not describe the release as an unavailable candidate.
+
+    These checks validate source prose, not publication, signatures or physical
+    acceptance. Those remain release-workflow and maintainer evidence.
+    """
+
+    def test_current_version_has_release_only_notes(self):
+        root = SCRIPTS.parent
+        version = re.search(r'^version = "([^"]+)"$',
+                            (root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
+        notes = (root / "docs/releases" / f"v{version}.md").read_text()
+        self.assertEqual(notes.splitlines()[0], f"# octet {version}")
+        normalized = " ".join(notes.lower().split())
+        # Registry publication is a separate gate from native/Serve publication.
+        # Permit only this explicit channel disclaimer, not an unpublished-product claim.
+        normalized = normalized.replace(
+            "npm, homebrew, crates.io and sdk registries are separate, unpublished channels.",
+            "",
+        )
+        for stale in ("unpublished", "source candidate", "publication remains blocked",
+                      "release gate — open", "acceptance is unrun"):
+            self.assertNotIn(stale, normalized)
+        self.assertRegex(notes, r"(?m)^## (Fixed|Added|Changed|Highlights)$")
+        for name in ("README.md", "docs/installation.md"):
+            with self.subTest(path=name):
+                self.assertIn(f"/releases/download/v{version}/install-octet.sh",
+                              (root / name).read_text())
+
+    def test_current_installation_guides_do_not_keep_candidate_gate_text(self):
+        for name in ("README.md", "docs/README.md", "docs/installation.md",
+                     "docs/distribution.md"):
+            normalized = " ".join((SCRIPTS.parent / name).read_text().lower().split())
+            with self.subTest(path=name):
+                self.assertNotIn("unpublished candidate", normalized)
+                self.assertNotIn("unpublished source candidate", normalized)
+                self.assertNotIn("physical acceptance is unrun", normalized)
+                self.assertNotIn("physical acceptance remains unrun", normalized)
 
 
 if __name__ == "__main__":

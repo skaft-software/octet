@@ -4,21 +4,26 @@
 
 Maintainer reference for experimental Serve. For installation and practical local
 use, read the [Serve guide](README.md). Feature statements below describe the
-implementation; they do not replace per-feature acceptance evidence. Current
-publication checks are recorded in the [0.7.0 release verification](../../releases/v0.7.0.md#release-verification).
+octet 0.7.5 source implementation; they do not replace per-feature acceptance
+evidence. See the [0.7.5 source notes](../../releases/v0.7.5.md); availability,
+signed assets, and public-install results belong to the
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
 
 The [validation record](#validation-evidence) and
 [historical checklist](p0-p1-delivery.md) retain their original Ygg-era scope.
-They are not a pass or waiver of [octet 0.7.0 release gates](../../releases/v0.7.0.md).
+They are not a pass or waiver of current release gates.
 Current work tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).
 
 ## Bottom line
 
-Serve is a real-session experimental local web interface. Signed 0.7.0 packages
-and public installation are verified. Live-provider/native-audio checks are
-optional and **NOT RUN**; package smoke does not establish complete media,
-recovery, or capture acceptance. LAN pairing and native applications remain
-specification-only.
+Serve is a real-session experimental local web interface.
+[0.7.4](../../releases/v0.7.4.md) is published with signed Serve packages and
+verified public installation; its tag and assets are immutable. Those checks
+do not qualify the 0.7.5 source. Live-provider/native-host audio checks are
+optional and **NOT RUN** in this source review. Signed-package and public-install
+checks are separate from actual-terminal/SSH, live-provider/audio, endurance,
+and complete graphical media, recovery, or capture acceptance. Private-LAN
+pairing and native graphical applications remain specification-only.
 
 ## Current status at a glance
 
@@ -180,8 +185,11 @@ octet serve
   --web-root <directory>
 ```
 
-Catalog installation and update are available for the published 0.7.0 package.
-There is no implemented `--lan`, `--demo`, or `--local-only` switch. The shortest direct source launch is:
+Catalog installation and update select the package matching the running octet
+version exactly; the 0.7.5 commands require matching assets on its GitHub release.
+A reviewed matching local archive or direct source build does not require public
+package availability. There is no implemented `--lan`, `--demo`, or `--local-only`
+switch. The shortest direct source launch is:
 
 ```console
 cargo run --features serve -- serve
@@ -279,9 +287,20 @@ reconciled as finished, discarded, or active, and adapter source attribution is
 added only where authoritative metadata exists; unmatched provider totals stay
 in `other`. Legacy `usage.updated` events remain accepted.
 
-The production authority catalog exposes `FullAccess` only. Narrower authority
-values exist in the protocol and UI vocabulary but are not advertised by the
-real adapter until they can retain their correct enforcement meaning.
+The production authority catalog contains only the host's immutable launch
+profile. `ReadOnly` means edit, write and process execution are disabled;
+`Workspace` means built-in file mutation is allowed only inside the workspace
+and processes are disabled; `FullAccess` means processes are enabled or file
+mutation can reach external paths. Tool allowlists and approvals may narrow
+individual operations further. The UI disables the singleton picker, and the
+server rejects different profiles on session creation and authority changes,
+including requests from older clients. Resume, fork and worker rebuild retain
+host-derived authority rather than an unsupported session label. Read-only
+inspection of delegated children remains a separate non-executing surface.
+
+This removes the earlier misleading per-session choices; it does not implement
+per-session sandboxes or OS isolation. Configure host restrictions before
+launch and restart the host to change them. Use OS isolation for hostile work.
 
 ### Attachments and prompt documents
 
@@ -440,9 +459,10 @@ The web surface excludes:
 - TUI synchronization; and
 - child-agent runtime trees.
 
-The production host advertises `terminal: true` only when configured authority
-allows process execution. The terminal is a bounded retained local PTY whose
-WebSocket authority is derived from the authenticated page origin.
+The production host advertises `terminal: true` only when host configuration
+allows process execution, independently of the session authority picker. The
+terminal is a bounded retained local PTY whose WebSocket authority is derived
+from the authenticated page origin.
 `childAgents` remains false; the UI does not fake child-agent state. None of these
 package-specific contracts supplies a qualified extension API 0.3 runtime example.
 
@@ -467,7 +487,9 @@ Production capability flags remain false for Connected Devices and LAN clients.
 The [native design](native-delivery.md) proposes shared React in thin system-webview
 shells. Tauri 2 is an unvalidated candidate; Electron is out of scope. There are no
 Tauri, Xcode/iOS, or Android projects; Developer ID signing, notarization,
-provisioning profiles, TestFlight builds, signed APKs, or Android App Bundles.
+provisioning profiles, TestFlight builds, signed APKs, or Android App Bundles
+for these graphical shells. Signed native CLI and Serve runtime archives are
+separate release artifacts, not native graphical apps.
 
 ## Validation evidence
 

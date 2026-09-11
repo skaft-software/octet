@@ -5,6 +5,20 @@ use std::time::Instant;
 
 use super::{fit_line, ShellState, TranscriptBlock};
 
+fn changelog_hint(state: &ShellState, width: u16) -> String {
+    let tip = if state.theme.unicode() {
+        "/changelog · what's new"
+    } else {
+        "/changelog - what's new"
+    };
+    let tip = if sexy_tui_rs::visible_width(tip) <= usize::from(width) {
+        tip
+    } else {
+        "/changelog"
+    };
+    fit_line(&state.theme.dim(tip), width)
+}
+
 fn welcome_is_mutable(state: &ShellState) -> bool {
     state.startup_card_started_at.is_some()
         && !state.transcript.iter().any(|block| {
@@ -53,18 +67,23 @@ fn render_pi_startup(state: &ShellState, width: u16) -> Vec<String> {
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let accent = |text: &str| state.theme.fg("accent", text);
     let muted = |text: &str| state.theme.dim(text);
-    [
+    let mut lines = vec![
         format!("{} {}", accent("octet"), muted(&version)),
+        changelog_hint(state, width),
         muted("escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more"),
         muted("Press ctrl+o to show full startup help and loaded resources."),
         String::new(),
         muted(
             "octet can explain its own features and look up its docs. Ask it how to use or extend octet.",
         ),
-    ]
-    .into_iter()
-    .map(|line| fit_line(&line, width))
-    .collect()
+    ];
+    if let Some(hint) = super::startup_update::update_hint(state, width) {
+        lines.insert(2, hint);
+    }
+    lines
+        .into_iter()
+        .map(|line| fit_line(&line, width))
+        .collect()
 }
 
 pub(super) fn render_welcome_card(
@@ -131,10 +150,16 @@ pub(super) fn render_welcome_card(
     } else {
         format!("{model} / {}", state.reasoning)
     };
-    if width < 24 {
-        // A narrow terminal cannot fit the two-column card. Keep a compact,
+    let has_update = state.available_update.is_some();
+    let box_color = state.theme.role_rgb("splash_box");
+    let text_width =
+        width.saturating_sub(logo_width as u16 + 5 + if box_color.is_some() { 2 } else { 0 });
+    if text_width < if has_update { 12 } else { 10 }
+        || max_rows < ROWS + 2 + usize::from(has_update)
+    {
+        // A narrow or short terminal cannot fit the two-column card. Keep a compact,
         // bounded identity instead of silently dropping the startup surface.
-        let mut compact = Vec::with_capacity(5);
+        let mut compact = Vec::with_capacity(7);
         if width >= 8 {
             let logo = crate::tui::splash::render_logo(
                 &state.theme,
@@ -156,6 +181,8 @@ pub(super) fn render_welcome_card(
             ),
             width,
         ));
+        compact.push(changelog_hint(state, width));
+        compact.extend(super::startup_update::update_hint(state, width));
         compact.push(fit_line(&splash_text(&identity), width));
         compact.push(fit_line(
             &format!("{} {}", splash_bold("Ctrl+D"), splash_text("to exit")),
@@ -163,14 +190,14 @@ pub(super) fn render_welcome_card(
         ));
         return compact;
     }
-    let text = if splash_color.is_some() {
-        [
+    let mut text = if splash_color.is_some() {
+        vec![
             format!(
                 "{} {}",
                 splash_bold("octet"),
                 splash_text(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             ),
-            String::new(),
+            changelog_hint(state, text_width),
             splash_text(&identity),
             splash_text(&welcome_workspace(state)),
             if state.safe_mode {
@@ -189,13 +216,13 @@ pub(super) fn render_welcome_card(
             format!("{} {}", splash_bold("Ctrl+D"), splash_text("to exit")),
         ]
     } else {
-        [
+        vec![
             format!(
                 "{} {}",
                 state.theme.bold(&state.theme.fg("model_accent", "octet")),
                 state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             ),
-            String::new(),
+            changelog_hint(state, text_width),
             state.theme.fg("foreground", &identity),
             state.theme.dim(&welcome_workspace(state)),
             if state.safe_mode {
@@ -219,7 +246,13 @@ pub(super) fn render_welcome_card(
         ]
     };
 
-    let box_color = state.theme.role_rgb("splash_box");
+    if let Some(hint) = super::startup_update::update_hint(state, text_width) {
+        text.insert(2, hint);
+    }
+    // Only the identity column grows for a newer release. The byte's occupied
+    // cells stay fixed; neither hint becomes a full-width row beneath it.
+    let mut logo = logo;
+    logo.resize(text.len(), " ".repeat(logo_width));
     if let Some(color) = box_color {
         let inner_width = usize::from(width).saturating_sub(2);
         let paint = |text: &str| state.theme.rgb_fg(color, text);
@@ -245,13 +278,13 @@ pub(super) fn render_welcome_card(
                 state.theme.glyph("vertical")
             ))
         };
-        let mut lines = Vec::with_capacity(ROWS + 2);
+        let mut lines = Vec::with_capacity(text.len() + 2);
         lines.push(edge(
             state.theme.glyph("top_left"),
             state.theme.glyph("top_right"),
         ));
-        for row in 0..ROWS {
-            lines.push(body(format!("  {}   {}", logo[row], text[row])));
+        for (logo, text) in logo.iter().zip(&text) {
+            lines.push(body(format!("  {logo}   {text}")));
         }
         lines.push(edge(
             state.theme.glyph("bottom_left"),
@@ -259,10 +292,10 @@ pub(super) fn render_welcome_card(
         ));
         lines
     } else {
-        let mut lines = Vec::with_capacity(ROWS + 2);
+        let mut lines = Vec::with_capacity(text.len() + 2);
         lines.push(String::new());
-        for row in 0..ROWS {
-            lines.push(fit_line(&format!("  {}   {}", logo[row], text[row]), width));
+        for (logo, text) in logo.iter().zip(&text) {
+            lines.push(fit_line(&format!("  {logo}   {text}"), width));
         }
         lines.push(String::new());
         lines
@@ -276,8 +309,64 @@ mod tests {
     use sexy_tui_rs::strip_terminal_sequences;
 
     #[test]
+    fn changelog_splash_tip_stays_bounded_without_moving_the_byte() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        for color in [
+            ColorDepth::TrueColor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+            ColorDepth::None,
+        ] {
+            for unicode in [true, false] {
+                let shell =
+                    InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_with(
+                        TerminalCapabilities::test(true, unicode, color),
+                    ));
+                shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+                for width in [1, 4, 8, 16, 23, 24, 40, 46, 80, 120] {
+                    for height in [7, 8, 10] {
+                        let rendered = render_welcome_card(
+                            &shell.state.borrow(),
+                            width,
+                            height,
+                            Instant::now(),
+                        );
+                        assert!(rendered.len() <= height);
+                        assert!(rendered
+                            .iter()
+                            .all(|line| sexy_tui_rs::visible_width(line) <= usize::from(width)));
+                        let plain = rendered
+                            .iter()
+                            .map(|line| strip_terminal_sequences(line))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if width >= 46 && height >= 8 {
+                            assert!(
+                                plain.contains(if unicode {
+                                    "/changelog · what's new"
+                                } else {
+                                    "/changelog - what's new"
+                                }),
+                                "missing exact splash tip at {width}x{height}: {plain}"
+                            );
+                        } else if width >= 16 && height >= 8 {
+                            assert!(
+                                plain.contains("/changelog"),
+                                "command hidden at {width}x{height}: {plain}"
+                            );
+                        }
+                        if color == ColorDepth::None {
+                            assert!(!rendered.join("\n").contains('\x1b'));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn welcome_logo_occupied_geometry_narrow() {
-        assert_welcome_logo_geometry(&[(46, 1), (24, 1)]);
+        assert_welcome_logo_geometry(&[(46, 1)]);
     }
 
     #[test]
@@ -414,7 +503,7 @@ mod tests {
     fn narrow_welcome_card_keeps_a_bounded_identity_fallback() {
         let shell = InteractiveShell::test_shell();
         shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
-        for width in [4, 8, 16, 23] {
+        for width in [4, 8, 16, 23, 24] {
             let rendered = render_welcome_card(&shell.state.borrow(), width, 10, Instant::now());
             assert!(
                 !rendered.is_empty(),

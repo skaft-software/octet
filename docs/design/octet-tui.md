@@ -53,6 +53,19 @@ custom splash colours keep precedence; no-colour output uses terminal-default
 foreground. Geometry and the terminal background are unchanged. User-customized
 ANSI16 palettes can still affect actual contrast.
 
+Interactive startup performs one best-effort newer-stable-release check outside
+the input and renderer loops, skipped in offline mode and cancelled on exit.
+A newer release adds an accent hint immediately below the muted
+`/changelog · what's new` row in the splash's right-hand version column:
+`↑ v<VERSION> available · run` followed by `octet update` rendered as Markdown
+inline code. Both hints use bounded compact/ASCII fallbacks; neither occupies a
+full-width footer beneath the logo. If conversation history has already frozen
+that prefix, the result becomes one UI-only rich live-tail notice instead of
+forcing historical replay. Its action retains inline-code styling, while
+semantic copy contains plain command text. Ordinary notices remain literal.
+No update is installed automatically. The bundled current-version changelog
+uses the same rich Markdown renderer in a scrollable report.
+
 ## Transcript and input
 
 The transcript is semantic blocks rather than a terminal framebuffer. Wrapped
@@ -81,8 +94,9 @@ This closes the tested pending → progress → result/error case, not all of #3
 Real updates to historical concurrent tools/rosters, retrospective Markdown
 changes, resize, and other structural transitions can still take the replay path
 below. Do not suppress that path without an emitted-history policy that preserves
-real results. Actual Terminal.app, Ghostty, and Ghostty → SSH reader/selection
-journeys on this candidate remain unrun.
+real results. Maintainer-reported Terminal.app, Ghostty and Ghostty → SSH acceptance preceded
+0.7.4 publication, but a subsequent model-switch regression showed stale splash
+rows. Acceptance of one journey does not qualify every reader/selection path.
 
 A change above the old viewport cannot be repaired with cursor addressing.
 Matching Pi, that path emits `ED 2`, homes, clears saved lines with `ED 3`, and
@@ -138,6 +152,11 @@ the active match and hint keys use the active model's adaptive accent, matching
 picker focus and the composer without treating the focused item as provider
 provenance.
 Executable-extension status/header/footer contributions never occupy that row.
+The default footer groups model, reasoning, context percentage/limit and cumulative
+session cost on the left with semantic dot separators (ASCII fallback supported),
+and right-aligns the workspace path. It abbreviates home to `~` and shortens or
+omits the path first on narrow terminals. Active-run identity, estimated-context
+markers, unavailable pricing and uncertain-cost subtotals retain their authority.
 Read-only `/help`, `/status`, `/context`, `/cost`, and `/cache` reports use the
 same title/purpose/status/footer vocabulary as ordinary pickers. They occupy a
 temporary viewport surface rather than transcript history, start at their first
@@ -240,10 +259,13 @@ header with the same model-adaptive shimmer as `Working`. The aligned detail row
 contains the latest semantic ATX or standalone-bold heading followed by a plain,
 subdued `Ctrl+O` hint; when no heading exists it contains only the hint. Ordinary
 body prose is never inferred as a label, and provider text is sanitized before
-display. The shimmer advances on the renderer thread at a bounded 80 ms cadence,
-changes style rather than text or geometry, and invalidates only the active
-status block. Each sweep spans the label's terminal-cell width plus its marker
-and trailing highlight clearance, at one cell per tick. Long labels such as
+display. The shimmer uses a monotonic 80 ms clock on the renderer thread,
+independent of semantic-event frequency. Late frames select the current phase
+without replaying missed frames; coalescing has a fixed deadline so incoming
+notifications cannot postpone painting indefinitely. Animation changes style
+rather than text or geometry and invalidates only the active status block.
+Each sweep spans the label's terminal-cell width plus its marker and trailing
+highlight clearance, at one cell per 80 ms of active time. Long labels such as
 `Compacting context` therefore receive a complete sweep; grapheme clusters stay
 intact and reduced-motion/no-color rendering remains static.
 Before any model delta, an opted-in endpoint readiness update may temporarily

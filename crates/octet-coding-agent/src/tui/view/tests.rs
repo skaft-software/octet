@@ -23,6 +23,14 @@ struct EmulatedTerminal {
     size: Arc<Mutex<(u16, u16)>>,
     bytes: Arc<Mutex<Vec<u8>>>,
     synchronized_output: bool,
+    status_frames: Option<StatusFrameObserver>,
+}
+
+struct StatusFrameObserver {
+    state: SharedState,
+    // Completion time, selected shimmer phase, and the complete frame's byte end.
+    frames: mpsc::Sender<(Instant, usize, usize)>,
+    delay: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EmulatedTerminal {
@@ -56,6 +64,16 @@ impl sexy_tui_rs::Terminal for EmulatedTerminal {
             }
             self.push(&[byte]);
             previous = Some(byte);
+        }
+        if data.contains("\x1b[?2026l") {
+            if let Some(observer) = &self.status_frames {
+                let phase = observer.state.borrow().status_shimmer_frame;
+                let end = self.bytes.lock().unwrap().len();
+                let _ = observer.frames.send((Instant::now(), phase, end));
+                thread::sleep(Duration::from_millis(
+                    observer.delay.load(std::sync::atomic::Ordering::Relaxed),
+                ));
+            }
         }
     }
 
@@ -158,6 +176,7 @@ fn emulated_shell_with_mode(
         size: size.clone(),
         bytes: bytes.clone(),
         synchronized_output,
+        status_frames: None,
     }));
     tui.add_child(Box::new(ShellComponent::new(
         state.clone(),
@@ -169,7 +188,7 @@ fn emulated_shell_with_mode(
             tui: Some(tui),
             state,
             size,
-            render_tx: None,
+            render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: application_viewport,
         },
@@ -227,7 +246,7 @@ fn assert_input_suggestions_replace_status_footer(
             .last()
             .expect("standalone composer should include its status footer")
     )
-    .contains("context 0%/272K"));
+    .contains("0%/272K"));
 
     let chrome = shell_chrome(&state, WIDTH, now);
     assert!(!chrome.suggestions.is_empty());
@@ -239,7 +258,7 @@ fn assert_input_suggestions_replace_status_footer(
         chrome
             .composer
             .iter()
-            .all(|line| !strip_terminal_sequences(line).contains("context 0%")),
+            .all(|line| !strip_terminal_sequences(line).contains("0%")),
         "autocomplete must replace the model and token status row"
     );
 
@@ -1417,7 +1436,7 @@ fn slash_command_menu_lists_commands_and_tab_completes_a_unique_prefix() {
     assert!(restored
         .composer
         .iter()
-        .any(|line| strip_terminal_sequences(line).contains("context 0%/272K")));
+        .any(|line| strip_terminal_sequences(line).contains("0%/272K")));
 
     shell.drain_editor();
     shell.apply_edit(EditAction::Char('/'));
@@ -1984,7 +2003,7 @@ fn submitted_prompts_render_immediately_with_real_context_budget() {
     let rendered = render_shell(&shell.state.borrow(), 120);
     let footer = rendered.last().expect("single composer footer");
     assert!(
-        strip_terminal_sequences(footer).contains("context 93%/967K"),
+        strip_terminal_sequences(footer).contains("93%/967K"),
         "footer was {footer:?}"
     );
 }
@@ -9314,20 +9333,28 @@ fn footer_collapses_semantically_and_keeps_one_adjacent_row() {
     let now = Instant::now();
     let wide = plain_footer(&shell, 100, now);
     assert!(wide.starts_with("  Qwen3.6 35B A3B · high"), "{wide:?}");
-    assert!(wide.contains("context 2%/246K"), "{wide:?}");
-    assert!(wide.ends_with("session $0"), "{wide:?}");
+    assert!(wide.contains("2%/246K"), "{wide:?}");
+    assert!(wide.contains(" · 2%/246K · $0"), "{wide:?}");
+    assert!(wide.ends_with("/work/octet-footer-regression"), "{wide:?}");
+    assert_eq!(visible_width(&wide), 98);
     assert!(!wide.contains('↑') && !wide.contains('↓'), "{wide:?}");
 
     let medium = plain_footer(&shell, 68, now);
     assert!(medium.contains("Qwen3.6 35B A3B · high"), "{medium:?}");
-    assert!(medium.contains("context 2%/246K"), "{medium:?}");
-    assert!(medium.ends_with("session $0"), "{medium:?}");
+    assert!(medium.contains("2%/246K"), "{medium:?}");
+    assert!(medium.contains(" · 2%/246K · $0"), "{medium:?}");
+    assert!(
+        medium.contains('…') && medium.ends_with("footer-regression"),
+        "{medium:?}"
+    );
+    assert_eq!(visible_width(&medium), 66);
 
     let compact = plain_footer(&shell, 44, now);
     assert!(compact.contains("Qwen3.6 35B A3B"), "{compact:?}");
     assert!(compact.contains("2%"), "{compact:?}");
-    assert!(compact.ends_with("session $0"), "{compact:?}");
-    assert!(!compact.contains("high"), "{compact:?}");
+    assert!(compact.ends_with(" · 2%/246K · $0"), "{compact:?}");
+    assert!(compact.contains("high"), "{compact:?}");
+    assert!(!compact.contains("footer-regression"), "{compact:?}");
 
     let narrow = plain_footer(&shell, 30, now);
     assert!(narrow.contains("Qwen3.6 35B A3B"), "{narrow:?}");
@@ -9339,6 +9366,85 @@ fn footer_collapses_semantically_and_keeps_one_adjacent_row() {
     assert!(!surface[surface.len() - 2].is_empty());
     assert_eq!(surface.last().unwrap(), &plain_footer(&shell, 100, now));
     assert!(surface.iter().all(|line| visible_width(line) <= 100));
+}
+
+#[test]
+fn default_footer_groups_live_metadata_and_right_aligns_workspace() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_workspace(PathBuf::from("/work/octet"));
+    shell.set_identity("openai", "gpt-6-astra", "xhigh");
+    {
+        let mut state = shell.state.borrow_mut();
+        state.model_display = "GPT-6-Astra".into();
+        state.model_compact_names = vec!["GPT-6-Astra".into(), "GPT-6".into()];
+        state.context_estimate = Some((84_320, 272_000));
+        state.session_cost_microdollars = Some(295_000_000);
+        state.price_display = PriceDisplay::Priced;
+    }
+    let now = Instant::now();
+    let left = "GPT-6-Astra · xhigh · 31%/272K · $295";
+    let cwd = "/work/octet";
+    let expected = format!(
+        "  {left}{}{cwd}",
+        " ".repeat(96 - visible_width(left) - cwd.len())
+    );
+    assert_eq!(plain_footer(&shell, 100, now), expected);
+    shell.set_context_estimate(136_000, 272_000);
+    shell.state.borrow_mut().session_cost_microdollars = Some(296_000_000);
+    let updated = plain_footer(&shell, 100, now);
+    assert!(updated.contains("50%/272K · $296"), "{updated:?}");
+    assert!(!updated.contains("31%") && !updated.contains("$295"));
+    assert!(updated.ends_with(cwd));
+    for width in 1..=120 {
+        let footer = plain_footer(&shell, width, now);
+        assert!(
+            visible_width(&footer) <= usize::from(width),
+            "{width}: {footer:?}"
+        );
+    }
+    shell.state.borrow_mut().usage_uncertain = true;
+    let unknown = plain_footer(&shell, 100, now);
+    assert!(unknown.contains("subtotal $296 + ?"), "{unknown:?}");
+    shell.state.borrow_mut().session_cost_microdollars = None;
+    let unknown = plain_footer(&shell, 100, now);
+    assert!(unknown.contains("usage/cost unknown"), "{unknown:?}");
+    assert!(!unknown.contains('$'));
+}
+
+#[test]
+fn default_footer_ascii_has_no_terminal_controls_or_unicode_separators() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    let mut shell = InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_with(
+        TerminalCapabilities::test(true, false, ColorDepth::None),
+    ));
+    shell.set_identity("openai", "gpt-5.6", "high");
+    shell.set_context_estimate(84_320, 272_000);
+    shell.set_workspace(PathBuf::from(
+        "/a/long/directory/with/\x1b[31mcolors\x1b[0m\nnewline/project",
+    ));
+    shell.state.borrow_mut().session_cost_microdollars = Some(295_000_000);
+    let now = Instant::now();
+    for width in 1..=120 {
+        let footer = crate::tui::composer_surface::render_composer_surface(
+            &shell.state.borrow(),
+            width,
+            now,
+        )
+        .pop()
+        .unwrap();
+        assert!(
+            visible_width(&footer) <= usize::from(width),
+            "{width}: {footer:?}"
+        );
+        assert!(!footer.chars().any(char::is_control), "{footer:?}");
+        assert!(!footer.contains('·') && !footer.contains('…'), "{footer:?}");
+    }
+    let footer = plain_footer(&shell, 120, now);
+    assert!(
+        footer.contains("31%/272K") && footer.contains("$295"),
+        "{footer:?}"
+    );
+    assert!(footer.ends_with("/project"), "{footer:?}");
 }
 
 #[test]
@@ -9382,7 +9488,7 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
         "token counters leaked into the simplified footer: {live:?}"
     );
     assert!(
-        live.contains("context ~8%/256K"),
+        live.contains("~8%/256K"),
         "live context pressure missing: {live:?}"
     );
     assert!(
@@ -9416,8 +9522,8 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
         "accumulated session cost should be visible: {paid:?}"
     );
     assert!(
-        paid.contains("session $0.120"),
-        "durable session spend should be labelled: {paid:?}"
+        paid.contains(" · $0.120"),
+        "durable session spend should follow the context group: {paid:?}"
     );
     assert!(!paid.contains("Working"), "{paid:?}");
 
@@ -9509,10 +9615,10 @@ fn idle_footer_shows_accumulated_session_cost_without_opt_in() {
     }
 
     let footer = plain_footer(&shell, 120, Instant::now());
-    assert!(footer.contains("context 0%/272K"), "{footer:?}");
+    assert!(footer.contains("0%/272K"), "{footer:?}");
     assert!(!footer.contains("102/272k"), "{footer:?}");
     assert!(!footer.contains("cache 92.4%"), "{footer:?}");
-    assert!(footer.contains("session"), "{footer:?}");
+    assert!(!footer.contains("session"), "{footer:?}");
     assert!(
         footer.contains("$0.0914"),
         "accumulated session cost missing: {footer:?}"
@@ -12709,4 +12815,325 @@ fn provider_usage_uncertain_never_infers_zero_from_pricing() {
             .iter()
             .all(|line| visible_width(line) <= usize::from(width)));
     }
+}
+
+// This fixture runs the production scheduler and Shell -> Pi -> ANSI renderer
+// on its owning thread; it never enters raw mode or opens a provider/session.
+struct StatusRenderLoop {
+    shell: InteractiveShell,
+    frames: mpsc::Receiver<(Instant, usize, usize)>,
+    delay: Arc<std::sync::atomic::AtomicU64>,
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+fn status_render_loop_shell(theme: OctetTheme) -> StatusRenderLoop {
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(80, 24);
+    shell.set_run_label("compacting");
+    shell.tui.take().unwrap().stop();
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (frames, frame_rx) = mpsc::channel();
+    let terminal = EmulatedTerminal {
+        size: shell.size.clone(),
+        bytes: bytes.clone(),
+        synchronized_output: true,
+        status_frames: Some(StatusFrameObserver {
+            state: shell.state.clone(),
+            frames,
+            delay: delay.clone(),
+        }),
+    };
+    let (tx, rx) = mpsc::sync_channel(1);
+    let state = shell.state.clone();
+    let size = shell.size.clone();
+    shell.render_thread = Some(thread::spawn(move || {
+        renderer_runtime::render_loop_with_terminal(
+            terminal,
+            state,
+            size,
+            rx,
+            false,
+            false,
+            |_, _| false,
+        );
+    }));
+    *shell.render_tx.lock().unwrap() = Some(tx);
+    StatusRenderLoop {
+        shell,
+        frames: frame_rx,
+        delay,
+        bytes,
+    }
+}
+
+#[test]
+fn status_render_loop_skips_missed_phases_after_expensive_frames() {
+    let StatusRenderLoop {
+        mut shell,
+        frames,
+        delay,
+        ..
+    } = status_render_loop_shell(crate::tui::theme::test_theme());
+    let first = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(first.1, 0);
+    // Delay real terminal frame completion, not a direct animation-method call.
+    // After each delay the next single frame must select the current phase,
+    // rather than slowing to one cell for every expensive render.
+    delay.store(240, std::sync::atomic::Ordering::Relaxed);
+    let mut previous = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+    for _ in 0..3 {
+        let next = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            next.1 - previous.1 >= 3,
+            "missed phases were lost: {previous:?} -> {next:?}"
+        );
+        let elapsed_ticks = next.0.duration_since(previous.0).as_millis() / 80;
+        assert!(u128::from((next.1 - previous.1) as u64).abs_diff(elapsed_ticks) <= 1);
+        previous = next;
+    }
+    delay.store(0, std::sync::atomic::Ordering::Relaxed);
+    shell.stop_renderer();
+}
+
+#[test]
+fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
+    let StatusRenderLoop {
+        mut shell,
+        frames,
+        bytes,
+        ..
+    } = status_render_loop_shell(crate::tui::theme::test_theme());
+    let first = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(first.1, 0);
+    // Missed 80 ms deadlines skip frames, so a shared runner need not paint
+    // 20 frames in 2050 ms. Await the sweep and the same ANSI palette coverage,
+    // with one finite liveness deadline, rather than asserting OS throughput.
+    let deadline = first.0 + Duration::from_secs(10);
+    let mut sample = first;
+    let mut samples = 0;
+    let mut consumed = 0;
+    let mut parser = vt100::Parser::new(24, 80, 100);
+    let mut palettes = Vec::new();
+    loop {
+        let (at, phase, end) = sample;
+        let elapsed_ticks = at.duration_since(first.0).as_millis() / 80;
+        assert!(
+            (phase as u128).abs_diff(elapsed_ticks) <= 1,
+            "phase {phase} at {elapsed_ticks} elapsed ticks"
+        );
+        // Upper-bound actual writes by elapsed cadence, not a fixed sleep's
+        // expected count. A late renderer must not replay missed frames.
+        assert!(samples <= elapsed_ticks + 1, "frame flood: {samples}");
+        assert!(end < 100_000, "terminal byte flood: {end}");
+        let frame = bytes.lock().unwrap()[consumed..end].to_vec();
+        assert!(!frame.windows(4).any(|part| part == b"\x1b[3J"));
+        parser.process(&frame);
+        consumed = end;
+        for (row, line) in parser.screen().rows(0, 80).enumerate() {
+            if let Some(column) = line.find("Compacting context") {
+                let palette = (column..column + "Compacting context".len())
+                    .map(|column| {
+                        parser
+                            .screen()
+                            .cell(row as u16, column as u16)
+                            .unwrap()
+                            .fgcolor()
+                    })
+                    .collect::<Vec<_>>();
+                if !palettes.contains(&palette) {
+                    palettes.push(palette);
+                }
+            }
+        }
+        if phase >= 24 && palettes.len() >= 20 {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "incomplete sweep: phase {phase}, {samples} frames, {} palettes",
+            palettes.len()
+        );
+        sample = frames.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "waiting for sweep: {error}; phase {phase}, {samples} frames, {} palettes",
+                palettes.len()
+            )
+        });
+        samples += 1;
+    }
+    eprintln!(
+        "status-loop idle compaction: {samples} frames, {} palettes, phase {} in {:?}",
+        palettes.len(),
+        sample.1,
+        sample.0.duration_since(first.0)
+    );
+    shell.set_run_label("idle");
+    shell.render();
+    frames.recv_timeout(Duration::from_secs(2)).unwrap();
+    // Any already-published frame may be in the observation queue at settlement.
+    frames.try_iter().for_each(drop);
+    assert!(matches!(
+        frames.recv_timeout(Duration::from_millis(250)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    shell.stop_renderer();
+}
+
+#[test]
+fn status_render_loop_disabled_motion_stays_static() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    let mut reduced = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+    reduced.animation = false;
+    for capabilities in [
+        reduced,
+        TerminalCapabilities::test(true, true, ColorDepth::None),
+        TerminalCapabilities::test(false, true, ColorDepth::TrueColor),
+    ] {
+        let StatusRenderLoop {
+            mut shell, frames, ..
+        } = status_render_loop_shell(crate::tui::theme::test_theme_with(capabilities));
+        frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            frames.recv_timeout(Duration::from_millis(250)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(shell.state.borrow().status_shimmer_frame, 0);
+        shell.stop_renderer();
+    }
+}
+
+#[test]
+fn status_render_loop_busy_notifications_keep_phase_and_stop_responsive() {
+    let StatusRenderLoop {
+        mut shell,
+        frames,
+        bytes,
+        ..
+    } = status_render_loop_shell(crate::tui::theme::test_theme());
+    frames.recv_timeout(Duration::from_secs(2)).unwrap();
+    let sender = shell.render_tx.lock().unwrap().as_ref().unwrap().clone();
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until {
+                if matches!(
+                    sender.try_send(RenderCommand::Render),
+                    Err(mpsc::TrySendError::Disconnected(_))
+                ) {
+                    break;
+                }
+                thread::yield_now();
+            }
+        });
+        let first = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread::sleep(Duration::from_millis(700));
+        let samples = frames.try_iter().collect::<Vec<_>>();
+        let last = samples
+            .last()
+            .expect("busy queue must not starve animation");
+        assert!(
+            (5..=50).contains(&samples.len()),
+            "frames: {}",
+            samples.len()
+        );
+        let ticks = last.0.duration_since(first.0).as_millis() / 80;
+        assert!(((last.1 - first.1) as u128).abs_diff(ticks) <= 1);
+        assert!(last.1 >= first.1 + 6);
+        // Independent observer: a mutex/channel stall cannot block its timeout.
+        // This is the same Stop-send/join sequence as stop_renderer, without
+        // moving the non-Send inline-test TUI to the observer thread.
+        let stop_tx = shell.render_tx.lock().unwrap().take().unwrap();
+        let render_thread = shell.render_thread.take().unwrap();
+        let (done, stopped) = mpsc::channel();
+        let start = Instant::now();
+        scope.spawn(move || {
+            stop_tx.send(RenderCommand::Stop).unwrap();
+            render_thread.join().unwrap();
+            done.send(()).unwrap();
+        });
+        stopped
+            .recv_timeout(Duration::from_millis(500))
+            .expect("Stop must preempt busy coalescing");
+        eprintln!(
+            "status-loop busy: {} frames in 700ms, Stop joined in {:?}",
+            samples.len(),
+            start.elapsed()
+        );
+    });
+    assert!(bytes.lock().unwrap().len() < 100_000);
+}
+
+#[test]
+fn status_render_loop_retry_compaction_and_cancellation_transitions() {
+    let StatusRenderLoop {
+        mut shell,
+        frames,
+        bytes,
+        ..
+    } = status_render_loop_shell(crate::tui::theme::test_theme());
+    let mut parser = vt100::Parser::new(24, 80, 100);
+    let mut consumed = 0;
+    let mut await_label = |label: &str| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let (at, phase, _) = frames
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "waiting for {label}: {error}; screen: {}",
+                        parser.screen().contents()
+                    )
+                });
+            let output = bytes.lock().unwrap();
+            parser.process(&output[consumed..]);
+            consumed = output.len();
+            if parser.screen().contents().contains(label) {
+                return (at, phase);
+            }
+        }
+    };
+    await_label("Compacting context");
+    shell.set_run_label("idle");
+    let id = shell.begin_run("openai");
+    shell.on_run_event(id, &retry_event(1));
+    shell.render();
+    let first = await_label("Retrying 1/3");
+    let second = await_label("Retrying 1/3");
+    assert!(second.1 > first.1);
+    shell.on_run_event(
+        id,
+        &AgentEvent::CompactionStarted {
+            reason: octet_agent::CompactionReason::Overflow,
+        },
+    );
+    shell.render();
+    let first = await_label("Compacting context");
+    let second = await_label("Compacting context");
+    assert!(second.1 > first.1);
+    shell.on_run_event(
+        id,
+        &AgentEvent::CompactionFinished {
+            reason: octet_agent::CompactionReason::Overflow,
+            result: Ok(octet_agent::CompactionInfo {
+                kind: octet_agent::CompactionKind::Local,
+                summary: "synthetic compaction outcome".into(),
+                first_kept: octet_agent::EntryId("kept".into()),
+                usage: octet_ai::Usage::default(),
+                elapsed: Duration::ZERO,
+                cost_microdollars: None,
+            }),
+        },
+    );
+    shell.render();
+    await_label("Working");
+    shell.set_run_preparing(id, "cancelling");
+    shell.interrupt_run(id);
+    shell.render();
+    await_label("interrupted");
+    assert!(!shell.state.borrow().has_active_status_shimmer());
+    assert!(!parser.screen().contents().contains("Compacting context"));
+    assert!(!parser.screen().contents().contains("Retrying"));
+    shell.stop_renderer();
 }

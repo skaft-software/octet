@@ -437,6 +437,9 @@ pub(super) fn render_block_planned_with_rainbow(
             finish_transcript_block(lines)
         }
         TranscriptBlock::Outcome(outcome) => render_outcome(outcome, theme, width),
+        TranscriptBlock::UpdateAvailable(version) => finish_transcript_block(
+            super::startup_update::render_update_notice(version, rich_renderer, theme, width),
+        ),
         TranscriptBlock::Notice(text) => {
             let text = theme.fg("muted", &sanitize_for_terminal(text));
             finish_transcript_block(wrap_hanging(&text, "", "", width))

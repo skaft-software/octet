@@ -287,9 +287,12 @@ into the composed prompt.
 Commands run immediately when safe or queue to the next idle boundary when they
 need Agent/session ownership.
 
-octet v0.7.0 uses the compiled default theme only. Theme selection and filesystem
-theme discovery are disabled.
+octet uses one compiled default theme with built-in `auto`, `light`, and `dark`
+terminal appearances. Theme-file customization and filesystem theme discovery
+remain disabled; the appearance selector is not a theme loader. See
+[Theme status](../themes.md).
 
+- `/theme [auto|light|dark]` — inspect or select a built-in terminal appearance.
 - `/model [id]` — pick or select a model.
 - `/thinking [level]` — select a capability-gated reasoning level.
 - `/answer [instruction]` — persist an answer-now steering message and switch the

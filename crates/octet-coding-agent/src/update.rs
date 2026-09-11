@@ -1,4 +1,4 @@
-//! Explicit, bounded release update check and self-update.
+//! Bounded startup release notice, explicit update check, and self-update.
 //!
 //! The check fetches the latest GitHub release with a short timeout, a hard
 //! response-size limit, and no redirects. The update delegates to the channel
@@ -17,6 +17,8 @@ use std::time::Duration;
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Context;
+
+mod progress;
 
 const REPOSITORY: &str = "https://github.com/skaft-software/octet";
 const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/skaft-software/octet/releases/download";
@@ -63,6 +65,150 @@ pub(crate) async fn check() -> anyhow::Result<UpdateStatus> {
     check_url(LATEST_RELEASE_URL, env!("CARGO_PKG_VERSION")).await
 }
 
+/// One best-effort, unauthenticated HTTPS check for a newer stable release.
+///
+/// Spawn this future once per interactive startup, never await it before showing
+/// the UI, and skip it entirely when the caller's resolved `offline` setting is
+/// true. The caller owns task cancellation on exit and notice presentation.
+/// This performs no installation, provider access, retries, polling, or writes.
+/// Network/metadata failures quietly return `None`. Only parsed major/minor/patch
+/// numbers cross into the UI; release URLs and other remote text never do.
+/// A single five-second deadline bounds the whole check, with a 64-KiB body
+/// limit and no redirects. Proxy auto-discovery is disabled to avoid acquiring
+/// environment proxy credentials. No persisted cache is created. OS DNS may
+/// outlive cancellation or the deadline, but runs at most one job on a detached
+/// standard thread, never Tokio's shutdown-blocking pool. Its late result cannot
+/// start HTTP after the check is dropped, and process exit does not wait for it.
+pub(crate) async fn startup_available_update() -> Option<semver::Version> {
+    startup_available_update_url(LATEST_RELEASE_URL, env!("CARGO_PKG_VERSION"), CHECK_TIMEOUT).await
+}
+
+// Production always uses the fixed HTTPS endpoint above. Injection here allows
+// synthetic loopback tests without contacting GitHub or using credentials.
+async fn startup_available_update_url(
+    url: &str,
+    current: &str,
+    timeout: Duration,
+) -> Option<semver::Version> {
+    use std::net::ToSocketAddrs;
+
+    let resolver = StartupResolver::new("api.github.com", || {
+        ("api.github.com", 0)
+            .to_socket_addrs()
+            .map(|addrs| Box::new(addrs) as reqwest::dns::Addrs)
+    });
+    startup_available_update_with_resolver(url, current, timeout, resolver).await
+}
+
+// Only the optional startup client uses this resolver; explicit update and
+// provider clients retain their existing DNS behavior. FnOnce enforces a single
+// lookup per startup check, including any unexpected repeated resolver calls.
+struct StartupResolver<F> {
+    hostname: &'static str,
+    lookup: std::sync::Mutex<Option<F>>,
+}
+
+impl<F> StartupResolver<F> {
+    fn new(hostname: &'static str, lookup: F) -> Self {
+        Self {
+            hostname,
+            lookup: std::sync::Mutex::new(Some(lookup)),
+        }
+    }
+}
+
+impl<F> reqwest::dns::Resolve for StartupResolver<F>
+where
+    F: FnOnce() -> std::io::Result<reqwest::dns::Addrs> + Send + 'static,
+{
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let lookup = if name.as_str() == self.hostname {
+            self.lookup.lock().unwrap().take()
+        } else {
+            None
+        };
+        Box::pin(async move {
+            let lookup = lookup.ok_or_else(|| {
+                std::io::Error::other("startup DNS permits only one lookup of the release host")
+            })?;
+            let (send, receive) = tokio::sync::oneshot::channel();
+            // getaddrinfo cannot be cancelled. Unlike spawn_blocking, a detached
+            // std thread does not hold runtime/process shutdown open. It owns
+            // only DNS work and the sender, never the HTTP client or a runtime.
+            let worker = std::thread::Builder::new()
+                .name("octet-startup-dns".into())
+                .spawn(move || {
+                    let _ = send.send(lookup());
+                })?;
+            drop(worker);
+            // Dropping the request drops this receiver. Late DNS completion
+            // then discards its addresses instead of continuing to connect.
+            Ok(receive.await??)
+        })
+    }
+}
+
+async fn startup_available_update_with_resolver(
+    url: &str,
+    current: &str,
+    timeout: Duration,
+    resolver: impl reqwest::dns::Resolve + 'static,
+) -> Option<semver::Version> {
+    tokio::time::timeout(timeout, async {
+        let current = semver::Version::parse(current).ok()?;
+        let client = reqwest::Client::builder()
+            // Optional startup traffic must not acquire environment proxy credentials.
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(resolver))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()
+            .ok()?;
+        let response = client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, format!("octet/{current}"))
+            .send()
+            .await
+            .ok()?;
+        // error_for_status alone accepts redirects with a plausible JSON body.
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = read_release_body(response).await.ok()?;
+        newer_stable_release(&body, &current)
+    })
+    .await
+    .ok()?
+}
+
+fn newer_stable_release(body: &[u8], current: &semver::Version) -> Option<semver::Version> {
+    #[derive(serde::Deserialize)]
+    struct StableRelease {
+        tag_name: String,
+        draft: bool,
+        prerelease: bool,
+    }
+
+    let release: StableRelease = serde_json::from_slice(body).ok()?;
+    if release.draft || release.prerelease {
+        return None;
+    }
+    let tag = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name);
+    let latest = semver::Version::parse(tag).ok()?;
+    if !latest.pre.is_empty() || !latest.cmp_precedence(current).is_gt() {
+        return None;
+    }
+    // Build metadata is neither release precedence nor trusted display text.
+    Some(semver::Version::new(
+        latest.major,
+        latest.minor,
+        latest.patch,
+    ))
+}
+
 async fn check_url(url: &str, current: &str) -> anyhow::Result<UpdateStatus> {
     let current = semver::Version::parse(current)?;
     let client = reqwest::Client::builder()
@@ -70,12 +216,32 @@ async fn check_url(url: &str, current: &str) -> anyhow::Result<UpdateStatus> {
         .timeout(CHECK_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let mut response = client
+    let response = client
         .get(url)
         .header(reqwest::header::USER_AGENT, format!("octet/{current}"))
         .send()
         .await?
         .error_for_status()?;
+    let body = read_release_body(response).await?;
+    let release: LatestRelease = serde_json::from_slice(&body)?;
+    let latest = semver::Version::parse(release.tag_name.trim().trim_start_matches('v'))?;
+    if latest > current {
+        Ok(UpdateStatus::Available {
+            current,
+            latest,
+            url: release.html_url.unwrap_or_else(|| {
+                format!(
+                    "https://github.com/skaft-software/octet/releases/tag/{}",
+                    release.tag_name
+                )
+            }),
+        })
+    } else {
+        Ok(UpdateStatus::Current { version: current })
+    }
+}
+
+async fn read_release_body(mut response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RELEASE_RESPONSE_BYTES as u64)
@@ -98,22 +264,7 @@ async fn check_url(url: &str, current: &str) -> anyhow::Result<UpdateStatus> {
         }
         body.extend_from_slice(&chunk);
     }
-    let release: LatestRelease = serde_json::from_slice(&body)?;
-    let latest = semver::Version::parse(release.tag_name.trim().trim_start_matches('v'))?;
-    if latest > current {
-        Ok(UpdateStatus::Available {
-            current,
-            latest,
-            url: release.html_url.unwrap_or_else(|| {
-                format!(
-                    "https://github.com/skaft-software/octet/releases/tag/{}",
-                    release.tag_name
-                )
-            }),
-        })
-    } else {
-        Ok(UpdateStatus::Current { version: current })
-    }
+    Ok(body)
 }
 
 /// How the running octet binary was installed.
@@ -768,9 +919,12 @@ pub(crate) async fn run(check_only: bool) -> anyhow::Result<()> {
             "octet update cannot update a debug build; install a release build of octet first"
         );
     }
-    let status = check().await?;
+    let status = progress::Activity::new("Checking for updates")
+        .wait(check())
+        .await?;
     match &status {
-        UpdateStatus::Current { .. } => {
+        UpdateStatus::Current { version } => {
+            progress::banner(version, "Already up to date");
             crate::output::stdout_line(status.to_string());
             Ok(())
         }
@@ -780,6 +934,7 @@ pub(crate) async fn run(check_only: bool) -> anyhow::Result<()> {
             let method = current_install_method();
             let action = UpdateAction::for_method(&method, latest);
             if check_only {
+                progress::banner(latest, "Update available");
                 crate::output::stdout_multiline(status.to_string());
                 match action {
                     Some(action) => {
@@ -815,19 +970,32 @@ fn manual_update_hint(method: &InstallMethod, latest: &semver::Version) -> Strin
     }
 }
 
-/// Executes `action` with inherited stdio, then reports the result.
+/// Executes the selected channel, streams its output, and verifies the result.
 async fn run_update(
     current: &semver::Version,
     latest: &semver::Version,
     action: &UpdateAction,
 ) -> anyhow::Result<()> {
-    crate::output::stdout_line(format!("Updating octet {current} to {latest}."));
-    crate::output::stdout_line(action.command_str());
-    let (program, args) = action.command_args();
-    let status = Command::new(&program)
-        .args(&args)
-        .status()
-        .with_context(|| format!("failed to run {}", program.to_string_lossy()))?;
+    // Capture the installed path before the channel replaces it. A successful
+    // child exit alone does not prove that the requested version was installed.
+    let executable = std::env::current_exe().context("could not locate the installed octet")?;
+    progress::banner(latest, &format!("Updating from v{current}"));
+    let status = match action {
+        UpdateAction::Installer { version } => run_installer(version).await?,
+        UpdateAction::Cargo { .. } | UpdateAction::Npm { .. } => {
+            let (program, args) = action.command_args();
+            let mut command = tokio::process::Command::new(&program);
+            command.args(args);
+            let label = if matches!(action, UpdateAction::Cargo { .. }) {
+                "Building and installing with Cargo"
+            } else {
+                "Installing with npm"
+            };
+            progress::command(&mut command, label)
+                .await
+                .with_context(|| format!("failed to run {}", program.to_string_lossy()))?
+        }
+    };
     if !status.success() {
         let detail = status
             .code()
@@ -838,6 +1006,9 @@ async fn run_update(
             action.command_str()
         );
     }
+    progress::Activity::new("Verifying installed version")
+        .wait(verify_installed_version(&executable, latest))
+        .await?;
     crate::output::stdout_line(format!(
         "octet updated to {latest}. Restart octet to use it."
     ));
@@ -856,11 +1027,825 @@ async fn run_update(
     Ok(())
 }
 
+// Fetch completely before executing: `curl | sh` can otherwise report success
+// after a failed/partial transfer. Only a successful installed-version probe may
+// produce the updater's final success message.
+async fn run_installer(version: &semver::Version) -> anyhow::Result<std::process::ExitStatus> {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::process::Stdio;
+    let url = format!("{RELEASE_DOWNLOAD_BASE}/v{version}/install-octet.sh");
+    let mut download = tokio::process::Command::new("curl");
+    download
+        .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
+            "--location",
+            "--max-redirs",
+            "5",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "300",
+            "--max-filesize",
+            "262144",
+            "--output",
+            "-",
+        ])
+        .arg(&url);
+    let script = progress::Activity::new("Downloading installer")
+        .wait(download_installer_script(
+            &mut download,
+            &url,
+            Duration::from_secs(300),
+        ))
+        .await?;
+    // Only a complete, successful, size-bounded download reaches this private
+    // unnamed file. The OS removes it even on terminating signals.
+    let mut installer = tempfile::tempfile()?;
+    installer.write_all(&script)?;
+    installer.seek(SeekFrom::Start(0))?;
+    tokio::process::Command::new("sh")
+        .stdin(Stdio::from(installer))
+        .env("OCTET_UPDATE_PARENT_UI", "1")
+        .kill_on_drop(true)
+        .status()
+        .await
+        .context("failed to run the version-pinned installer")
+}
+
+async fn download_installer_script(
+    command: &mut tokio::process::Command,
+    url: &str,
+    timeout: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    const MAX_BYTES: u64 = 262_144;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to download the version-pinned installer from {url}"))?;
+    // Older curl versions cannot enforce --max-filesize on unknown-length
+    // responses. Bound the consumed bytes and elapsed time ourselves; never
+    // expose the script or retain an arbitrarily large temporary download.
+    let result = tokio::time::timeout(timeout, async {
+        let mut script = Vec::new();
+        child
+            .stdout
+            .take()
+            .expect("piped installer download")
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut script)
+            .await
+            .context("failed to read the installer download")?;
+        anyhow::ensure!(
+            script.len() <= MAX_BYTES as usize,
+            "installer download exceeds its size limit for {url}; no installer was executed"
+        );
+        let status = child.wait().await?;
+        anyhow::ensure!(
+            status.success(),
+            "installer download failed ({status}) for {url}; no installer was executed"
+        );
+        anyhow::ensure!(!script.is_empty(), "downloaded installer is empty");
+        Ok(script)
+    })
+    .await
+    .with_context(|| format!("installer download timed out for {url}; no installer was executed"))
+    .and_then(|result| result);
+    if result.is_err() {
+        // Reap the direct downloader on failed validation or a deadline, rather
+        // than allowing a still-writing curl to outlive the rejected update.
+        let _ = child.kill().await;
+    }
+    result
+}
+
+async fn verify_installed_version(
+    executable: &Path,
+    latest: &semver::Version,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut child = tokio::process::Command::new(executable)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("could not verify the installed octet version")?;
+    tokio::time::timeout(CHECK_TIMEOUT, async {
+        let mut output = Vec::new();
+        child
+            .stdout
+            .take()
+            .expect("piped version output")
+            .take(1025)
+            .read_to_end(&mut output)
+            .await?;
+        anyhow::ensure!(
+            output.len() <= 1024,
+            "installed octet version output exceeded its limit"
+        );
+        let status = child.wait().await?;
+        anyhow::ensure!(
+            status.success() && output == format!("octet {latest}\n").as_bytes(),
+            "update command finished, but the installed octet does not report version {latest}"
+        );
+        Ok(())
+    })
+    .await
+    .context("installed octet version check timed out")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installer_download_enforces_its_own_byte_limit() {
+        for (size, succeeds) in [(262_144, true), (262_145, false)] {
+            let mut command = tokio::process::Command::new("python3");
+            command.args([
+                "-c",
+                &format!("import sys; sys.stdout.buffer.write(b'x' * {size})"),
+            ]);
+            let result = download_installer_script(
+                &mut command,
+                "https://example.invalid/installer",
+                Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(bytes) = result {
+                assert_eq!(bytes.len(), size);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installer_download_deadline_covers_body_and_exit_and_reaps_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        for script in [
+            "printf untrusted_installer_bytes; exec sleep 30",
+            "exec 1>&-; exec sleep 30",
+        ] {
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .arg("-c")
+                .arg(format!("printf '%s\\n' $$ > \"$1\"; {script}"))
+                .arg("installer-probe")
+                .arg(&pid_file);
+            let started = std::time::Instant::now();
+            let error = download_installer_script(
+                &mut command,
+                "https://example.invalid/installer",
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("timed out"));
+            assert!(!error.to_string().contains("untrusted_installer_bytes"));
+            assert!(started.elapsed() < Duration::from_secs(5));
+            let pid = std::fs::read_to_string(&pid_file).unwrap();
+            assert!(!Command::new("kill")
+                .arg("-0")
+                .arg(pid.trim())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installed_version_probe_requires_success_and_exact_target_without_exposing_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("octet");
+        let version = semver::Version::new(0, 7, 5);
+        for (script, succeeds) in [
+            ("printf 'octet 0.7.5\\n'", true),
+            ("printf 'octet 0.7.4\\n'", false),
+            ("printf 'octet 0.7.5\\n'; exit 1", false),
+            ("printf 'private diagnostic\\n'", false),
+            ("dd if=/dev/zero bs=1025 count=1 2>/dev/null", false),
+        ] {
+            std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = verify_installed_version(&executable, &version).await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Err(error) = result {
+                assert!(!error.to_string().contains("private diagnostic"));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installed_version_probe_has_a_bounded_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("octet");
+        std::fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(7),
+            verify_installed_version(&executable, &semver::Version::new(0, 7, 5)),
+        )
+        .await
+        .expect("version probe deadline")
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    fn stable_release(tag: &str) -> serde_json::Value {
+        serde_json::json!({ "tag_name": tag, "draft": false, "prerelease": false })
+    }
+
+    #[test]
+    fn startup_only_reports_newer_stable_semver_precedence() {
+        for (current, tag, expected) in [
+            ("0.7.4", "v0.7.5", Some((0, 7, 5))),
+            ("0.7.4", "0.8.0", Some((0, 8, 0))),
+            ("0.9.0", "v0.10.0", Some((0, 10, 0))),
+            ("0.7.5-rc.1", "v0.7.5", Some((0, 7, 5))),
+            ("0.7.4", "v0.7.5+remote.text", Some((0, 7, 5))),
+            ("0.7.4", "v0.7.4", None),
+            ("0.7.4", "v0.7.3", None),
+            ("0.10.0", "v0.9.0", None),
+            ("0.7.4", "v0.7.4+remote.text", None),
+            ("0.7.4+aaa", "v0.7.4+zzz", None),
+            ("0.7.4", "v0.7.5-rc.1", None),
+            ("0.7.4", "v1.0.0-alpha", None),
+            ("0.7.4", "vv0.7.5", None),
+            ("0.7.4", " v0.7.5 ", None),
+            ("0.7.4", "v0.07.5", None),
+            ("0.7.4", "v0.7", None),
+            ("0.7.4", "v0.7.5\ninstall something", None),
+            ("0.7.4", "v0.7.5+\u{1b}[31m", None),
+            ("0.7.4", "v18446744073709551616.0.0", None),
+        ] {
+            let body = serde_json::to_vec(&stable_release(tag)).unwrap();
+            assert_eq!(
+                newer_stable_release(&body, &current.parse().unwrap()),
+                expected.map(|(major, minor, patch)| semver::Version::new(major, minor, patch)),
+                "current={current}, tag={tag:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn startup_rejects_draft_prerelease_and_malformed_metadata() {
+        let current = semver::Version::new(0, 7, 4);
+        for (field, value) in [
+            ("draft", serde_json::json!(true)),
+            ("prerelease", serde_json::json!(true)),
+            ("draft", serde_json::json!("false")),
+            ("prerelease", serde_json::Value::Null),
+            ("tag_name", serde_json::json!(75)),
+        ] {
+            let mut release = stable_release("v0.7.5");
+            release[field] = value;
+            assert_eq!(
+                newer_stable_release(&serde_json::to_vec(&release).unwrap(), &current),
+                None,
+                "{release}",
+            );
+        }
+        for field in ["draft", "prerelease", "tag_name"] {
+            let mut release = stable_release("v0.7.5");
+            release.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                newer_stable_release(&serde_json::to_vec(&release).unwrap(), &current),
+                None,
+            );
+        }
+        for body in [b"not json".as_slice(), b"[]", b"null", b"\xff"] {
+            assert_eq!(newer_stable_release(body, &current), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_requests_once_without_credentials_and_returns_only_version_numbers() {
+        assert_eq!(
+            LATEST_RELEASE_URL,
+            "https://api.github.com/repos/skaft-software/octet/releases/latest"
+        );
+        let server = MockServer::start().await;
+        let mut release = stable_release("v0.7.5+remote.build.metadata");
+        release["html_url"] = serde_json::json!("\u{1b}]8;;https://evil.test\u{7}click");
+        release["name"] = serde_json::json!("run a remote installer");
+        release["body"] = serde_json::json!("\u{1b}[31mremote instructions");
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .and(header("user-agent", "octet/0.7.4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(release))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = startup_available_update_url(
+            &format!("{}/latest", server.uri()),
+            "0.7.4",
+            CHECK_TIMEOUT,
+        )
+        .await;
+        assert_eq!(result, Some(semver::Version::new(0, 7, 5)));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(request.body.is_empty());
+        assert!(request.url.query().is_none());
+        for header in [
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "x-api-key",
+        ] {
+            assert!(!request.headers.contains_key(header), "{header}");
+        }
+    }
+
+    #[test]
+    fn startup_ignores_environment_proxy_credentials() {
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://test-only:synthetic@{}", proxy.local_addr().unwrap());
+        // Isolate proxy variables from concurrently running tests. Reuse the
+        // request test in a child process, with every proxy setting aimed at a
+        // synthetic sink that must receive no connection.
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.args([
+            "--exact",
+            "update::tests::startup_requests_once_without_credentials_and_returns_only_version_numbers",
+        ]);
+        for variable in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            child.env(variable, &proxy_url);
+        }
+        child.env("NO_PROXY", "").env("no_proxy", "");
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        proxy.set_nonblocking(true).unwrap();
+        assert_eq!(
+            proxy.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_is_quiet_for_http_errors_and_redirects_even_with_valid_metadata() {
+        let server = MockServer::start().await;
+        let destination = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(stable_release("v9.0.0")))
+            .expect(0)
+            .mount(&destination)
+            .await;
+        for status in [301, 302, 303, 307, 308, 403, 404, 429, 500, 503] {
+            let route = format!("/status/{status}");
+            Mock::given(method("GET"))
+                .and(path(&route))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("location", destination.uri())
+                        .set_body_json(stable_release("v9.0.0")),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert_eq!(
+                startup_available_update_url(
+                    &format!("{}{route}", server.uri()),
+                    "0.7.4",
+                    CHECK_TIMEOUT,
+                )
+                .await,
+                None,
+                "status={status}",
+            );
+        }
+        assert!(destination.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_is_quiet_for_bad_json_and_unavailable_network() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            startup_available_update_url(&server.uri(), "0.7.4", CHECK_TIMEOUT).await,
+            None,
+        );
+        // A bound, non-listening socket keeps the failed connection local without
+        // a port-reuse race. Some platforms time out rather than refusing it.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        assert_eq!(
+            startup_available_update_url(
+                &format!("http://{}", socket.local_addr().unwrap()),
+                "0.7.4",
+                Duration::from_millis(250),
+            )
+            .await,
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_enforces_declared_response_size_limit() {
+        let server = MockServer::start().await;
+        for (size, expected) in [
+            (
+                MAX_RELEASE_RESPONSE_BYTES,
+                Some(semver::Version::new(0, 7, 5)),
+            ),
+            (MAX_RELEASE_RESPONSE_BYTES + 1, None),
+        ] {
+            let mut body = serde_json::to_vec(&stable_release("v0.7.5")).unwrap();
+            body.resize(size, b' ');
+            let route = format!("/size/{size}");
+            Mock::given(method("GET"))
+                .and(path(&route))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert_eq!(
+                startup_available_update_url(
+                    &format!("{}{route}", server.uri()),
+                    "0.7.4",
+                    CHECK_TIMEOUT,
+                )
+                .await,
+                expected,
+                "size={size}",
+            );
+        }
+    }
+
+    async fn chunked_release_server(
+        size: usize,
+        delay: Duration,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let received = stream.read(&mut request).await.unwrap();
+            assert!(received > 0, "client must start the release request");
+            if stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = started.send(());
+            let mut body = serde_json::to_vec(&stable_release("v0.7.5")).unwrap();
+            body.resize(size, b' ');
+            for chunk in body.chunks(1024) {
+                let mut frame = format!("{:x}\r\n", chunk.len()).into_bytes();
+                frame.extend_from_slice(chunk);
+                frame.extend_from_slice(b"\r\n");
+                if stream.write_all(&frame).await.is_err() {
+                    return;
+                }
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+        });
+        (url, task, ready)
+    }
+
+    #[tokio::test]
+    async fn startup_enforces_chunked_response_size_limit() {
+        for (size, expected) in [
+            (
+                MAX_RELEASE_RESPONSE_BYTES,
+                Some(semver::Version::new(0, 7, 5)),
+            ),
+            (MAX_RELEASE_RESPONSE_BYTES + 1, None),
+        ] {
+            let (url, task, _) = chunked_release_server(size, Duration::ZERO).await;
+            assert_eq!(
+                startup_available_update_url(&url, "0.7.4", CHECK_TIMEOUT).await,
+                expected,
+                "size={size}",
+            );
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_deadline_bounds_slow_headers_without_retrying() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(stable_release("v0.7.5"))
+                    .set_delay(Duration::from_secs(10)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let started = std::time::Instant::now();
+        assert_eq!(
+            startup_available_update_url(&server.uri(), "0.7.4", Duration::from_millis(250)).await,
+            None,
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn startup_deadline_bounds_slow_streaming_body() {
+        let (url, task, ready) =
+            chunked_release_server(16 * 1024, Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let result = startup_available_update_url(&url, "0.7.4", Duration::from_millis(250)).await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(result, None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        ready.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_check_can_be_cancelled_on_exit() {
+        let (url, server, ready) = chunked_release_server(16 * 1024, Duration::from_secs(1)).await;
+        let check = tokio::spawn(async move {
+            startup_available_update_url(&url, "0.7.4", CHECK_TIMEOUT).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        check.abort();
+        assert!(check.await.unwrap_err().is_cancelled());
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn startup_dns_allows_only_one_lookup_of_its_expected_host() {
+        use reqwest::dns::Resolve;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let address = "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap();
+        let resolver = StartupResolver::new("startup-update.invalid", move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs)
+        });
+        assert!(resolver
+            .resolve("other.invalid".parse().unwrap())
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let addresses = resolver
+            .resolve("startup-update.invalid".parse().unwrap())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(addresses, vec![address]);
+        assert!(resolver
+            .resolve("startup-update.invalid".parse().unwrap())
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_dns_failure_is_quiet() {
+        let resolver = StartupResolver::new("startup-update.invalid", || {
+            Err(std::io::Error::other("injected DNS failure"))
+        });
+        assert_eq!(
+            startup_available_update_with_resolver(
+                "http://startup-update.invalid/latest",
+                "0.7.4",
+                CHECK_TIMEOUT,
+                resolver,
+            )
+            .await,
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_dns_cancellation_discards_late_result_without_connecting() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Observe disposal of the actual DNS result, not merely that the request
+        // future returned. Iterating a late answer would permit a TCP connect.
+        struct DnsAnswer {
+            address: Option<std::net::SocketAddr>,
+            used: Arc<AtomicBool>,
+            dropped: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Iterator for DnsAnswer {
+            type Item = std::net::SocketAddr;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.used.store(true, Ordering::SeqCst);
+                self.address.take()
+            }
+        }
+        impl Drop for DnsAnswer {
+            fn drop(&mut self) {
+                let _ = self.dropped.take().unwrap().send(());
+            }
+        }
+
+        for abort in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let url = format!("http://startup-update.invalid:{}/latest", address.port());
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, hold) = std::sync::mpsc::channel();
+            let (dropped, disposed) = tokio::sync::oneshot::channel();
+            let used = Arc::new(AtomicBool::new(false));
+            let answer = DnsAnswer {
+                address: Some(address),
+                used: used.clone(),
+                dropped: Some(dropped),
+            };
+            let resolver = StartupResolver::new("startup-update.invalid", move || {
+                started.send(()).unwrap();
+                hold.recv().unwrap();
+                Ok(Box::new(answer) as reqwest::dns::Addrs)
+            });
+            let deadline = if abort {
+                CHECK_TIMEOUT
+            } else {
+                Duration::from_millis(250)
+            };
+            let check = tokio::spawn(async move {
+                startup_available_update_with_resolver(&url, "0.7.4", deadline, resolver).await
+            });
+            tokio::time::timeout(Duration::from_secs(2), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            if abort {
+                check.abort();
+                assert!(check.await.unwrap_err().is_cancelled());
+            } else {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(2), check)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    None,
+                );
+            }
+            // DNS stays blocked until after the check has completed/been aborted.
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), disposed)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!used.load(Ordering::SeqCst), "late addresses were consumed");
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
+    #[test]
+    fn startup_pending_dns_does_not_delay_runtime_or_process_exit() {
+        const CHILD_MODE: &str = "OCTET_TEST_STARTUP_DNS_EXIT";
+        const TEST: &str =
+            "update::tests::startup_pending_dns_does_not_delay_runtime_or_process_exit";
+        const DROPPED: &str = "runtime dropped while DNS remains held";
+
+        if let Ok(mode) = std::env::var(CHILD_MODE) {
+            let mut builder = if mode.starts_with("multi-") {
+                let mut builder = tokio::runtime::Builder::new_multi_thread();
+                builder.worker_threads(1);
+                builder
+            } else {
+                tokio::runtime::Builder::new_current_thread()
+            };
+            let runtime = builder.enable_all().build().unwrap();
+            runtime.block_on(async {
+                let (started, ready) = tokio::sync::oneshot::channel();
+                let resolver = StartupResolver::new("startup-update.invalid", move || {
+                    started.send(()).unwrap();
+                    // Deliberately never release this DNS job, even after the
+                    // runtime drops. Only child process exit terminates it.
+                    loop {
+                        std::thread::park();
+                    }
+                });
+                let abort = mode.ends_with("abort");
+                let deadline = if abort {
+                    CHECK_TIMEOUT
+                } else {
+                    Duration::from_millis(250)
+                };
+                let check = tokio::spawn(startup_available_update_with_resolver(
+                    "http://startup-update.invalid/latest",
+                    "0.7.4",
+                    deadline,
+                    resolver,
+                ));
+                tokio::time::timeout(Duration::from_secs(2), ready)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if abort {
+                    check.abort();
+                    assert!(check.await.unwrap_err().is_cancelled());
+                } else {
+                    assert_eq!(check.await.unwrap(), None);
+                }
+            });
+            let start = std::time::Instant::now();
+            drop(runtime); // Normal shutdown, NOT shutdown_timeout/background.
+            println!("{DROPPED}: {mode}, {:?}", start.elapsed());
+            return;
+        }
+
+        // A subprocess makes shutdown regressions bounded failures instead of
+        // hanging the suite. Both Tokio runtime flavors must exit normally with
+        // resolution still held, after either the outer deadline or task abort.
+        for mode in [
+            "current-deadline",
+            "current-abort",
+            "multi-deadline",
+            "multi-abort",
+        ] {
+            let start = std::time::Instant::now();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD_MODE, mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut timed_out = false;
+            while child.try_wait().unwrap().is_none() {
+                if start.elapsed() >= Duration::from_secs(3) {
+                    timed_out = true;
+                    child.kill().unwrap();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !timed_out && output.status.success() && stdout.contains(DROPPED),
+                "{mode}: held DNS blocked runtime/process exit or child failed\n{stdout}\n{stderr}",
+            );
+            println!("{mode}: process exited in {:?}\n{stdout}", start.elapsed());
+        }
+    }
 
     #[tokio::test]
     async fn reports_newer_release_without_treating_older_tags_as_updates() {

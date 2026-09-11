@@ -38,6 +38,10 @@ fn terminal_safe_output(text: &str, terminal: bool) -> std::borrow::Cow<'_, str>
 /// Stream a persistent Agent session to standard output without constructing a
 /// terminal UI.
 pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
+    // Explicit template arguments are data, not local commands.
+    if boot.config.prompt_template.is_none() {
+        crate::commands::reject_tui_changelog(&prompt)?;
+    }
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;
     let mut app = build_app(boot, launch, system)?;

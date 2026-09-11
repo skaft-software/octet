@@ -86,6 +86,21 @@ fn report_body_lines(report: &ReportOverlay, state: &ShellState, width: u16) -> 
         ReportBody::Text { text, styled } => {
             super::panel_render::document_visual_lines_styled(text, &state.theme, width, *styled)
         }
+        ReportBody::Markdown(document) => {
+            let inset = " ".repeat(usize::from(plan.inset));
+            let mut renderer = state.rich_renderer.borrow_mut();
+            let renderer = renderer.get_or_insert_with(|| state.theme.rich_renderer());
+            let plain = state.theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
+            renderer
+                .render(document, plan.content_width.max(1))
+                .lines
+                .into_iter()
+                .map(|line| {
+                    let line = if plain { line.plain } else { line.styled };
+                    fit_line(&format!("{inset}{line}"), width)
+                })
+                .collect()
+        }
         ReportBody::Context(context) => {
             let inset = " ".repeat(usize::from(plan.inset));
             context

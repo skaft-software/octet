@@ -1,12 +1,12 @@
 # octet-web-search reference
 
-**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
-to published octet 0.7.3 and its matching bundle; local candidate sources or
-archives require a locally built octet 0.7.4. See
-[the open release gates](../../docs/releases/v0.7.4.md).
+**Distribution version: 0.7.5.** Catalog commands below require version-matched
+published assets. Source checkouts and local archives require exactly octet 0.7.5.
+See the [release record](../../docs/releases/v0.7.5.md) for publication and
+installation evidence.
 
 [Usage guide](README.md). This describes the bundled API `0.2` implementation,
-not current extension authoring. Bundle `0.7.4` requires exactly octet `0.7.4`.
+not current extension authoring. Bundle `0.7.5` requires exactly octet `0.7.5`.
 
 The opt-in executable supports [Brave Search API](https://brave.com/search/api/)
 (recommended) and an explicitly configured [SearXNG](https://docs.searxng.org/)
@@ -24,8 +24,8 @@ visible consent metadata, not a sandbox.
 
 ## Install and opt in
 
-With [octet 0.7.3 installed](../../docs/installation.md), once the matching signed
-public bundle is published, install it:
+With [octet 0.7.5 installed](../../docs/installation.md), install the matching
+signed public bundle:
 
 ```console
 octet extension install octet-web-search
@@ -59,8 +59,8 @@ safe and inert; load it explicitly with `/skills load octet-web-search` when web
 research is wanted. The runtime contains its dependency-free Python SDK, so
 installation performs no `pip install`, model call, service setup, or other
 arbitrary code. Python 3.9 or newer must be available as `python3`.
-Release compatibility is recorded in `extension.toml`: bundle `0.7.4`, extension
-API `0.2`, exact octet `0.7.4`.
+Release compatibility is recorded in `extension.toml`: bundle `0.7.5`, extension
+API `0.2`, exact octet `0.7.5`.
 
 ## Choose a provider
 

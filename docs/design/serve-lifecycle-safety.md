@@ -4,8 +4,10 @@ Maintainer reference for safety contracts described by the experimental
 `octet serve` source snapshot. For local use, see the
 [Serve guide](../experimental/octet-serve/README.md). The contracts protect
 octet's trust, persistence, and protocol boundaries; they do **not** turn octet
-into an operating-system sandbox. Current-version recovery qualification is
-deferred; the verification references below are not a new octet 0.7.0 pass.
+into an operating-system sandbox. This document describes octet 0.7.5 source
+contracts, not a new qualification pass. The [0.7.4 recovery record](../qualification/v0.7.4-recovery.md)
+retains its historical scope; current release results belong to the
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
 
 ## Security model
 
@@ -17,6 +19,13 @@ user, container, VM, or platform sandbox.
 Within that model, Serve fails closed at externally controlled boundaries:
 project IDs and relative paths, uploaded bytes, durable store files, process
 lifetime, protocol payloads, and client generations.
+
+Production sessions expose only the immutable host-derived authority profile.
+Creating a session or changing its authority to another profile is rejected;
+resume, fork and worker rebuild do not turn a label into new permissions. Change
+host restrictions before launch, not through the composer. This is not a
+per-session sandbox; terminal and extension admission remain governed by host
+policy.
 
 ## Owned subprocesses
 

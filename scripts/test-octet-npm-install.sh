@@ -81,6 +81,8 @@ run_isolated() (
 )
 printf '%s\n' 'must survive npm uninstall' > "$sentinel"
 
+run_isolated python3 "$repository_directory/scripts/verify-octet-npm.py" "$version" "$package_directory"
+
 # Populate npm's local cache from the four produced files. The actual install
 # remains offline, so optional dependency resolution cannot silently reach a
 # registry and no lifecycle hook can become a network-running installer.
@@ -167,6 +169,26 @@ if [[ -d "$nested_root" && ! -L "$nested_root" && ! -e "$hoisted_root" ]]; then
     mv "$nested_root" "$hoisted_root"
 fi
 [[ -d "$hoisted_root" && ! -L "$hoisted_root" && ! -e "$nested_root" ]]
+# Compare ALL text/binary/empty assets with the verified tarball, including
+# files npm pack normally filters. npm/pacote installs .gitignore metadata as
+# .npmignore; verify its original bytes at that documented name, without mutating
+# the installed tree. Every other inventoried path remains exact.
+run_isolated python3 - "$repository_directory/scripts/verify-octet-npm.py" \
+    "$version" "$platform" "$hoisted_root/share/octet" <<'PYDOCS'
+import pathlib
+import runpy
+import sys
+verifier, version, artifact, installed = sys.argv[1:]
+verification = runpy.run_path(verifier)
+path = pathlib.Path(artifact)
+expected = next(item for item in verification["expected_packages"](version) if item.artifact == path.name)
+inspection = verification["inspect_tarball"](path, expected)
+verification["validate"](inspection, version)
+verification["check_documentation_bytes"](inspection, pathlib.Path(installed), npm_install=True)
+print(f"installed documentation: {len(verification['DOCUMENTATION_FILES'])} inventoried files match tarball bytes (npm ignore-metadata naming)")
+PYDOCS
+[[ ! -e "$hoisted_root/share/octet/extensions/octet-browse/extension.py" ]]
+
 [[ "$(run_isolated octet --version)" == "octet $version" ]]
 mkdir -p "$(dirname "$nested_root")"
 mv "$hoisted_root" "$nested_root"

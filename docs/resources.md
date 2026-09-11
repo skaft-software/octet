@@ -2,8 +2,10 @@
 
 Prompts, skills, and executable extensions share one filesystem
 resolver. Resource-specific parsers own their schemas; the resolver owns the
-cross-cutting local safety and precedence contract. Theme customization is
-disabled in v0.7.0; the terminal uses its compiled default.
+cross-cutting local safety and precedence contract. Theme-file customization
+and filesystem theme discovery remain disabled. The compiled default theme
+offers built-in `auto`, `light`, and `dark` terminal appearances through `/theme`;
+these choices do not load theme files. See [Theme status](themes.md).
 
 ## Locations and precedence
 
@@ -57,6 +59,13 @@ Skill discovery uses this **low-to-high precedence** order:
    invocation directory, then the invocation directory's `.pi/skills`, then the
    workspace's `.octet/skills`. These project roots require `--workspace-trusted`.
 3. **Explicit:** `--skill-dir` sources in command-line option order.
+
+A project root that is also a user skill root is scanned only in the user tier.
+For example, starting in your home directory keeps `~/.agents/skills` and
+`~/.octet/skills` user-installed, without an untrusted-project warning for those
+same roots. This does not trust the workspace: distinct project roots, including
+nested `.agents/skills` and the invocation's `.pi/skills`, remain gated. Root
+symlinks are still rejected.
 
 Later definitions replace earlier definitions of the same skill name; collisions
 are recorded in discovery diagnostics. Discovery does not activate a skill.

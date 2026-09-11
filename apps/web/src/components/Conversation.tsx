@@ -4386,7 +4386,7 @@ function Composer({
               label="Authority"
               className="authority-menu"
               value={session.authority}
-              disabled={isWorking}
+              disabled={isWorking || bootstrap.authorityProfiles.length === 1}
               icon={<ShieldCheck />}
               options={bootstrap.authorityProfiles.map((authority) => ({
                 value: authority,

@@ -1,6 +1,6 @@
 ---
 name: octet-browse
-version: 0.7.4
+version: 0.7.5
 description: Inspect and operate bounded semantic web pages in octet Browse's visible isolated Chromium while keeping authentication manual.
 required-tools:
   - browser_status
