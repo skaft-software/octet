@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-09
+
+See the [release notes](docs/releases/v0.7.3.md) for scope and remaining terminal
+qualification limits.
+
+### Fixed
+
+- Apply contrast-aware 256-colour approximation across the full TUI while
+  preserving true-colour, ANSI16, and no-colour behavior.
+- Preserve streaming work and stabilize Markdown rendering, compact subagent
+  presentation, model picker navigation, and composer chip editing.
+- Enforce safe tool ordering and repair the Browse setup-test readiness race.
+
+### Added
+
+- OpenRouter batch handling and Luna model support.
+
+### Changed
+
+- Align product, SDK, Serve, and first-party bundle versions to 0.7.3.
+- Resize and genuine historical updates can still clear/replay scrollback;
+  full terminal qualification remains open.
+
 ## [0.7.2] - 2026-09-08
 
 See the [release notes](docs/releases/v0.7.2.md) for verified signed Native/Serve

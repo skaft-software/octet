@@ -9,7 +9,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 MAX_ACTIVE_CHILDREN = 8
 MAX_DEPTH = 1
 MAX_WORKERS_PER_OWNER = 32

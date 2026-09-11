@@ -41,7 +41,7 @@ identical spawn key is retry-safe; using it with different input fails.
 
 ## Install and enable
 
-With [octet 0.7.2 installed](../../docs/installation.md), once the matching signed
+With [octet 0.7.3 installed](../../docs/installation.md), once the matching signed
 public bundle is published, install it, then explicitly enable it:
 
 ```console
@@ -50,7 +50,7 @@ octet --enable-extension octet-subagents
 ```
 
 For a reviewed local archive instead, use
-`octet extension install --path ./octet-subagents-0.7.2.tar.gz`.
+`octet extension install --path ./octet-subagents-0.7.3.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
 starts nothing; the bundle stays disabled until explicitly enabled. Default full
 access (`unsafe_host`) implicitly trusts it without saving a grant. Optional
@@ -90,7 +90,7 @@ prompt. `/subagents inspect <name-or-id>` provides cached detail and
 
 ## Reference
 
-Bundle `0.7.2` requires exactly octet `0.7.2` and retains API `0.2`. The detailed
+Bundle `0.7.3` requires exactly octet `0.7.3` and retains API `0.2`. The detailed
 contract is a bundled-runtime reference, not a current extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.

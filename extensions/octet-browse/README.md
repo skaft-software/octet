@@ -8,7 +8,7 @@ profile.
 
 ## Install the bundle
 
-With [octet 0.7.2 installed](../../docs/installation.md), once the matching signed
+With [octet 0.7.3 installed](../../docs/installation.md), once the matching signed
 public bundle is published, install it, then explicitly enable it:
 
 ```console
@@ -62,8 +62,8 @@ before removing only the locked, sentinel-verified isolated profile.
 ## Reference
 
 The bundled runtime still uses API `0.2`; these are usage and implementation
-references, not current extension-authoring examples. Bundle `0.7.2` requires
-exactly octet `0.7.2` and `playwright==1.57.0`.
+references, not current extension-authoring examples. Bundle `0.7.3` requires
+exactly octet `0.7.3` and `playwright==1.57.0`.
 
 - <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
 - <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.

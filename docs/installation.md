@@ -6,15 +6,15 @@
 
 ## Install native binaries
 
-The [v0.7.2 release](releases/v0.7.2.md) includes signed native archives and a
+The [v0.7.3 release](releases/v0.7.3.md) includes signed native archives and a
 version-pinned installer for macOS Apple silicon/Intel and GNU/Linux x86-64.
-Public-install verification passed on all three platforms. Install from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.2):
+See the release record for public-install verification results. Install from the
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.3):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.2/install-octet.sh | sh
-octet --version   # octet 0.7.2
+  https://github.com/skaft-software/octet/releases/download/v0.7.3/install-octet.sh | sh
+octet --version   # octet 0.7.3
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -50,8 +50,8 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The v0.7.2 release includes the four official executable bundles and the
-separate Serve 0.7.2 application. For example:
+The v0.7.3 release includes the four official executable bundles and the
+separate Serve 0.7.3 application. For example:
 
 ```sh
 octet extension install octet-web-search
@@ -90,11 +90,11 @@ The included **linux/amd64** image is a source-build route, not evidence of a
 published image:
 
 ```sh
-scripts/build-octet-image.sh octet:0.7.2
+scripts/build-octet-image.sh octet:0.7.3
 docker run --rm -it \
   -e ANTHROPIC_API_KEY \
   -v "$PWD:/workspace" \
-  octet:0.7.2 --model claude-sonnet-4-6
+  octet:0.7.3 --model claude-sonnet-4-6
 ```
 
 The script builds a clean tracked Git snapshot, refuses tracked changes, and

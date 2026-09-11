@@ -8500,6 +8500,95 @@ fn streamed_markdown_settles_into_rich_structure() {
 }
 
 #[test]
+fn full_tui_colour_modes_preserve_readable_content_and_supported_encoding() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use crate::tui::theme::TerminalBackground;
+
+    for depth in [
+        ColorDepth::TrueColor,
+        ColorDepth::Ansi256,
+        ColorDepth::Ansi16,
+        ColorDepth::None,
+    ] {
+        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+            for width in [40, 80, 160] {
+                let capabilities = TerminalCapabilities::test(true, true, depth);
+                let theme = crate::tui::theme::test_theme_for(background, capabilities);
+                let mut shell = InteractiveShell::test_shell_with_theme(theme);
+                shell.set_size(width, 24);
+                shell.set_identity("anthropic", "claude-sonnet-4", "high");
+                let mut samples = render_shell(&shell.state.borrow(), width);
+                shell.state.borrow_mut().push_block(TranscriptBlock::Assistant(Box::new(
+                    AssistantBlock::finalized("# Palette check\n\n**Strong** and `inline`.\n\n- list item\n\n```rust\nlet answer = 42;\n```\n\n| State | Value |\n| --- | --- |\n| ready | 42 |".into()),
+                )));
+                samples.extend(render_shell(&shell.state.borrow(), width));
+                open_select_panel(&mut shell, &["Ready", "Approval required", "Failed"]);
+                samples.extend(render_shell(&shell.state.borrow(), width));
+                shell.close_panel();
+                {
+                    let state = shell.state.borrow();
+                    let theme = &state.theme;
+                    samples.extend(AssistantBlock::finalized(
+                        "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".into(),
+                    ).render(&theme.rich_renderer(), theme, width));
+                    for native in [true, false] {
+                        samples.extend(render_block(
+                            None,
+                            &TranscriptBlock::Tool(Box::new(ToolPanel::subagent_activity(
+                                &subagent_transcript_test_view(native),
+                            ))),
+                            theme,
+                            &theme.rich_renderer(),
+                            &theme.reasoning_renderer(),
+                            width,
+                            false,
+                        ));
+                    }
+                }
+                let joined = samples.join("\n");
+                let visible = strip_terminal_sequences(&joined);
+                assert!(visible.contains("-old") && visible.contains("+new"));
+                assert!(visible.contains("Audit docs") && visible.contains("Inspect tests"));
+                assert!(
+                    visible.contains("Palette check") && visible.contains("answer"),
+                    "{depth:?}/{width}: {visible}"
+                );
+                assert!(
+                    visible.contains("Approval required"),
+                    "{depth:?}/{width}: {visible}"
+                );
+                if depth != ColorDepth::TrueColor {
+                    assert!(!joined.contains("38;2;") && !joined.contains("48;2;"));
+                }
+                if matches!(depth, ColorDepth::None | ColorDepth::Ansi16) {
+                    assert!(!joined.contains("38;5;") && !joined.contains("48;5;"));
+                }
+                if depth == ColorDepth::None {
+                    assert!(!joined.contains("\x1b["), "no-colour SGR: {joined:?}");
+                }
+                if depth == ColorDepth::Ansi256 {
+                    assert!(joined.contains("38;5;") && joined.contains("48;5;"));
+                    for escape in joined.split("\x1b[").skip(1) {
+                        let Some((sgr, _)) = escape.split_once('m') else {
+                            continue;
+                        };
+                        let codes = sgr.split(';').collect::<Vec<_>>();
+                        for triple in codes.windows(3) {
+                            if matches!(triple[0], "38" | "48") && triple[1] == "5" {
+                                assert!(
+                                    triple[2].parse::<u8>().unwrap() >= 16,
+                                    "theme-owned slot: {sgr}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn compiled_default_composer_keeps_the_terminal_background_unfilled() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::TerminalBackground;
