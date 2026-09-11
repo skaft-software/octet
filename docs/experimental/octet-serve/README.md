@@ -58,13 +58,12 @@ for an ephemeral **HttpOnly, SameSite=Strict** browser cookie before API or
 event-stream access. Host, Origin, and Fetch Metadata checks restrict requests
 to the local application. Keep the launch capability private.
 
-Browser authentication is not project trust or an agent sandbox. Authority
-choices come from host configuration, but selecting a narrower label does not
-reconfigure tool or process enforcement. Set restrictions on the host before
-launch; do not rely on the picker for isolation. Enabled commands run with the
-local user's OS authority; use a restricted user, container, VM, or OS sandbox
-for hostile work. Pairing would not grant project trust, Remote Read, or more
-tool authority.
+Browser authentication is not project trust or an agent sandbox. The authority
+indicator reflects the host's immutable launch policy; per-session changes are
+unavailable and rejected server-side. Configure restrictions before launch and
+restart the host to change them. Enabled commands run with the local user's OS
+authority; use a restricted user, container, VM, or OS sandbox for hostile work.
+Pairing would not grant project trust, Remote Read, or more tool authority.
 
 **LAN pairing is not implemented.** There is no working `--lan`, `--demo`, or
 `--local-only` switch. Do not expose this listener through `0.0.0.0`, a proxy, or

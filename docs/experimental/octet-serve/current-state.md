@@ -287,13 +287,20 @@ reconciled as finished, discarded, or active, and adapter source attribution is
 added only where authoritative metadata exists; unmatched provider totals stay
 in `other`. Legacy `usage.updated` events remain accepted.
 
-The production authority catalog is derived from host sandbox configuration:
-`ReadOnly` is always listed, `Workspace` is added when writes are allowed, and
-`FullAccess` when process execution is allowed. These are not independently
-enforced per-session sandboxes: `SetAuthority` changes the session setting,
-not the worker's tool/process configuration. Do not rely on choosing `ReadOnly`
-or `Workspace` to restrict an otherwise full-access host. Configure host policy
-before launch and use OS isolation for hostile work.
+The production authority catalog contains only the host's immutable launch
+profile. `ReadOnly` means edit, write and process execution are disabled;
+`Workspace` means built-in file mutation is allowed only inside the workspace
+and processes are disabled; `FullAccess` means processes are enabled or file
+mutation can reach external paths. Tool allowlists and approvals may narrow
+individual operations further. The UI disables the singleton picker, and the
+server rejects different profiles on session creation and authority changes,
+including requests from older clients. Resume, fork and worker rebuild retain
+host-derived authority rather than an unsupported session label. Read-only
+inspection of delegated children remains a separate non-executing surface.
+
+This removes the earlier misleading per-session choices; it does not implement
+per-session sandboxes or OS isolation. Configure host restrictions before
+launch and restart the host to change them. Use OS isolation for hostile work.
 
 ### Attachments and prompt documents
 

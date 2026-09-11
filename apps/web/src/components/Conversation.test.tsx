@@ -1076,6 +1076,40 @@ describe("conversation composer", () => {
     await waitFor(() => expect(authority).toHaveFocus());
   });
 
+  it.each([
+    ["readOnly", "Read only"],
+    ["workspace", "Workspace"],
+    ["fullAccess", "Full access"],
+  ] as const)("does not offer changes to immutable host authority %s", async (profile, label) => {
+    const user = userEvent.setup();
+    const onConfigure = vi.fn().mockResolvedValue(undefined);
+    const bootstrap = structuredClone(fixtureBootstrap);
+    bootstrap.authorityProfiles = [profile];
+    bootstrap.authorityCeiling = profile;
+    const session = structuredClone(fixtureSessions["session-fresh"]!);
+    session.authority = profile;
+    render(
+      <Conversation
+        session={session}
+        bootstrap={bootstrap}
+        onSubmit={noOp}
+        onInterrupt={noOp}
+        onConfigure={onConfigure}
+        onResolveApproval={noOp}
+        onResolveUserInput={noOp}
+        onOpenOutput={() => {}}
+        onOpenSource={() => {}}
+      />,
+    );
+
+    const authority = screen.getByRole("button", { name: `Authority: ${label}` });
+    expect(authority).toBeDisabled();
+    await user.click(authority);
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(screen.queryByRole("menu", { name: "Authority" })).toBeNull();
+    expect(onConfigure).not.toHaveBeenCalled();
+  });
+
   it("uses a themed searchable model picker instead of a native select", async () => {
     const user = userEvent.setup();
     const onConfigure = vi.fn().mockResolvedValue(undefined);

@@ -20,6 +20,13 @@ Within that model, Serve fails closed at externally controlled boundaries:
 project IDs and relative paths, uploaded bytes, durable store files, process
 lifetime, protocol payloads, and client generations.
 
+Production sessions expose only the immutable host-derived authority profile.
+Creating a session or changing its authority to another profile is rejected;
+resume, fork and worker rebuild do not turn a label into new permissions. Change
+host restrictions before launch, not through the composer. This is not a
+per-session sandbox; terminal and extension admission remain governed by host
+policy.
+
 ## Owned subprocesses
 
 Git helpers and PTY shells own a process tree rather than only a direct child.
