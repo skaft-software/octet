@@ -61,5 +61,6 @@ installed copy. Continue with [getting started](docs/getting-started.md).
 [Changelog](CHANGELOG.md)
 
 Built by [Achu Mukundan](https://github.com/achuthanmukundan00). [MIT licensed](LICENSE).
-Design patterns draw on Pi and the Terminus 2 agent. Benchmark evaluation data is not used to develop the agent; 
-comparisons follow benchmarking. See [third-party notices](THIRD_PARTY_NOTICES.md).
+Design patterns draw on Pi and the Terminus 2 agent. Benchmark evaluation data is
+not used to develop the agent; comparisons follow benchmarking.
+See [third-party notices](THIRD_PARTY_NOTICES.md).
