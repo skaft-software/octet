@@ -46,6 +46,19 @@
 - Retain explicit gaps for subscriptions, modern stdio, advanced schema/forms,
   OAuth registration/enterprise features and unrun real-world/frontend journeys.
 
+### Fixed
+
+- Wait for credential-store contention within the operation's deadline,
+  cancellation and owner fences, then reread the winning token. Healthy concurrent
+  refresh or bearer reads no longer invalidate connections or abort the winner.
+- Redact private interaction payloads without rewriting MCP error flags, content
+  discriminators or known protocol fields. Check raw string types, embedded/link
+  resources and the captured output schema before redaction; incompatible redacted
+  payloads still fail closed.
+  Arbitrary structured data, metadata and progress remain redacted.
+- Correct the OAuth callback documentation: `/oauth/callback` is fixed; the
+  default port is OS-selected and OAuth state is random and validated.
+
 <a id="010--ygg-061"></a>
 
 ## [0.1.0]

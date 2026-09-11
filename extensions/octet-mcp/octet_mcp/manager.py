@@ -1186,6 +1186,7 @@ class BridgeManager:
                     self.extension, owner=owner.as_dict(), parent_request_id=request_id,
                     cancellation=cancellation, deadline=time.monotonic() + timeout_ms / 1000,
                     is_active=is_active, server_label=binding.server_label, private_ui=True,
+                    output_schema=binding.output_schema,
                 )
             kwargs = {"interaction_handler": interaction_handler} if interaction_handler is not None else {}
             if isinstance(client, (McpStdioClient, McpStreamableHttpClient)):

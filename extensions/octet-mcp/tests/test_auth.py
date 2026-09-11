@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
+import fcntl
 import json
 import os
 from pathlib import Path
 import stat
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -31,6 +34,23 @@ def server(kind="bearer"):
 
 def binding(config=None, context=None):
     return AuthBinding.from_server(AuthOwner.from_context(context or owner_context()), config or server())
+
+
+@contextmanager
+def observe_lock_contention():
+    """Signal an actual OS lock conflict without replacing lock semantics."""
+    contended = threading.Event()
+    flock = fcntl.flock
+
+    def acquire(descriptor, flags):
+        try:
+            return flock(descriptor, flags)
+        except BlockingIOError:
+            contended.set()
+            raise
+
+    with mock.patch("octet_mcp.auth_store.fcntl.flock", side_effect=acquire):
+        yield contended
 
 
 class AuthStoreTests(unittest.TestCase):
@@ -172,12 +192,65 @@ class AuthStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(AuthError, "cancelled"), self.transaction(cancel=lambda: True):
             pass
 
-    def test_refresh_transaction_lock_is_nonblocking_across_store_instances(self):
+    def test_transaction_waits_and_rereads_replacement_across_store_instances(self):
+        self.save()
         other = PrivateTokenStore(self.path)
-        with self.transaction():
-            with self.assertRaisesRegex(AuthError, "already in progress"), other.transaction(
-                    self.binding, deadline=time.monotonic() + 5, cancel=lambda: False):
-                pass
+        answers = []
+        done = threading.Event()
+
+        def read():
+            try:
+                with other.transaction(self.binding, deadline=time.monotonic() + 5,
+                                       cancel=lambda: False) as tx:
+                    answers.append(tx.load().access_token)
+            except Exception as error:
+                answers.append(error)
+            finally:
+                done.set()
+
+        with observe_lock_contention() as contended:
+            with self.transaction() as tx:
+                thread = threading.Thread(target=read, daemon=True)
+                thread.start()
+                self.addCleanup(thread.join, 2)
+                self.assertTrue(contended.wait(1))
+                self.assertFalse(done.wait(0.1))
+                tx.save(TokenRecord("replacement.secret"))
+            thread.join(1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(answers, ["replacement.secret"])
+
+    def test_contended_transaction_honors_deadline_and_cancellation_before_loading(self):
+        self.save()
+        other = PrivateTokenStore(self.path)
+        for interruption in ("timeout", "cancelled"):
+            with self.subTest(interruption=interruption), observe_lock_contention() as contended:
+                cancelled = threading.Event()
+                answers = []
+                deadline = time.monotonic() + (0.15 if interruption == "timeout" else 5)
+
+                def read():
+                    try:
+                        with other.transaction(self.binding, deadline=deadline,
+                                               cancel=cancelled.is_set):
+                            answers.append("unexpected acquisition")
+                    except AuthError as error:
+                        answers.append(error.code)
+
+                with self.transaction() as tx:
+                    thread = threading.Thread(target=read, daemon=True)
+                    thread.start()
+                    self.addCleanup(thread.join, 2)
+                    self.assertTrue(contended.wait(1))
+                    if interruption == "cancelled":
+                        cancelled.set()
+                    thread.join(1)
+                    self.assertFalse(thread.is_alive())  # No need to release the holder first.
+                    self.assertEqual(answers, ["authentication_" + interruption])
+                    self.assertEqual(tx.load().access_token, "bearer.secret")
+                with other.transaction(self.binding, deadline=time.monotonic() + 1,
+                                       cancel=lambda: False) as tx:
+                    self.assertEqual(tx.load().access_token, "bearer.secret")
 
     def test_write_failure_leaves_previous_record_and_no_temporary_secret(self):
         path = self.save()

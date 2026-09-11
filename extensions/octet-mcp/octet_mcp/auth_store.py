@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import time
 from typing import Iterator, Optional
 
 from .auth import (AuthBinding, AuthError, Cancel, MAX_DOCUMENT_BYTES, TokenRecord,
@@ -95,10 +96,16 @@ class PrivateTokenStore:
             lock = os.open(binding.key + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
                            | os.O_CLOEXEC | os.O_NONBLOCK, 0o600, dir_fd=directory)
             _validate_file(os.fstat(lock))
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise AuthError("authentication_busy") from None
+            # Contention is not invalid authentication. Wait within the caller's
+            # budget so it can reread the winner's persisted replacement, while
+            # polling cancellation/owner revocation instead of blocking in flock.
+            while True:
+                check_operation(deadline, cancel)
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
             check_operation(deadline, cancel)
             yield TokenTransaction(directory, binding, deadline, cancel)
         except OSError:

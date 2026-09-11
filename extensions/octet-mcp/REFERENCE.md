@@ -292,8 +292,9 @@ state, callback issuer and scope responses. Networking has bounded admission,
 DNS/TLS pinning, deadlines, no redirects/proxies/cookies and no ambient credentials.
 
 - `/mcp auth login <server>` requests bearer input privately or begins manual OAuth.
-  A bounded numeric-loopback callback uses a random path and port (or the reviewed
-  `redirectPort`). After secret-free initial consent, review the authorization URL
+  A bounded numeric-loopback callback uses the fixed `/oauth/callback` path and an
+  OS-selected port (or the reviewed `redirectPort`), with random, validated OAuth
+  state. After secret-free initial consent, review the authorization URL
   in private input and type `continue`. Open it manually and finish login after
   the command returns. No browser is launched automatically; the URL/state never
   enters ordinary confirmation details.
@@ -315,7 +316,10 @@ active flows additionally bind extension instance/generation. A fresh generation
 of the same durable owner can reuse credentials; other owners cannot.
 
 Refresh is serialized, expiry-aware and fail-closed on scope expansion, changed
-metadata, non-rotating refresh tokens or ambiguous exchanges. Local removal does
+metadata, non-rotating refresh tokens or ambiguous exchanges. Contending readers
+wait within their original deadline, honor cancellation/owner revocation, and
+reread the stored grant after acquiring the lock instead of treating healthy
+contention as invalid authentication. Local removal does
 not revoke a remote authorization grant; use the issuer's manual revocation UI.
 Dynamic registration, an Octet-published CIMD identity, enterprise authorization,
 client secrets, sender-constrained tokens and automatic scope escalation remain
@@ -495,6 +499,14 @@ private prompt channel: tool input cancels without a public pending request, and
 headless commands deny setup. This is an explicit frontend limitation, not
 permission to send credentials through chat or ordinary public confirmations.
 Small-form/URL renderer fixtures are not combined live MCP/OAuth qualification.
+
+Private-answer echo suppression applies to payload data (including arbitrary
+structured content, metadata and progress), not protocol field names or validated
+status and content-type literals. It cannot turn a server error into success.
+Payload string types, embedded/link resources and the captured output schema are
+checked before this redaction. Redacted data must still satisfy result/output-schema
+validation; otherwise the call fails without publishing an incompatible payload or
+artifact.
 
 Modern `input_required` continuation is confined to `tools/call` and
 `resources/read`: original arguments remain fixed, each continuation gets a fresh

@@ -445,7 +445,7 @@ class McpStreamableHttpClient:
                             value = _redact_value(dict(event), tuple(active.elicitation_urls))
                             if interaction_handler is not None:
                                 interaction_handler.check_active()
-                                value = interaction_handler.redact_result(value)
+                                value = interaction_handler.redact_payload(value)
                             progress(value)
                     result = self._route_request_messages(
                         messages, request_id=request_id, progress_token=progress_token,
@@ -461,7 +461,7 @@ class McpStreamableHttpClient:
                 )
                 if interaction_handler:
                     interaction_handler.check_active()
-                    return interaction_handler.redact_result(result)
+                    return interaction_handler.redact_result(result, method=method)
                 return result
             except (McpProtocolError, McpTransportError, McpAuthenticationError) as error:
                 self._fail(error)
