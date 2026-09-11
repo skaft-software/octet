@@ -28,6 +28,30 @@ MAX_EXPANDED_BYTES = 160 * 1024 * 1024
 MAX_ENTRIES = 4096
 MAX_MEMBER_BYTES = 64 * 1024 * 1024
 
+
+def documentation_files() -> set[str]:
+    inventory = pathlib.Path(__file__).resolve().parent.parent / "docs/package-assets.txt"
+    result = set()
+    for line in inventory.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"(text|asset) ([A-Za-z0-9_./-]+)", line)
+        if match is None:
+            raise ValueError(f"invalid documentation inventory entry: {line}")
+        name = match.group(2)
+        if any(part in {"", ".", ".."} for part in name.split("/")) or name in result:
+            raise ValueError(f"unsafe or repeated documentation inventory path: {name}")
+        result.add(name)
+    return result
+
+
+DOCUMENTATION_FILES = documentation_files()
+DOCUMENTATION_EXTRAS = {
+    name for name in DOCUMENTATION_FILES
+    if not name.startswith(("docs/", "examples/", "sdk/"))
+}
+
+
 LIFECYCLE_KEYS = {
     "scripts",
     "preinstall",
@@ -157,6 +181,12 @@ def allowed_member(expected: ExpectedPackage, relative: str, is_directory: bool)
     }
     if relative in fixed:
         return True
+    if relative.startswith("share/octet/"):
+        name = relative.removeprefix("share/octet/")
+        if name in DOCUMENTATION_EXTRAS:
+            return not is_directory
+        if any(path.startswith(name + "/") for path in DOCUMENTATION_EXTRAS):
+            return is_directory
     return any(relative.startswith(prefix) for prefix in ("share/octet/docs/", "share/octet/examples/", "share/octet/sdk/"))
 
 
@@ -214,12 +244,39 @@ def inspect_tarball(path: pathlib.Path, expected: ExpectedPackage) -> Inspection
     return Inspection(expected, members, contents, expanded)
 
 
-def require_files(inspection: Inspection, names: Iterable[str]) -> None:
+def require_files(inspection: Inspection, names: Iterable[str], *, allow_empty: bool = False) -> None:
     for name in names:
         if name not in inspection.contents:
             fail(f"{inspection.expected.artifact} is missing package/{name}")
-        if not inspection.contents[name]:
+        if not allow_empty and not inspection.contents[name]:
             fail(f"{inspection.expected.artifact} contains an empty package/{name}")
+
+
+def check_documentation_bytes(
+    inspection: Inspection, root: pathlib.Path, *, npm_install: bool = False,
+) -> None:
+    """Compare every asset with a validated native stage or an offline install.
+
+    npm/pacote installs Git ignore metadata as .npmignore. Only that documented
+    filename normalization is permitted; every byte still comes from the tarball.
+    This is a comparison only: it never repairs a package from local source.
+    """
+    require_files(inspection, ("share/octet/" + name for name in sorted(DOCUMENTATION_FILES)), allow_empty=True)
+    if root.is_symlink() or not root.is_dir():
+        fail(f"documentation root is not a real directory: {root}")
+    for name in sorted(DOCUMENTATION_FILES):
+        relative = pathlib.PurePosixPath(name)
+        if npm_install and relative.name == ".gitignore":
+            relative = relative.with_name(".npmignore")
+        path = root
+        for part in relative.parts:
+            path /= part
+            if path.is_symlink():
+                fail(f"documentation path contains a symlink: {path}")
+        if not path.is_file():
+            fail(f"documentation file is missing or not regular: {path}")
+        if path.read_bytes() != inspection.contents["share/octet/" + name]:
+            fail(f"{inspection.expected.artifact} documentation bytes differ: {name}")
 
 
 def require_executable(inspection: Inspection, name: str) -> None:
@@ -318,6 +375,10 @@ def validate(inspection: Inspection, version: str) -> None:
                 "share/octet/README.md",
             ),
         )
+        require_files(inspection, ("share/octet/" + name for name in sorted(DOCUMENTATION_EXTRAS)))
+        # Some inventoried source references (e.g. Python __init__.py) are empty.
+        # They must still survive as regular files, not disappear during packing.
+        require_files(inspection, ("share/octet/" + name for name in sorted(DOCUMENTATION_FILES)), allow_empty=True)
         for name in ("bin/octet", "bin/octet-host"):
             require_executable(inspection, name)
         if inspection.contents["share/octet/.octet-version"].decode("utf-8").strip() != version:

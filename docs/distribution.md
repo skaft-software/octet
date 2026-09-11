@@ -27,7 +27,7 @@ version-matched assets and channel boundaries.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and first-party extension distribution versions | `0.7.5`; installed compatibility `requires_octet = "=0.7.5"` |
+| Product, SDK, Serve and four executable-bundle distribution versions | `0.7.5`; installed compatibility `requires_octet = "=0.7.5"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |

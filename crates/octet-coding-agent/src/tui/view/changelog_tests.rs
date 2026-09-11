@@ -123,7 +123,7 @@ fn changelog_scrolls_reflows_and_closes_without_editing_the_composer() {
     let tail = plain_rows(&shell);
     assert_ne!(first, tail);
     assert!(
-        tail.contains("unchanged"),
+        tail.contains("publication."),
         "End should reach the last release-note paragraph: {tail}"
     );
     let Some(ShellOverlay::Report(report)) = shell.state.borrow().overlay.clone() else {

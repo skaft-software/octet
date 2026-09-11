@@ -1,7 +1,8 @@
 # Architecture
 
-Maintainer reference for the experimental source snapshot, not octet 0.7.0
-qualification. Start with the [Serve guide](README.md) for local use.
+Maintainer reference for experimental Serve in the octet 0.7.5 source, not a
+release-qualification result. Start with the [Serve guide](README.md) for local
+use and version-matched package availability.
 [LAN pairing](lan-pairing.md), native shells, and production live previews remain
 design-only. The graphical protocol described here is separate from extension
 API 0.3 and native-host protocol 1.

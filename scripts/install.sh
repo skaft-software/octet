@@ -457,6 +457,51 @@ finally:
 PY
 }
 
+# Keep this self-contained installer allowlist synchronized with the public
+# inventory by scripts/test-packaged-docs.py. These are inert reference files,
+# not permission to extract arbitrary crates/, scripts/ or extension runtimes.
+documentation_extra_files() {
+    cat <<'OCTET_DOCUMENTATION_EXTRAS'
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
+SECURITY.md
+THIRD_PARTY_NOTICES.md
+crates/octet-ai/models/SOURCES.md
+crates/octet-ai/src/protocol/openai_responses.rs
+crates/octet-ai/src/responses_ws.rs
+crates/octet-coding-agent/README.md
+crates/octet-coding-agent/src/providers/declarations.json
+crates/sexy-tui-rs/LICENSE
+crates/sexy-tui-rs/README.md
+crates/sexy-tui-rs/UPSTREAM-PARITY.md
+crates/sexy-tui-rs/VENDORED.md
+crates/sexy-tui-rs/docs/octet-integration.md
+crates/sexy-tui-rs/docs/rich-rendering.md
+crates/sexy-tui-rs/upstream/pi-tui-0.84.4.json
+evaluation/harbor/README.md
+evaluation/harbor/config.py
+evaluation/harbor/requirements.txt
+extensions/octet-browse/README.md
+extensions/octet-browse/REFERENCE.md
+extensions/octet-mcp/README.md
+extensions/octet-mcp/REFERENCE.md
+extensions/octet-pi-compat/COMPATIBILITY.md
+extensions/octet-pi-compat/README.md
+extensions/octet-pi-compat/profiles/0.84.4.json
+extensions/octet-pi-compat/profiles/0.84.4.ledger.json
+extensions/octet-serve/README.md
+extensions/octet-subagents/README.md
+extensions/octet-subagents/REFERENCE.md
+extensions/octet-web-search/README.md
+extensions/octet-web-search/REFERENCE.md
+scripts/bench-pi-runtime.py
+scripts/bench-systems.py
+third_party/licenses/PI-MIT.txt
+third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt
+OCTET_DOCUMENTATION_EXTRAS
+}
+
 extract_validated_archive() {
     archive=$1
     extraction=$2
@@ -464,7 +509,7 @@ extract_validated_archive() {
     archive_kind=$4
     expected_sha256=$5
 
-    python3 - "$archive" "$extraction" "$expected_root" "$archive_kind" "$expected_sha256" <<'PY'
+    python3 - "$archive" "$extraction" "$expected_root" "$archive_kind" "$expected_sha256" "$(documentation_extra_files)" <<'PY'
 import gzip
 import hashlib
 import os
@@ -474,6 +519,8 @@ import sys
 import tarfile
 import tempfile
 import unicodedata
+
+DOCUMENTATION_EXTRAS = set(sys.argv[6].splitlines())
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_TAR_BYTES = 160 * 1024 * 1024
@@ -539,6 +586,12 @@ def validate_layout(parts, member, kind):
             fail("release archive has an unexpected layout")
     elif top in {"docs", "examples", "sdk"}:
         if len(parts) == 2 and not member.isdir():
+            fail("release archive has an unexpected layout")
+    elif "/".join(parts[1:]) in DOCUMENTATION_EXTRAS:
+        if not member.isfile():
+            fail("release archive has an unexpected layout")
+    elif any(name.startswith("/".join(parts[1:]) + "/") for name in DOCUMENTATION_EXTRAS):
+        if not member.isdir():
             fail("release archive has an unexpected layout")
     else:
         fail("release archive has an unexpected layout")
@@ -640,6 +693,7 @@ def run():
                 f"{expected_root}/sdk": "directory",
             }
             if kind == "release":
+                required.update({f"{expected_root}/{name}": "file" for name in DOCUMENTATION_EXTRAS})
                 required.update({
                     f"{expected_root}/LICENSE": "file",
                     f"{expected_root}/octet": "file",
@@ -717,6 +771,88 @@ except (OSError, tarfile.TarError, UnicodeError, ValueError):
 PY
 }
 
+# Bound both pre-placement and final exact-version proofs. Only this
+# noninteractive probe gets its own process group; installer job control stays
+# unchanged. Neither arbitrary output nor a descendant-held pipe can stall it.
+verify_octet_version() {
+    python3 - "$1" "$2" <<'PYVERSION'
+import os
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+process = None
+selector = selectors.DefaultSelector()
+status = 1
+cancel_signal = None
+
+def cancelled(number, frame):
+    global cancel_signal
+    cancel_signal = number
+    # Do not unwind Popen before its child can be recorded for cleanup.
+    if process is not None:
+        raise SystemExit(128 + number)
+
+for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(number, cancelled)
+try:
+    deadline = time.monotonic() + 5.0
+    process = subprocess.Popen(
+        [sys.argv[1], "--version"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    if cancel_signal is not None:
+        raise SystemExit(128 + cancel_signal)
+    for stream in (process.stdout, process.stderr):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    output = bytearray()
+    total = 0
+    while selector.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        for key, events in selector.select(remaining):
+            chunk = os.read(key.fileobj.fileno(), 1025 - total)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            total += len(chunk)
+            if total > 1024:
+                raise ValueError("oversize probe")
+            if key.fileobj is process.stdout:
+                output.extend(chunk)
+    returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+    if returncode == 0 and output == ("octet " + sys.argv[2] + "\n").encode("ascii"):
+        status = 0
+    elif returncode != 0:
+        status = returncode if 0 < returncode < 126 else 1
+    else:
+        status = 2
+except (OSError, ValueError, TimeoutError, subprocess.TimeoutExpired):
+    status = 1
+finally:
+    # Ignore repeat cancellation only during bounded kill/reap cleanup.
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, signal.SIG_IGN)
+    if process is not None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        process.stdout.close()
+        process.stderr.close()
+    selector.close()
+sys.exit(status)
+PYVERSION
+}
+
 validate_release_binaries() {
     source_root=$1
     expected_version=$2
@@ -731,9 +867,8 @@ validate_release_binaries() {
         chmod 0755 "$executable"
     done
 
-    binary_version=$("$source_binary" --version)
-    if [ "$binary_version" != "octet $expected_version" ]; then
-        printf 'octet binary version mismatch: %s\n' "$binary_version" >&2
+    if ! verify_octet_version "$source_binary" "$expected_version"; then
+        printf 'could not verify the octet binary version\n' >&2
         return 1
     fi
 
@@ -803,6 +938,14 @@ install_assets() {
     cp -R "$source_root/docs" "$assets_temporary/docs"
     cp -R "$source_root/examples" "$assets_temporary/examples"
     cp -R "$source_root/sdk" "$assets_temporary/sdk"
+    documentation_extra_files | while IFS= read -r relative; do
+        if [ ! -f "$source_root/$relative" ] || [ -L "$source_root/$relative" ]; then
+            printf 'octet documentation reference is missing or linked: %s\n' "$relative" >&2
+            exit 1
+        fi
+        mkdir -p "$assets_temporary/$(dirname "$relative")"
+        cp "$source_root/$relative" "$assets_temporary/$relative"
+    done
     printf '%s\n' "$version" > "$assets_temporary/.octet-version"
 
     if { [ -e "$data_directory" ] || [ -L "$data_directory" ]; } \
@@ -984,14 +1127,16 @@ if [ "$path_present" = false ] && [ "${OCTET_NO_MODIFY_PATH:-0}" != "1" ]; then
 fi
 
 ui_stage "Checking installed version"
-if installed_version=$("$install_directory/octet" --version 2>/dev/null); then
-    if [ "$installed_version" != "octet $version" ]; then
-        printf 'installed octet binary version mismatch\n' >&2
-        exit 1
-    fi
+if verify_octet_version "$install_directory/octet" "$version"; then
+    :
 else
     status=$?
-    printf 'could not verify the installed octet version\n' >&2
+    if [ "$status" = 2 ]; then
+        printf 'installed octet binary version mismatch\n' >&2
+        status=1
+    else
+        printf 'could not verify the installed octet version\n' >&2
+    fi
     exit "$status"
 fi
 if ! command -v rg >/dev/null 2>&1; then

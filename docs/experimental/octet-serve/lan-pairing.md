@@ -2,7 +2,7 @@
 
 # LAN pairing specification
 
-**Unimplemented design reference.** The supplied source snapshot supports only
+**Unimplemented design reference.** The octet 0.7.5 source supports only
 the [local loopback client](README.md). All LAN flags, routes, DTO additions,
 dependencies, native projects, and acceptance commands below are proposed
 contracts, not available setup instructions or observed passes. Connected
@@ -10,7 +10,11 @@ Devices and LAN-client capabilities remain false. This graphical transport
 specification is not extension API 0.3 or native-host protocol 1.
 
 Work tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).
-No LAN or signed native delivery is qualified for octet 0.7.0.
+Private-LAN pairing and native graphical shells are not implemented or qualified.
+This does not describe native CLI or Serve runtime archive availability:
+[0.7.4](../../releases/v0.7.4.md) has published signed packages, and the
+[exact 0.7.5 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5)
+is authoritative for that version's assets and public-install verification.
 
 ## Product invariant
 
@@ -716,7 +720,8 @@ pairing, TLS, or devices.
 ## Acceptance matrix
 
 The following are unrun design criteria, not existing LAN test results. All `R`,
-`N`, `W`, `A`, and `D` tests are release-blocking. Physical `E` tests are required
+`N`, `W`, `A`, and `D` tests would block a LAN release, not the current
+loopback-only package. Physical `E` tests are required
 before distributing a signed LAN build.
 
 | ID | Runner | Acceptance |

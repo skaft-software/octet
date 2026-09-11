@@ -29,9 +29,15 @@ trap 'rm -rf "$work_directory"' EXIT
 native_directory="$work_directory/native"
 output_directory="$work_directory/npm"
 repeat_directory="$work_directory/npm-repeat"
-mkdir -p "$native_directory"
+mkdir -p "$native_directory" "$work_directory/home" "$work_directory/tmp"
+# No user npm configuration, registry traffic, lifecycle hooks or shared caches.
+export HOME="$work_directory/home" TMPDIR="$work_directory/tmp"
+export NPM_CONFIG_USERCONFIG="$HOME/.npmrc" NPM_CONFIG_GLOBALCONFIG="$HOME/.npm-globalrc"
+export NPM_CONFIG_CACHE="$work_directory/cache" NPM_CONFIG_OFFLINE=true
+export NPM_CONFIG_REGISTRY=http://127.0.0.1:9 NPM_CONFIG_IGNORE_SCRIPTS=true
+export NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false
 
-python3 - "$native_directory" "$version" <<'PY'
+python3 - "$native_directory" "$version" "$repository_directory/docs/package-assets.txt" <<'PY'
 import gzip
 import hashlib
 import pathlib
@@ -92,10 +98,24 @@ printf '%s\\n' '{{"protocol_version":1,"request_id":"npm-test","seq":1,"type":"h
                 add_file(archive, f"{root}/README.md", b"# octet fixture\\n")
                 for directory in ("docs", "examples", "sdk"):
                     add_directory(archive, f"{root}/{directory}")
-                add_file(archive, f"{root}/docs/index.md", b"# Docs\\n")
-                add_file(archive, f"{root}/docs/current-reference.md", b"# octet current reference\\n")
-                add_file(archive, f"{root}/examples/example.md", b"# Example\\n")
-                add_file(archive, f"{root}/sdk/python.py", b"# SDK fixture\\n")
+                # Every inventoried path is represented; asset fixtures contain
+                # binary bytes, and the empty Python module stays empty.
+                for line in pathlib.Path(sys.argv[3]).read_text().splitlines():
+                    if not line or line.startswith("#"):
+                        continue
+                    kind, name = line.split(" ", 1)
+                    if name in {"README.md", "LICENSE"}:
+                        continue
+                    data = ("# Public fixture " + target + " " + name + "\n").encode()
+                    if kind == "asset":
+                        data += b"\x00\xff\x80binary fixture\r\n"
+                    if name.endswith("/tests/__init__.py"):
+                        data = b""
+                    if name.endswith("/.gitignore"):
+                        # Real npm must omit both this file and an inventoried
+                        # evidence file matched by this nested ignore rule.
+                        data = b"# fixture ignore rules\ndata/agent_tasks.jsonl\n"
+                    add_file(archive, f"{root}/{name}", data)
 
 lines = []
 install = native / "install-octet.sh"
@@ -269,6 +289,194 @@ if python3 "$script_directory/verify-octet-npm-provenance.py" \
     printf 'provenance verifier accepted a mismatched artifact binding\n' >&2
     exit 1
 fi
+
+# All inventory bytes must come from the matching native fixture, not checkout
+# files or another architecture. Manifests/checksums bind the FINAL repaired tgz.
+python3 - "$script_directory" "$native_directory" "$output_directory" "$work_directory" "$version" <<'PYDOCS'
+import base64
+import copy
+import hashlib
+import io
+import json
+import pathlib
+import runpy
+import subprocess
+import sys
+import tarfile
+
+scripts, native, output, work = map(pathlib.Path, sys.argv[1:5])
+version = sys.argv[5]
+verification = runpy.run_path(str(scripts / "verify-octet-npm.py"))
+files = verification["DOCUMENTATION_FILES"]
+manifest = json.loads((output / "OCTET_NPM_MANIFEST.json").read_text())
+for package in manifest["packages"]:
+    data = (output / package["artifact"]).read_bytes()
+    assert package["bytes"] == len(data)
+    assert package["sha256"] == hashlib.sha256(data).hexdigest()
+    assert package["sha512_integrity"] == "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+    if package["target"] == "launcher":
+        continue
+    root = f"octet-{version}-{package['target']}"
+    with tarfile.open(native / (root + ".tar.gz")) as source, tarfile.open(output / package["artifact"]) as packed:
+        for name in sorted(files):
+            assert source.extractfile(root + "/" + name).read() == packed.extractfile("package/share/octet/" + name).read(), name
+for line in (output / "OCTET_NPM_SHA256SUMS").read_text().splitlines():
+    digest, name = line.split("  ./")
+    assert hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
+print(f"native → npm: {len(files)} inventoried files match for all three targets; final artifact digests match")
+
+expected = verification["expected_packages"](version)[1]
+inspection = verification["inspect_tarball"](output / expected.artifact, expected)
+stage = work / "packlist-reproduction"
+for name, data in inspection.contents.items():
+    path = stage / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    path.chmod(inspection.members["package/" + name].mode)
+raw = work / "raw-npm"
+raw.mkdir()
+subprocess.run(["npm", "pack", "--ignore-scripts", "--pack-destination", str(raw)], cwd=stage, check=True, capture_output=True, timeout=30)
+raw_path, = raw.glob("*.tgz")
+raw_inspection = verification["inspect_tarball"](raw_path, expected)
+benchmark = "docs/benchmarks/swe-bench-live-lite-v0.6.3/"
+omitted = [benchmark + ".gitignore", benchmark + "data/agent_tasks.jsonl"]
+for name in omitted:
+    assert "share/octet/" + name not in raw_inspection.contents, name
+    assert "share/octet/" + name in inspection.contents, name
+assert "share/octet/docs/current-reference.md" in raw_inspection.contents
+print("actual npm pack reproduced .gitignore + nested evidence omission; final packages retain both")
+
+# The standalone verifier must reject ANY missing inventory asset, not just an
+# extra reference or an otherwise empty docs/examples/sdk directory.
+for name in sorted(files):
+    damaged = copy.deepcopy(inspection)
+    del damaged.contents["share/octet/" + name]
+    try:
+        verification["validate"](damaged, version)
+    except verification["VerificationError"]:
+        pass
+    else:
+        raise AssertionError("verifier accepted missing inventory file: " + name)
+
+# The shared installed-byte check must reject both a changed ordinary doc and
+# a same-size change to a binary asset (existence/size-only checks miss these).
+for name in ["docs/current-reference.md", "docs/assets/octet/marks/favicon.ico"]:
+    path = stage / "share/octet" / name
+    original = path.read_bytes()
+    path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+    try:
+        verification["check_documentation_bytes"](inspection, stage / "share/octet")
+    except verification["VerificationError"] as error:
+        assert "bytes differ" in str(error)
+    else:
+        raise AssertionError("byte comparison accepted altered asset: " + name)
+    path.write_bytes(original)
+
+# npm/pacote renames ignore metadata during ordinary installation. This is a
+# named layout contract, not permission to skip missing/changed documentation.
+doc_root = stage / "share/octet"
+ignore = doc_root / benchmark / ".gitignore"
+installed_ignore = ignore.with_name(".npmignore")
+ignore_bytes = ignore.read_bytes()
+assert not installed_ignore.exists()
+ignore.rename(installed_ignore)
+verification["check_documentation_bytes"](inspection, doc_root, npm_install=True)
+for data in (None, ignore_bytes + b"changed"):
+    installed_ignore.unlink()
+    if data is not None:
+        installed_ignore.write_bytes(data)
+    try:
+        verification["check_documentation_bytes"](inspection, doc_root, npm_install=True)
+    except verification["VerificationError"]:
+        pass
+    else:
+        raise AssertionError("npm metadata normalization hid a missing/changed asset")
+    if installed_ignore.exists():
+        installed_ignore.unlink()
+    installed_ignore.write_bytes(ignore_bytes)
+installed_ignore.rename(ignore)
+
+# Exercise the exact private-stage restoration helper: it may add only missing
+# inventoried docs, never overwrite changed bytes or launder unsafe npm entries.
+helper = (scripts / "package-octet-npm.sh").read_text().split("<<'PYRESTORE'\n", 1)[1].split("\nPYRESTORE", 1)[0]
+def restore(path):
+    return subprocess.run([sys.executable, "-c", helper, str(scripts / "verify-octet-npm.py"), version,
+                           str(path), expected.artifact, str(stage), "0"], capture_output=True, timeout=30)
+
+result = restore(raw_path)
+assert result.returncode == 0, result.stderr.decode()
+verification["check_documentation_bytes"](verification["inspect_tarball"](raw_path, expected), stage / "share/octet")
+for mutation, message in [("changed", b"npm changed inventoried documentation bytes"),
+                          ("missing", b"is missing package/share/octet/docs/current-reference.md"),
+                          ("link", b"link or special"), ("traversal", b"unsafe member path"),
+                          ("unexpected", b"unexpected member"), ("duplicate", b"repeats member")]:
+    path = work / (mutation + ".tgz")
+    ordinary = "package/share/octet/docs/current-reference.md"
+    with tarfile.open(path, "w:gz") as archive:
+        for name, member in inspection.members.items():
+            if mutation == "missing" and name == ordinary:
+                continue
+            data = inspection.contents.get(name.removeprefix("package/"))
+            if mutation == "changed" and name == ordinary:
+                data = bytes([data[0] ^ 1]) + data[1:]
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+        if mutation in {"link", "traversal", "unexpected", "duplicate"}:
+            name = {"link": "package/share/octet/docs/link", "traversal": "package/../escape",
+                    "unexpected": "package/share/octet/extensions/octet-browse/extension.py", "duplicate": ordinary}[mutation]
+            member = tarfile.TarInfo(name)
+            member.mode = 0o644
+            if mutation == "link":
+                member.type = tarfile.SYMTYPE
+                member.linkname = "/outside"
+            archive.addfile(member)
+    if mutation == "missing":
+        try:
+            verification["validate"](verification["inspect_tarball"](path, expected), version)
+        except verification["VerificationError"] as error:
+            assert message.decode() in str(error)
+        else:
+            raise AssertionError("standalone verifier accepted missing ordinary doc")
+    else:
+        result = restore(path)
+        assert result.returncode != 0 and message in result.stderr, result.stderr.decode()
+
+# Missing native docs cannot be repaired from this checkout. A secret in an
+# ignored file still fails AFTER restoration; checksum/type gates remain intact.
+archive_path = next(native.glob("*aarch64-apple-darwin.tar.gz"))
+original = archive_path.read_bytes()
+sums = native / "OCTET_SHA256SUMS"
+original_sums = sums.read_bytes()
+with tarfile.open(archive_path) as archive:
+    members = archive.getmembers()
+    contents = {member.name: archive.extractfile(member).read() for member in members if member.isfile()}
+for mutation, message in [("missing", b"missing a required native or inventoried documentation file"),
+                          ("secret", b"secret scanner found a match"), ("checksum", b"checksum does not match"),
+                          ("link", b"link or special file")]:
+    try:
+        with tarfile.open(archive_path, "w:gz") as archive:
+            for original_member in members:
+                member = copy.copy(original_member)
+                data = contents.get(member.name)
+                if mutation == "missing" and member.name.endswith("/docs/current-reference.md"):
+                    continue
+                if mutation == "secret" and member.name.endswith("/.gitignore"):
+                    data = b"-----BEGIN PRIVATE KEY-----\n"
+                    member.size = len(data)
+                if mutation == "link" and member.name.endswith("/docs/current-reference.md"):
+                    member.type, member.linkname, member.size = tarfile.SYMTYPE, "/outside", 0
+                    data = None
+                archive.addfile(member, io.BytesIO(data) if data is not None else None)
+        if mutation != "checksum":
+            sums.write_text("\n".join(f"{hashlib.sha256((native / line.split('  ./')[1]).read_bytes()).hexdigest()}  ./{line.split('  ./')[1]}"
+                                      for line in original_sums.decode().splitlines()) + "\n")
+        result = subprocess.run([str(scripts / "package-octet-npm.sh"), version, str(native),
+                                 str(work / ("bad-native-" + mutation)), str(sums)], capture_output=True, timeout=30)
+        assert result.returncode != 0 and message in result.stderr, result.stderr.decode()
+    finally:
+        archive_path.write_bytes(original)
+        sums.write_bytes(original_sums)
+print("all missing-inventory, changed-byte, native/checksum, secret, and archive-boundary regressions passed")
+PYDOCS
 
 # Repacking the same immutable inputs with the same epoch must be byte-for-byte identical, not merely semantically equivalent.
 SOURCE_DATE_EPOCH=0 "$script_directory/package-octet-npm.sh" \

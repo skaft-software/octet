@@ -37,13 +37,15 @@ RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources \
     && useradd --create-home --uid 10001 octet
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/octet /usr/local/bin/octet
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/octet-host /usr/local/bin/octet-host
-COPY README.md /usr/local/share/octet/README.md
-COPY docs /usr/local/share/octet/docs
-COPY examples /usr/local/share/octet/examples
-COPY sdk /usr/local/share/octet/sdk
+# Materialized only from docs/package-assets.txt by build-octet-image.sh.
+COPY .octet-package-docs /usr/local/share/octet
 RUN test -f /usr/local/share/octet/docs/sdk.md \
     && test -f /usr/local/share/octet/examples/README.md \
-    && test -f /usr/local/share/octet/sdk/python/README.md
+    && test -f /usr/local/share/octet/sdk/python/README.md \
+    && test -f /usr/local/share/octet/SECURITY.md \
+    && test -f /usr/local/share/octet/extensions/octet-browse/REFERENCE.md \
+    && test -f /usr/local/share/octet/sdk/typescript/src/api_v03.ts \
+    && test ! -e /usr/local/share/octet/extensions/octet-browse/extension.toml
 ENV OCTET_PACKAGE_DIR=/usr/local/share/octet
 USER octet
 WORKDIR /workspace

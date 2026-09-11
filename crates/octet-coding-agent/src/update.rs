@@ -1031,11 +1031,8 @@ async fn run_update(
 // after a failed/partial transfer. Only a successful installed-version probe may
 // produce the updater's final success message.
 async fn run_installer(version: &semver::Version) -> anyhow::Result<std::process::ExitStatus> {
-    use std::io::{Seek, SeekFrom};
+    use std::io::{Seek, SeekFrom, Write};
     use std::process::Stdio;
-    // An unnamed file is removed by the OS even on terminating signals. Fetch
-    // stdout goes only to that private file, never the UI or command output.
-    let mut installer = tempfile::tempfile()?;
     let url = format!("{RELEASE_DOWNLOAD_BASE}/v{version}/install-octet.sh");
     let mut download = tokio::process::Command::new("curl");
     download
@@ -1060,21 +1057,18 @@ async fn run_installer(version: &semver::Version) -> anyhow::Result<std::process
             "--output",
             "-",
         ])
-        .arg(&url)
-        .stdout(Stdio::from(installer.try_clone()?))
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let status = progress::Activity::new("Downloading installer")
-        .wait(download.status())
-        .await
-        .context("failed to download the version-pinned installer")?;
-    if !status.success() {
-        anyhow::bail!("installer download failed ({status}) for {url}; no installer was executed");
-    }
-    let size = installer.metadata()?.len();
-    if size == 0 || size > 262_144 {
-        anyhow::bail!("downloaded installer is empty or exceeds its size limit");
-    }
+        .arg(&url);
+    let script = progress::Activity::new("Downloading installer")
+        .wait(download_installer_script(
+            &mut download,
+            &url,
+            Duration::from_secs(300),
+        ))
+        .await?;
+    // Only a complete, successful, size-bounded download reaches this private
+    // unnamed file. The OS removes it even on terminating signals.
+    let mut installer = tempfile::tempfile()?;
+    installer.write_all(&script)?;
     installer.seek(SeekFrom::Start(0))?;
     tokio::process::Command::new("sh")
         .stdin(Stdio::from(installer))
@@ -1083,6 +1077,56 @@ async fn run_installer(version: &semver::Version) -> anyhow::Result<std::process
         .status()
         .await
         .context("failed to run the version-pinned installer")
+}
+
+async fn download_installer_script(
+    command: &mut tokio::process::Command,
+    url: &str,
+    timeout: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    const MAX_BYTES: u64 = 262_144;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to download the version-pinned installer from {url}"))?;
+    // Older curl versions cannot enforce --max-filesize on unknown-length
+    // responses. Bound the consumed bytes and elapsed time ourselves; never
+    // expose the script or retain an arbitrarily large temporary download.
+    let result = tokio::time::timeout(timeout, async {
+        let mut script = Vec::new();
+        child
+            .stdout
+            .take()
+            .expect("piped installer download")
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut script)
+            .await
+            .context("failed to read the installer download")?;
+        anyhow::ensure!(
+            script.len() <= MAX_BYTES as usize,
+            "installer download exceeds its size limit for {url}; no installer was executed"
+        );
+        let status = child.wait().await?;
+        anyhow::ensure!(
+            status.success(),
+            "installer download failed ({status}) for {url}; no installer was executed"
+        );
+        anyhow::ensure!(!script.is_empty(), "downloaded installer is empty");
+        Ok(script)
+    })
+    .await
+    .with_context(|| format!("installer download timed out for {url}; no installer was executed"))
+    .and_then(|result| result);
+    if result.is_err() {
+        // Reap the direct downloader on failed validation or a deadline, rather
+        // than allowing a still-writing curl to outlive the rejected update.
+        let _ = child.kill().await;
+    }
+    result
 }
 
 async fn verify_installed_version(
@@ -1127,6 +1171,65 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installer_download_enforces_its_own_byte_limit() {
+        for (size, succeeds) in [(262_144, true), (262_145, false)] {
+            let mut command = tokio::process::Command::new("python3");
+            command.args([
+                "-c",
+                &format!("import sys; sys.stdout.buffer.write(b'x' * {size})"),
+            ]);
+            let result = download_installer_script(
+                &mut command,
+                "https://example.invalid/installer",
+                Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(bytes) = result {
+                assert_eq!(bytes.len(), size);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installer_download_deadline_covers_body_and_exit_and_reaps_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        for script in [
+            "printf untrusted_installer_bytes; exec sleep 30",
+            "exec 1>&-; exec sleep 30",
+        ] {
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .arg("-c")
+                .arg(format!("printf '%s\\n' $$ > \"$1\"; {script}"))
+                .arg("installer-probe")
+                .arg(&pid_file);
+            let started = std::time::Instant::now();
+            let error = download_installer_script(
+                &mut command,
+                "https://example.invalid/installer",
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("timed out"));
+            assert!(!error.to_string().contains("untrusted_installer_bytes"));
+            assert!(started.elapsed() < Duration::from_secs(5));
+            let pid = std::fs::read_to_string(&pid_file).unwrap();
+            assert!(!Command::new("kill")
+                .arg("-0")
+                .arg(pid.trim())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -64,8 +64,9 @@ continuation, but their Debug representations are redacted.
 Unit and loopback tests cover exact choices, controls, caches, stream assembly,
 continuation and pre-network rejection. They use synthetic inputs and private
 state, not user credentials or live inference. Live-provider demonstrations are
-optional and have not been run for this candidate. Local focused checks are not
-complete release qualification. Native compact construction rejects unsupported
+optional and recorded separately for each release; these synthetic checks do not
+establish them. Local focused checks are not complete release qualification.
+Native compact construction rejects unsupported
 selections before resource reservation, and raw compact controls are checked
 before credential resolution or network access. Retained opaque-state accounting
 also covers replacements without double-counting already buffered signatures.

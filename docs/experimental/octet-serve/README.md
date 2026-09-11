@@ -1,7 +1,10 @@
 # Experimental `octet serve`
 
-With [octet 0.7.0 installed](../../installation.md), install the signed public
-Serve package and start the graphical client:
+This guide describes the experimental Serve source in octet **0.7.5**. With
+[the matching octet version installed](../../installation.md) and its Serve
+assets available on the
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5),
+install the package and start the graphical client:
 
 ```console
 octet extension install octet-serve
@@ -15,10 +18,14 @@ This starts a headless host for the launch workspace and opens its local web
 client. `--port 0` requests an available port. Add `--no-open` to skip opening the
 browser; `--web-root <directory>` selects a development asset directory.
 
-Signed packages and public installation are verified for 0.7.0; see the
-[release verification](../../releases/v0.7.0.md#release-verification). Serve remains
-experimental. Live-provider/native-audio checks are optional and **NOT RUN**;
-package smoke does not qualify every media, recovery, or visual journey.
+The [0.7.5 notes](../../releases/v0.7.5.md) describe source changes; the exact
+GitHub release is authoritative for availability, signed assets, and
+public-install verification. [0.7.4](../../releases/v0.7.4.md) is a published,
+immutable release with signed Serve packages and installation checks; those
+results do not qualify 0.7.5. Serve remains experimental. Live-provider and
+native-host audio checks are optional and **NOT RUN** in this source review.
+Package smoke does not qualify private-LAN access, actual-terminal/SSH behavior,
+endurance, or every graphical media, recovery, and visual journey.
 
 <a id="product-contract"></a>
 
@@ -51,10 +58,13 @@ for an ephemeral **HttpOnly, SameSite=Strict** browser cookie before API or
 event-stream access. Host, Origin, and Fetch Metadata checks restrict requests
 to the local application. Keep the launch capability private.
 
-Browser authentication is not project trust or an agent sandbox. The production
-adapter advertises `FullAccess` only. Enabled commands run with the local user's
-OS authority; use a restricted user, container, VM, or OS sandbox for hostile
-work. Pairing would not grant project trust, Remote Read, or more tool authority.
+Browser authentication is not project trust or an agent sandbox. Authority
+choices come from host configuration, but selecting a narrower label does not
+reconfigure tool or process enforcement. Set restrictions on the host before
+launch; do not rely on the picker for isolation. Enabled commands run with the
+local user's OS authority; use a restricted user, container, VM, or OS sandbox
+for hostile work. Pairing would not grant project trust, Remote Read, or more
+tool authority.
 
 **LAN pairing is not implemented.** There is no working `--lan`, `--demo`, or
 `--local-only` switch. Do not expose this listener through `0.0.0.0`, a proxy, or
@@ -65,8 +75,8 @@ also unimplemented.
 
 ## Terminal and recovery
 
-The terminal appears only when the host allows process execution. It starts a
-local shell in the configured workspace and retains at most four terminals.
+The terminal appears only when host configuration allows process execution. It
+starts a local shell in the configured workspace and retains at most four terminals.
 Browser disconnect or detach retains the shell; host shutdown stops retained
 shells. Closing an inspector or preview is only a presentation action, not a
 stop command. Descendant cleanup is bounded, not OS-level process containment.
@@ -89,7 +99,9 @@ qualification.
 
 ## Install or update a package
 
-With octet `0.7.0`, install or update the signed public package:
+With octet `0.7.5`, first check that the matching Serve assets are available on
+the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+Then install or update the public package:
 
 ```console
 octet extension install octet-serve
@@ -99,14 +111,15 @@ octet extension update octet-serve
 For a reviewed matching local archive instead:
 
 ```console
-octet extension install --path octet-serve-0.7.0-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.7.5-TARGET.tar.gz
 octet extension list
 octet serve
 ```
 
 Local archive installation does not need GitHub network access. The package
-requires exactly `=0.7.0`; published targets are GNU/Linux x86_64 and macOS
-x86_64/arm64, not Linux musl.
+requires exactly `=0.7.5`. Replace `TARGET` with `x86_64-unknown-linux-gnu`,
+`x86_64-apple-darwin`, or `aarch64-apple-darwin`; Linux musl is unsupported.
+A local build/archive is not evidence of signed publication.
 
 Update reinstalls the package matching the running octet version; it is not an
 independent upgrade to a different runtime version.

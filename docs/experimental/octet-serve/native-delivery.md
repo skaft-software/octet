@@ -1,8 +1,11 @@
 # Native delivery
 
-**Design reference, not an available application.** The supplied snapshot has no
-Tauri, Xcode/iOS, or Android project, no signed native builds, and no implemented
-LAN pairing. See the [local web client](README.md) for source-based access.
+**Design reference, not an available graphical application.** The octet 0.7.5
+source has no Tauri, Xcode/iOS, or Android project, no signed graphical app
+builds, and no implemented LAN pairing. Native CLI and Serve runtime archives
+are separate release artifacts, not these proposed apps. See the
+[local web client](README.md) for source launch and version-matched package
+availability.
 
 The design uses one shared React frontend in thin system-webview shells. Tauri
 2 is an unvalidated candidate, not a selected dependency; Electron is out of

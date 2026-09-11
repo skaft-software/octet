@@ -432,6 +432,34 @@ mod scheduler_tests {
     }
 
     #[test]
+    fn sparse_compaction_frames_keep_elapsed_phase_without_replay() {
+        use super::super::InteractiveShell;
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_run_label("compacting");
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        schedule.observe(&state, start);
+        let revision = state.block_revisions[0];
+        // Sixteen paints in 2050 ms are valid: phase follows all 25 elapsed
+        // ticks, while each late wake invalidates the status only once.
+        for (index, ms) in (1..=15).map(|step| step * 128).chain([2050]).enumerate() {
+            let now = start + Duration::from_millis(ms);
+            schedule.advance(&mut state, now);
+            assert_eq!(state.status_shimmer_frame as u64, ms / 80);
+            assert_eq!(state.block_revisions[0], revision + index as u64 + 1);
+            schedule.advance(&mut state, now);
+            assert_eq!(state.block_revisions[0], revision + index as u64 + 1);
+        }
+        assert_eq!(state.status_shimmer_frame, 25);
+        assert_eq!(state.block_revisions[0], revision + 16);
+        assert_eq!(
+            schedule.poll_interval(false, start + Duration::from_millis(2050)),
+            Duration::from_millis(30)
+        );
+    }
+
+    #[test]
     fn long_compaction_delay_invalidates_only_one_current_status_frame() {
         use super::super::{InteractiveShell, TranscriptBlock};
         let mut shell = InteractiveShell::test_shell();

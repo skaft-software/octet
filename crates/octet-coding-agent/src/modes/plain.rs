@@ -193,7 +193,10 @@ async fn run_prompt(
     tracker: &mut RunTracker,
     presentation: PromptPresentation,
 ) -> anyhow::Result<PromptExit> {
-    crate::commands::reject_tui_changelog(&prompt)?;
+    // Explicit template arguments are data, not local commands.
+    if app.config.prompt_template.is_none() {
+        crate::commands::reject_tui_changelog(&prompt)?;
+    }
     let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
             if app.config.debug_prompt {
@@ -623,8 +626,10 @@ async fn run_prompt(
 /// Run the chronological fallback. A positional prompt is one-shot. Without
 /// one, piped stdin becomes one prompt; a TTY reads one line at each `> `.
 pub async fn run_plain(boot: Bootstrap, initial_prompt: Option<String>) -> anyhow::Result<()> {
-    if let Some(prompt) = initial_prompt.as_deref() {
-        crate::commands::reject_tui_changelog(prompt)?;
+    if boot.config.prompt_template.is_none() {
+        if let Some(prompt) = initial_prompt.as_deref() {
+            crate::commands::reject_tui_changelog(prompt)?;
+        }
     }
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;

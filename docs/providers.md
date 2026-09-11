@@ -11,9 +11,9 @@ Use `/model [id]` to select a model and `/status` to inspect its route and
 capabilities. Live discovery is used where a provider exposes it. `--offline`
 skips optional discovery, **not inference traffic**.
 
-> Draft qualification: these are supplied 0.7.0 source contracts, not live
-> endpoint verification. Provider/thinking work outside this snapshot and
-> contradictory context-window documentation require reconciliation before publication.
+> These are octet 0.7.5 source contracts, not live endpoint verification. Model
+> availability remains account- and endpoint-specific; deterministic checks do
+> not qualify every live provider.
 
 ## Cloud setup
 
@@ -278,8 +278,9 @@ for host-qualified Codex Responses requests (including Lite) with local function
 tools: before assistant commit it may discard provisional output and replace
 interrupted inference from durable context. This can duplicate remote generation
 and incur unknown charges; it does not replay committed local tool effects or
-prove remote cancellation. The developing candidate separates finite streamed-inference replacement
-and HTTP-admission retry budgets, without resetting on transport fallback.
+prove remote cancellation. The agent separates finite streamed-inference
+replacement and HTTP-admission retry budgets, without resetting on transport
+fallback.
 These bound attempts, not confirmed accepted generations or charges; eligibility
 and hard ceilings can stop recovery earlier. Only
 positively classified pre-send outages enter sustained, cancellable network
@@ -287,7 +288,7 @@ waiting. Unknown failed-attempt usage blocks replacement under hard cumulative
 cost/token ceilings. Unknown exposure is durably recorded independently of known
 usage: later success, resume, or checkout does not restore complete totals.
 Displayed numeric usage/cost is then a known subtotal; a fork starts independent
-accounting. See [candidate recovery qualification](qualification/v0.7.4-recovery.md)
+accounting. See [historical v0.7.4 recovery qualification](qualification/v0.7.4-recovery.md)
 for the source comparison and outstanding live/endurance evidence; Codex parity
 is not established.
 
@@ -295,7 +296,7 @@ is not established.
 
 Direct `gpt-6-astra` is declared on Responses with text/image input, a 1.05M-token
 context window, 128K output, and `low` through `max` effort. Inputs above 272K
-use the long-context price tier. Baseline 0.7.0 source supports selection,
+use the long-context price tier. Current source supports selection,
 text/images, reasoning, and ordinary/parallel tool calls. It does **not** implement
 native async tools (`async: true` and pending-call lifecycle), steering an active
 Responses WebSocket response, or coding-loop reasoning changes through

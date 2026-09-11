@@ -15,7 +15,10 @@
   `/changelog` command with a splash reminder.
 - Avoid misleading project-skill warnings when the same root is already a user
   skill directory, without relaxing actual project trust checks.
-- Correct stale pre-release documentation shipped with 0.7.4.
+- Correct stale publication-status documentation shipped with 0.7.4, and retain
+  linked public reference files across documentation package layouts.
+- Bound installer-script downloads independently of curl's version, and bound
+  both pre- and post-install version checks by time and output size.
 
 ## [0.7.4] - 2026-09-11
 

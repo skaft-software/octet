@@ -43,6 +43,15 @@ the metadata digest and every tarball's SHA-256/SHA-512 digests. Local scripts
 check deterministic packing, tarball/path/lifecycle/secret handling, and an
 offline install; they do **not** prove registry publication or macOS acceptance.
 
+All files in the [public documentation inventory](../package-assets.txt) are
+retained byte-for-byte from the verified native assets. Packing restores files
+that npm's ignore rules would omit before final checksums and provenance are
+computed; it never substitutes checkout documentation. Ordinary npm installation
+renames `.gitignore` metadata to `.npmignore`. Its bytes are verified at that
+installed name; other inventoried paths remain unchanged. This is documentation,
+not a Git checkout: use the version-pinned source checkout for benchmark
+reproduction and its original Git ignore rules. No lifecycle hook repairs files.
+
 The protected job downloads a fixed npm CLI tarball, verifies its recorded
 SHA-512 integrity, and installs it with lifecycle scripts, audit, and funding
 disabled. After publication, verification checks registry package integrity and

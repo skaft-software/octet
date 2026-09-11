@@ -150,8 +150,10 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The four official executable bundles and Serve 0.7.0 are published with verified
-signatures and public installation. Catalog forms select an exact-version package:
+The four official executable bundles and the separate Serve application must
+match octet 0.7.5. Availability, signed assets, and public-install verification
+are recorded on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+Catalog forms select the package matching the running host version:
 
 ```text
 octet extension install NAME

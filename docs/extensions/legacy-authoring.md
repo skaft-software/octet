@@ -6,11 +6,13 @@ quickstart. New authoring uses [API `0.3`](../extensions.md); the
 [generated contract](API-0.3-REFERENCE.md) alone defines that wire. Shared host
 operations below do not upgrade legacy methods or SDKs.
 
-**Identity boundary:** octet 0.7.0 source uses only octet first-party names,
+**Identity boundary:** octet 0.7.5 source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
-First-party source SDK/extension distributions are version `0.7.0`; independent
-examples keep their own versions.
+The source SDK distributions and four official executable bundles are version
+`0.7.5`; the Pi compatibility bridge and independent examples keep their own
+versions. This is not SDK registry publication; see
+[installation and availability](../installation.md).
 
 The [legacy protocol reference](PROTOCOL-REFERENCE.md) retains complete API
 `0.1`/`0.2` method, request/response, type, and lifecycle detail. Process
@@ -158,7 +160,7 @@ name = "git-tools"
 version = "0.2.0"
 api_version = "0.2"
 # Required for an installable bundle; optional for an unpackaged local copy.
-requires_octet = "=0.7.0"
+requires_octet = "=0.7.5"
 description = "Small local git helpers"
 
 [entrypoint]
@@ -716,9 +718,11 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 
 ## Installable extension bundles
 
-Published-catalog commands below describe source behavior conditional on
-separately verified publication. They do not assert that an octet 0.7.0 bundle
-can be downloaded now. Use a reviewed source or local archive for this checkout.
+Catalog commands select the package matching the running host version. For
+octet 0.7.5 availability, signed assets, and public-install verification, consult
+the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+Use a reviewed source or local archive when matching publication has not been
+verified.
 
 Executable bundles use runtime `extension.toml`, not Serve's application launcher
 manifest. An archive has exactly one root named for the extension, all regular
@@ -742,9 +746,9 @@ metadata**, not a version to substitute into a new authoring guide:
 
 ```toml
 name = "octet-web-search"
-version = "0.7.0"
+version = "0.7.5"
 api_version = "0.2"
-requires_octet = "=0.7.0"
+requires_octet = "=0.7.5"
 ```
 
 `requires_octet` is optional for unpackaged local copies but enforced when
@@ -830,7 +834,7 @@ loopback/process/workspace capabilities. Official installation uses a matching
 target archive and shared release `SHA256SUMS`; local archives use:
 
 ```console
-octet extension install --path ./octet-serve-0.7.0-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.7.5-TARGET.tar.gz
 ```
 
 The application archive retains its strict two-file payload and atomic install.

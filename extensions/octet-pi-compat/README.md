@@ -7,7 +7,7 @@ import a setup first; a generated link is not proof of compatibility.
 
 ## Create a local link
 
-With [octet 0.7.0 installed](../../docs/installation.md) and a separately reviewed
+With [octet 0.7.5 installed](../../docs/installation.md) and a separately reviewed
 local Pi installation:
 
 ```console
@@ -32,8 +32,8 @@ details source order, fingerprints, integrity, link identity, and rollback.
 
 ## Pinned compatibility profile
 
-The bridge distribution is `0.7.0`; Pi `0.84.4` and the live API version are
-independent contracts. It requires exactly
+The bridge distribution remains `0.7.0`, independently of octet `0.7.5`;
+Pi `0.84.4` and the live API version are also independent contracts. It requires exactly
 `@earendil-works/pi-coding-agent@0.84.4` and Node 22.19 or newer, validated before
 importing extension code. It never silently adopts a newer Pi runtime from
 `PATH`. `octet pi plan --pi-package DIR` records a canonical nonstandard package

@@ -3,8 +3,9 @@
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
 Serve remains experimental. This checkout's source distribution is 0.7.5;
-public packages must match exactly. See the [release record](../../docs/releases/v0.7.5.md)
-for publication and installation evidence. These implementation contracts do not
+public packages must match exactly. The [source notes](../../docs/releases/v0.7.5.md)
+describe changes; the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5)
+records publication and installation evidence. These implementation contracts do not
 imply complete feature or live-provider acceptance.
 
 ## Focused checks

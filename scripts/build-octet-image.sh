@@ -116,6 +116,47 @@ git -C "$repository_directory" archive --format=tar "$source_commit" \
 printf '%s\n' "$source_commit" > "$context/.octet-container-source"
 chmod 0644 "$context/.octet-container-source"
 
+# Stage the finite public documentation inventory from the clean snapshot.
+# Docker copies this data-only tree, never broad extension/runtime directories.
+python3 - "$context" <<'PYDOCS'
+import pathlib
+import re
+import shutil
+import sys
+
+context = pathlib.Path(sys.argv[1])
+package = context / ".octet-package-docs"
+package.mkdir(mode=0o755)
+seen = set()
+for line in (context / "docs/package-assets.txt").read_text(encoding="utf-8").splitlines():
+    if not line or line.startswith("#"):
+        continue
+    kind, separator, name = line.partition(" ")
+    if (kind not in {"text", "asset"} or not separator
+        or not re.fullmatch(r"[A-Za-z0-9_./-]+", name)
+        or any(part in {"", ".", ".."} for part in name.split("/")) or name in seen):
+        raise SystemExit("unsafe or duplicate documentation inventory path")
+    seen.add(name)
+    path = context
+    for component in name.split("/"):
+        path /= component
+        if path.is_symlink():
+            raise SystemExit(f"documentation asset traverses a link: {name}")
+    if not path.is_file():
+        raise SystemExit(f"documentation asset is not a regular file: {name}")
+    if kind == "text":
+        path.read_text(encoding="utf-8")
+    elif not name.startswith("docs/"):
+        raise SystemExit(f"non-text documentation assets must be under docs/: {name}")
+    destination = package / name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, destination)
+    destination.chmod(0o644)
+# The runtime is unprivileged even when the build host has a private umask.
+for directory in [package, *(path for path in package.rglob("*") if path.is_dir())]:
+    directory.chmod(0o755)
+PYDOCS
+
 if [[ "$mode" == context ]]; then
     printf 'created clean octet container context at %s (%s)\n' "$context" "$source_commit"
 else

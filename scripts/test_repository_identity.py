@@ -131,6 +131,12 @@ class ReleaseDocumentationTests(unittest.TestCase):
         notes = (root / "docs/releases" / f"v{version}.md").read_text()
         self.assertEqual(notes.splitlines()[0], f"# octet {version}")
         normalized = " ".join(notes.lower().split())
+        # Registry publication is a separate gate from native/Serve publication.
+        # Permit only this explicit channel disclaimer, not an unpublished-product claim.
+        normalized = normalized.replace(
+            "npm, homebrew, crates.io and sdk registries are separate, unpublished channels.",
+            "",
+        )
         for stale in ("unpublished", "source candidate", "publication remains blocked",
                       "release gate — open", "acceptance is unrun"):
             self.assertNotIn(stale, normalized)

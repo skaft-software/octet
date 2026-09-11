@@ -28,7 +28,8 @@ struct EmulatedTerminal {
 
 struct StatusFrameObserver {
     state: SharedState,
-    frames: mpsc::Sender<(Instant, usize)>,
+    // Completion time, selected shimmer phase, and the complete frame's byte end.
+    frames: mpsc::Sender<(Instant, usize, usize)>,
     delay: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -67,7 +68,8 @@ impl sexy_tui_rs::Terminal for EmulatedTerminal {
         if data.contains("\x1b[?2026l") {
             if let Some(observer) = &self.status_frames {
                 let phase = observer.state.borrow().status_shimmer_frame;
-                let _ = observer.frames.send((Instant::now(), phase));
+                let end = self.bytes.lock().unwrap().len();
+                let _ = observer.frames.send((Instant::now(), phase, end));
                 thread::sleep(Duration::from_millis(
                     observer.delay.load(std::sync::atomic::Ordering::Relaxed),
                 ));
@@ -12819,7 +12821,7 @@ fn provider_usage_uncertain_never_infers_zero_from_pricing() {
 // on its owning thread; it never enters raw mode or opens a provider/session.
 struct StatusRenderLoop {
     shell: InteractiveShell,
-    frames: mpsc::Receiver<(Instant, usize)>,
+    frames: mpsc::Receiver<(Instant, usize, usize)>,
     delay: Arc<std::sync::atomic::AtomicU64>,
     bytes: Arc<Mutex<Vec<u8>>>,
 }
@@ -12903,29 +12905,31 @@ fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
         ..
     } = status_render_loop_shell(crate::tui::theme::test_theme());
     let first = frames.recv_timeout(Duration::from_secs(2)).unwrap();
-    thread::sleep(Duration::from_millis(2050));
-    let samples = frames.try_iter().collect::<Vec<_>>();
-    assert!(
-        (20..=30).contains(&samples.len()),
-        "frames: {}",
-        samples.len()
-    );
-    assert!(
-        samples.last().unwrap().1 >= 24,
-        "long label gets a full sweep"
-    );
-    for &(at, phase) in &samples {
-        let elapsed_ticks = at.duration_since(first.0).as_millis() / 80;
-        assert!((phase as u128).abs_diff(elapsed_ticks) <= 1);
-    }
+    assert_eq!(first.1, 0);
+    // Missed 80 ms deadlines skip frames, so a shared runner need not paint
+    // 20 frames in 2050 ms. Await the sweep and the same ANSI palette coverage,
+    // with one finite liveness deadline, rather than asserting OS throughput.
+    let deadline = first.0 + Duration::from_secs(10);
+    let mut sample = first;
+    let mut samples = 0;
+    let mut consumed = 0;
     let mut parser = vt100::Parser::new(24, 80, 100);
     let mut palettes = Vec::new();
-    let output = bytes.lock().unwrap().clone();
-    for frame in output.split_inclusive(|byte| *byte == b'l') {
-        parser.process(frame);
-        if !frame.ends_with(b"\x1b[?2026l") {
-            continue;
-        }
+    loop {
+        let (at, phase, end) = sample;
+        let elapsed_ticks = at.duration_since(first.0).as_millis() / 80;
+        assert!(
+            (phase as u128).abs_diff(elapsed_ticks) <= 1,
+            "phase {phase} at {elapsed_ticks} elapsed ticks"
+        );
+        // Upper-bound actual writes by elapsed cadence, not a fixed sleep's
+        // expected count. A late renderer must not replay missed frames.
+        assert!(samples <= elapsed_ticks + 1, "frame flood: {samples}");
+        assert!(end < 100_000, "terminal byte flood: {end}");
+        let frame = bytes.lock().unwrap()[consumed..end].to_vec();
+        assert!(!frame.windows(4).any(|part| part == b"\x1b[3J"));
+        parser.process(&frame);
+        consumed = end;
         for (row, line) in parser.screen().rows(0, 80).enumerate() {
             if let Some(column) = line.find("Compacting context") {
                 let palette = (column..column + "Compacting context".len())
@@ -12942,18 +12946,28 @@ fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
                 }
             }
         }
+        if phase >= 24 && palettes.len() >= 20 {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "incomplete sweep: phase {phase}, {samples} frames, {} palettes",
+            palettes.len()
+        );
+        sample = frames.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "waiting for sweep: {error}; phase {phase}, {samples} frames, {} palettes",
+                palettes.len()
+            )
+        });
+        samples += 1;
     }
-    assert!(
-        palettes.len() >= 20,
-        "distinct ANSI palettes: {}",
-        palettes.len()
-    );
-    assert!(!output.windows(4).any(|part| part == b"\x1b[3J"));
-    assert!(output.len() < 100_000);
     eprintln!(
-        "status-loop idle compaction: {} frames, {} palettes in 2050ms",
-        samples.len(),
-        palettes.len()
+        "status-loop idle compaction: {samples} frames, {} palettes, phase {} in {:?}",
+        palettes.len(),
+        sample.1,
+        sample.0.duration_since(first.0)
     );
     shell.set_run_label("idle");
     shell.render();
@@ -13064,7 +13078,7 @@ fn status_render_loop_retry_compaction_and_cancellation_transitions() {
     let mut await_label = |label: &str| {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let (at, phase) = frames
+            let (at, phase, _) = frames
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or_else(|error| {
                     panic!(

@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_directory=$(cd "$(dirname "$0")" && pwd)
 source_installer="$script_directory/install.sh"
+python3 "$script_directory/test-packaged-docs.py"
 work_directory=$(mktemp -d "${TMPDIR:-/tmp}/octet-installer-test.XXXXXX")
 trap 'rm -rf "$work_directory"' EXIT
 assets="$work_directory/assets"
@@ -119,7 +120,7 @@ make_archive() {
     mkdir -p "$assets"
     cp "$fake_bin/cosign-template" "$assets/cosign-darwin-arm64"
     printf '%s\n' 'test sigstore bundle' > "$assets/OCTET_SHA256SUMS.sigstore.json"
-    python3 - "$assets/$archive_name" "$package" "$variant" <<'PY'
+    python3 - "$assets/$archive_name" "$package" "$variant" "$script_directory/../docs/package-assets.txt" <<'PY'
 import gzip
 import io
 import pathlib
@@ -136,6 +137,21 @@ files = {
     "octet": b'''#!/bin/sh
 case "${1:-}" in
     --version)
+        phase=pre
+        [ "$0" != "$OCTET_INSTALL_DIR/octet" ] || phase=final
+        if [ "${OCTET_TEST_VERSION_PHASE:-}" = "$phase" ]; then
+            case "${OCTET_TEST_VERSION_BEHAVIOR:-}" in
+                wrong) printf '%s\\n' 'probe private diagnostic'; exit 0 ;;
+                nonzero) printf '%s\\n' 'probe private diagnostic' >&2; exit 42 ;;
+                oversize) python3 -c 'import sys; sys.stdout.write("x" * 2048)'; exit 0 ;;
+                stderr-oversize) python3 -c 'import sys; sys.stderr.write("x" * 2048)'; exit 0 ;;
+                no-newline) printf '%s' 'octet 0.7.5'; exit 0 ;;
+                extra-newline) printf 'octet 0.7.5\\n\\n'; exit 0 ;;
+
+                hang) exec sleep 30 ;;
+                descendant) sleep 30 & echo "$!" > "$OCTET_TEST_DESCENDANT_PID"; exit 0 ;;
+            esac
+        fi
         if [ "${OCTET_TEST_FINAL_VERSION_FAIL:-0}" = 1 ] && [ "$0" = "$OCTET_INSTALL_DIR/octet" ]; then
             printf '%s\\n' 'installed version probe failed' >&2
             exit 42
@@ -165,7 +181,20 @@ esac
     "examples/README.md": b"# Example\n",
     "sdk/README.md": b"# SDK\n",
 }
-directories = [package, f"{package}/docs", f"{package}/examples", f"{package}/sdk"]
+for line in pathlib.Path(sys.argv[4]).read_text().splitlines():
+    if line and not line.startswith("#"):
+        name = line.split(" ", 1)[1]
+        if name != "README.md" and not name.startswith(("docs/", "examples/", "sdk/")):
+            files.setdefault(name, ("# Public fixture " + name + "\n").encode())
+if variant == "missing-reference":
+    del files["SECURITY.md"]
+if variant == "extension-runtime":
+    files["extensions/octet-browse/extension.py"] = b"# must not ship\n"
+directories = [package] + sorted({
+    f"{package}/{parent.as_posix()}"
+    for name in files for parent in pathlib.PurePosixPath(name).parents
+    if parent.as_posix() != "."
+})
 
 class Zeros(io.RawIOBase):
     def __init__(self, size):
@@ -382,6 +411,13 @@ printf '%s\n' '{"protocol_version":1,"request_id":"installer-probe","command":"h
     | grep -F '"sdk_version":"0.7.5"' >/dev/null
 test "$("$positive_home/bin/octet" --version)" = 'octet 0.7.5'
 test -f "$positive_home/share/octet/README.md"
+while read -r kind relative; do
+    case "$kind" in text|asset) ;; *) continue ;; esac
+    case "$relative" in docs/*|examples/*|sdk/*) continue ;; esac
+    test -f "$positive_home/share/octet/$relative"
+done < "$script_directory/../docs/package-assets.txt"
+test ! -e "$positive_home/share/octet/extensions/octet-browse/extension.py"
+
 test -f "$positive_home/share/octet/docs/index.md"
 test -f "$positive_home/share/octet/docs/current-reference.md"
 test ! -e "$positive_home/bin/ygg"
@@ -462,6 +498,12 @@ env \
     OCTET_TEST_EXPECTED_IDENTITY="$expected_identity" \
     python3 "$script_directory/test-installer-progress.py" "$installer" "$work_directory"
 
+env PATH="$fake_bin:$PATH" OCTET_TEST_ASSETS="$assets" \
+    OCTET_TEST_COSIGN_LOG="$work_directory/cosign.log" \
+    OCTET_TEST_EXPECTED_IDENTITY="$expected_identity" \
+    python3 "$script_directory/test-installer-version.py" "$installer" "$work_directory"
+
+
 expect_failure untrusted 'redirected to an untrusted host' OCTET_TEST_REDIRECT_HOST=example.com
 expect_failure signature 'release checksum provenance verification failed' OCTET_TEST_BAD_SIGNATURE=1
 expect_failure cosign-tamper 'checksum mismatch for the pinned cosign verifier' OCTET_TEST_TAMPER_COSIGN=1
@@ -473,6 +515,8 @@ printf '%s  ./%s\n' "$(sha256_file "$assets/$archive_name")" "$archive_name" \
 expect_failure duplicate-checksum 'release checksum manifest contains duplicate entries'
 
 for case_spec in \
+    'missing-reference|missing required members' \
+    'extension-runtime|unexpected layout' \
     'link|links or unexpected entry types' \
     'duplicate|duplicate member' \
     'portable-collision|colliding portable paths' \

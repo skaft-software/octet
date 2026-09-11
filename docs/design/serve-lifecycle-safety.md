@@ -4,8 +4,10 @@ Maintainer reference for safety contracts described by the experimental
 `octet serve` source snapshot. For local use, see the
 [Serve guide](../experimental/octet-serve/README.md). The contracts protect
 octet's trust, persistence, and protocol boundaries; they do **not** turn octet
-into an operating-system sandbox. Current-version recovery qualification is
-deferred; the verification references below are not a new octet 0.7.0 pass.
+into an operating-system sandbox. This document describes octet 0.7.5 source
+contracts, not a new qualification pass. The [0.7.4 recovery record](../qualification/v0.7.4-recovery.md)
+retains its historical scope; current release results belong to the
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
 
 ## Security model
 

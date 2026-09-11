@@ -112,6 +112,7 @@ fn octet_documentation_paths(workspace: &Path) -> Option<[PathBuf; 5]> {
 
 const EMBEDDED_DOCUMENTATION_VERSION_FILE: &str = ".octet-version";
 const EMBEDDED_DOCUMENTATION_ARCHIVE: &[u8] = include_bytes!(env!("OCTET_EMBEDDED_DOCS_ARCHIVE"));
+include!(concat!(env!("OUT_DIR"), "/octet-documentation-files.rs"));
 
 fn installed_documentation_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -170,20 +171,14 @@ fn documentation_version_is_current(root: &Path) -> bool {
 }
 
 fn validate_embedded_documentation_path(path: &Path) -> anyhow::Result<()> {
-    let mut components = path.components();
-    let Some(std::path::Component::Normal(first)) = components.next() else {
-        anyhow::bail!("embedded documentation contains an empty path");
-    };
-    if !matches!(
-        first.to_str(),
-        Some("README.md" | "docs" | "examples" | "sdk")
-    ) {
-        anyhow::bail!("embedded documentation contains an unexpected root");
-    }
-    for component in components {
-        if !matches!(component, std::path::Component::Normal(_)) {
-            anyhow::bail!("embedded documentation contains an unsafe path");
-        }
+    if !path
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+        || !EMBEDDED_DOCUMENTATION_FILES
+            .iter()
+            .any(|name| path == Path::new(name))
+    {
+        anyhow::bail!("embedded documentation contains an unexpected or unsafe path");
     }
     Ok(())
 }
@@ -196,13 +191,17 @@ fn unpack_embedded_documentation(destination: &Path) -> anyhow::Result<()> {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         validate_embedded_documentation_path(&path)?;
-        if !entry.header().entry_type().is_dir() && !entry.header().entry_type().is_file() {
+        if !entry.header().entry_type().is_file() {
             anyhow::bail!("embedded documentation contains a non-regular entry");
         }
         entry.unpack_in(destination)?;
     }
 
-    if documentation_paths(destination).is_none() {
+    if documentation_paths(destination).is_none()
+        || EMBEDDED_DOCUMENTATION_FILES
+            .iter()
+            .any(|name| !destination.join(name).is_file())
+    {
         anyhow::bail!("embedded documentation is incomplete");
     }
     fs::write(
@@ -1655,6 +1654,49 @@ Environment:
         assert!(report
             .join("evidence/audit-evidence-files.sha256")
             .is_file());
+    }
+
+    #[test]
+    fn embedded_documentation_preserves_current_public_source_text() {
+        let root = tempfile::tempdir().unwrap();
+        unpack_embedded_documentation(root.path()).unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for name in EMBEDDED_DOCUMENTATION_FILES {
+            assert_eq!(
+                fs::read(root.path().join(name)).unwrap(),
+                fs::read(source.join(name)).unwrap(),
+                "stale packaged {name}"
+            );
+        }
+        for name in [
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+            "CHANGELOG.md",
+            "THIRD_PARTY_NOTICES.md",
+            "LICENSE",
+            "extensions/octet-browse/REFERENCE.md",
+            "extensions/octet-subagents/REFERENCE.md",
+            "extensions/octet-pi-compat/profiles/0.84.4.json",
+            "crates/octet-ai/src/responses_ws.rs",
+            "sdk/typescript/src/api_v03.ts",
+            "sdk/typescript/src/api_v03.mjs",
+        ] {
+            assert!(root.path().join(name).is_file(), "missing {name}");
+        }
+        for name in [
+            "../SECURITY.md",
+            "/README.md",
+            "extensions/octet-browse/extension.toml",
+            "extensions/octet-browse/extension.py",
+            "crates/octet-coding-agent/src/main.rs",
+            "docs/private.md",
+            "sdk/private.so",
+        ] {
+            assert!(
+                validate_embedded_documentation_path(Path::new(name)).is_err(),
+                "accepted {name}"
+            );
+        }
     }
 
     #[test]

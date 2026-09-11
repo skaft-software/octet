@@ -163,12 +163,12 @@ cancellation. The AI client reports post-send header/body failures rather than
 silently retrying them; zero visible output does not establish nonacceptance.
 The agent retains this conservative default for unqualified requests, but may
 replace host-qualified Codex local-function inference before assistant commit,
-even after provisional generation. The developing candidate separates finite
+even after provisional generation. The agent separates finite
 streamed-inference replacement and HTTP-admission budgets; neither authorizes
 blanket retry or establishes the number of accepted generations or charges.
 Transport fallback does not reset these logical-turn budgets. See the
 [recovery boundary](../tools.md#recovery-and-security) and
-[candidate qualification](../qualification/v0.7.4-recovery.md).
+[historical v0.7.4 recovery qualification](../qualification/v0.7.4-recovery.md).
 The coding product uses a
 fifteen-minute response-header default for built-in and custom routes; custom
 providers can override that startup allowance for their own cold-start profile.

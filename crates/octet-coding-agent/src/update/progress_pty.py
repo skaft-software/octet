@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix="octet-update-ui-") as root:
     root = pathlib.Path(root)
     fake = root / "curl"
     fake.write_text("""#!/usr/bin/env python3
-import os, pathlib, sys
+import os, pathlib, sys, time
 assert sys.argv[sys.argv.index('--output') + 1] == '-'
 mode = os.environ['OCTET_TEST_UPDATE_UI']
 marker = pathlib.Path(os.environ['OCTET_TEST_UPDATE_MARKER'])
@@ -38,13 +38,24 @@ if mode == 'fetch-empty':
     sys.stdout.buffer.write(b'')
 elif mode == 'fetch-large':
     sys.stdout.buffer.write(b'x' * 262145)
+elif mode == 'fetch-stream-large':
+    # Model legacy curl receiving an unknown-length body: it ignores the byte
+    # flag and keeps producing unless the host closes the pipe and stops it.
+    sys.stdout.write('touch "' + str(marker) + '"\\n')
+    sys.stdout.flush()
+    for index in range(128):
+        sys.stdout.buffer.write(b'#' + b'x' * 16382 + b'\\n')
+        sys.stdout.buffer.flush()
+        with marker.with_suffix('.count').open('ab', buffering=0) as counter:
+            counter.write(b'x')
+        time.sleep(0.01)
 else:
     sys.stdout.write('test "$OCTET_UPDATE_PARENT_UI" = 1 || exit 3\\ntouch "' + str(marker) + '"\\n')
 if mode == 'fetch-failed':
     raise SystemExit(22)
 """)
     fake.chmod(0o700)
-    for mode in ["fetch-failed", "fetch-empty", "fetch-large", "fetch-ok"]:
+    for mode in ["fetch-failed", "fetch-empty", "fetch-large", "fetch-stream-large", "fetch-ok"]:
         marker = root / mode
         env = environment(mode)
         env["PATH"] = str(root) + os.pathsep + env["PATH"]
@@ -52,6 +63,8 @@ if mode == 'fetch-failed':
         result = subprocess.run(argv, env=env, capture_output=True, timeout=5)
         assert result.returncode == 0, (mode, result.stdout, result.stderr)
         assert marker.exists() == (mode == "fetch-ok"), mode
+        if mode == "fetch-stream-large":
+            assert 1 <= len(marker.with_suffix('.count').read_bytes()) < 128, "host consumed the oversized stream"
         assert b"\x1b" not in result.stderr and b"\r" not in result.stderr
 
     for term in ["dumb", "xterm-256color", ""]:

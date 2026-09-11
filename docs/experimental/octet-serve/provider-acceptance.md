@@ -1,14 +1,15 @@
 # Configured-provider acceptance
 
 Maintainer reference for provider routes and acceptance procedures in the
-supplied source snapshot. For usage, see the [Serve guide](README.md).
-Optional live-provider checks have **not been run** for octet 0.7.0. Graphical
-media, recovery, and capture work remains separately tracked. Provider/reasoning
-work outside this snapshot must be reconciled with the final source before
-integration.
+octet 0.7.5 source. For usage, see the [Serve guide](README.md). Optional
+live-provider/native-host audio checks are **NOT RUN** in this source review.
+Graphical media, recovery, and capture work remains separately tracked. The
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5)
+records publication verification and any separately approved live acceptance;
+source contracts are not live-provider or model-capability qualification.
 
 The retained [v0.4.0 record](#release-record) is historical Ygg evidence, not a
-pass or waiver of [octet 0.7.0 release gates](../../releases/v0.7.0.md).
+pass or waiver of current release gates.
 
 ## Acceptance boundaries
 
@@ -31,10 +32,16 @@ audio acceptance does not establish web attachment support: production Serve
 supports images and bounded prompt documents, not audio. The bundled extension
 runtime examples are not qualified API 0.3 authoring examples.
 
-## Supported provider matrix
+<a id="supported-provider-matrix"></a>
 
-This is the route inventory recorded by the snapshot, not a final provider or
-model-capability qualification.
+## Acceptance route matrix
+
+These are representative routes for the procedures below, not a complete
+provider inventory or model-capability qualification. See the
+[provider guide](../../providers.md) for additional declared routes, including
+Google, Bedrock, Azure, Mistral, and Cloudflare, and their configuration limits.
+The protected workflow selects Responses, Messages, Chat, and one native-audio
+route; it does not exercise every declared provider.
 
 | Route | Providers | Credential source | Deterministic coverage | Optional live representative |
 | --- | --- | --- | --- | --- |
@@ -107,7 +114,7 @@ loopback-only and credential-free. No current run is reported here.
 The snapshot describes a protected `Stable provider acceptance` workflow. Both
 stable release workflows expose `require_provider_acceptance`, defaulting to
 `false`. Packaging then does not read provider secrets or require an acceptance
-run; this is the credential-free release policy for octet 0.7.0. Setting it to
+run; this is the credential-free release policy for octet 0.7.5. Setting it to
 `true` explicitly opts that workflow run into fail-closed exact-SHA and
 protected-approval enforcement.
 

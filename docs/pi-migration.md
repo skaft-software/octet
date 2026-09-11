@@ -9,7 +9,7 @@ octet migrate pi --dry-run
 This scanner reads local files without running package code, starting a model,
 or changing either setup. It always runs dry, even without `--dry-run`; it is
 not an apply command or a compatibility promise. These commands are included in
-[octet 0.7.0](installation.md). Pi sources and the pinned Pi runtime remain
+[octet 0.7.5](installation.md). Pi sources and the pinned Pi runtime remain
 separately reviewed local inputs.
 
 ## Current command
@@ -98,7 +98,8 @@ scripts, copies the Pi runtime, nor enables/trusts the link.
   `ExtensionRunner`, event bus, `globalThis`, and registry set.
 - Compilation requires exactly `@earendil-works/pi-coding-agent@0.84.4`, selected
   by `--pi-package` or bounded local discovery. Prefer an explicit path in
-  automation. The bridge distribution `0.7.0` targets Pi `0.84.4` and Node 22.19+.
+  automation. The independently versioned bridge distribution remains `0.7.0`,
+  targeting Pi `0.84.4` and Node 22.19+; it is not the octet host version.
 - `--output` requires an existing non-symlink parent and a new file; it never
   replaces a plan. Without it, stdout is canonical JSON and the inertness note
   goes to stderr, so stdout can be redirected.
