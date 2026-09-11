@@ -9,9 +9,11 @@ owners privately through the GitHub organization.
 
 ## Supported versions
 
-octet is pre-1.0 software. Version 0.7.1 is the current source version. Reports
-against the release or current source are welcome; include the version and
-commit because behavior may change.
+octet is pre-1.0 software. The latest published release is 0.7.3; this checkout
+is the unpublished 0.7.4 source candidate, with the #382 physical acceptance
+gate still open. See the [candidate notes](docs/releases/v0.7.4.md). Reports
+against the published release or current source are welcome; include the version
+and commit because behavior may change.
 
 ## Permissions
 

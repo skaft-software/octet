@@ -1,8 +1,13 @@
 # octet Browse reference
 
+**Source candidate 0.7.4 is UNPUBLISHED.** Public catalog commands below apply
+to published octet 0.7.3 and its matching bundle; local candidate sources or
+archives require a locally built octet 0.7.4. See
+[the open release gates](../../docs/releases/v0.7.4.md).
+
 [Usage guide](README.md). This reference describes the bundled API `0.2`
-implementation, not current extension authoring. Distribution `0.7.3` requires
-exactly octet `0.7.3` and pins `playwright==1.57.0`.
+implementation, not current extension authoring. Distribution `0.7.4` requires
+exactly octet `0.7.4` and pins `playwright==1.57.0`.
 
 The opt-in executable always launches Playwright's bundled Chromium visibly
 (`headless=False`) with a persistent profile owned only by octet Browse. It never
