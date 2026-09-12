@@ -1848,9 +1848,26 @@ fn discovered_reasoning_capability(
                 .unwrap_or(OpenAiChatReasoningMode::SystemMessage),
         },
         Protocol::OpenAiResponses => OpenAiChatReasoningMode::Standard,
-        // A Messages boolean/effort inventory does not prove adaptive thinking.
+        // Native codecs need a declaration-owned control/budget contract, but
+        // that must not broaden an endpoint's narrower exact choices/default.
         Protocol::AnthropicMessages | Protocol::GoogleGenerativeAi | Protocol::BedrockConverse => {
-            return known
+            let mut capability = known?;
+            if metadata.control.is_some_and(|control| {
+                control != ReasoningControl::Effort && control != capability.control
+            }) {
+                return None;
+            }
+            if let Some(options) = &metadata.options {
+                if options
+                    .choices()
+                    .iter()
+                    .any(|choice| !capability.supports(choice))
+                {
+                    return None;
+                }
+                capability.options = Some(options.clone());
+            }
+            return Some(capability);
         }
     };
     let mut capability = known.unwrap_or_else(|| {

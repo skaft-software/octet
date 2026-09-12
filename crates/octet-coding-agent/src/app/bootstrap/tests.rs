@@ -4483,3 +4483,82 @@ fn pinned_metadata_sparse_static_routes_keep_their_declared_wire_profiles() {
         assert_eq!(reasoning.control, expected.control);
     }
 }
+
+#[test]
+fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "opencode")
+        .unwrap();
+    for api_name in [
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-unknown-fixture",
+    ] {
+        for (values, expected) in [
+            (serde_json::json!(["low", "high"]), true),
+            (serde_json::json!(["low", "ultra"]), false),
+            (serde_json::json!(["none", "default"]), false),
+        ] {
+            let mut catalog = ModelCatalog::default();
+            for route in declaration.routes {
+                let id = EndpointId(route.endpoint_id.into());
+                if !catalog.has_endpoint(&id) {
+                    catalog
+                        .register_endpoint(Endpoint {
+                            id,
+                            base_url: url::Url::parse("https://fixture.invalid/").unwrap(),
+                            auth: Auth::None,
+                            default_headers: Default::default(),
+                            transport: route.transport,
+                            runtime: route.runtime,
+                            timeout: Duration::from_secs(5),
+                        })
+                        .unwrap();
+                }
+            }
+            let default = values[0].clone();
+            register_openai_compatible_models_from_response(
+                &mut catalog,
+                declaration,
+                ModelFilter::All,
+                &serde_json::json!({"data":[{"id":api_name,
+                    "reasoning":{"supported":true,"values":values,"default":default}}]}),
+            )
+            .unwrap();
+            crate::providers::register_static_models(&mut catalog, declaration).unwrap();
+            let model = catalog
+                .resolve(&ModelId(format!("opencode/{api_name}")))
+                .unwrap();
+            assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
+            let known = declaration.static_reasoning_for(api_name, Protocol::AnthropicMessages);
+            if let Some(mut expected) = known.filter(|_| expected) {
+                expected.options = Some(octet_ai::types::ReasoningOptions {
+                    values: vec!["low".into(), "high".into()],
+                    default: Some("low".into()),
+                });
+                let actual = model.spec.capabilities.reasoning.as_ref().unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+                assert_eq!(
+                    actual.default_selection(),
+                    Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low))
+                );
+                for forbidden in [
+                    ReasoningConfig::Off,
+                    ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium),
+                    ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max),
+                ] {
+                    assert!(!actual.supports(&forbidden));
+                }
+            } else {
+                assert!(
+                    model.spec.capabilities.reasoning.is_none(),
+                    "{api_name}: {values}"
+                );
+            }
+        }
+    }
+}
