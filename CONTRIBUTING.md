@@ -146,4 +146,4 @@ vendored or derived code; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Roadmap
 
-[View the project on GitHub](https://github.com/orgs/skaft-software/projects/5).
+[Public roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md) · [Engineering backlog](https://github.com/orgs/skaft-software/projects/5) · [Maintainability plan](docs/design/maintainability.md)

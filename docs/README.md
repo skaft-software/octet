@@ -58,7 +58,7 @@
 - [0.7.4 release notes and documentation correction](releases/v0.7.4.md)
 - [0.7.3 release notes](releases/v0.7.3.md)
 - [0.7.1 release notes](releases/v0.7.1.md)
-- [Roadmap](https://github.com/orgs/skaft-software/projects/5)
+- [Roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md)
 - [Benchmarks and performance](benchmarks/README.md)
 - [Download benchmark results](assets/evidence/README.md)
 - [Brand Kit](assets/octet/README.md)

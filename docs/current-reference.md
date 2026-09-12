@@ -45,7 +45,7 @@ not a second user manual.
 | <a id="reliability-and-security-engineering"></a>Reliability and security | [Recovery and security boundaries](tools.md#recovery-and-security) |
 | <a id="development"></a>Development | [Required checks](../CONTRIBUTING.md#tests), [build profiles](build-profiles.md), [source build](installation.md#build-from-a-checkout) |
 | <a id="repository-map"></a>Repository map | [Codebase](../README.md#codebase) and [crate contracts](../crates/octet-coding-agent/README.md) |
-| <a id="documentation"></a>Documentation | [Topic navigation](README.md); planning lives in the [GitHub project](https://github.com/orgs/skaft-software/projects/5) |
+| <a id="documentation"></a>Documentation | [Topic navigation](README.md); [public roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md); [engineering backlog](https://github.com/orgs/skaft-software/projects/5) |
 | <a id="historical-ygg-distribution-reference"></a>Historical Ygg distribution | [Historical installation only](reference/historical-installation.md) |
 | <a id="historical-installer"></a>Historical installer | [Ygg v0.6.7 installer](reference/historical-installation.md#historical-installer) |
 | <a id="npm-distribution"></a>Historical npm distribution | [Conditional historical npm channel](reference/historical-installation.md#npm-distribution) |
