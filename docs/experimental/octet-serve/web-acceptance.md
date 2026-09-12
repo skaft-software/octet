@@ -1,11 +1,11 @@
 # Web acceptance
 
 Maintainer acceptance criteria, **not a current test result**. The web-first gate
-requires observed evidence for every applicable item below. For the octet 0.7.5
-source, see the [release notes](../../releases/v0.7.5.md); publication, signed
+requires observed evidence for every applicable item below. For the octet 0.7.6
+source, see the [release notes](../../releases/v0.7.6.md); publication, signed
 assets, and public-install results belong to the
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
-[0.7.4](../../releases/v0.7.4.md) is a published immutable release, not a 0.7.5
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
+[0.7.4](../../releases/v0.7.4.md) is a published immutable release, not a 0.7.6
 pass. Package smoke and historical fixtures do not establish every manual
 journey, actual-terminal/SSH behavior, private-LAN access, or endurance.
 Live-provider/native-host audio checks are optional and **NOT RUN** in this

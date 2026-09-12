@@ -11,7 +11,20 @@ Use `/model [id]` to select a model and `/status` to inspect its route and
 capabilities. Live discovery is used where a provider exposes it. `--offline`
 skips optional discovery, **not inference traffic**.
 
-> These are octet 0.7.5 source contracts, not live endpoint verification. Model
+A pinned, provider-scoped models.dev supplement fills missing metadata for models
+actually returned by supported built-in discovery. It does not inject availability,
+override API false/unknown/malformed assertions, or change configured/custom
+metadata or routes. Builds and runtime never fetch models.dev. See the
+[catalog source and pricing review](../crates/octet-ai/models/SOURCES.md).
+
+For a sparse direct DeepSeek `deepseek-flash` entry, the supplement supplies
+**DeepSeek V4.1 Flash**, 1M context / 384K output, text/image input, tools,
+structured output, and exact Off/low/high/max reasoning with native DeepSeek
+controls and reasoning replay. Direct DeepSeek's current peak/off-peak tariff is
+not modeled: pricing remains unknown unless explicitly configured, so hard
+price-dependent ceilings fail closed.
+
+> These are octet 0.7.6 source contracts, not live endpoint verification. Model
 > availability remains account- and endpoint-specific; deterministic checks do
 > not qualify every live provider.
 

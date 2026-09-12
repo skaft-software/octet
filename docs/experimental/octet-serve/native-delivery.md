@@ -1,6 +1,6 @@
 # Native delivery
 
-**Design reference, not an available graphical application.** The octet 0.7.5
+**Design reference, not an available graphical application.** The octet 0.7.6
 source has no Tauri, Xcode/iOS, or Android project, no signed graphical app
 builds, and no implemented LAN pairing. Native CLI and Serve runtime archives
 are separate release artifacts, not these proposed apps. See the

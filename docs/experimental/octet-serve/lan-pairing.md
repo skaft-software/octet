@@ -2,7 +2,7 @@
 
 # LAN pairing specification
 
-**Unimplemented design reference.** The octet 0.7.5 source supports only
+**Unimplemented design reference.** The octet 0.7.6 source supports only
 the [local loopback client](README.md). All LAN flags, routes, DTO additions,
 dependencies, native projects, and acceptance commands below are proposed
 contracts, not available setup instructions or observed passes. Connected
@@ -13,7 +13,7 @@ Work tracking is on the [Project](https://github.com/orgs/skaft-software/project
 Private-LAN pairing and native graphical shells are not implemented or qualified.
 This does not describe native CLI or Serve runtime archive availability:
 [0.7.4](../../releases/v0.7.4.md) has published signed packages, and the
-[exact 0.7.5 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5)
+[exact 0.7.6 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
 is authoritative for that version's assets and public-install verification.
 
 ## Product invariant

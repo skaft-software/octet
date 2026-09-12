@@ -1,6 +1,6 @@
 # Architecture
 
-Maintainer reference for experimental Serve in the octet 0.7.5 source, not a
+Maintainer reference for experimental Serve in the octet 0.7.6 source, not a
 release-qualification result. Start with the [Serve guide](README.md) for local
 use and version-matched package availability.
 [LAN pairing](lan-pairing.md), native shells, and production live previews remain

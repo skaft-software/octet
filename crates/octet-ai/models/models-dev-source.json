@@ -1,0 +1,7 @@
+{
+  "sha256": "922e6f74093fa6562b29dde8cb145f34bf7f42f70e7cc46cc4660a7ace759869",
+  "unverified_pricing_providers": [
+    "deepseek"
+  ],
+  "url": "https://models.dev/api.json"
+}

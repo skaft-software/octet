@@ -7,13 +7,13 @@ Usage:
   scripts/build-octet-image.sh [IMAGE]
   scripts/build-octet-image.sh --context OUTPUT_DIRECTORY
 
-Build the pinned linux/amd64 octet image (default: octet:0.7.5), or materialize
+Build the pinned linux/amd64 octet image (default: octet:0.7.6), or materialize
 the exact clean tracked Docker context for inspection.
 EOF
 }
 
 mode=build
-image=octet:0.7.5
+image=octet:0.7.6
 output_directory=
 case $# in
     0) ;;

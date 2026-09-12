@@ -102,11 +102,11 @@ for config examples, bounded manifest reads, diagnostics, and resolver APIs.
 ## Manifest
 
 Select `api_version = "0.3"` exactly; an extension's own `version` does not select
-the wire. octet 0.7.5 source uses `octet_version`, `requires_octet`, `OCTET_*`, and
+the wire. octet 0.7.6 source uses `octet_version`, `requires_octet`, `OCTET_*`, and
 `octet_extension`, with no aliases for earlier first-party wire names or imports.
-The first-party source distribution version is **0.7.5**, independent of API
+The first-party source distribution version is **0.7.6**, independent of API
 `0.3`. Catalog installation requires version-matched published assets; see
-[installation](installation.md) and the [release record](releases/v0.7.5.md).
+[installation](installation.md) and the [release record](releases/v0.7.6.md).
 
 Declare the entrypoint and tools for the implementation you actually supply.
 Return the complete tool catalog and a valid selected contract from

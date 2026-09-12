@@ -9,6 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const SNAPSHOT_PATH: &str = "models/models-dev-names.json";
+const CAPABILITIES_SNAPSHOT_PATH: &str = "models/models-dev-capabilities.json";
 const PRICING_SNAPSHOT_PATH: &str = "models/models-dev-pricing.json";
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,31 @@ fn main() {
     if pricing.is_empty() {
         panic!("models.dev pricing metadata contained no priced models");
     }
+
+    println!("cargo:rerun-if-changed={CAPABILITIES_SNAPSHOT_PATH}");
+    let capabilities: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+        &fs::read_to_string(CAPABILITIES_SNAPSHOT_PATH).expect("read capability snapshot"),
+    )
+    .expect("valid capability snapshot");
+    assert!(!capabilities.is_empty(), "empty capability snapshot");
+    let mut generated = String::from(
+        "// @generated: provider-scoped source assertions, not wire profiles\n\
+         pub(crate) static MODEL_CAPABILITIES: &[(&str, &str)] = &[\n",
+    );
+    for (key, value) in capabilities {
+        assert!(value.is_object(), "capability record must be an object");
+        generated.push_str(&format!(
+            "    ({}, {}),\n",
+            serde_json::to_string(&key).unwrap(),
+            serde_json::to_string(&value.to_string()).unwrap()
+        ));
+    }
+    generated.push_str("];\n");
+    fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("models_dev_capabilities.rs"),
+        generated,
+    )
+    .expect("write generated capabilities");
 
     write_generated(&names);
     write_generated_pricing(&pricing);

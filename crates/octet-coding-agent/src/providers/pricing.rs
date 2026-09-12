@@ -202,11 +202,9 @@ fn legacy_model_pricing(profile: PricingProfile, model_id: &str) -> Option<Prici
         PricingProfile::OpenAi => return openai_pricing(model_id),
         PricingProfile::Anthropic => return anthropic_pricing(model_id),
         PricingProfile::Google => return google_pricing(model_id),
-        PricingProfile::DeepSeek => match model_id {
-            "deepseek-v4-flash" => (140_000, 280_000, 2_800, 0),
-            "deepseek-v4-pro" => (435_000, 870_000, 3_625, 0),
-            _ => return None,
-        },
+        // A flat quote cannot model the current peak/off-peak schedule. Keep
+        // hard-cost uncertainty until a reviewed authoritative tariff exists.
+        PricingProfile::DeepSeek => return None,
         PricingProfile::MiniMax => match model_id {
             "MiniMax-M2.7" => (300_000, 1_200_000, 60_000, 375_000),
             "MiniMax-M2.7-highspeed" => (600_000, 2_400_000, 60_000, 375_000),

@@ -2,9 +2,9 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. This checkout's source distribution is 0.7.5;
-public packages must match exactly. The [source notes](../../docs/releases/v0.7.5.md)
-describe changes; the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5)
+Serve remains experimental. This checkout's source distribution is 0.7.6;
+public packages must match exactly. The [source notes](../../docs/releases/v0.7.6.md)
+describe changes; the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
 records publication and installation evidence. These implementation contracts do not
 imply complete feature or live-provider acceptance.
 
@@ -90,7 +90,7 @@ contains the adapter into private `App`. Source-level extraction behind a stable
 Runtime API is deferred; the default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface. See [architecture](../../docs/experimental/octet-serve/architecture.md).
 
-The source package requires exactly octet `=0.7.5`. Use version-matched published
+The source package requires exactly octet `=0.7.6`. Use version-matched published
 assets or a matching local build and reviewed local archive. See
 [distribution channels](../../docs/distribution.md). It declares three targets:
 

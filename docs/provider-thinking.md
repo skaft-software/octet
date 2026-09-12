@@ -9,6 +9,10 @@ live-provider availability or acceptance.
 - Discovered exact values and defaults survive caches and model selection.
   Missing metadata, unknown metadata and explicit false are distinct. Explicit
   false disables inference from a known route; malformed assertions fail closed.
+  Built-in discovery can supplement an absent contract from the pinned,
+  exact provider/model models.dev record; this does not advertise availability
+  or enrich custom/Codex inventories. Existing declaration-owned wire profiles,
+  not names or booleans, determine which semantic options can be consumed.
 - Exact sets preserve holes: `low, high` does not imply `medium`. Off is distinct
   from Minimal, and an always-on contract has only On.
 - CLI/config and persisted choices may normalize to a supported choice. Core
@@ -33,11 +37,16 @@ live-provider availability or acceptance.
 | Always-on model | On sends no reasoning control; explicit core Off is rejected |
 | Explicit Qwen enable profile | `enable_thinking` boolean |
 | Explicit Qwen chat-template profile | `chat_template_kwargs.enable_thinking`, with the configured `preserve_thinking` setting |
-| DeepSeek toggle | Native `thinking.type`; not an unrelated Qwen control |
+| DeepSeek toggle/effort | Native `thinking.type`, exact advertised effort, and `reasoning_content` replay; not an unrelated Qwen control |
 | OpenRouter | Nested `reasoning` control |
 | Together | Typed `reasoning.enabled`, plus effort only when its profile supports it |
 | Google native | Native thinking level or token-budget control, according to the selected capability; unsupported Off is not silently omitted |
 | Anthropic / Bedrock token thinking | Native enabled thinking and token budget; budget must leave output space for an answer |
+
+The pinned direct `deepseek-flash` supplement names DeepSeek V4.1 Flash and
+preserves Off/low/high/max, without inventing medium, xhigh, or a default. Source
+metadata does not universally prove Chat effort, native Messages thinking, or
+Google budget support. See the [rich source audit](../crates/octet-ai/models/SOURCES.md).
 
 A custom server's explicit profile does not change the contract of the same
 model hosted elsewhere. In particular, Cerebras **`qwen-3.8-27b`** uses

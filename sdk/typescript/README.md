@@ -1,8 +1,8 @@
 # @skaft-software/octet-extension-api-v03
 
-This checkout's source distribution is **0.7.5**, not a claim of SDK registry
+This checkout's source distribution is **0.7.6**, not a claim of SDK registry
 publication. For version-matched published native assets and installation
-evidence, see the [octet 0.7.5 release record](../../docs/releases/v0.7.5.md).
+evidence, see the [octet 0.7.6 release record](../../docs/releases/v0.7.6.md).
 
 Schema-generated ESM runtime and TypeScript declarations for the canonical octet
 extension API `0.3` contract. This example negotiates a contract locally:
@@ -18,7 +18,7 @@ This is a contract-binding example, **not a complete runnable extension**. It
 does not demonstrate a manifest, stdio process loop, tool dispatch, cancellation,
 or shutdown. Do not infer a complete extension runtime from generated bindings.
 
-The source package distribution version is `0.7.5`, independent of extension
+The source package distribution version is `0.7.6`, independent of extension
 API `0.3`. The package name does not assert npm publication or registry
 availability; native octet publication does not publish this SDK to npm.
 Generated declarations/runtime have no registry dependencies.

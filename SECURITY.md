@@ -9,8 +9,8 @@ owners privately through the GitHub organization.
 
 ## Supported versions
 
-octet is pre-1.0 software. This checkout has distribution version 0.7.5.
-See the [release record](docs/releases/v0.7.5.md) for publication and public-install
+octet is pre-1.0 software. This checkout has distribution version 0.7.6.
+See the [release record](docs/releases/v0.7.6.md) for publication and public-install
 evidence. Reports against a published release or current source are welcome;
 include the version and commit because behavior may change.
 

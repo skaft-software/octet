@@ -1092,6 +1092,259 @@ pub(crate) fn apply_discovered_reasoning(
     Ok(())
 }
 
+/// Presence, not successful decoding, controls enrichment. Unknown/null and
+/// malformed endpoint assertions must never be replaced by catalog optimism.
+fn has_metadata_assertion(entry: &serde_json::Value, names: &[&str]) -> bool {
+    [
+        Some(entry),
+        entry.get("provider"),
+        entry.get("top_provider"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|metadata| {
+        let asserted = |object: &serde_json::Value, name: &str| {
+            if let Some((container, field)) = name.split_once('/') {
+                object
+                    .get(container)
+                    .is_some_and(|value| !value.is_object() || value.get(field).is_some())
+            } else {
+                object.get(name).is_some()
+            }
+        };
+        names.iter().any(|name| asserted(metadata, name))
+            || metadata.get("capabilities").is_some_and(|caps| {
+                !caps.is_object() || names.iter().any(|name| asserted(caps, name))
+            })
+    })
+}
+
+const CONTEXT_FIELDS: &[&str] = &[
+    "context_window",
+    "context_length",
+    "max_model_len",
+    "max_context_tokens",
+    "limit/context",
+];
+const OUTPUT_FIELDS: &[&str] = &["max_output_tokens", "max_completion_tokens", "limit/output"];
+const MODALITY_FIELDS: &[&str] = &[
+    "architecture",
+    "input_modalities",
+    "modalities",
+    "vision",
+    "audio",
+];
+const TOOL_FIELDS: &[&str] = &[
+    "supports_tools",
+    "tools",
+    "tool_call",
+    "tool_calling",
+    "function_calling",
+    "supported_parameters",
+];
+const REASONING_FIELDS: &[&str] = &[
+    "reasoning",
+    "supports_reasoning",
+    "reasoning_effort",
+    "reasoning_options",
+    "supported_reasoning_levels",
+    "supported_reasoning_efforts",
+    "default_reasoning_level",
+    "default_reasoning_effort",
+    "interleaved",
+];
+
+fn enriched_builtin_entry(
+    entry: &serde_json::Value,
+    snapshot: &serde_json::Value,
+) -> serde_json::Value {
+    let mut result = entry.clone();
+    for (aliases, target, value) in [
+        (
+            &["display_name", "name"][..],
+            "display_name",
+            snapshot.get("name"),
+        ),
+        (
+            CONTEXT_FIELDS,
+            "context_window",
+            snapshot.pointer("/limit/context"),
+        ),
+        (
+            OUTPUT_FIELDS,
+            "max_output_tokens",
+            snapshot.pointer("/limit/output"),
+        ),
+        (TOOL_FIELDS, "tools", snapshot.get("tool_call")),
+        (
+            &[
+                "structured_output",
+                "supports_structured_output",
+                "supported_parameters",
+            ][..],
+            "structured_output",
+            snapshot.get("structured_output"),
+        ),
+        (
+            MODALITY_FIELDS,
+            "input_modalities",
+            snapshot.pointer("/modalities/input"),
+        ),
+    ] {
+        if !has_metadata_assertion(entry, aliases) {
+            if let Some(value) = value {
+                result[target] = value.clone();
+            }
+        }
+    }
+    result
+}
+
+fn has_reasoning_assertion(entry: &serde_json::Value) -> bool {
+    has_metadata_assertion(entry, REASONING_FIELDS)
+        || [
+            Some(entry),
+            entry.get("top_provider"),
+            entry.get("provider"),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|metadata| {
+            metadata
+                .get("supported_parameters")
+                .is_some_and(|parameters| {
+                    // A tools-only parameter list is not a negative reasoning
+                    // assertion in the existing discovery contract.
+                    parameters.as_array().is_none_or(|parameters| {
+                        parameters.iter().any(|p| {
+                            matches!(
+                                p.as_str(),
+                                Some("reasoning" | "reasoning_effort" | "reasoning.effort")
+                            )
+                        })
+                    })
+                })
+        })
+}
+
+fn builtin_discovery_reasoning(
+    entry: &serde_json::Value,
+    declaration: Option<&ProviderDeclaration>,
+    id: &str,
+    snapshot: Option<&serde_json::Value>,
+) -> anyhow::Result<DiscoveredReasoning> {
+    let mut metadata = decode_reasoning_metadata(entry)?;
+    if declaration.is_none() {
+        return Ok(metadata);
+    }
+    if !has_reasoning_assertion(entry) {
+        if let (Some(declaration), Some(snapshot)) = (declaration, snapshot) {
+            if let Some(route) = declaration.route_for_model(id) {
+                if let Some(supplement) =
+                    snapshot_reasoning_metadata(declaration, route.protocol, id, snapshot)
+                {
+                    return Ok(supplement);
+                }
+                if has_metadata_assertion(snapshot, REASONING_FIELDS) {
+                    metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
+                }
+            }
+        }
+    } else if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent {
+        metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
+    }
+    Ok(metadata)
+}
+
+/// models.dev describes semantic controls, not a universal compatible encoding.
+/// Only declaration-owned, implemented wire profiles may consume its reasoning
+/// supplement. Custom/Codex routes never call this boundary.
+fn snapshot_reasoning_metadata(
+    declaration: &ProviderDeclaration,
+    protocol: Protocol,
+    id: &str,
+    snapshot: &serde_json::Value,
+) -> Option<DiscoveredReasoning> {
+    let known = sparse_route_reasoning(declaration, protocol, id)
+        .or_else(|| declaration.static_reasoning_for(id, protocol));
+    let toggle_profile = protocol == Protocol::OpenAiChat
+        && (matches!(declaration.id, "deepseek" | "openrouter" | "together")
+            || known.as_ref().is_some_and(|capability| {
+                matches!(
+                    capability.openai_chat_mode,
+                    OpenAiChatReasoningMode::DeepSeekThinking
+                        | OpenAiChatReasoningMode::DeepSeekToggle
+                        | OpenAiChatReasoningMode::OpenRouter
+                        | OpenAiChatReasoningMode::Together { .. }
+                )
+            }));
+    let supported_profile = toggle_profile
+        || (protocol == Protocol::OpenAiChat && declaration.id == "cerebras")
+        || (protocol == Protocol::OpenAiResponses && declaration.id == "openai")
+        || known.is_some();
+    if !supported_profile {
+        return None;
+    }
+    let mut metadata = decode_reasoning_metadata(snapshot).ok()?;
+    if metadata.supported == Some(false) {
+        return Some(metadata);
+    }
+    if protocol == Protocol::AnthropicMessages
+        && known.is_some()
+        && snapshot
+            .get("reasoning")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        // Preserve an existing declaration-owned native contract when only its
+        // semantic source supplement is present. A catalog boolean did not
+        // create this codec profile; explicit endpoint assertions bypass here.
+        metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
+        metadata.supported = Some(true);
+        metadata.options = None;
+        metadata.control = None;
+        return Some(metadata);
+    }
+    let toggle = snapshot
+        .get("reasoning_options")?
+        .as_array()?
+        .iter()
+        .any(|option| option.get("type").and_then(serde_json::Value::as_str) == Some("toggle"));
+    if declaration.id == "deepseek"
+        && snapshot
+            .pointer("/interleaved/field")
+            .and_then(serde_json::Value::as_str)
+            != Some("reasoning_content")
+    {
+        return None;
+    }
+    if toggle && toggle_profile {
+        let options = metadata
+            .options
+            .get_or_insert_with(|| octet_ai::types::ReasoningOptions {
+                values: vec!["default".into()],
+                default: None,
+            });
+        if !options.choices().contains(&ReasoningConfig::Off) {
+            options.values.insert(0, "none".into());
+        }
+        metadata.control.get_or_insert(ReasoningControl::Toggle);
+        metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
+        metadata.supported = Some(true);
+    }
+    // Preserve separately documented route defaults only when the refreshed
+    // exact set still supports them. Never fill effort holes or invent defaults.
+    if let Some(options) = &mut metadata.options {
+        if options.default.is_none() {
+            options.default = known
+                .and_then(|c| c.options)
+                .and_then(|o| o.default)
+                .filter(|default| options.values.contains(default));
+        }
+    }
+    Some(metadata)
+}
+
 #[derive(Clone, Debug)]
 struct DiscoveredApiModel {
     id: String,
@@ -1104,6 +1357,8 @@ struct DiscoveredApiModel {
     display_name: Option<String>,
     vision: bool,
     audio: bool,
+    modalities_asserted: bool,
+    structured_output: Option<bool>,
 }
 
 fn is_deepseek_v4_model(id: &str) -> bool {
@@ -1137,11 +1392,8 @@ fn metadata_capability_flag(value: &serde_json::Value) -> Option<bool> {
         .or_else(|| value.get("supported").and_then(serde_json::Value::as_bool))
 }
 
-/// Inventory schemas are not standardized, but the common gateways expose
-/// tool support either as a capability flag or as a list of accepted request
-/// parameters. Keep unknown distinct from an explicit false so hosted and
-/// user-configured local endpoints can apply different safe defaults.
-fn model_metadata_tool_support(entry: &serde_json::Value) -> Option<bool> {
+fn asserted_capability(entry: &serde_json::Value, names: &[&str]) -> Option<bool> {
+    let mut supported = None;
     for metadata in [
         Some(entry),
         entry.get("top_provider"),
@@ -1150,32 +1402,72 @@ fn model_metadata_tool_support(entry: &serde_json::Value) -> Option<bool> {
     .into_iter()
     .flatten()
     {
-        for name in [
-            "supports_tools",
-            "tools",
-            "tool_calling",
-            "function_calling",
-        ] {
-            if let Some(supported) = metadata.get(name).and_then(metadata_capability_flag) {
-                return Some(supported);
-            }
-        }
-        if let Some(capabilities) = metadata.get("capabilities") {
-            for name in ["tools", "tool_calling", "function_calling"] {
-                if let Some(supported) = capabilities.get(name).and_then(metadata_capability_flag) {
-                    return Some(supported);
+        for object in [Some(metadata), metadata.get("capabilities")]
+            .into_iter()
+            .flatten()
+        {
+            for name in names {
+                if let Some(value) = object.get(*name) {
+                    match metadata_capability_flag(value) {
+                        Some(true) => supported = Some(true),
+                        // Unknown/malformed explicit flags are not positive support.
+                        Some(false) | None => return Some(false),
+                    }
                 }
             }
         }
-        if let Some(parameters) = metadata
-            .get("supported_parameters")
-            .and_then(serde_json::Value::as_array)
-        {
-            return Some(parameters.iter().any(|parameter| {
-                matches!(
-                    parameter.as_str(),
-                    Some("tools" | "tool_choice" | "functions" | "function_call")
-                )
+    }
+    supported
+}
+
+fn discovered_structured_output(entry: &serde_json::Value) -> Option<bool> {
+    asserted_capability(entry, &["structured_output", "supports_structured_output"]).or_else(|| {
+        has_metadata_assertion(entry, &["supported_parameters"]).then(|| {
+            entry
+                .get("supported_parameters")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|parameters| {
+                    parameters
+                        .iter()
+                        .any(|p| p.as_str() == Some("response_format"))
+                })
+        })
+    })
+}
+
+/// Inventory schemas are not standardized, but the common gateways expose
+/// tool support either as a capability flag or as a list of accepted request
+/// parameters. Keep unknown distinct from an explicit false so hosted and
+/// user-configured local endpoints can apply different safe defaults.
+fn model_metadata_tool_support(entry: &serde_json::Value) -> Option<bool> {
+    if let Some(supported) = asserted_capability(
+        entry,
+        &[
+            "supports_tools",
+            "tools",
+            "tool_call",
+            "tool_calling",
+            "function_calling",
+        ],
+    ) {
+        return Some(supported);
+    }
+    for metadata in [
+        Some(entry),
+        entry.get("top_provider"),
+        entry.get("provider"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(parameters) = metadata.get("supported_parameters") {
+            return Some(parameters.as_array().is_some_and(|parameters| {
+                parameters.iter().any(|parameter| {
+                    matches!(
+                        parameter.as_str(),
+                        Some("tools" | "tool_choice" | "functions" | "function_call")
+                    )
+                })
             }));
         }
     }
@@ -1203,7 +1495,8 @@ fn model_metadata_supports_reasoning(entry: &serde_json::Value) -> bool {
 /// Preserve octet's historical/local default when its sparse `/models` response
 /// says nothing about tools, while still honoring every explicit false.
 fn custom_model_metadata_supports_tools(entry: &serde_json::Value) -> bool {
-    model_metadata_tool_support(entry).unwrap_or(true)
+    model_metadata_tool_support(entry)
+        .unwrap_or_else(|| !has_metadata_assertion(entry, TOOL_FIELDS))
 }
 
 /// Read provider model-inventory modality metadata without assuming a single
@@ -1217,7 +1510,7 @@ fn input_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
         .get("architecture")
         .and_then(|value| value.get("input_modalities"))
         .or_else(|| entry.get("input_modalities"))
-        .or_else(|| entry.get("modalities"))
+        .or_else(|| entry.get("modalities").map(|m| m.get("input").unwrap_or(m)))
         .and_then(serde_json::Value::as_array);
     let mut result = ModalitySet::none();
     for value in values.into_iter().flatten() {
@@ -1238,7 +1531,15 @@ fn input_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
 /// Parse the two inventory envelopes used by supported providers: OpenAI-style
 /// `{ "data": [...] }` and Codex-style `{ "models": [...] }`. Some local
 /// servers return the array directly, so that shape is accepted as well.
+#[cfg(test)]
 fn api_models_from_response(body: &serde_json::Value) -> anyhow::Result<Vec<DiscoveredApiModel>> {
+    api_models_from_response_for(body, None)
+}
+
+fn api_models_from_response_for(
+    body: &serde_json::Value,
+    declaration: Option<&ProviderDeclaration>,
+) -> anyhow::Result<Vec<DiscoveredApiModel>> {
     let entries = body
         .get("data")
         .or_else(|| body.get("models"))
@@ -1256,10 +1557,24 @@ fn api_models_from_response(body: &serde_json::Value) -> anyhow::Result<Vec<Disc
         else {
             continue;
         };
+        let snapshot = declaration.and_then(|d| {
+            d.route_for_model(id)?;
+            octet_ai::model_metadata::model_capability_metadata(d.id, id)
+        });
+        let reasoning_metadata =
+            builtin_discovery_reasoning(entry, declaration, id, snapshot.as_ref())?;
+        let enriched = snapshot
+            .as_ref()
+            .map(|snapshot| enriched_builtin_entry(entry, snapshot));
+        let entry = enriched.as_ref().unwrap_or(entry);
         let input_modalities = input_modalities_from_entry(entry);
-        let vision =
-            input_modalities.contains(octet_ai::Modality::Image) || model_id_implies_vision(id);
-        let audio = input_modalities.contains(octet_ai::Modality::Audio);
+        let modalities_asserted = has_metadata_assertion(entry, MODALITY_FIELDS);
+        let vision = asserted_capability(entry, &["vision"]).unwrap_or_else(|| {
+            input_modalities.contains(octet_ai::Modality::Image)
+                || (!modalities_asserted && model_id_implies_vision(id))
+        });
+        let audio = asserted_capability(entry, &["audio"])
+            .unwrap_or_else(|| input_modalities.contains(octet_ai::Modality::Audio));
         models.push(DiscoveredApiModel {
             id: id.to_owned(),
             context_window: positive_u64(
@@ -1270,8 +1585,18 @@ fn api_models_from_response(body: &serde_json::Value) -> anyhow::Result<Vec<Disc
                     "max_model_len",
                     "max_context_tokens",
                 ],
-            ),
+            )
+            .or_else(|| {
+                entry
+                    .get("limit")
+                    .and_then(|limit| positive_u64(limit, &["context"]))
+            }),
             max_output_tokens: positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
+                .or_else(|| {
+                    entry
+                        .get("limit")
+                        .and_then(|limit| positive_u64(limit, &["output"]))
+                })
                 .or_else(|| {
                     entry
                         .get("top_provider")
@@ -1280,10 +1605,12 @@ fn api_models_from_response(body: &serde_json::Value) -> anyhow::Result<Vec<Disc
             tools: custom_model_metadata_supports_tools(entry),
             #[cfg(test)]
             reasoning: model_metadata_supports_reasoning(entry),
-            reasoning_metadata: decode_reasoning_metadata(entry)?,
+            reasoning_metadata,
             display_name: discovered_display_name(entry, id),
             vision,
             audio,
+            modalities_asserted,
+            structured_output: discovered_structured_output(entry),
         });
     }
     models.sort_by(|left, right| left.id.cmp(&right.id));
@@ -1482,7 +1809,8 @@ fn discovered_reasoning_capability(
     if metadata.supported == Some(false) {
         return None;
     }
-    let known = sparse_route_reasoning(declaration, protocol, id);
+    let known = sparse_route_reasoning(declaration, protocol, id)
+        .or_else(|| declaration.static_reasoning_for(id, protocol));
     if metadata.source == octet_ai::types::ReasoningMetadataSource::Unknown {
         return None;
     }
@@ -1514,7 +1842,10 @@ fn discovered_reasoning_capability(
             },
             // An explicit exact effort schema is an endpoint assertion. Boolean
             // metadata alone above is not enough to select an arbitrary profile.
-            _ => OpenAiChatReasoningMode::SystemMessage,
+            _ => known
+                .as_ref()
+                .map(|capability| capability.openai_chat_mode.clone())
+                .unwrap_or(OpenAiChatReasoningMode::SystemMessage),
         },
         Protocol::OpenAiResponses => OpenAiChatReasoningMode::Standard,
         // A Messages boolean/effort inventory does not prove adaptive thinking.
@@ -1597,7 +1928,16 @@ fn register_openai_compatible_models(
     let Some(body) = body else {
         return Ok(());
     };
-    for model in api_models_from_response(&body)? {
+    register_openai_compatible_models_from_response(catalog, declaration, filter, &body)
+}
+
+fn register_openai_compatible_models_from_response(
+    catalog: &mut ModelCatalog,
+    declaration: &ProviderDeclaration,
+    filter: ModelFilter,
+    body: &serde_json::Value,
+) -> anyhow::Result<()> {
+    for model in api_models_from_response_for(body, Some(declaration))? {
         let api_name = model.id.as_str();
         let catalog_id = format!("{}/{}", declaration.id, api_name);
         let Some(route) = discovered_preset_binding(declaration, api_name) else {
@@ -1628,7 +1968,7 @@ fn register_openai_compatible_models(
             .gpt_vision_fallback(api_name)
             && (!gpt_6_family_model(api_name) || public_openai_gpt_6_model(declaration, api_name));
         let mut input_modalities =
-            if model.vision || model_id_implies_vision(api_name) || gpt_vision_fallback {
+            if model.vision || (!model.modalities_asserted && gpt_vision_fallback) {
                 ModalitySet::none().with(octet_ai::Modality::Image)
             } else {
                 ModalitySet::none()
@@ -1651,7 +1991,9 @@ fn register_openai_compatible_models(
                 reasoning,
                 responses_lite: false,
                 agent_delegation: None,
-                structured_output: protocol != Protocol::OpenAiChat,
+                structured_output: model
+                    .structured_output
+                    .unwrap_or(protocol != Protocol::OpenAiChat),
                 deferred_tool_loading: false,
             },
             ModelLimits {
@@ -1685,7 +2027,16 @@ fn register_anthropic_compatible_models(
     else {
         return Ok(());
     };
-    for model in api_models_from_response(&body)? {
+    register_anthropic_compatible_models_from_response(catalog, declaration, filter, &body)
+}
+
+fn register_anthropic_compatible_models_from_response(
+    catalog: &mut ModelCatalog,
+    declaration: &ProviderDeclaration,
+    filter: ModelFilter,
+    body: &serde_json::Value,
+) -> anyhow::Result<()> {
+    for model in api_models_from_response_for(body, Some(declaration))? {
         let api_name = model.id.as_str();
         let catalog_id = format!("{}/{}", declaration.id, api_name);
         let Some(route) = declaration.route_for_model(api_name) else {
@@ -1706,24 +2057,30 @@ fn register_anthropic_compatible_models(
             catalog,
             declaration,
             api_name,
-            None,
+            model.display_name.clone(),
             Capabilities {
                 input_modalities: if model.vision
-                    || declaration.discovery_capabilities.assumes_image_input()
+                    || (!model.modalities_asserted
+                        && declaration.discovery_capabilities.assumes_image_input())
                 {
                     ModalitySet::none().with(octet_ai::Modality::Image)
                 } else {
                     ModalitySet::none()
                 },
                 output_modalities: ModalitySet::none(),
-                tools: true,
-                parallel_tool_calls: true,
-                // Inventing adaptive-thinking support makes older models reject
-                // otherwise valid requests, so discovery remains conservative.
-                reasoning: None,
+                tools: model.tools,
+                parallel_tool_calls: model.tools,
+                // Only a separately declared native contract is a fallback;
+                // a source boolean cannot invent adaptive-thinking support.
+                reasoning: discovered_reasoning_capability(
+                    declaration,
+                    route.protocol,
+                    api_name,
+                    &model.reasoning_metadata,
+                ),
                 responses_lite: false,
                 agent_delegation: None,
-                structured_output: true,
+                structured_output: model.structured_output.unwrap_or(true),
                 deferred_tool_loading: false,
             },
             ModelLimits {
@@ -1773,6 +2130,57 @@ fn register_deepseek_v4_pro(
     catalog: &mut ModelCatalog,
     declaration: &ProviderDeclaration,
 ) -> anyhow::Result<()> {
+    let api_name =
+        optional_env("OCTET_DEEPSEEK_MODEL")?.unwrap_or_else(|| DEEPSEEK_MODEL_ID.to_owned());
+    let discovered = discovered_deepseek_spec(catalog, declaration, &api_name);
+    let context_window = deepseek_limit(
+        "OCTET_DEEPSEEK_CONTEXT_WINDOW",
+        discovered
+            .as_ref()
+            .map_or(DEEPSEEK_DEFAULT_CONTEXT_WINDOW, |m| m.limits.context_window),
+    )?;
+    let max_output_tokens = deepseek_limit(
+        "OCTET_DEEPSEEK_MAX_OUTPUT_TOKENS",
+        discovered
+            .as_ref()
+            .map_or(DEEPSEEK_DEFAULT_MAX_OUTPUT_TOKENS, |m| {
+                m.limits.max_output_tokens
+            }),
+    )?;
+    register_deepseek_legacy_alias(
+        catalog,
+        declaration,
+        &api_name,
+        context_window,
+        max_output_tokens,
+    )
+}
+
+fn discovered_deepseek_spec(
+    catalog: &ModelCatalog,
+    declaration: &ProviderDeclaration,
+    api_name: &str,
+) -> Option<ModelSpec> {
+    let route = declaration.route_for_model(api_name)?;
+    catalog
+        .models()
+        .find(|model| {
+            model.endpoint.0 == route.endpoint_id
+                && model.api_name == api_name
+                && model.id.0 != DEEPSEEK_MODEL_ID
+        })
+        .cloned()
+}
+
+/// Keep the historical selector (including OCTET_DEEPSEEK_MODEL routing) without
+/// letting a capability seed outrank an actually admitted provider inventory.
+fn register_deepseek_legacy_alias(
+    catalog: &mut ModelCatalog,
+    declaration: &ProviderDeclaration,
+    api_name: &str,
+    context_window: u64,
+    max_output_tokens: u64,
+) -> anyhow::Result<()> {
     let route = declared_deepseek_route(declaration)?;
     let endpoint_id = EndpointId(route.endpoint_id.into());
     if !catalog.has_endpoint(&endpoint_id) {
@@ -1782,30 +2190,30 @@ fn register_deepseek_v4_pro(
         );
     }
     if has_model_id(catalog, DEEPSEEK_MODEL_ID) {
+        // A pre-existing configured model is not this function's fallback.
         return Ok(());
     }
-    let api_name =
-        optional_env("OCTET_DEEPSEEK_MODEL")?.unwrap_or_else(|| DEEPSEEK_MODEL_ID.to_owned());
-    let cache =
-        crate::providers::cache_compatibility(declaration.compatibility, &api_name, route.protocol);
-    let pricing = crate::providers::pricing_for(declaration, &api_name);
-    let context_window = deepseek_limit(
-        "OCTET_DEEPSEEK_CONTEXT_WINDOW",
-        DEEPSEEK_DEFAULT_CONTEXT_WINDOW,
-    )?;
-    let max_output_tokens = deepseek_limit(
-        "OCTET_DEEPSEEK_MAX_OUTPUT_TOKENS",
-        DEEPSEEK_DEFAULT_MAX_OUTPUT_TOKENS,
-    )?;
     if max_output_tokens > context_window {
         anyhow::bail!(
             "OCTET_DEEPSEEK_MAX_OUTPUT_TOKENS must not exceed OCTET_DEEPSEEK_CONTEXT_WINDOW"
         );
     }
+    if let Some(mut discovered) = discovered_deepseek_spec(catalog, declaration, api_name) {
+        discovered.id = ModelId(DEEPSEEK_MODEL_ID.into());
+        discovered.limits = ModelLimits {
+            context_window,
+            max_output_tokens,
+        };
+        catalog.register_model(discovered)?;
+        return Ok(());
+    }
+    let cache =
+        crate::providers::cache_compatibility(declaration.compatibility, api_name, route.protocol);
+    let pricing = crate::providers::pricing_for(declaration, api_name);
     catalog.register_model(ModelSpec {
         id: ModelId(DEEPSEEK_MODEL_ID.into()),
         endpoint: endpoint_id,
-        api_name,
+        api_name: api_name.to_owned(),
         display_name: None,
         protocol: route.protocol,
         capabilities: Capabilities {
@@ -1853,7 +2261,15 @@ fn register_discovered_deepseek_models(
     else {
         return Ok(());
     };
-    for model in api_models_from_response(&body)? {
+    register_deepseek_models_from_response(catalog, declaration, &body)
+}
+
+fn register_deepseek_models_from_response(
+    catalog: &mut ModelCatalog,
+    declaration: &ProviderDeclaration,
+    body: &serde_json::Value,
+) -> anyhow::Result<()> {
+    for model in api_models_from_response_for(body, Some(declaration))? {
         let api_name = model.id.as_str();
         let Some(route) = declaration.route_for_model(api_name) else {
             continue;
@@ -1880,12 +2296,12 @@ fn register_discovered_deepseek_models(
                     ModalitySet::none()
                 },
                 output_modalities: ModalitySet::none(),
-                tools: true,
+                tools: model.tools,
                 parallel_tool_calls: false,
                 reasoning,
                 responses_lite: false,
                 agent_delegation: None,
-                structured_output: false,
+                structured_output: model.structured_output.unwrap_or(false),
 
                 deferred_tool_loading: false,
             },
@@ -2090,8 +2506,17 @@ fn openrouter_models_from_response(
         if api_name.trim().is_empty() {
             continue;
         }
+        let snapshot =
+            octet_ai::model_metadata::model_capability_metadata(declaration.id, api_name);
+        let reasoning_metadata =
+            builtin_discovery_reasoning(entry, Some(declaration), api_name, snapshot.as_ref())?;
+        let enriched = snapshot
+            .as_ref()
+            .map(|snapshot| enriched_builtin_entry(entry, snapshot));
+        let entry = enriched.as_ref().unwrap_or(entry);
         let context_window = entry
             .get("context_length")
+            .or_else(|| entry.get("context_window"))
             .and_then(serde_json::Value::as_u64)
             .filter(|value| *value > 0)
             .unwrap_or(131_072);
@@ -2099,24 +2524,24 @@ fn openrouter_models_from_response(
             .get("top_provider")
             .and_then(|provider| provider.get("max_completion_tokens"))
             .or_else(|| entry.get("max_completion_tokens"))
+            .or_else(|| entry.get("max_output_tokens"))
             .and_then(serde_json::Value::as_u64)
             .filter(|value| *value > 0)
             .map(|value| value.min(context_window))
         else {
-            // Without a provider-advertised completion ceiling, octet cannot
-            // distinguish a real model limit from a guessed local cap.
+            // Without a provider assertion or pinned route ceiling, do not
+            // guess a completion limit.
             continue;
         };
         // OpenRouter may expose modality metadata under architecture or at
         // the top level (depending on the inventory proxy). Normalize both so
         // attachments are not rejected before the request reaches the API.
         let mut input_modalities = input_modalities_from_entry(entry);
-        if model_id_implies_vision(api_name) {
+        if !has_metadata_assertion(entry, MODALITY_FIELDS) && model_id_implies_vision(api_name) {
             input_modalities = input_modalities.with(octet_ai::Modality::Image);
         }
         let supports_tools = model_metadata_supports_tools(entry);
 
-        let reasoning_metadata = decode_reasoning_metadata(entry)?;
         let Some(route) = declaration.route_for_model(api_name) else {
             continue;
         };
@@ -2139,7 +2564,7 @@ fn openrouter_models_from_response(
                 ),
                 responses_lite: false,
                 agent_delegation: None,
-                structured_output: false,
+                structured_output: discovered_structured_output(entry).unwrap_or(false),
 
                 deferred_tool_loading: false,
             },
@@ -2147,8 +2572,11 @@ fn openrouter_models_from_response(
                 context_window,
                 max_output_tokens,
             },
-            pricing: openrouter_pricing(entry)
-                .or_else(|| crate::providers::pricing_for(declaration, api_name)),
+            pricing: if entry.get("pricing").is_some() {
+                openrouter_pricing(entry)
+            } else {
+                crate::providers::pricing_for(declaration, api_name)
+            },
             cache: crate::providers::cache_compatibility(
                 declaration.compatibility,
                 api_name,
@@ -2378,8 +2806,8 @@ fn try_register_environment_declaration(
             &base_url,
             PROVIDER_RESPONSE_HEADER_TIMEOUT,
         )?;
-        register_deepseek_v4_pro(catalog, declaration)?;
         register_discovered_deepseek_models(catalog, declaration, &credential, &base_url)?;
+        register_deepseek_v4_pro(catalog, declaration)?;
         return Ok(());
     }
 
@@ -2389,8 +2817,8 @@ fn try_register_environment_declaration(
         &credential,
         PROVIDER_RESPONSE_HEADER_TIMEOUT,
     )?;
-    crate::providers::register_static_models(catalog, declaration)?;
-
+    // Provider discovery owns explicit metadata; static declarations only fill
+    // missing inventory afterwards. Configured entries already present still win.
     match declaration.model_discovery {
         ModelDiscovery::Static | ModelDiscovery::None => {}
         ModelDiscovery::OpenAiModels { filter } => {
@@ -2407,6 +2835,7 @@ fn try_register_environment_declaration(
         // integration, never by the environment-backed preset bootstrap.
         ModelDiscovery::CodexSubscription | ModelDiscovery::HostOwnedSubscription => {}
     }
+    crate::providers::register_static_models(catalog, declaration)?;
     Ok(())
 }
 

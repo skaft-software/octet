@@ -1,8 +1,8 @@
 # octet-mcp
 
-**Distribution version: 0.7.5.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.5.
-See the [release record](../../docs/releases/v0.7.5.md) for publication and
+**Distribution version: 0.7.6.** Catalog commands below require version-matched
+published assets. Source checkouts and local archives require exactly octet 0.7.6.
+See the [release record](../../docs/releases/v0.7.6.md) for publication and
 installation evidence.
 
 Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool servers
@@ -32,7 +32,7 @@ paths with your reviewed local paths. Protect the file with `chmod 600`.
 }
 ```
 
-With [octet 0.7.5 installed](../../docs/installation.md) and Python 3.9+ on
+With [octet 0.7.6 installed](../../docs/installation.md) and Python 3.9+ on
 `PATH`, install the matching signed public bundle and validate your configuration:
 
 ```console
@@ -72,7 +72,7 @@ same semantic state used by the TUI and Serve.
 A local server runs with your OS authority. Neither configuration nor tool
 approval is a sandbox. Server trust does not approve every tool: only an exact,
 uncontradicted JSON `readOnlyHint: true` gets read-only classification. Unknown
-or destructive calls require host policy. The octet `0.7.5` coding product does
+or destructive calls require host policy. The octet `0.7.6` coding product does
 not issue approvals for those calls, so they fail closed with a tool error.
 Calls are never automatically replayed after an ambiguous failure; cancellation
 does not promise rollback.
@@ -91,7 +91,7 @@ are unsupported.
 
 ## Reference
 
-The bundle requires exactly octet `0.7.5`; its API remains `0.2`. The following
+The bundle requires exactly octet `0.7.6`; its API remains `0.2`. The following
 is a retained bundled-runtime contract, not a current SDK authoring guide.
 
 - <a id="security-and-authority"></a>[Security and authority](REFERENCE.md#security-and-authority).
