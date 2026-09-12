@@ -81,7 +81,7 @@ signal-hook = "0.4"
 sha2 = "0.10"
 ring = "0.17"
 libc = "0.2"
-getrandom = { version = "0.3", optional = true }
+getrandom = { version = "0.4", optional = true }
 globset = "0.4"
 octet-serve-backend = { version = "=0.7.6", path = "../../extensions/octet-serve", optional = true }
 
