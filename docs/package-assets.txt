@@ -186,6 +186,7 @@ text docs/current-reference.md
 text docs/design/config-diagnostics.md
 text docs/design/extension-capability-and-orchestration-boundaries.md
 text docs/design/extensions-spike.md
+text docs/design/maintainability.md
 text docs/design/octet-agent.md
 text docs/design/octet-ai.md
 text docs/design/octet-coding-agent.md
