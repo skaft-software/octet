@@ -151,8 +151,8 @@ octet extension list
 ```
 
 The four official executable bundles and the separate Serve application must
-match octet 0.7.5. Availability, signed assets, and public-install verification
-are recorded on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+match octet 0.7.6. Availability, signed assets, and public-install verification
+are recorded on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
 Catalog forms select the package matching the running host version:
 
 ```text

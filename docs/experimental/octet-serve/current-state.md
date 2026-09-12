@@ -4,10 +4,10 @@
 
 Maintainer reference for experimental Serve. For installation and practical local
 use, read the [Serve guide](README.md). Feature statements below describe the
-octet 0.7.5 source implementation; they do not replace per-feature acceptance
-evidence. See the [0.7.5 source notes](../../releases/v0.7.5.md); availability,
+octet 0.7.6 source implementation; they do not replace per-feature acceptance
+evidence. See the [0.7.6 source notes](../../releases/v0.7.6.md); availability,
 signed assets, and public-install results belong to the
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
 
 The [validation record](#validation-evidence) and
 [historical checklist](p0-p1-delivery.md) retain their original Ygg-era scope.
@@ -19,7 +19,7 @@ Current work tracking is on the [Project](https://github.com/orgs/skaft-software
 Serve is a real-session experimental local web interface.
 [0.7.4](../../releases/v0.7.4.md) is published with signed Serve packages and
 verified public installation; its tag and assets are immutable. Those checks
-do not qualify the 0.7.5 source. Live-provider/native-host audio checks are
+do not qualify the 0.7.6 source. Live-provider/native-host audio checks are
 optional and **NOT RUN** in this source review. Signed-package and public-install
 checks are separate from actual-terminal/SSH, live-provider/audio, endurance,
 and complete graphical media, recovery, or capture acceptance. Private-LAN
@@ -186,7 +186,7 @@ octet serve
 ```
 
 Catalog installation and update select the package matching the running octet
-version exactly; the 0.7.5 commands require matching assets on its GitHub release.
+version exactly; the 0.7.6 commands require matching assets on its GitHub release.
 A reviewed matching local archive or direct source build does not require public
 package availability. There is no implemented `--lan`, `--demo`, or `--local-only`
 switch. The shortest direct source launch is:

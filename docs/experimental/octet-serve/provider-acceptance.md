@@ -1,10 +1,10 @@
 # Configured-provider acceptance
 
 Maintainer reference for provider routes and acceptance procedures in the
-octet 0.7.5 source. For usage, see the [Serve guide](README.md). Optional
+octet 0.7.6 source. For usage, see the [Serve guide](README.md). Optional
 live-provider/native-host audio checks are **NOT RUN** in this source review.
 Graphical media, recovery, and capture work remains separately tracked. The
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5)
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
 records publication verification and any separately approved live acceptance;
 source contracts are not live-provider or model-capability qualification.
 
@@ -114,7 +114,7 @@ loopback-only and credential-free. No current run is reported here.
 The snapshot describes a protected `Stable provider acceptance` workflow. Both
 stable release workflows expose `require_provider_acceptance`, defaulting to
 `false`. Packaging then does not read provider secrets or require an acceptance
-run; this is the credential-free release policy for octet 0.7.5. Setting it to
+run; this is the credential-free release policy for octet 0.7.6. Setting it to
 `true` explicitly opts that workflow run into fail-closed exact-SHA and
 protected-approval enforcement.
 

@@ -6,11 +6,11 @@ quickstart. New authoring uses [API `0.3`](../extensions.md); the
 [generated contract](API-0.3-REFERENCE.md) alone defines that wire. Shared host
 operations below do not upgrade legacy methods or SDKs.
 
-**Identity boundary:** octet 0.7.5 source uses only octet first-party names,
+**Identity boundary:** octet 0.7.6 source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
 The source SDK distributions and four official executable bundles are version
-`0.7.5`; the Pi compatibility bridge and independent examples keep their own
+`0.7.6`; the Pi compatibility bridge and independent examples keep their own
 versions. This is not SDK registry publication; see
 [installation and availability](../installation.md).
 
@@ -160,7 +160,7 @@ name = "git-tools"
 version = "0.2.0"
 api_version = "0.2"
 # Required for an installable bundle; optional for an unpackaged local copy.
-requires_octet = "=0.7.5"
+requires_octet = "=0.7.6"
 description = "Small local git helpers"
 
 [entrypoint]
@@ -719,8 +719,8 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.7.5 availability, signed assets, and public-install verification, consult
-the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+octet 0.7.6 availability, signed assets, and public-install verification, consult
+the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
 Use a reviewed source or local archive when matching publication has not been
 verified.
 
@@ -746,9 +746,9 @@ metadata**, not a version to substitute into a new authoring guide:
 
 ```toml
 name = "octet-web-search"
-version = "0.7.5"
+version = "0.7.6"
 api_version = "0.2"
-requires_octet = "=0.7.5"
+requires_octet = "=0.7.6"
 ```
 
 `requires_octet` is optional for unpackaged local copies but enforced when
@@ -834,7 +834,7 @@ loopback/process/workspace capabilities. Official installation uses a matching
 target archive and shared release `SHA256SUMS`; local archives use:
 
 ```console
-octet extension install --path ./octet-serve-0.7.5-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.7.6-TARGET.tar.gz
 ```
 
 The application archive retains its strict two-file payload and atomic install.

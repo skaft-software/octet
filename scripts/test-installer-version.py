@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="version-probe-", dir=fixtures) as tempo
     probe.chmod(0o755)
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         pidfile.unlink(missing_ok=True)
-        process = subprocess.Popen([sys.executable, "-c", helper, str(probe), "0.7.5"],
+        process = subprocess.Popen([sys.executable, "-c", helper, str(probe), "0.7.6"],
                                    env=dict(os.environ, OCTET_TEST_DESCENDANT_PID=str(pidfile)),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:

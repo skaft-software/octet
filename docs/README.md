@@ -53,6 +53,7 @@
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
+- [0.7.6 hotfix notes](releases/v0.7.6.md)
 - [0.7.5 release notes](releases/v0.7.5.md)
 - [0.7.4 release notes and documentation correction](releases/v0.7.4.md)
 - [0.7.3 release notes](releases/v0.7.3.md)

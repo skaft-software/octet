@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.7.6]
+
+- Fix stale models.dev integration for discovered names, context/output limits
+  and advertised thinking, preserving explicit provider API assertions.
+- Recognize DeepSeek V4.1 Flash correctly; refresh and review the checked-in rich
+  metadata snapshot before release, without network access during compilation.
+- Remove the duplicate working-directory line from the TUI splash while keeping
+  the footer path and narrow-terminal behavior.
+- Align active first-party distribution versions to 0.7.6; independent API,
+  protocol, example and historical-release identities remain unchanged.
+- See [hotfix notes](docs/releases/v0.7.6.md) and the exact GitHub release for
+  validation, signed publication and public-install results. No all-provider
+  or live-inference qualification is claimed.
+
 ## [0.7.5] - 2026-09-11
 
 - Repair stale startup splash rows after model switches.
@@ -929,6 +943,7 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 - Every bundled theme retains its authored palette, while the compiled default follows the selected model lab and resets cleanly after theme switches.
 - Batched tool results retain independent bounded output allowances so a large early result cannot starve later calls in the same turn.
 
+[0.7.6]: https://github.com/skaft-software/octet/releases/tag/v0.7.6
 [0.7.5]: https://github.com/skaft-software/octet/releases/tag/v0.7.5
 [0.7.4]: https://github.com/skaft-software/octet/releases/tag/v0.7.4
 [0.7.3]: https://github.com/skaft-software/octet/releases/tag/v0.7.3

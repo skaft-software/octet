@@ -29,6 +29,21 @@ pub(crate) struct DiscoveredModelMetadata<'a> {
     pub pricing: Option<octet_ai::Pricing>,
 }
 
+impl ProviderDeclaration {
+    /// A declaration-owned wire contract may supplement a genuinely discovered
+    /// sparse route. This is not a models.dev-derived encoding or inventory.
+    pub(crate) fn static_reasoning_for(
+        &self,
+        api_name: &str,
+        protocol: Protocol,
+    ) -> Option<ReasoningCapability> {
+        static_models(self.static_models)
+            .iter()
+            .find(|model| model.id == api_name && model.protocol == protocol)
+            .and_then(static_reasoning_capability)
+    }
+}
+
 /// Register every unique route endpoint for an environment-authenticated
 /// declaration.
 pub(crate) fn register_environment_endpoints(

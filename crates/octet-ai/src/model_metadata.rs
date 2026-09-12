@@ -1,7 +1,8 @@
 //! Human-facing model metadata generated from the models.dev canonical catalog.
 //!
 //! The build script consumes checked-in models.dev snapshots. Runtime code
-//! performs only binary searches over generated static data, so pricing remains
+//! uses binary searches over generated static data (decoding only a selected
+//! capability record), so pricing remains
 //! deterministic and available in offline builds.
 
 use crate::pricing::{Pricing, TokenRate};
@@ -9,6 +10,7 @@ use crate::pricing::{Pricing, TokenRate};
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/models_dev_names.rs"));
     include!(concat!(env!("OUT_DIR"), "/models_dev_pricing.rs"));
+    include!(concat!(env!("OUT_DIR"), "/models_dev_capabilities.rs"));
 }
 
 fn lookup(table: &'static [(&'static str, &'static str)], key: &str) -> Option<&'static str> {
@@ -62,6 +64,18 @@ pub fn model_pricing(provider_id: &str, model_id: &str) -> Option<Pricing> {
     lookup_pricing(&key)
 }
 
+/// Return pinned source assertions for an exact built-in provider/model route.
+///
+/// This binary-search index decodes only the selected record, never the entire
+/// snapshot. Callers must preserve endpoint assertions and constrain reasoning
+/// controls to a known provider wire profile. No leaf aliases or inventory are
+/// inferred here; Codex and custom endpoints have no entry in this index.
+pub fn model_capability_metadata(provider_id: &str, model_id: &str) -> Option<serde_json::Value> {
+    let key = format!("{provider_id}/{model_id}");
+    lookup(generated::MODEL_CAPABILITIES, &key)
+        .map(|raw| serde_json::from_str(raw).expect("build-validated metadata JSON"))
+}
+
 /// Return the models.dev display name for a canonical or uniquely identifiable
 /// model ID.
 ///
@@ -99,12 +113,38 @@ mod tests {
 
         let routed = model_pricing("openrouter", "deepseek/deepseek-v4-pro")
             .expect("provider-specific snapshot price");
-        assert_eq!(routed.input, TokenRate(417_252));
-        assert_eq!(routed.output, TokenRate(834_504));
+        assert_eq!(routed.input, TokenRate(829_458));
+        assert_eq!(routed.output, TokenRate(1_658_916));
         assert_eq!(routed.reasoning, None);
         assert!(model_pricing("openai", "gpt-5.6").is_none());
         assert!(model_pricing("openai", "gpt-5.6-sol").is_some());
         assert!(model_pricing("unknown", "model").is_none());
+    }
+
+    #[test]
+    fn generated_capabilities_keep_exact_provider_scoped_source_assertions() {
+        let flash = model_capability_metadata("deepseek", "deepseek-flash").unwrap();
+        assert_eq!(flash["name"], "DeepSeek V4.1 Flash");
+        assert_eq!(flash["limit"]["context"], 1_000_000);
+        assert_eq!(flash["limit"]["output"], 384_000);
+        assert_eq!(
+            flash["reasoning_options"][1]["values"],
+            serde_json::json!(["low", "high", "max"])
+        );
+        assert_eq!(flash["interleaved"]["field"], "reasoning_content");
+        assert_eq!(
+            flash["modalities"]["input"],
+            serde_json::json!(["text", "image"])
+        );
+        assert_eq!(
+            model_display_name("deepseek/deepseek-flash"),
+            Some("DeepSeek V4.1 Flash")
+        );
+        for provider in ["openai", "codex", "custom", "openrouter"] {
+            assert!(model_capability_metadata(provider, "deepseek-flash").is_none());
+        }
+        assert!(model_capability_metadata("deepseek", "DEEPSEEK-FLASH").is_none());
+        assert!(model_pricing("deepseek", "deepseek-flash").is_none());
     }
 
     #[test]

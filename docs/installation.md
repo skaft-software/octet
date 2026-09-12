@@ -7,15 +7,15 @@
 ## Install native binaries
 
 Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
-See the [v0.7.5 notes](releases/v0.7.5.md) for changes; availability, signed
+See the [v0.7.6 notes](releases/v0.7.6.md) for changes; availability, signed
 assets and public-install verification are recorded on the version-pinned
 GitHub release. Install using the matching installer from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5):
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.5/install-octet.sh | sh
-octet --version   # octet 0.7.5
+  https://github.com/skaft-software/octet/releases/download/v0.7.6/install-octet.sh | sh
+octet --version   # octet 0.7.6
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -92,7 +92,7 @@ they do not refresh the catalog over the network. Continue with
 ## Optional packages
 
 The four official executable bundles and the separate Serve application must
-match octet 0.7.5. Their publication status is recorded on the GitHub release;
+match octet 0.7.6. Their publication status is recorded on the GitHub release;
 installation never substitutes another host version. For example:
 
 ```sh

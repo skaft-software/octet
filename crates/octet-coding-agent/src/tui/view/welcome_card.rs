@@ -1,6 +1,5 @@
 //! Startup welcome-card lifecycle and presentation.
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use super::{fit_line, ShellState, TranscriptBlock};
@@ -49,18 +48,6 @@ pub(super) fn restart_welcome_animation(state: &mut ShellState) {
         state.startup_card_started_at = Some(Instant::now());
         state.invalidate_transcript_layout();
     }
-}
-
-fn welcome_workspace(state: &ShellState) -> String {
-    let Some(path) = state.workspace.as_deref() else {
-        return "workspace unavailable".to_owned();
-    };
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        if let Ok(relative) = path.strip_prefix(home) {
-            return format!("~/{}", relative.display());
-        }
-    }
-    path.display().to_string()
 }
 
 fn render_pi_startup(state: &ShellState, width: u16) -> Vec<String> {
@@ -199,7 +186,8 @@ pub(super) fn render_welcome_card(
             ),
             changelog_hint(state, text_width),
             splash_text(&identity),
-            splash_text(&welcome_workspace(state)),
+            // The footer owns the path; keep the byte-aligned breathing row.
+            String::new(),
             if state.safe_mode {
                 format!(
                     "{} {}",
@@ -224,7 +212,7 @@ pub(super) fn render_welcome_card(
             ),
             changelog_hint(state, text_width),
             state.theme.fg("foreground", &identity),
-            state.theme.dim(&welcome_workspace(state)),
+            String::new(),
             if state.safe_mode {
                 format!(
                     "{} {}",
@@ -307,6 +295,44 @@ mod tests {
     use super::*;
     use crate::tui::view::InteractiveShell;
     use sexy_tui_rs::strip_terminal_sequences;
+
+    #[test]
+    fn workspace_is_footer_only_across_startup_layouts() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        const WORKSPACE: &str = "/work/splash-path-regression";
+        for color in [ColorDepth::TrueColor, ColorDepth::Ansi16, ColorDepth::None] {
+            for custom in [false, true] {
+                let mut theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+                    true, true, color,
+                ));
+                if custom {
+                    theme.override_token("splash", "#d97757");
+                    theme.override_token("splash_box", "#d97757");
+                }
+                let mut shell = InteractiveShell::test_shell_with_theme(theme);
+                shell.set_workspace(std::path::PathBuf::from(WORKSPACE));
+                shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+                for update in [None, Some(semver::Version::new(9, 8, 7))] {
+                    shell.state.borrow_mut().available_update = update;
+                    for width in [4, 16, 46, 80, 120] {
+                        let rows =
+                            render_welcome_card(&shell.state.borrow(), width, 10, Instant::now());
+                        let plain = strip_terminal_sequences(&rows.join("\n"));
+                        assert!(!plain.contains("/work"), "{plain}");
+                        assert!(!plain.contains("splash-path"), "{plain}");
+                        assert!(!plain.contains("workspace unavailable"), "{plain}");
+                    }
+                }
+                let surface = crate::tui::composer_surface::render_composer_surface(
+                    &shell.state.borrow(),
+                    120,
+                    Instant::now(),
+                );
+                let footer = strip_terminal_sequences(surface.last().unwrap());
+                assert!(footer.ends_with(WORKSPACE), "{footer}");
+            }
+        }
+    }
 
     #[test]
     fn changelog_splash_tip_stays_bounded_without_moving_the_byte() {

@@ -1,13 +1,13 @@
 # octet Extension Protocol Reference
 
-**Identity boundary:** octet 0.7.5 source uses only octet first-party names,
+**Identity boundary:** octet 0.7.6 source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers 0.1/0.2/0.3 do not imply aliases for old Ygg wire names or
 imports. The source SDK distributions and four official executable bundles are
-version `0.7.5`; the Pi compatibility bridge and independent examples keep their
+version `0.7.6`; the Pi compatibility bridge and independent examples keep their
 own versions. This is not SDK registry publication. Version-matched assets and
 public-install verification belong to the
-[v0.7.5 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+[v0.7.6 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
 
 > **Legacy API versions:** `0.1` (frozen compatibility) and `0.2`
 > (supported stateful wire). API `0.3` is defined by the generated
@@ -89,7 +89,7 @@ The **first** host request, sent immediately after the child process starts.
   "method": "initialize",
   "params": {
     "api_version": "0.1",
-    "octet_version": "0.7.5",
+    "octet_version": "0.7.6",
     "extension": {
       "name": "hello-world",
       "version": "0.1.0",

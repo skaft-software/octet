@@ -1,6 +1,6 @@
 [package]
 name = "octet-serve-backend"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 rust-version = "1.86"
 license = "MIT"
@@ -27,7 +27,7 @@ portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
-octet-agent = { version = "=0.7.5", path = "../../crates/octet-agent" }
+octet-agent = { version = "=0.7.6", path = "../../crates/octet-agent" }
 sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

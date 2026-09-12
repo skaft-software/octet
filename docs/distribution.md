@@ -1,9 +1,9 @@
 # Distribution channels
 
-Octet 0.7.5 native, Serve and four executable-bundle asset availability is recorded
-on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+Octet 0.7.6 native, Serve and four executable-bundle asset availability is recorded
+on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
 Public-install results are recorded there. See [installation](installation.md) for
-native installation or a source build, and [release notes](releases/v0.7.5.md)
+native installation or a source build, and [release notes](releases/v0.7.6.md)
 for changes; the GitHub release records publication verification.
 npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.
 The repository is now `skaft-software/octet`. The immutable v0.7.0 assets retain
@@ -15,7 +15,7 @@ Do not recreate the old name.
 
 These source identities do not establish publication of every channel.
 The distribution version does not establish publication or change independent
-API and schema versions. See the [0.7.5 release](releases/v0.7.5.md) for the
+API and schema versions. See the [0.7.6 release](releases/v0.7.6.md) for the
 version-matched assets and channel boundaries.
 
 | Surface | Source identity |
@@ -27,7 +27,7 @@ version-matched assets and channel boundaries.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK, Serve and four executable-bundle distribution versions | `0.7.5`; installed compatibility `requires_octet = "=0.7.5"` |
+| Product, SDK, Serve and four executable-bundle distribution versions | `0.7.6`; installed compatibility `requires_octet = "=0.7.6"` |
 | Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
@@ -63,10 +63,10 @@ Cargo can build the published canonical tag's exact source
 (Rust 1.86+ and ripgrep):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.5 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.7.6 --bins octet-coding-agent
 ```
 
-The public `v0.7.5` tag must exist before using this command. `cargo install octet`
+The public `v0.7.6` tag must exist before using this command. `cargo install octet`
 and registry-based `cargo install octet-coding-agent` are not the supported
 Cargo path.
 
@@ -74,8 +74,21 @@ The npm channel remains unpublished pending functional first-package bootstrap,
 trusted publishers and registry provenance verification. Its future command is:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.5
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.6
 ```
+
+## Reviewed model metadata
+
+Release preparation refreshes and reviews the checked-in models.dev names,
+pricing, capabilities and source identity together. On a workspace product-version
+change, or an explicit CI dispatch requesting it, CI runs the live models.dev
+`--check` gate. Stale snapshots must be refreshed and reviewed before the release
+source is frozen; the check does not silently rewrite release inputs.
+
+Ordinary compilation uses checked-in metadata without network access. This gate
+is not a startup catalog auto-update, an all-provider test or live-inference
+qualification. See the [model-source record](../crates/octet-ai/models/SOURCES.md)
+for metadata scope and limitations.
 
 ## Homebrew
 
@@ -130,7 +143,7 @@ release alias.
 
 ## Other channels
 
-The v0.7.5 version-pinned shell installer targets macOS
+The v0.7.6 version-pinned shell installer targets macOS
 arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
 platforms but remains unavailable through npm. See
 the [npm release contract](release/npm-trusted-publishing.md) for platform-first

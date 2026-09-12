@@ -45,6 +45,10 @@ vocabulary that uses that hierarchy without adding a second TUI.
 
 ## Startup identity
 
+The working directory appears only in the footer, not again in the splash.
+The splash keeps its byte-aligned spacing, model identity, permissions, and
+release hints.
+
 The eight-bar byte mark retains its model-blended gradient and finite colour
 sweep on true-colour terminals. ANSI256 and ANSI16 instead use one
 background-balanced model accent uniformly across all bars, without brightening

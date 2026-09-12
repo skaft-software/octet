@@ -1,9 +1,9 @@
 # Experimental `octet serve`
 
-This guide describes the experimental Serve source in octet **0.7.5**. With
+This guide describes the experimental Serve source in octet **0.7.6**. With
 [the matching octet version installed](../../installation.md) and its Serve
 assets available on the
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5),
+[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6),
 install the package and start the graphical client:
 
 ```console
@@ -18,11 +18,11 @@ This starts a headless host for the launch workspace and opens its local web
 client. `--port 0` requests an available port. Add `--no-open` to skip opening the
 browser; `--web-root <directory>` selects a development asset directory.
 
-The [0.7.5 notes](../../releases/v0.7.5.md) describe source changes; the exact
+The [0.7.6 notes](../../releases/v0.7.6.md) describe source changes; the exact
 GitHub release is authoritative for availability, signed assets, and
 public-install verification. [0.7.4](../../releases/v0.7.4.md) is a published,
 immutable release with signed Serve packages and installation checks; those
-results do not qualify 0.7.5. Serve remains experimental. Live-provider and
+results do not qualify 0.7.6. Serve remains experimental. Live-provider and
 native-host audio checks are optional and **NOT RUN** in this source review.
 Package smoke does not qualify private-LAN access, actual-terminal/SSH behavior,
 endurance, or every graphical media, recovery, and visual journey.
@@ -98,8 +98,8 @@ qualification.
 
 ## Install or update a package
 
-With octet `0.7.5`, first check that the matching Serve assets are available on
-the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.5).
+With octet `0.7.6`, first check that the matching Serve assets are available on
+the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
 Then install or update the public package:
 
 ```console
@@ -110,13 +110,13 @@ octet extension update octet-serve
 For a reviewed matching local archive instead:
 
 ```console
-octet extension install --path ./octet-serve-0.7.5-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.7.6-TARGET.tar.gz
 octet extension list
 octet serve
 ```
 
 Local archive installation does not need GitHub network access. The package
-requires exactly `=0.7.5`. Replace `TARGET` with `x86_64-unknown-linux-gnu`,
+requires exactly `=0.7.6`. Replace `TARGET` with `x86_64-unknown-linux-gnu`,
 `x86_64-apple-darwin`, or `aarch64-apple-darwin`; Linux musl is unsupported.
 A local build/archive is not evidence of signed publication.
 

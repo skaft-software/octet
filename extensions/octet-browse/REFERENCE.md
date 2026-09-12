@@ -1,13 +1,13 @@
 # octet Browse reference
 
-**Distribution version: 0.7.5.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.5.
-See the [release record](../../docs/releases/v0.7.5.md) for publication and
+**Distribution version: 0.7.6.** Catalog commands below require version-matched
+published assets. Source checkouts and local archives require exactly octet 0.7.6.
+See the [release record](../../docs/releases/v0.7.6.md) for publication and
 installation evidence.
 
 [Usage guide](README.md). This reference describes the bundled API `0.2`
-implementation, not current extension authoring. Distribution `0.7.5` requires
-exactly octet `0.7.5` and pins `playwright==1.57.0`.
+implementation, not current extension authoring. Distribution `0.7.6` requires
+exactly octet `0.7.6` and pins `playwright==1.57.0`.
 
 The opt-in executable always launches Playwright's bundled Chromium visibly
 (`headless=False`) with a persistent profile owned only by octet Browse. It never
@@ -17,7 +17,7 @@ pairs with, copies, discovers, or launches a normal Chrome/Chromium profile.
 
 Bundle installation only copies inert files. It does **not** run Python, install Playwright, download a browser, create a profile, or start this extension.
 
-With [octet 0.7.5 installed](../../docs/installation.md), use the matching signed
+With [octet 0.7.6 installed](../../docs/installation.md), use the matching signed
 public bundle below. A reviewed checkout or locally built archive remains an alternative;
 see the [guide](README.md#install-the-bundle).
 

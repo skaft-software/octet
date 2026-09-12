@@ -1,8 +1,8 @@
 # octet-subagents
 
-**Distribution version: 0.7.5.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.5.
-See the [release record](../../docs/releases/v0.7.5.md) for publication and
+**Distribution version: 0.7.6.** Catalog commands below require version-matched
+published assets. Source checkouts and local archives require exactly octet 0.7.6.
+See the [release record](../../docs/releases/v0.7.6.md) for publication and
 installation evidence.
 
 Delegate a bounded task to a background worker while the parent continues other
@@ -46,7 +46,7 @@ identical spawn key is retry-safe; using it with different input fails.
 
 ## Install and enable
 
-With [octet 0.7.5 installed](../../docs/installation.md), install the matching
+With [octet 0.7.6 installed](../../docs/installation.md), install the matching
 signed public bundle, then explicitly enable it:
 
 ```console
@@ -54,8 +54,8 @@ octet extension install octet-subagents
 octet --enable-extension octet-subagents
 ```
 
-For source testing with a locally built octet 0.7.5 and reviewed local
-archive, use `octet extension install --path ./octet-subagents-0.7.5.tar.gz`.
+For source testing with a locally built octet 0.7.6 and reviewed local
+archive, use `octet extension install --path ./octet-subagents-0.7.6.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
 starts nothing; the bundle stays disabled until explicitly enabled. Default full
 access (`unsafe_host`) implicitly trusts it without saving a grant. Optional
@@ -95,7 +95,7 @@ prompt. `/subagents inspect <name-or-id>` provides cached detail and
 
 ## Reference
 
-Bundle `0.7.5` requires exactly octet `0.7.5` and retains API `0.2`. The detailed
+Bundle `0.7.6` requires exactly octet `0.7.6` and retains API `0.2`. The detailed
 contract is a bundled-runtime reference, not a current extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.

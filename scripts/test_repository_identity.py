@@ -117,6 +117,48 @@ class RepositoryIdentityTests(unittest.TestCase):
                 self.assertEqual(lines[1], rf"^https://github\.com/{expected}/\.github/workflows/release-octet\.yml@refs/tags/(v{escaped_version}|octet-binaries-v{escaped_version})$")
 
 
+class SourceDistributionVersionTests(unittest.TestCase):
+    """Release distribution identities stay aligned; API versions are independent."""
+
+    def setUp(self):
+        self.root = SCRIPTS.parent
+        self.version = re.search(r'^version = "([^"]+)"$',
+                                 (self.root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
+
+    def test_first_party_manifests_locks_and_installer_match_workspace(self):
+        for name in ("Cargo.lock", "extensions/octet-serve/Cargo.lock"):
+            entries = re.findall(r'name = "(octet-[^"]+)"\nversion = "([^"]+)"',
+                                 (self.root / name).read_text())
+            self.assertEqual(len(entries), 5 if name == "Cargo.lock" else 3)
+            for package, version in entries:
+                with self.subTest(path=name, package=package):
+                    self.assertEqual(version, self.version)
+        for name in ("crates/octet-agent/Cargo.toml", "crates/octet-coding-agent/Cargo.toml",
+                     "extensions/octet-serve/Cargo.toml"):
+            versions = re.findall(r'^octet-[^ ]+ = \{ version = "=([^"]+)"',
+                                  (self.root / name).read_text(), re.MULTILINE)
+            self.assertTrue(versions, name)
+            self.assertEqual(set(versions), {self.version}, name)
+        for name in ("extensions/octet-serve/Cargo.toml", "sdk/python/pyproject.toml"):
+            self.assertIn(f'\nversion = "{self.version}"\n', (self.root / name).read_text())
+        self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
+                         self.version)
+        self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
+        for package in ("octet-browse", "octet-mcp", "octet-subagents", "octet-web-search"):
+            manifest = (self.root / "extensions" / package / "extension.toml").read_text()
+            with self.subTest(package=package):
+                self.assertIn(f'\nversion = "{self.version}"\n', manifest)
+                self.assertIn(f'\nrequires_octet = "={self.version}"\n', manifest)
+                self.assertIn('\napi_version = "0.2"\n', manifest)
+
+    def test_current_notes_are_identical_and_in_the_finite_documentation_inventory(self):
+        name = f"docs/releases/v{self.version}.md"
+        canonical = (self.root / name).read_bytes()
+        bundled = self.root / f"crates/octet-coding-agent/src/tui/view/releases/v{self.version}.md"
+        self.assertEqual(canonical, bundled.read_bytes())
+        self.assertIn(f"text {name}", (self.root / "docs/package-assets.txt").read_text().splitlines())
+
+
 class ReleaseDocumentationTests(unittest.TestCase):
     """Bundled user docs must not describe the release as an unavailable candidate.
 
