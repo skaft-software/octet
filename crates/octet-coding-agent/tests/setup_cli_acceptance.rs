@@ -115,10 +115,9 @@ impl SetupServer {
                             "200 OK",
                             br#"{"data":[{"id":"fixture-model","name":"Fixture Model"}]}"#,
                         ),
-                        ServerReply::Unauthorized => (
-                            "401 Unauthorized",
-                            br#"{"error":"unauthorized"}"#,
-                        ),
+                        ServerReply::Unauthorized => {
+                            ("401 Unauthorized", br#"{"error":"unauthorized"}"#)
+                        }
                         ServerReply::Close => unreachable!(),
                     };
                     let response = format!(
@@ -170,11 +169,7 @@ fn read_headers(stream: &mut TcpStream) -> Vec<u8> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let mut request = Vec::new();
     let mut buffer = [0u8; 1024];
-    while request.len() < 16 * 1024
-        && !request
-            .windows(4)
-            .any(|window| window == b"\r\n\r\n")
-    {
+    while request.len() < 16 * 1024 && !request.windows(4).any(|window| window == b"\r\n\r\n") {
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => request.extend_from_slice(&buffer[..read]),
@@ -371,10 +366,7 @@ fn wait_for_child(child: &mut Child) -> ExitStatus {
 }
 
 fn read_capture(file: &mut fs::File, name: &str) -> String {
-    let length = file
-        .metadata()
-        .expect("stat CLI output capture")
-        .len();
+    let length = file.metadata().expect("stat CLI output capture").len();
     assert!(
         length <= MAX_CAPTURE_BYTES as u64,
         "CLI {name} exceeded {MAX_CAPTURE_BYTES}-byte capture limit"
@@ -398,8 +390,14 @@ fn capture_command(command: Command) -> ProcessOutput {
 
 fn assert_no_prompt(output: &ProcessOutput) {
     for stream in [&output.stdout, &output.stderr] {
-        assert!(!stream.contains("Set up a provider"), "setup wizard leaked: {stream}");
-        assert!(!stream.contains("Enter "), "interactive input leaked: {stream}");
+        assert!(
+            !stream.contains("Set up a provider"),
+            "setup wizard leaked: {stream}"
+        );
+        assert!(
+            !stream.contains("Enter "),
+            "interactive input leaked: {stream}"
+        );
     }
 }
 
@@ -437,11 +435,8 @@ fn write_concurrent_registry(fixture: &Fixture) {
 "#;
     fs::write(fixture.registry_path(), registry).expect("write competing registry");
     #[cfg(unix)]
-    fs::set_permissions(
-        fixture.registry_path(),
-        fs::Permissions::from_mode(0o600),
-    )
-    .expect("protect competing registry");
+    fs::set_permissions(fixture.registry_path(), fs::Permissions::from_mode(0o600))
+        .expect("protect competing registry");
 }
 
 #[test]
@@ -467,10 +462,21 @@ fn cli_setup_discovers_selected_model_uses_env_credential_and_matches_tui_receip
         .env("EXAMPLE_API_KEY", SECRET);
     let output = capture_command(command);
 
-    assert!(output.status.success(), "CLI setup failed: {}", output.stderr);
-    assert_eq!(server.requests(), 1, "setup should probe one selected endpoint");
+    assert!(
+        output.status.success(),
+        "CLI setup failed: {}",
+        output.stderr
+    );
+    assert_eq!(
+        server.requests(),
+        1,
+        "setup should probe one selected endpoint"
+    );
     let request = server.request_text().to_ascii_lowercase();
-    assert!(request.contains("get /v1/models"), "unexpected probe request: {request}");
+    assert!(
+        request.contains("get /v1/models"),
+        "unexpected probe request: {request}"
+    );
     assert!(
         request.contains("authorization: bearer cli-secret-never-render"),
         "environment credential was not sent to the selected endpoint: {request}"
@@ -523,7 +529,11 @@ fn cli_setup_manual_review_cancel_and_offline_paths_do_not_probe_or_prompt() {
     assert_no_prompt(&review);
 
     let cancelled = fixture.setup(None, &["--cancel"]);
-    assert!(cancelled.status.success(), "cancel failed: {}", cancelled.stderr);
+    assert!(
+        cancelled.status.success(),
+        "cancel failed: {}",
+        cancelled.stderr
+    );
     assert!(cancelled
         .stdout
         .contains("setup cancelled; no provider state was written"));
@@ -533,9 +543,20 @@ fn cli_setup_manual_review_cancel_and_offline_paths_do_not_probe_or_prompt() {
     let no_probe_server = SetupServer::start(ServerReply::Models);
     let endpoint = no_probe_server.url();
     let offline = fixture.setup(Some(&endpoint), &["--offline"]);
-    assert!(!offline.status.success(), "offline discovery unexpectedly succeeded");
-    assert!(offline.stderr.contains("offline"), "offline diagnostic: {}", offline.stderr);
-    assert_eq!(no_probe_server.requests(), 0, "offline setup contacted the endpoint");
+    assert!(
+        !offline.status.success(),
+        "offline discovery unexpectedly succeeded"
+    );
+    assert!(
+        offline.stderr.contains("offline"),
+        "offline diagnostic: {}",
+        offline.stderr
+    );
+    assert_eq!(
+        no_probe_server.requests(),
+        0,
+        "offline setup contacted the endpoint"
+    );
     assert_no_provider_state(&fixture);
     assert_no_prompt(&offline);
 
@@ -551,7 +572,11 @@ fn cli_setup_manual_review_cancel_and_offline_paths_do_not_probe_or_prompt() {
             "--yes",
         ],
     );
-    assert!(committed.status.success(), "manual setup failed: {}", committed.stderr);
+    assert!(
+        committed.status.success(),
+        "manual setup failed: {}",
+        committed.stderr
+    );
     assert!(committed.stdout.contains("custom/local/manual-model"));
     assert!(fixture.registry_path().exists());
     assert!(fixture.config_path().exists());
@@ -607,16 +632,13 @@ fn cli_setup_rejects_a_concurrent_registry_change_instead_of_overwriting_it() {
     let (server, observed, release) = SetupServer::delayed(ServerReply::Models);
     let endpoint = server.url();
     let mut command = fixture.base_command();
-    command
-        .args(["setup", "--endpoint"])
-        .arg(endpoint)
-        .args([
-            "--provider",
-            "race",
-            "--model",
-            "fixture-model",
-            "--yes",
-        ]);
+    command.args(["setup", "--endpoint"]).arg(endpoint).args([
+        "--provider",
+        "race",
+        "--model",
+        "fixture-model",
+        "--yes",
+    ]);
     let child = spawn_captured(command);
     observed
         .recv_timeout(WAIT)
@@ -664,7 +686,10 @@ fn print_and_rpc_unresolved_startup_are_actionable_and_noninteractive() {
             "{name} omitted bounded availability details: {}",
             output.stderr
         );
-        assert!(output.stdout.trim().is_empty(), "{name} wrote response stdout");
+        assert!(
+            output.stdout.trim().is_empty(),
+            "{name} wrote response stdout"
+        );
         assert!(!output.stderr.contains("Set up a provider"));
         assert_no_provider_state(&fixture);
         assert_secret_free(&output);
