@@ -13,8 +13,10 @@ availability come from that contract.
 **The `octet_extension.Extension` runtime supports legacy API `0.1`/`0.2`, not
 a complete API `0.3` extension runtime.** Generated types do not supply API `0.3`
 stdio dispatch, request scheduling, cancellation, or process lifecycle. Do not
-change a legacy manifest or constructor to `0.3` and expect an upgrade.
-No complete runnable Python API `0.3` quickstart is qualified here.
+change a legacy manifest or constructor to `0.3` and expect an upgrade. The
+qualified dependency-free API `0.3` process example is
+[api-v03-minimal](../../examples/extensions/api-v03-minimal/README.md); it is a
+reference loop, not a replacement for this retained legacy runtime.
 
 The dependency-free source package is named `octet-extension-sdk`; from a checkout:
 
