@@ -5,7 +5,7 @@
 **Prior authoring candidate:** `1dee2148c6af152e660007f7971c6f53372937af`  
 **Repair status:** source-only, uncommitted; Rust host qualification pending
 
-This record covers the bounded fixture-path repair. It is not an installed-candidate acceptance claim, a full unchanged Pi-parity claim, or live/physical qualification.
+This record covers the bounded fixture-path and cancellation-synchronization repair. It is not an installed-candidate acceptance claim, a full unchanged Pi-parity claim, or live/physical qualification.
 
 ## Observed failure and cause
 
@@ -19,17 +19,20 @@ The fixture joined `CARGO_MANIFEST_DIR` with `../../examples/...` and passed tha
 
 The existing passing legacy Python-host fixture canonicalizes the same repository-relative path before using it (`crates/octet-agent/tests/extension_api_0_1_conformance.rs:274-283`). The repair follows that contract: `crates/octet-agent/tests/api_v03_runnable.rs:34-38` canonicalizes the example directory before joining `extension.toml`. Canonicalization resolves the filesystem's actual checkout spelling, so the fixture does not encode `/var` versus `/private/var`.
 
+A follow-up repaired-stack run reached negotiation and the real call but failed at `11-api-v03-runnable.log:27-35` with `Err(Timeout { method: "tool/call" })` after 3.17 seconds. The fixture gave the request and shutdown drain equal three-second deadlines; `ExtensionProcess::shutdown` drains before its final shutdown stage (`crates/octet-agent/src/extension_process.rs:6683-6684`), so a fixed sleep did not prove that a pending request had been admitted and the request timeout could win the deadline race. The cancellation fixture now waits, with a bounded timeout, until `health_snapshot().pending_requests` is nonzero before shutdown, and gives the shutdown drain a one-second budget while retaining a three-second request timeout. This makes the expected `Cancelled { method: "tool/call", .. }` result distinct from `Timeout { method: "tool/call" }`.
+
 ## Scope and preserved behavior
 
-Only `crates/octet-agent/tests/api_v03_runnable.rs` changed in this repair. The example directory was inspected but no example defect was demonstrated, so no example file changed. `extension_process.rs` remains Windows-owned and untouched.
+The only repository source file changed in this repair is `crates/octet-agent/tests/api_v03_runnable.rs`; this qualification record is updated alongside it. The example directory was inspected but no example defect was demonstrated, so no example file changed. `extension_process.rs` remains Windows-owned and untouched.
 
-The fixture's behavior assertions remain unchanged: API `0.3` manifest/version checks, required feature negotiation, the real `echo` call and structured result, shutdown-triggered cooperative cancellation, and clean process exit. No production admission boundary or negotiate/call/cancel/shutdown behavior was modified.
+The fixture's behavior assertions remain: API `0.3` manifest/version checks, required feature negotiation, the real `echo` call and structured result, shutdown-triggered cooperative cancellation, and clean process exit. The cancellation setup now waits for exactly one host request to be pending before invoking shutdown and retains the distinct `ExtensionRuntimeError::Cancelled { method, .. }` assertion; no production admission, negotiation, call, cancellation, or shutdown behavior was modified.
 
 ## Verification record
 
 | Evidence | Result |
 | --- | --- |
 | Frozen `api_v03_runnable` host run (`09-api-v03-runnable.log`) | **Failed**, exit 101: startup rejected the non-canonical `ParentDir` path before negotiation. Retained as the motivating failure. |
+| Repaired-stack `api_v03_runnable` run (`11-api-v03-runnable.log`) | **Failed**, exit 101 after 3.17 seconds: the real call reached its three-second timeout before shutdown produced host cancellation. Retained as the synchronization/timer-race failure. |
 | Frozen broad rustfmt check (`13-rustfmt-changed-rust.log`) | **Failed**, exit 1: output reported formatting diffs beginning in the separately owned `crates/octet-agent/tests/recovery_current.rs` and other changed files. This is not a clean API-fixture formatting pass. |
 | Repair-session Cargo/test/build/rustfmt checks | **Not run**; prohibited for this source-only owner lane. |
 
