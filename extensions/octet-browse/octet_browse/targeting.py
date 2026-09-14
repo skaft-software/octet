@@ -67,6 +67,7 @@ class TargetMetadata:
     in_form: bool
     fillable: bool
     manual_value_possible: bool
+    opens_popup: bool = False
 
 
 @dataclass
@@ -348,6 +349,7 @@ def inspect_target(
         in_form=in_form,
         fillable=fillable,
         manual_value_possible=contenteditable,
+        opens_popup=attributes.get("target", "").strip().lower() == "_blank",
     )
 
 

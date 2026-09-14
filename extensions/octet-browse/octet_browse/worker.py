@@ -34,6 +34,7 @@ from .targeting import TargetMetadata, inspect_target, resolve_target
 DEFAULT_OPERATION_TIMEOUT = 12.0
 NAVIGATION_TIMEOUT = 15.0
 CONFIRMATION_OPERATION_TIMEOUT = 25.0
+POPUP_NAVIGATION_GRACE_SECONDS = 1.0
 MAX_WORK_QUEUE = 32
 MAX_TABS = 32
 KEY_ALLOWLIST = (
@@ -215,6 +216,8 @@ class BrowserEngine:
         self._tab_id_factory = tab_id_factory or (lambda: "tab_" + secrets.token_hex(8))
         self._playwright: Any = None
         self._context: Any = None
+        self._context_closed = False
+        self._closing_context = False
         self._profile_lease: Optional[ProfileLease] = None
         self._owner: Optional[Tuple[str, str, int]] = None
         self._tabs: Dict[str, TabState] = {}
@@ -254,30 +257,57 @@ class BrowserEngine:
         operation.check()
         if self._context is not None:
             self._require_owner(owner)
-            self._degraded = False
             self._sync_pages()
-            created_tab_id: Optional[str] = None
-            if not self._tabs:
-                page = self._context.new_page()
-                created_tab_id = self._register_page(page).tab_id
-            text = "Visible isolated browser already open."
-            if created_tab_id is not None:
-                text += f" Created tab {created_tab_id}."
-            elif self._selected_tab_id is not None:
-                text += f" Selected tab {self._selected_tab_id}."
-            result = self._browser_result(text)
-            result["created_tab_ids"] = [created_tab_id] if created_tab_id else []
-            return result
+            # A close event detaches the dead context. Only this explicit launch
+            # request may recover it; ordinary browser actions never relaunch or
+            # reactivate a browser that the user closed or that crashed.
+            if self._context is not None:
+                self._degraded = False
+                created_tab_id: Optional[str] = None
+                created_page: Any = None
+                try:
+                    if not self._tabs:
+                        created_page = self._context.new_page()
+                        operation.check()
+                        created_tab_id = self._register_page(created_page).tab_id
+                    operation.check()
+                    text = "Visible isolated browser already open."
+                    if created_tab_id is not None:
+                        text += f" Created tab {created_tab_id}."
+                    elif self._selected_tab_id is not None:
+                        text += f" Selected tab {self._selected_tab_id}."
+                    result = self._browser_result(text)
+                    operation.check()
+                    if not result.get("open"):
+                        raise BrowseError(
+                            "browser_degraded",
+                            "The browser context ended during launch; inspect status and relaunch it.",
+                        )
+                    result["created_tab_ids"] = [created_tab_id] if created_tab_id else []
+                    return result
+                except BaseException:
+                    # A cancelled repeated-open must not leave a newly created
+                    # blank tab visible after its caller has gone away.
+                    if created_page is not None:
+                        try:
+                            created_page.close()
+                        except Exception:
+                            pass
+                        if created_tab_id is not None:
+                            self._remove_tab(created_tab_id)
+                    raise
 
         self.setup.validate_runtime()
         lease = self.profiles.acquire(create=True)
         playwright = None
         context = None
+        context_admitted = False
         try:
             operation.check()
             sync_api = self._load_pinned_playwright()
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(self.paths.runtime / "browsers")
             playwright = sync_api.sync_playwright().start()
+            operation.check()
             executable = Path(playwright.chromium.executable_path)
             self._validate_browser_executable(executable)
             operation.check()
@@ -289,13 +319,21 @@ class BrowserEngine:
                 viewport={"width": 1280, "height": 800},
                 timeout=operation.remaining_ms(),
             )
+            # A timed-out/cancelled launch may return after the caller has
+            # abandoned its request. Check before admitting the visible context
+            # so the exception path closes it instead of leaving a stray browser
+            # that can later reacquire the foreground.
+            operation.check()
             context.set_default_timeout(5000)
             context.set_default_navigation_timeout(int(NAVIGATION_TIMEOUT * 1000))
             context.route("**/*", self._route_request)
             context.on("page", self._handle_new_page)
             self._playwright = playwright
             self._context = context
+            self._context_closed = False
             self._profile_lease = lease
+            context_admitted = True
+            self._watch_context(context)
             self._owner = owner.key
             self._degraded = False
             for page in list(context.pages):
@@ -303,18 +341,30 @@ class BrowserEngine:
             if not self._tabs:
                 self._register_page(context.new_page())
             self._sync_pages()
+            operation.check()
+            if self._context is None:
+                raise BrowseError(
+                    "browser_degraded",
+                    "The browser context ended during launch; inspect status and relaunch it.",
+                )
             tab_ids = sorted(self._tabs)
             text = "Opened visible isolated browser."
             if tab_ids:
                 text += " Tabs: " + ", ".join(tab_ids) + "."
             result = self._browser_result(text)
+            operation.check()
+            if not result.get("open"):
+                raise BrowseError(
+                    "browser_degraded",
+                    "The browser context ended during launch; inspect status and relaunch it.",
+                )
             result["created_tab_ids"] = tab_ids
             return result
         except BaseException as error:
             self._degraded = True
             if self._context is not None:
                 self._close_browser(preserve_degraded=True)
-            else:
+            elif not context_admitted:
                 if context is not None:
                     try:
                         context.close()
@@ -433,9 +483,20 @@ class BrowserEngine:
         before_downloads = self._download_events
         self._blocked_navigation = False
         try:
-            resolved.target.click(timeout=operation.remaining_ms())
+            if resolved.metadata.opens_popup and callable(getattr(tab.page, "expect_popup", None)):
+                with tab.page.expect_popup(timeout=operation.remaining_ms()) as popup_info:
+                    resolved.target.click(timeout=operation.remaining_ms())
+                self._register_page(popup_info.value)
+            else:
+                resolved.target.click(timeout=operation.remaining_ms())
             operation.check()
+            self._settle_new_pages(operation, before_ids)
             self._sync_pages()
+            if self._context is None:
+                raise BrowseError(
+                    "browser_degraded",
+                    "The browser context ended during the click; inspect status and relaunch it.",
+                )
             if self._blocked_navigation:
                 raise BrowseError(
                     "navigation_blocked",
@@ -673,6 +734,8 @@ class BrowserEngine:
         }
 
     def close(self, operation: OperationContext, owner: ResourceOwner) -> Dict[str, Any]:
+        operation.check()
+        self._sync_pages()
         if self._context is None:
             return self._browser_result("Browser already closed; no tab IDs were affected.")
         self._require_owner(owner)
@@ -745,8 +808,14 @@ class BrowserEngine:
             is_navigation = True
         if is_navigation:
             try:
-                frame = request.frame
-                if frame.parent_frame is None:
+                try:
+                    parent_frame = request.frame.parent_frame
+                except Exception:
+                    # Chromium can issue a popup's first navigation before its
+                    # frame is available. Treat the request as top-level and
+                    # validate its URL rather than rejecting a valid popup.
+                    parent_frame = None
+                if parent_frame is None and request.url != "about:blank":
                     validate_http_url(request.url)
             except Exception:
                 self._blocked_navigation = True
@@ -761,6 +830,38 @@ class BrowserEngine:
             # A failed continue is a browser transport failure, not grounds to
             # retry or silently authorize another route.
             pass
+
+    def _watch_context(self, context: Any) -> None:
+        """Observe an externally closed context without ever relaunching it."""
+
+        try:
+            context.on(
+                "close",
+                lambda *_arguments: self._handle_context_close(context),
+            )
+        except Exception:
+            # Older/fake context implementations may not expose lifecycle
+            # events. The regular pages probe still detects transport failures.
+            pass
+
+    def _handle_context_close(self, context: Any) -> None:
+        if getattr(self, "_closing_context", False) or context is not self._context:
+            return
+        self._context_closed = True
+        self._degraded = True
+
+    @staticmethod
+    def _context_has_ended(context: Any) -> bool:
+        try:
+            probe = getattr(context, "is_closed", None)
+        except Exception:
+            return True
+        if probe is None:
+            return False
+        try:
+            return bool(probe() if callable(probe) else probe)
+        except Exception:
+            return True
 
     def _handle_new_page(self, page: Any) -> None:
         try:
@@ -791,6 +892,11 @@ class BrowserEngine:
         self._page_ids[identity] = tab_id
         try:
             opener = page.opener
+            # Playwright's sync API exposes Page.opener as a method; treating
+            # the bound method itself as an opener incorrectly drops the normal
+            # initial about:blank page during the next lifecycle sync.
+            if callable(opener):
+                opener = opener()
         except Exception:
             opener = None
         if tab.last_url == "about:blank" and opener is None:
@@ -809,12 +915,71 @@ class BrowserEngine:
         except Exception:
             pass
 
+    def _settle_new_pages(
+        self, operation: OperationContext, before_ids: set[str]
+    ) -> None:
+        """Give popup navigations a bounded chance to leave about:blank.
+
+        Playwright emits a popup before its target navigation settles. Syncing
+        immediately after the click would otherwise classify that transient
+        about:blank as an unsafe page and close a valid popup.
+        """
+
+        context = self._context
+        if context is None:
+            return
+        pages = list(context.pages)
+        for page in pages:
+            self._register_page(page)
+        pending = {
+            tab_id
+            for tab_id, tab in self._tabs.items()
+            if tab_id not in before_ids
+            and str(getattr(tab.page, "url", "about:blank")) == "about:blank"
+        }
+        deadline = min(
+            operation.deadline,
+            time.monotonic() + POPUP_NAVIGATION_GRACE_SECONDS,
+        )
+        while pending and time.monotonic() < deadline:
+            operation.check()
+            for tab_id in list(pending):
+                tab = self._tabs.get(tab_id)
+                if tab is None or str(getattr(tab.page, "url", "about:blank")) != "about:blank":
+                    pending.discard(tab_id)
+            if not pending:
+                return
+            remaining_ms = max(
+                1,
+                min(50, int((deadline - time.monotonic()) * 1000)),
+            )
+            tab = self._tabs.get(next(iter(pending)))
+            if tab is None:
+                continue
+            try:
+                tab.page.wait_for_timeout(remaining_ms)
+            except Exception:
+                break
+            pages = list(context.pages)
+            for page in pages:
+                self._register_page(page)
+
     def _sync_pages(self) -> None:
         context = self._context
         if context is None:
             return
+        if getattr(self, "_context_closed", False) or self._context_has_ended(context):
+            self._degraded = True
+            self._close_browser(preserve_degraded=True)
+            return
         try:
             pages = list(context.pages)
+            # A close event can be dispatched while the pages list is read.
+            # Do not publish the old context as open in that case.
+            if getattr(self, "_context_closed", False) or self._context_has_ended(context):
+                self._degraded = True
+                self._close_browser(preserve_degraded=True)
+                return
         except Exception:
             self._degraded = True
             self._close_browser(preserve_degraded=True)
@@ -968,6 +1133,7 @@ class BrowserEngine:
         context, self._context = self._context, None
         playwright, self._playwright = self._playwright, None
         lease, self._profile_lease = self._profile_lease, None
+        self._context_closed = False
         for tab in self._tabs.values():
             tab.close_references()
         self._tabs.clear()
@@ -977,16 +1143,21 @@ class BrowserEngine:
         self._owner = None
         if not preserve_degraded:
             self._degraded = False
-        if context is not None:
-            try:
-                context.close()
-            except Exception:
-                pass
-        if playwright is not None:
-            try:
-                playwright.stop()
-            except Exception:
-                pass
+        closing_before = getattr(self, "_closing_context", False)
+        self._closing_context = True
+        try:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if playwright is not None:
+                try:
+                    playwright.stop()
+                except Exception:
+                    pass
+        finally:
+            self._closing_context = closing_before
         if lease is not None:
             lease.release()
 

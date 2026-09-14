@@ -60,6 +60,9 @@ not in a sandbox. Installing files starts nothing; skill activation is separate.
 - Screenshots are viewport-only and conservatively refuse possible form-value
   exposure. There is no JavaScript, clipboard, file-transfer, cookie, storage, or
   normal-profile access.
+- Repeated open requests reuse the existing visible context. If the user closes
+  it or it crashes, Browse reports degraded closed state and releases its owned
+  helpers; only a new explicit open request may relaunch it.
 
 Use `/browse close` when finished. `/browse reset-profile` separately confirms
 before removing only the locked, sentinel-verified isolated profile.
