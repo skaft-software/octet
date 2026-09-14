@@ -3390,7 +3390,7 @@ async fn parallel_safe_tool_implementations_really_overlap() {
 }
 
 #[tokio::test]
-async fn host_classification_overrides_a_parallel_tool_claim() {
+async fn network_classification_overrides_a_parallel_tool_claim() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("messages"))
@@ -3413,12 +3413,12 @@ async fn host_classification_overrides_a_parallel_tool_claim() {
     let probe = ParallelOverlapProbe {
         active: Arc::clone(&active),
         maximum: Arc::clone(&maximum),
-        effect: ToolEffect::HostRead,
+        effect: ToolEffect::Network,
     };
     let mut agent = build_agent_with_extra_tool(
         &server.uri(),
         workspace.path(),
-        &sessions.path().join("host-effect-sequential.jsonl"),
+        &sessions.path().join("network-effect-sequential.jsonl"),
         Some(4),
         probe,
     );
