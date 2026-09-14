@@ -299,12 +299,26 @@ impl Candidate {
             thread::sleep(Duration::from_millis(5));
         };
         assert!(status.success(), "candidate shutdown status: {status}");
-        let restored = terminal_attributes(self.pty.slave.as_raw_fd());
+        // A controlling-terminal session exit can revoke the parent-held slave
+        // on macOS. The retained master exposes the same terminal mode state
+        // after the child exits on both macOS and Linux.
+        let restored = terminal_attributes(self.pty.master.as_raw_fd());
         assert_eq!(
             restored.c_lflag & (libc::ICANON | libc::ECHO),
             self.pty.original_termios.c_lflag & (libc::ICANON | libc::ECHO),
             "PTY line discipline was not restored"
         );
+    }
+}
+
+impl Drop for Candidate {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            unsafe {
+                let _ = libc::kill(self.child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = self.child.wait();
+        }
     }
 }
 
