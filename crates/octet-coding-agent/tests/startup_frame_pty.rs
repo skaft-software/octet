@@ -2641,7 +2641,9 @@ fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
                 STARTUP_TIMEOUT,
             );
             let before = changelog_session_bytes(&octet);
-            octet.pty.write_input(b"/changelog\r\r");
+            // Enter on the visible slash popup invokes `/changelog`; a second
+            // Enter would close the report via its own input owner.
+            octet.pty.write_input(b"/changelog\r");
             Some(before)
         } else {
             None
