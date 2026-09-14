@@ -31,17 +31,29 @@ provider-token events, and gates the finite SSE body. The test independently
 holds ordinary `Working` and manual `Compacting context` responses, samples
 frame count/palette changes, exercises local keyboard input and resize, cancels,
 checks no duplicate request/stale activity, and verifies PTY line-discipline
-restoration. It also records dark/light ordinary waits and a no-color static
-fallback. It does not use credentials, personal sessions, live providers, or
-fault injection into a real network.
+restoration through the retained PTY master after the child exits. The parent
+must not provide a terminal: the fixture opens its own PTY, gives the child a
+session/controlling-terminal boundary, and retains the master for post-exit
+inspection; an unwind guard kills and reaps an unfinished child. It also records
+dark/light ordinary waits and a no-color static fallback. It does not use
+credentials, personal sessions, live providers, or fault injection into a real
+network.
+
+## Qualification repair
+
+The frozen run reached shutdown but called `tcgetattr` on the parent-held PTY
+slave after the child session exited. macOS can revoke that slave at the
+controlling-terminal session boundary, producing `ENOTTY` even though the PTY
+master still exposes the terminal mode state. The repair reads the master while
+preserving the existing `ICANON | ECHO` restoration assertion; it does not skip
+or weaken restoration on `ENOTTY` and does not use the test runner's stdin.
 
 ## Checks
 
-- `rustfmt --edition 2021 --check crates/octet-coding-agent/src/tui/view/reasoning_render.rs` — exit 0.
-- `rustfmt --edition 2021 --check crates/octet-coding-agent/tests/activity_wait_pty.rs` — exit 0.
-- `git diff --check` — exit 0 at the last static checkpoint.
-- Cargo/rustc and the new binary PTY test are **pending**: the shared build slot
-  is held by integration in `BUILD-SLOT.md`.
+- Prior static checkpoint: `rustfmt --edition 2021 --check crates/octet-coding-agent/src/tui/view/reasoning_render.rs` — exit 0.
+- Prior static checkpoint: `rustfmt --edition 2021 --check crates/octet-coding-agent/tests/activity_wait_pty.rs` — exit 0.
+- Prior static checkpoint: `git diff --check` — exit 0.
+- Cargo/rustc, the repaired binary PTY test, and post-repair formatter checks are **pending**: coding roots may not run them.
 
 ## Remaining qualification
 
