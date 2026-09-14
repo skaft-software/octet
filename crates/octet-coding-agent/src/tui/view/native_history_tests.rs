@@ -5,12 +5,18 @@ struct NativeReplay {
     shell: InteractiveShell,
     bytes: Arc<Mutex<Vec<u8>>>,
     terminal: vt100::Parser,
+    width: u16,
+    height: u16,
 }
 
 impl NativeReplay {
     fn new() -> Self {
+        Self::with_size(80, 8)
+    }
+
+    fn with_size(width: u16, height: u16) -> Self {
         let (mut shell, bytes) =
-            emulated_shell_with_mode(crate::tui::theme::test_theme(), 80, 8, true, false);
+            emulated_shell_with_mode(crate::tui::theme::test_theme(), width, height, true, false);
         // Match the product's policy; the generic Pi default stays unchanged.
         shell.tui.as_mut().unwrap().set_clear_on_shrink(false);
         for index in 0..30 {
@@ -19,7 +25,9 @@ impl NativeReplay {
         let mut replay = Self {
             shell,
             bytes,
-            terminal: vt100::Parser::new(8, 80, 2048),
+            terminal: vt100::Parser::new(height, width, 2048),
+            width,
+            height,
         };
         replay.render(false);
         replay
@@ -39,12 +47,18 @@ impl NativeReplay {
                 "history replay: {output:?}"
             );
         }
-        process_vt100_with_saved_line_clear(&mut self.terminal, &bytes, 8, 80, 2048);
+        process_vt100_with_saved_line_clear(
+            &mut self.terminal,
+            &bytes,
+            self.height,
+            self.width,
+            2048,
+        );
         output
     }
 
     fn history(&mut self) -> String {
-        self.terminal.set_size(2048, 80);
+        self.terminal.set_size(2048, self.width);
         self.terminal.set_scrollback(usize::MAX);
         let physical = self.terminal.screen().contents();
         for index in 0..30 {
@@ -145,6 +159,57 @@ fn native_pending_tool_progress_then_result_is_addressable_and_exactly_once() {
         }
         assert!(!physical.contains("result pending"), "{physical}");
     }
+}
+
+#[test]
+fn native_ordinary_streaming_paragraph_boundaries_do_not_replay() {
+    let mut replay = NativeReplay::with_size(96, 18);
+    let run = replay.shell.begin_run("openai");
+    let heading = "# APPEND heading\n\n";
+    replay.shell.on_run_event(
+        run,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: heading.into(),
+        },
+    );
+    replay.render(true);
+    let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
+    let mut source = heading.to_owned();
+
+    for index in 0..48 {
+        let mut chunk = format!(
+            "APPEND_{index:02} deterministic streamed prose with Markdown boundaries and enough words to occupy a physical row.\n"
+        );
+        if matches!(index, 7 | 15 | 23 | 31 | 39 | 47) {
+            chunk.push('\n');
+        }
+        source.push_str(&chunk);
+        replay.shell.on_run_event(
+            run,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: chunk,
+            },
+        );
+        replay.render(true);
+    }
+
+    assert_eq!(
+        replay.shell.tui.as_ref().unwrap().full_redraws(),
+        baseline,
+        "ordinary streamed paragraph boundaries must not trigger Pi replay"
+    );
+    let state = replay.shell.state.borrow();
+    let index = state.active_text.expect("active streamed text");
+    let TranscriptBlock::Assistant(assistant) = &state.transcript[index] else {
+        panic!("assistant");
+    };
+    assert_eq!(assistant.text, source);
+    assert_eq!(
+        block_copy_text(&state.transcript[index]),
+        sexy_tui_rs::parse_markdown(&source).plain_text()
+    );
 }
 
 #[test]

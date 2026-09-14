@@ -106,6 +106,60 @@ fn deterministic_adversarial_bytes_never_break_width_or_static_equivalence() {
     }
 }
 
+#[test]
+fn ordinary_streaming_paragraph_boundaries_keep_canonical_rows_stable() {
+    let renderer = renderer(TerminalCapabilities::plain());
+    let mut stream = StreamingMarkdown::new();
+    let mut cache = sexy_tui_rs::StreamingRenderCache::default();
+    let mut frame = Vec::new();
+    let mut source = String::new();
+    let mut chunks = vec!["# APPEND heading\n\n".to_owned()];
+    for index in 0..48 {
+        let mut chunk = format!(
+            "APPEND_{index:02} deterministic streamed prose with Markdown boundaries and enough words to occupy a physical row.\n"
+        );
+        if matches!(index, 7 | 15 | 23 | 31 | 39 | 47) {
+            chunk.push('\n');
+        }
+        chunks.push(chunk);
+    }
+
+    for chunk in chunks {
+        source.push_str(&chunk);
+        stream.push_str(&chunk);
+        let previous = frame.clone();
+        let update = cache.render_line_update(&stream, &renderer, 96, false);
+        assert!(update.stable_prefix <= previous.len());
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert_eq!(
+            &frame[..previous.len().min(frame.len())],
+            &previous[..previous.len().min(frame.len())],
+            "stream frame changed an already emitted row for {chunk:?}"
+        );
+        assert_eq!(
+            frame,
+            renderer.render(&parse_markdown(&source), 96).plain_lines(),
+            "stream geometry diverged for {chunk:?}"
+        );
+    }
+
+    let previous = frame.clone();
+    stream.finish();
+    let update = cache.render_line_update(&stream, &renderer, 96, false);
+    frame.truncate(update.stable_prefix);
+    frame.extend(update.replacement);
+    assert_eq!(
+        &frame[..previous.len().min(frame.len())],
+        &previous[..previous.len().min(frame.len())]
+    );
+    assert_eq!(
+        frame,
+        renderer.render(&parse_markdown(&source), 96).plain_lines()
+    );
+    assert_eq!(stream.raw_text(), source);
+}
+
 fn visualize_controls(value: &str) -> String {
     value.replace('\x1b', "<ESC>").replace('\x07', "<BEL>")
 }
