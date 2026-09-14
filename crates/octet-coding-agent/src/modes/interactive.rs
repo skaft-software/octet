@@ -5876,8 +5876,7 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                 app.executable_extensions
                     .commit_prompt_context(pending_context_count);
                 prepare_prompt(&mut shell);
-                let display = retry_composed.transcript_text;
-                shell.on_prompt_submitted(&display);
+                shell.on_composed_prompt_submitted(&retry_composed);
                 let run_id = shell.begin_run(&app.model.endpoint.id.0);
                 shell.mark_prompt_persisted();
                 shell.set_awaiting_provider(run_id);

@@ -821,7 +821,8 @@ impl AttachmentLedger {
         self.entries.extend(entries);
     }
 
-    fn take_all(&mut self) -> Vec<Attachment> {
+    /// Move pending entries out without changing the monotonic chip ID.
+    pub(crate) fn take_all(&mut self) -> Vec<Attachment> {
         std::mem::take(&mut self.entries)
     }
 }

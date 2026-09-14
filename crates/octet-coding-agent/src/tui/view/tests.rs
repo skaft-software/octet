@@ -2528,6 +2528,134 @@ fn composer_projection_cache_reuses_an_unchanged_large_draft_and_refreshes_on_ch
 }
 
 #[test]
+fn prompt_history_repeats_with_bounds_and_restores_an_empty_draft() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("first");
+    shell.on_prompt_submitted("second");
+
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "second");
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "first");
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "first", "oldest history wrapped");
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), "second");
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), "", "newest history lost the empty draft");
+    assert_eq!(shell.state.borrow().editor.cursor(), 0);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+    assert_eq!(shell.state.borrow().prompt_history.len(), 2);
+}
+
+#[test]
+fn prompt_history_keeps_multiline_motion_away_from_text_boundaries() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("sent");
+    for character in "first\nsecond".chars() {
+        shell.apply_edit(EditAction::Char(character));
+    }
+    let draft = shell.pending();
+
+    shell.state.borrow_mut().editor.set_cursor(7);
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), draft);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+
+    let before_down = shell.state.borrow().editor.cursor();
+    shell.state.borrow_mut().editor.set_cursor(draft.len() - 1);
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), draft);
+    assert!(shell.state.borrow().editor.cursor() >= before_down);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+}
+
+#[test]
+fn prompt_history_editing_does_not_mutate_the_recalled_original() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("original");
+    shell.apply_edit(EditAction::Up);
+    shell.apply_edit(EditAction::Char('!'));
+    assert_eq!(shell.pending(), "original!");
+    assert_eq!(
+        shell.state.borrow().prompt_history[0].display_text,
+        "original"
+    );
+
+    let resubmitted = shell.drain_composed();
+    shell.on_prompt_submitted(&resubmitted.display_text);
+    assert_eq!(shell.state.borrow().prompt_history.len(), 2);
+    assert_eq!(
+        shell.state.borrow().prompt_history[0].display_text,
+        "original"
+    );
+    assert_eq!(
+        shell.state.borrow().prompt_history[1].display_text,
+        "original!"
+    );
+}
+
+#[test]
+fn prompt_history_preserves_collapsed_paste_masks_and_payloads() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.apply_edit(EditAction::Paste("sent line\n".repeat(20)));
+    let sent = shell.drain_composed();
+    let display = sent.display_text.clone();
+    assert_eq!(sent.attachments.len(), 1);
+    shell.on_composed_prompt_submitted(&sent);
+
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), display);
+    let recalled = shell.drain_composed();
+    assert_eq!(recalled.display_text, display);
+    assert_eq!(recalled.attachments.len(), 1);
+    assert!(matches!(
+        recalled.parts.as_slice(),
+        [octet_agent::InputPart::Text(text)] if text.contains("sent line")
+    ));
+    assert_eq!(shell.state.borrow().prompt_history[0].attachments.len(), 1);
+}
+
+#[test]
+fn prompt_history_restores_the_draft_cursor_and_payload_at_newest_boundary() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("sent");
+    shell.apply_edit(EditAction::Paste("draft line\n".repeat(20)));
+    let draft_display = shell.pending();
+    let draft_cursor = shell.state.borrow().editor.cursor();
+
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "sent");
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), draft_display);
+    assert_eq!(shell.state.borrow().editor.cursor(), draft_cursor);
+    let restored = shell.drain_composed();
+    assert_eq!(restored.display_text, draft_display);
+    assert!(matches!(
+        restored.parts.as_slice(),
+        [octet_agent::InputPart::Text(text)] if text.contains("draft line")
+    ));
+}
+
+#[test]
+fn prompt_history_is_bounded_to_recent_successful_prompts() {
+    let mut shell = InteractiveShell::test_shell();
+    for index in 0..(MAX_PROMPT_HISTORY_ENTRIES + 3) {
+        shell.on_prompt_submitted(&format!("prompt {index}"));
+    }
+    assert_eq!(
+        shell.state.borrow().prompt_history.len(),
+        MAX_PROMPT_HISTORY_ENTRIES
+    );
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "prompt 102");
+    for _ in 0..MAX_PROMPT_HISTORY_ENTRIES {
+        shell.apply_edit(EditAction::Up);
+    }
+    assert_eq!(shell.pending(), "prompt 3", "oldest retained prompt wrapped");
+}
+
+#[test]
 fn vertical_editor_navigation_snaps_to_document_boundaries_in_one_step() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(40, 12);
