@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import codecs
 import copy
+import errno
 import hashlib
 import hmac
 import html
 from html.parser import HTMLParser
 import http.client
+import io
 import ipaddress
 import json
 import math
@@ -23,6 +25,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import socket
 import ssl
 import stat
@@ -209,10 +212,17 @@ class Deadline:
         self.checkpoint()
         return max(0.001, self._end - time.monotonic())
 
-    def socket_timeout(self) -> float:
-        # API 0.2 gives a two-second cancellation grace.  No individual socket
-        # operation is allowed to consume that whole interval.
-        return max(0.05, min(0.75, self.remaining()))
+    def wait_for_socket(self, sock: socket.socket, *, writing: bool = False) -> None:
+        # Poll cancellation below API 0.2's two-second grace, without treating
+        # a quiet interval as the end of the overall request budget.
+        while True:
+            readable, writable, _ = select.select(
+                [] if writing else [sock], [sock] if writing else [], [],
+                min(0.1, self.remaining()),
+            )
+            self.checkpoint()
+            if readable or writable:
+                return
 
 
 class BoundedCache:
@@ -1028,26 +1038,105 @@ def _address_allowed(address: ipaddress._BaseAddress, allow_private: bool) -> bo
     return address.is_global
 
 
+def _connect_socket(resolved: ResolvedAddress, deadline: Deadline) -> socket.socket:
+    sock = socket.socket(resolved.family, socket.SOCK_STREAM)
+    try:
+        deadline.checkpoint()
+        sock.setblocking(False)
+        error = sock.connect_ex(resolved.sockaddr)
+        if error in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR):
+            deadline.wait_for_socket(sock, writing=True)
+            error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if error:
+            raise OSError(error, os.strerror(error))
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Poll below HTTP buffering; socket timeouts would poison makefile readers."""
+
+    def __init__(self, sock: socket.socket, deadline: Deadline) -> None:
+        super().__init__()
+        self._socket = sock
+        self._deadline = deadline
+        # Retain makefile's socket ownership: HTTPConnection may close its own
+        # reference after headers, before HTTPResponse has consumed the body.
+        self._raw = sock.makefile("rb", buffering=0)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        while True:
+            self._deadline.checkpoint()
+            writing = False
+            try:
+                count = self._raw.readinto(buffer)
+                if count is not None:
+                    return count
+            except ssl.SSLWantReadError:
+                pass
+            except ssl.SSLWantWriteError:
+                writing = True
+            self._deadline.wait_for_socket(self._socket, writing=writing)
+
+    def close(self) -> None:
+        try:
+            self._raw.close()
+        finally:
+            super().close()
+
+
+class _DeadlineSocket:
+    """Cooperative I/O for the sendall/makefile/close surface used by http.client."""
+
+    def __init__(self, sock: socket.socket, deadline: Deadline) -> None:
+        self._socket = sock
+        self._deadline = deadline
+
+    def sendall(self, data: bytes) -> None:
+        pending = memoryview(data)
+        while pending:
+            self._deadline.checkpoint()
+            writing = True
+            try:
+                sent = self._socket.send(pending)
+                if sent == 0:
+                    raise OSError("the connection closed during the request")
+                pending = pending[sent:]
+                continue
+            except (BlockingIOError, ssl.SSLWantWriteError):
+                pass
+            except ssl.SSLWantReadError:
+                writing = False
+            self._deadline.wait_for_socket(self._socket, writing=writing)
+
+    def makefile(self, mode: str) -> io.BufferedReader:
+        return io.BufferedReader(_DeadlineReader(self._socket, self._deadline))
+
+    def close(self) -> None:
+        self._socket.close()
+
+
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     def __init__(
         self,
         host: str,
         port: int,
         resolved: ResolvedAddress,
-        timeout: float,
+        deadline: Deadline,
     ) -> None:
-        super().__init__(host, port=port, timeout=timeout)
+        super().__init__(host, port=port, timeout=deadline.remaining())
         self._resolved = resolved
+        self._deadline = deadline
 
     def connect(self) -> None:
-        sock = socket.socket(self._resolved.family, socket.SOCK_STREAM)
-        try:
-            sock.settimeout(self.timeout)
-            sock.connect(self._resolved.sockaddr)
-            self.sock = sock
-        except BaseException:
-            sock.close()
-            raise
+        self.sock = _DeadlineSocket(
+            _connect_socket(self._resolved, self._deadline), self._deadline,
+        )
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -1056,20 +1145,31 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         host: str,
         port: int,
         resolved: ResolvedAddress,
-        timeout: float,
+        deadline: Deadline,
         context: ssl.SSLContext,
     ) -> None:
-        super().__init__(host, port=port, timeout=timeout, context=context)
+        super().__init__(host, port=port, timeout=deadline.remaining(), context=context)
         self._resolved = resolved
+        self._deadline = deadline
 
     def connect(self) -> None:
-        raw = socket.socket(self._resolved.family, socket.SOCK_STREAM)
+        sock = _connect_socket(self._resolved, self._deadline)
         try:
-            raw.settimeout(self.timeout)
-            raw.connect(self._resolved.sockaddr)
-            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+            sock = self._context.wrap_socket(
+                sock, server_hostname=self.host, do_handshake_on_connect=False,
+            )
+            while True:
+                self._deadline.checkpoint()
+                try:
+                    sock.do_handshake()
+                    break
+                except ssl.SSLWantReadError:
+                    self._deadline.wait_for_socket(sock)
+                except ssl.SSLWantWriteError:
+                    self._deadline.wait_for_socket(sock, writing=True)
+            self.sock = _DeadlineSocket(sock, self._deadline)
         except BaseException:
-            raw.close()
+            sock.close()
             raise
 
 
@@ -1162,13 +1262,12 @@ class HttpClient:
         last_error: Optional[BaseException] = None
         for resolved in addresses:
             deadline.checkpoint()
-            timeout = deadline.socket_timeout()
             if parsed.scheme == "https":
                 connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
-                    host, port, resolved, timeout, self._ssl_context
+                    host, port, resolved, deadline, self._ssl_context
                 )
             else:
-                connection = _PinnedHTTPConnection(host, port, resolved, timeout)
+                connection = _PinnedHTTPConnection(host, port, resolved, deadline)
             response: Optional[http.client.HTTPResponse] = None
             try:
                 connection.request(
@@ -1201,6 +1300,7 @@ class HttpClient:
                     except socket.timeout as error:
                         deadline.checkpoint()
                         raise RequestTimedOut("the web request reached its time limit") from error
+                    deadline.checkpoint()
                     if not chunk:
                         break
                     size += len(chunk)
