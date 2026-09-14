@@ -1399,7 +1399,7 @@ mod tests {
                 InputPart::Text(_) => None,
             })
             .collect::<Vec<_>>();
-        let bytes = |media: &Media| -> &[u8] {
+        fn bytes(media: &Media) -> &[u8] {
             match media {
                 Media::Image(image) => match &image.source {
                     octet_ai::ImageSource::Inline(data) => data.as_ref(),
@@ -1410,7 +1410,7 @@ mod tests {
                     _ => panic!("expected inline audio"),
                 },
             }
-        };
+        }
         assert_eq!(bytes(media[0]), b"first-bytes");
         assert_eq!(bytes(media[1]), b"audio-bytes");
         assert_eq!(bytes(media[2]), b"second-bytes");
