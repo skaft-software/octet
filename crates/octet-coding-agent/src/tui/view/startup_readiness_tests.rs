@@ -143,6 +143,41 @@ fn startup_input_owners_render_and_resize_without_releasing_branding() {
 }
 
 #[test]
+fn startup_lifecycle_waits_paint_the_draft_without_provisional_model_chrome() {
+    for application_viewport in [false, true] {
+        let mut shell = pending_shell();
+        shell.set_run_label("discovering models…");
+        shell.state.borrow_mut().editor.set_text("retained draft");
+        let component = ShellComponent::new(shell.state.clone(), application_viewport);
+        for (width, height) in [(12, 1), (24, 4), (46, 8), (96, 18), (120, 40)] {
+            shell.set_size(width, height);
+            let frame = component.render(width);
+            assert_unbranded(&frame);
+            assert_eq!(frame.len(), usize::from(height));
+            assert!(frame
+                .iter()
+                .all(|line| visible_width(line) <= usize::from(width)));
+            if height >= 4 {
+                assert!(plain(&frame).contains("retained draft"));
+                assert!(frame.iter().any(|line| line.contains(CURSOR_MARKER)));
+            }
+        }
+        shell.show_overlay_text("Verification instructions".into());
+        let overlay = plain(&component.render(120));
+        assert!(overlay.contains("Verification instructions"));
+        assert!(!overlay.contains("retained draft"));
+        shell.close_overlay();
+        assert!(plain(&component.render(120)).contains("retained draft"));
+        shell.set_identity("custom", "custom/probe", "off");
+        shell.set_run_label("idle");
+        shell.finish_startup();
+        let ready = plain(&component.render(120));
+        assert!(ready.contains("retained draft"));
+        assert!(ready.contains("custom/probe"));
+    }
+}
+
+#[test]
 fn readiness_inserts_one_welcome_prefix_into_a_warm_cache() {
     let mut shell = pending_shell();
     shell.set_workspace(PathBuf::from("/startup-fixture/workspace"));

@@ -382,10 +382,12 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         .unwrap_or_default();
 
     if state.startup_pending {
-        // Only the current startup input owner is meaningful before readiness.
-        // Pickers own their own cursor; credential/endpoint prompts use the
-        // existing temporary composer, without its provisional model footer.
-        let mut composer = if state.tool_input_prompt.is_some() {
+        // Pickers own their own cursor. Lifecycle waits own the ordinary draft,
+        // and credential/endpoint prompts own the temporary composer. Neither
+        // should expose a provisional model footer before launch readiness.
+        let mut composer = if state.tool_input_prompt.is_some()
+            || (state.panel.is_none() && state.overlay.is_none() && !state.run_label.is_empty())
+        {
             let mut lines =
                 crate::tui::composer_surface::render_composer_surface(state, width, now);
             if crate::tui::composer_surface::status_footer_visible(state, width) {
@@ -396,7 +398,6 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
             Vec::new()
         };
         let rows = usize::from(state.size.1.max(1));
-        composer.truncate(rows);
         let header = if !state.run_label.is_empty() && state.panel.is_none() {
             vec![fit_line(
                 &state.theme.dim(&sanitize_for_terminal(&state.run_label)),
@@ -405,6 +406,7 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         } else {
             Vec::new()
         };
+        composer.truncate(rows.saturating_sub(header.len()));
         error.truncate(
             rows.saturating_sub(header.len() + composer.len() + usize::from(state.panel.is_some())),
         );
