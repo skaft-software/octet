@@ -3,7 +3,9 @@
 
 The caller supplies every identity field explicitly.  This command never reads
 Cargo.toml or a release API; it validates the already-created checksum asset and
-its local release files before atomically writing the metadata document.
+its local release files before atomically writing the metadata document.  The
+published three-target set is the default; the Windows target is available only
+through the explicit ``--include-windows-candidate`` opt-in.
 """
 
 from __future__ import annotations
@@ -19,11 +21,15 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from octet_release_identity import release_repository
-TARGETS = (
+
+PUBLISHED_TARGETS = (
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
 )
+WINDOWS_CANDIDATE_TARGET = "x86_64-pc-windows-gnu"
+# Keep the historical name for callers that inspect the published contract.
+TARGETS = PUBLISHED_TARGETS
 CHECKSUM_PATTERN = re.compile(r"^([0-9a-f]{64})  \.\/([A-Za-z0-9_.-]+)$")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
@@ -54,7 +60,17 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def parse_checksums(path: pathlib.Path, version: str) -> Mapping[str, str]:
+def release_targets(include_windows_candidate: bool = False) -> tuple[str, ...]:
+    if include_windows_candidate:
+        return (*PUBLISHED_TARGETS, WINDOWS_CANDIDATE_TARGET)
+    return PUBLISHED_TARGETS
+
+
+def parse_checksums(
+    path: pathlib.Path,
+    version: str,
+    include_windows_candidate: bool = False,
+) -> Mapping[str, str]:
     regular_file(path, "checksum manifest")
     try:
         lines = path.read_text(encoding="ascii").splitlines()
@@ -62,7 +78,10 @@ def parse_checksums(path: pathlib.Path, version: str) -> Mapping[str, str]:
         fail(f"checksum manifest is not ASCII text: {path}: {error}")
     expected = {
         "install-octet.sh",
-        *(f"octet-{version}-{target}.tar.gz" for target in TARGETS),
+        *(
+            f"octet-{version}-{target}.tar.gz"
+            for target in release_targets(include_windows_candidate)
+        ),
     }
     entries: dict[str, str] = {}
     for line in lines:
@@ -128,9 +147,10 @@ def build_metadata(
     workflow_ref: str,
     repository: str,
     checksums_path: pathlib.Path,
+    include_windows_candidate: bool = False,
 ) -> dict[str, Any]:
     validate_identity(version, tag, source_commit, workflow_commit, workflow_ref, repository)
-    entries = parse_checksums(checksums_path, version)
+    entries = parse_checksums(checksums_path, version, include_windows_candidate)
     assets: list[dict[str, str]] = []
     for name, kind, target in [
         ("install-octet.sh", "installer", None),
@@ -140,7 +160,7 @@ def build_metadata(
                 "binary",
                 target,
             )
-            for target in TARGETS
+            for target in release_targets(include_windows_candidate)
         ],
     ]:
         asset_path = checksums_path.parent / name
@@ -183,6 +203,14 @@ def main(argv: Sequence[str]) -> int:
     parser.add_argument("repository")
     parser.add_argument("checksums", type=pathlib.Path)
     parser.add_argument("output", type=pathlib.Path)
+    parser.add_argument(
+        "--include-windows-candidate",
+        action="store_true",
+        help=(
+            "explicitly include the x86_64-pc-windows-gnu candidate archive; "
+            "the default remains the three published Unix targets"
+        ),
+    )
     args = parser.parse_args(argv)
     metadata = build_metadata(
         args.version,
@@ -192,6 +220,7 @@ def main(argv: Sequence[str]) -> int:
         args.workflow_ref,
         args.repository,
         args.checksums,
+        args.include_windows_candidate,
     )
     payload = (json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode("utf-8")
     write_atomic(args.output, payload)

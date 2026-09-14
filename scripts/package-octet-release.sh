@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 4 ]]; then
-    printf 'usage: %s TARGET OUTPUT_DIRECTORY VERSION SOURCE_DIRECTORY\n' "$0" >&2
+if [[ $# -lt 4 || $# -gt 5 ]]; then
+    printf 'usage: %s TARGET OUTPUT_DIRECTORY VERSION SOURCE_DIRECTORY [WINDOWS_PROBE_JSON]\n' "$0" >&2
     exit 2
 fi
 
@@ -10,6 +10,7 @@ target=$1
 output_directory=$2
 version=$3
 source_directory=$4
+windows_probe=${5:-}
 
 if [[ -z "$target" || -z "$version" || -z "$source_directory" ]]; then
     printf 'target, version, and source directory must not be empty\n' >&2
@@ -20,7 +21,18 @@ if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)
     exit 2
 fi
 case "$target" in
-    x86_64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin) ;;
+    x86_64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin)
+        if [[ -n "$windows_probe" ]]; then
+            printf 'a Windows probe is only valid for the Windows release target\n' >&2
+            exit 2
+        fi
+        ;;
+    x86_64-pc-windows-gnu)
+        if [[ -z "$windows_probe" ]]; then
+            printf 'Windows release packaging requires a native Windows probe identity JSON\n' >&2
+            exit 2
+        fi
+        ;;
     *)
         printf 'unsupported octet release target: %s\n' "$target" >&2
         exit 2
@@ -42,6 +54,16 @@ if ! git -C "$source_directory" diff-index --quiet HEAD --; then
     printf 'release source has tracked changes; package an immutable clean commit\n' >&2
     exit 1
 fi
+
+# A cross-built Windows executable is not runnable on the Unix release host.  The
+# dedicated packager verifies a native Windows probe identity and hashes those
+# probed files into the archive instead of attempting an accidental Unix probe.
+if [[ "$target" == "x86_64-pc-windows-gnu" ]]; then
+    script_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+    exec python3 "$script_directory/package-octet-windows-release.py" \
+        "$target" "$output_directory" "$version" "$source_directory" "$windows_probe"
+fi
+
 binary="$source_directory/target/$target/release/octet"
 host_binary="$source_directory/target/$target/release/octet-host"
 package_version=${version#v}
