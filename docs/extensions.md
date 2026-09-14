@@ -23,13 +23,22 @@ The host resolves these options before startup and supplies their values in
 [`initialize.params.flag_values`](extensions/API-0.3-REFERENCE.md#initializerequest).
 See [CLI flags](#api-03-cli-flags) for validation and parsing rules.
 
-No complete runnable API `0.3` example is qualified here. The
-[Python `Extension` runtime](../sdk/python/README.md)
-is an API `0.1`/`0.2` adapter; generated `octet_extension.api_v03` types do not
-implement a complete API `0.3` process runtime. The
-[TypeScript example](../sdk/typescript/README.md) demonstrates contract negotiation,
-not a running extension. The existing [extension examples](../examples/README.md#legacy-extension-examples)
-are legacy references, not API `0.3` quickstarts. Do not retag their manifests.
+## Qualified API `0.3` example
+
+The [minimal ordinary-process example](../examples/extensions/api-v03-minimal/README.md)
+is the qualified current-API quickstart. It starts from a clean octet `0.7.6`
+installation, uses only Python 3's standard library, performs exact API/schema
+negotiation, exposes and handles a real `echo` tool, and exercises cancellation
+and graceful shutdown. Its README records prerequisites, trust and enablement,
+expected output, and process-level verification. Use it as a wire reference for
+other languages; it is intentionally not a general-purpose SDK runtime.
+
+The retained [Python `Extension` runtime](../sdk/python/README.md) is an API
+`0.1`/`0.2` adapter. Generated `octet_extension.api_v03` types are contract
+bindings, not a complete process runtime. The [TypeScript example](../sdk/typescript/README.md)
+demonstrates contract negotiation, not a running extension. The existing
+[extension examples](../examples/README.md#legacy-extension-examples) remain
+legacy references; do not retag their manifests.
 
 ## Kernel boundary
 
