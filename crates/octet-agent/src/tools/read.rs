@@ -231,8 +231,10 @@ impl Tool for ReadTool {
     }
 
     fn concurrency(&self) -> ToolConcurrency {
-        // Likewise, HostRead and Network calls are forced back to sequential
-        // execution after per-call effect classification.
+        // Live read waves admit exact Pure, WorkspaceRead, or HostRead calls only
+        // after effect classification and policy admission. HostRead remains
+        // non-replayable; crash replay still requires exact Pure/WorkspaceRead,
+        // while Network and all other effects remain sequential barriers.
         ToolConcurrency::Parallel
     }
 
