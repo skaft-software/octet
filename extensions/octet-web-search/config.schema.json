@@ -16,7 +16,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 2048,
-          "description": "Explicit non-secret SearXNG base or /search URL."
+          "description": "Explicit non-secret SearXNG base or /search URL; non-secret query parameters are preserved."
         },
         "label": {"type": "string", "minLength": 1, "maxLength": 48},
         "allow_private_endpoint": {

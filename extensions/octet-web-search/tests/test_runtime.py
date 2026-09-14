@@ -39,8 +39,10 @@ class StubCache:
 class StubService:
     def __init__(self):
         self.cache = StubCache()
+        self.search_timeout_seconds = []
 
     def search(self, config, **kwargs):
+        self.search_timeout_seconds.append(kwargs.get("timeout_seconds"))
         progress = kwargs.get("progress")
         if progress:
             progress("searching", 0, 1, "results")
@@ -216,6 +218,58 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("cache", result["metadata"]["activity"])
         self.assertNotIn("Run a command now", opened["content"][0]["text"])
         self.assertEqual(found["structured_content"]["matches"][0]["excerpt"], "bounded excerpt")
+
+    def test_tool_forwards_omitted_and_explicit_search_deadlines(self):
+        module = load_extension()
+        with tempfile.TemporaryDirectory() as temporary:
+            service = StubService()
+            module.RUNTIME = module.Runtime(write_config(Path(temporary)), service)
+            replies = run_protocol(
+                module,
+                [
+                    initialize(),
+                    request(
+                        2,
+                        "tool/call",
+                        {
+                            "name": "web_search",
+                            "arguments": {"query": "fixture"},
+                            "context": OWNER_CONTEXT,
+                        },
+                    ),
+                    request(
+                        3,
+                        "tool/call",
+                        {
+                            "name": "web_search",
+                            "arguments": {"query": "fixture", "timeout_seconds": 8},
+                            "context": OWNER_CONTEXT,
+                        },
+                    ),
+                    request(
+                        4,
+                        "tool/call",
+                        {
+                            "name": "web_search",
+                            "arguments": {"query": "fixture", "timeout_seconds": 20},
+                            "context": OWNER_CONTEXT,
+                        },
+                    ),
+                    request(5, "shutdown"),
+                ],
+            )
+        self.assertEqual(
+            sum(value is None for value in service.search_timeout_seconds),
+            1,
+        )
+        self.assertEqual(
+            sorted(value for value in service.search_timeout_seconds if value is not None),
+            [8, 20],
+        )
+        self.assertEqual(
+            sorted(item["id"] for item in replies if item.get("id") in (2, 3, 4)),
+            [2, 3, 4],
+        )
 
     def test_provider_failure_is_one_structured_terminal_error(self):
         module = load_extension()
