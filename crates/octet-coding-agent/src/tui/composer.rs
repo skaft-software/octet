@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::io::Read;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use octet_agent::{InputPart, UserInput};
@@ -73,29 +74,143 @@ fn unescape_path_token(text: &str) -> String {
     unescaped
 }
 
-/// Interpret a paste payload as a dropped/pasted file path, if it is one.
+/// One path token admitted by an explicit paste/drop event.
 ///
-/// Terminals deliver drag-drops as the path text, variously shell-escaped
-/// (`My\ File.png`), quoted (`'My File.png'`), or as a `file://` URL.
-/// Returns the path only when the file exists.
-pub fn parse_dropped_path(text: &str) -> Option<PathBuf> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('\n') {
+/// `range` indexes the original paste text, while `path` is the decoded local
+/// file used for the attachment. Keeping both lets the caller replace each
+/// token with a distinct chip without changing separators or prompt text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DroppedPath {
+    pub range: Range<usize>,
+    pub path: PathBuf,
+}
+
+/// Tokenize shell-quoted path text without performing shell expansion.
+///
+/// Drag/drop implementations disagree about whether paths with spaces are
+/// quoted or backslash-escaped. This parser accepts both forms, preserves the
+/// original byte range, and deliberately does not implement globbing,
+/// variables, command substitution, or other shell behavior.
+fn shell_token_ranges(text: &str) -> Option<Vec<Range<usize>>> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, character) in text.char_indices() {
+        let Some(token_start) = start else {
+            if character.is_whitespace() {
+                continue;
+            }
+            start = Some(index);
+            if character == '\\' {
+                escaped = true;
+            } else if matches!(character, '\'' | '"') {
+                quote = Some(character);
+            }
+            continue;
+        };
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            continue;
+        }
+        if character.is_whitespace() {
+            ranges.push(token_start..index);
+            start = None;
+        }
+    }
+
+    if escaped || quote.is_some() {
         return None;
     }
-    let unquoted = trimmed
-        .strip_prefix('\'')
-        .and_then(|s| s.strip_suffix('\''))
-        .or_else(|| trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
-        .unwrap_or(trimmed);
-    let unescaped = unescape_path_token(unquoted);
-    let expanded = if let Some(rest) = unescaped.strip_prefix("file://") {
+    if let Some(token_start) = start {
+        ranges.push(token_start..text.len());
+    }
+    Some(ranges)
+}
+
+/// Decode only the quoting/escaping syntax used by terminal path drops.
+fn decode_shell_path_token(raw: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(raw.len());
+    let mut quote = None;
+    let mut characters = raw.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else if delimiter == '"' && character == '\\' {
+                let Some(next) = characters.peek().copied() else {
+                    return None;
+                };
+                if next == '\\' || next.is_whitespace() || matches!(next, '\'' | '"') {
+                    decoded.push(next);
+                    characters.next();
+                } else {
+                    // Keep Windows-style or literal backslashes whose next
+                    // character is not a drop escape.
+                    decoded.push('\\');
+                }
+            } else {
+                decoded.push(character);
+            }
+            continue;
+        }
+
+        match character {
+            '\\' => {
+                let Some(next) = characters.peek().copied() else {
+                    return None;
+                };
+                if next == '\\' || next.is_whitespace() || matches!(next, '\'' | '"') {
+                    decoded.push(next);
+                    characters.next();
+                } else {
+                    decoded.push('\\');
+                }
+            }
+            '\'' | '"' => quote = Some(character),
+            _ => decoded.push(character),
+        }
+    }
+
+    quote.is_none().then_some(decoded)
+}
+
+fn existing_file(path: PathBuf) -> Option<PathBuf> {
+    path.is_file().then_some(path)
+}
+
+fn path_from_decoded_token(decoded: &str) -> Option<PathBuf> {
+    if decoded.is_empty() {
+        return None;
+    }
+    let expanded = if let Some(rest) = decoded.strip_prefix("file://") {
+        // Only local file URLs are safe to resolve in the TUI. A non-local
+        // hostname must not turn into a relative path under the process cwd.
         let path = if rest == "localhost" {
-            String::new()
+            return None;
         } else if let Some(path) = rest.strip_prefix("localhost/") {
             format!("/{path}")
-        } else {
+        } else if rest.starts_with('/') {
             rest.to_owned()
+        } else {
+            return None;
         };
         // `file://` URLs percent-encode spaces and non-ASCII bytes; plain
         // dropped paths are left untouched (a literal `%20` in a filename).
@@ -103,13 +218,86 @@ pub fn parse_dropped_path(text: &str) -> Option<PathBuf> {
             .decode_utf8()
             .map(|decoded| decoded.into_owned())
             .unwrap_or(path)
-    } else if let Some(rest) = unescaped.strip_prefix("~/") {
+    } else if let Some(rest) = decoded.strip_prefix("~/") {
         let home = dirs::home_dir()?;
         return existing_file(home.join(rest));
     } else {
-        unescaped
+        decoded.to_owned()
     };
     existing_file(PathBuf::from(expanded))
+}
+
+/// Interpret an explicit paste/drop payload as an ordered list of existing
+/// local files.
+///
+/// Every non-whitespace token must resolve to a regular file. Returning
+/// `None` for a mixed path/prompt payload prevents a path-looking word in
+/// ordinary prose from being treated as consent to read a file. No shell
+/// expansion or globbing is performed.
+pub fn explicit_dropped_paths(text: &str) -> Option<Vec<DroppedPath>> {
+    let ranges = shell_token_ranges(text)?;
+    if ranges.is_empty() {
+        return None;
+    }
+
+    ranges
+        .into_iter()
+        .map(|range| {
+            let decoded = decode_shell_path_token(&text[range.clone()])?;
+            let path = path_from_decoded_token(&decoded)?;
+            Some(DroppedPath { range, path })
+        })
+        .collect()
+}
+
+/// Interpret a paste payload as one existing local file path, if it is one.
+///
+/// Terminals deliver drag-drops as the path text, variously shell-escaped
+/// (`My\\ File.png`), quoted (`'My File.png'`), or as a `file://` URL. This
+/// helper intentionally rejects a list; use [`parse_dropped_paths`] for an
+/// explicit multi-file paste.
+pub fn parse_dropped_path(text: &str) -> Option<PathBuf> {
+    let mut paths = explicit_dropped_paths(text)?.into_iter();
+    let path = paths.next()?.path;
+    paths.next().is_none().then_some(path)
+}
+
+/// Parse every token in an explicit paste/drop payload in original order.
+///
+/// A returned list is all-or-nothing: a missing, malformed, or unsupported
+/// token returns `None`, so callers cannot accidentally create a partial set
+/// of chips.
+pub fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
+    Some(
+        explicit_dropped_paths(text)?
+            .into_iter()
+            .map(|dropped| dropped.path)
+            .collect(),
+    )
+}
+
+/// Classify all paths in an explicit paste/drop payload in original order.
+///
+/// This is separate from [`classify_paste`] so the existing single-paste
+/// caller can keep treating ordinary prose as text while a multi-file-aware
+/// caller admits the complete batch atomically.
+pub fn classify_paste_paths(text: &str) -> Option<Vec<PasteKind>> {
+    parse_dropped_paths(text).map(|paths| {
+        paths
+            .into_iter()
+            .map(classify_existing_path)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn classify_existing_path(path: PathBuf) -> PasteKind {
+    if media_kind_for_path(&path).is_some() {
+        PasteKind::MediaFile(path)
+    } else if file_kind_for_path(&path).is_some() {
+        PasteKind::DocumentFile(path)
+    } else {
+        PasteKind::NonMediaFile(path)
+    }
 }
 
 /// Return whether editor text should be treated as an absolute filesystem
@@ -169,10 +357,6 @@ pub fn looks_like_absolute_path(text: &str) -> bool {
     normalized[1..].contains('/') || Path::new(&normalized).exists()
 }
 
-fn existing_file(path: PathBuf) -> Option<PathBuf> {
-    path.is_file().then_some(path)
-}
-
 /// How a paste payload should enter the composer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PasteKind {
@@ -185,13 +369,7 @@ pub enum PasteKind {
 
 pub fn classify_paste(text: &str) -> PasteKind {
     if let Some(path) = parse_dropped_path(text) {
-        return if media_kind_for_path(&path).is_some() {
-            PasteKind::MediaFile(path)
-        } else if file_kind_for_path(&path).is_some() {
-            PasteKind::DocumentFile(path)
-        } else {
-            PasteKind::NonMediaFile(path)
-        };
+        return classify_existing_path(path);
     }
     if text.lines().count() > LARGE_PASTE_LINES || text.chars().count() > LARGE_PASTE_CHARS {
         return PasteKind::LargeText;
@@ -313,6 +491,7 @@ pub enum AttachError {
     TooLarge { limit_bytes: u64 },
     UnsupportedModality { modality: &'static str },
     UnsupportedAudioFormat(AudioFormat),
+    UnsupportedMediaType(&'static str),
 }
 
 impl std::fmt::Display for AttachError {
@@ -333,8 +512,83 @@ impl std::fmt::Display for AttachError {
                 f,
                 "the active provider route does not accept {format:?} audio input (use WAV or MP3)",
             ),
+            Self::UnsupportedMediaType(kind) => write!(
+                f,
+                "unsupported {kind} input (native input supports images and WAV/MP3 audio)",
+            ),
         }
     }
+}
+
+struct PreparedMedia {
+    label: &'static str,
+    media: Media,
+    byte_len: u64,
+}
+
+fn unsupported_media_type_for_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" | "m4v" | "mov" | "avi" | "mkv" | "webm" | "wmv" | "flv" | "mpeg" | "mpg" | "3gp"
+        | "ogv" => Some("video"),
+        "bmp" | "tif" | "tiff" | "ico" | "heic" | "heif" | "avif" | "svg" => Some("image"),
+        _ => None,
+    }
+}
+
+fn prepare_media(path: &Path, modalities: ModalitySet) -> Result<PreparedMedia, AttachError> {
+    let kind = match media_kind_for_path(path) {
+        Some(kind) => kind,
+        None => {
+            return Err(match unsupported_media_type_for_path(path) {
+                Some(kind) => AttachError::UnsupportedMediaType(kind),
+                None => AttachError::Unreadable(
+                    "unsupported media extension (images: PNG/JPEG/GIF/WebP; audio: WAV/MP3)"
+                        .into(),
+                ),
+            });
+        }
+    };
+    let (label, modality, modality_name, limit) = match &kind {
+        MediaKind::Image(_) => ("Image", Modality::Image, "image", MAX_IMAGE_BYTES),
+        MediaKind::Audio(_) => ("Audio", Modality::Audio, "audio", MAX_AUDIO_BYTES),
+    };
+    if !modalities.contains(modality) {
+        return Err(AttachError::UnsupportedModality {
+            modality: modality_name,
+        });
+    }
+    if let MediaKind::Audio(format) = &kind {
+        if !matches!(format, AudioFormat::Wav | AudioFormat::Mp3) {
+            return Err(AttachError::UnsupportedAudioFormat(*format));
+        }
+    }
+    let metadata = fs::metadata(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
+    if !metadata.is_file() {
+        return Err(AttachError::Unreadable("not a regular file".into()));
+    }
+    if metadata.len() > limit {
+        return Err(AttachError::TooLarge { limit_bytes: limit });
+    }
+    let file = std::fs::File::open(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
+    let mut limited = file.take(limit + 1);
+    let mut data = Vec::new();
+    limited
+        .read_to_end(&mut data)
+        .map_err(|e| AttachError::Unreadable(e.to_string()))?;
+    if data.len() as u64 > limit {
+        return Err(AttachError::TooLarge { limit_bytes: limit });
+    }
+    let byte_len = data.len() as u64;
+    let media = match kind {
+        MediaKind::Image(mime) => Media::image_bytes(bytes::Bytes::from(data), mime),
+        MediaKind::Audio(format) => Media::audio_bytes(bytes::Bytes::from(data), format),
+    };
+    Ok(PreparedMedia {
+        label,
+        media,
+        byte_len,
+    })
 }
 
 /// Chip-keyed attachments owned by the composer.
@@ -348,6 +602,20 @@ impl AttachmentLedger {
     fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
+    }
+
+    fn record_media(&mut self, prepared: PreparedMedia) -> String {
+        let id = self.next_id();
+        let chip = format!("[{} #{id}]", prepared.label);
+        self.entries.push(Attachment {
+            id,
+            chip: chip.clone(),
+            payload: AttachmentPayload::Media {
+                media: prepared.media,
+                byte_len: prepared.byte_len,
+            },
+        });
+        chip
     }
 
     pub fn is_empty(&self) -> bool {
@@ -426,48 +694,103 @@ impl AttachmentLedger {
         path: &Path,
         modalities: ModalitySet,
     ) -> Result<String, AttachError> {
-        let kind = media_kind_for_path(path)
-            .ok_or_else(|| AttachError::Unreadable("unsupported media extension".into()))?;
-        let (label, modality, modality_name, limit) = match &kind {
-            MediaKind::Image(_) => ("Image", Modality::Image, "image", MAX_IMAGE_BYTES),
-            MediaKind::Audio(_) => ("Audio", Modality::Audio, "audio", MAX_AUDIO_BYTES),
-        };
-        if !modalities.contains(modality) {
-            return Err(AttachError::UnsupportedModality {
-                modality: modality_name,
-            });
-        }
-        if let MediaKind::Audio(format) = &kind {
-            if !matches!(format, AudioFormat::Wav | AudioFormat::Mp3) {
-                return Err(AttachError::UnsupportedAudioFormat(*format));
-            }
-        }
-        let metadata = fs::metadata(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
-        if metadata.len() > limit {
-            return Err(AttachError::TooLarge { limit_bytes: limit });
-        }
-        let file = std::fs::File::open(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
-        let mut limited = file.take(limit + 1);
-        let mut data = Vec::new();
-        limited
-            .read_to_end(&mut data)
-            .map_err(|e| AttachError::Unreadable(e.to_string()))?;
-        if data.len() as u64 > limit {
-            return Err(AttachError::TooLarge { limit_bytes: limit });
-        }
-        let byte_len = data.len() as u64;
-        let media = match kind {
-            MediaKind::Image(mime) => Media::image_bytes(bytes::Bytes::from(data), mime),
-            MediaKind::Audio(format) => Media::audio_bytes(bytes::Bytes::from(data), format),
-        };
-        let id = self.next_id();
-        let chip = format!("[{label} #{id}]");
-        self.entries.push(Attachment {
-            id,
-            chip: chip.clone(),
-            payload: AttachmentPayload::Media { media, byte_len },
-        });
+        let paths = [path.to_path_buf()];
+        let chip = self
+            .attach_media_batch(&paths, modalities)?
+            .into_iter()
+            .next()
+            .expect("a one-file batch returns one chip");
         Ok(chip)
+    }
+
+    /// Admit several media files as one atomic batch.
+    ///
+    /// All files are classified, capability-gated, size-gated, and read before
+    /// the ledger is mutated. If any file fails, no partial chips or payloads
+    /// remain. The returned chips and ledger entries retain the input order;
+    /// repeated paths intentionally receive distinct chips and payloads.
+    pub fn attach_media_batch(
+        &mut self,
+        paths: &[PathBuf],
+        modalities: ModalitySet,
+    ) -> Result<Vec<String>, AttachError> {
+        let prepared = paths
+            .iter()
+            .map(|path| prepare_media(path, modalities))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut chips = Vec::with_capacity(prepared.len());
+        for prepared in prepared {
+            chips.push(self.record_media(prepared));
+        }
+        Ok(chips)
+    }
+
+    /// Atomically admit supported files from an explicit paste/drop payload and
+    /// return the same payload with each admitted path replaced by its chip.
+    ///
+    /// Ordinary source files remain literal text. A malformed or mixed
+    /// path/prose payload returns `Ok(None)`, while a media read/capability
+    /// failure returns an error before the ledger is changed.
+    pub fn attach_explicit_paths(
+        &mut self,
+        text: &str,
+        modalities: ModalitySet,
+    ) -> Result<Option<String>, AttachError> {
+        let dropped = match explicit_dropped_paths(text) {
+            Some(dropped) => dropped,
+            None => return Ok(None),
+        };
+        let prepared = dropped
+            .iter()
+            .map(|dropped| {
+                if media_kind_for_path(&dropped.path).is_some()
+                    || unsupported_media_type_for_path(&dropped.path).is_some()
+                {
+                    prepare_media(&dropped.path, modalities).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !prepared.iter().any(Option::is_some)
+            && !dropped
+                .iter()
+                .any(|dropped| file_kind_for_path(&dropped.path).is_some())
+        {
+            return Ok(None);
+        }
+
+        let mut replacements = Vec::new();
+        for (dropped, prepared) in dropped.into_iter().zip(prepared) {
+            let Some(attachment) = prepared else {
+                if file_kind_for_path(&dropped.path).is_none() {
+                    continue;
+                }
+                let label = match file_kind_for_path(&dropped.path) {
+                    Some(FileKind::Pdf) => "PDF",
+                    None => continue,
+                };
+                let id = self.next_id();
+                let chip = format!("[{label} #{id}]");
+                self.entries.push(Attachment {
+                    id,
+                    chip: chip.clone(),
+                    payload: AttachmentPayload::FileReference(
+                        dropped.path.to_string_lossy().into_owned(),
+                    ),
+                });
+                replacements.push((dropped.range, chip));
+                continue;
+            };
+            let chip = self.record_media(attachment);
+            replacements.push((dropped.range, chip));
+        }
+
+        let mut replaced = text.to_owned();
+        for (range, chip) in replacements.into_iter().rev() {
+            replaced.replace_range(range, &chip);
+        }
+        Ok(Some(replaced))
     }
 
     /// Record a PDF as a path reference. The current provider boundary has
@@ -802,6 +1125,72 @@ mod tests {
     }
 
     #[test]
+    fn explicit_path_batches_preserve_token_ranges_order_and_unsupported_video_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first image.png");
+        let audio = dir.path().join("voice.wav");
+        let video = dir.path().join("clip.mp4");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&audio, b"audio").unwrap();
+        fs::write(&video, b"video").unwrap();
+
+        let escaped_first = first.display().to_string().replace(' ', "\\ ");
+        let pasted = format!("{escaped_first}\n'{}'", audio.display());
+        let dropped = explicit_dropped_paths(&pasted).expect("all explicit tokens are files");
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(dropped[0].path, first);
+        assert_eq!(dropped[1].path, audio);
+        assert_eq!(&pasted[dropped[0].range.clone()], escaped_first);
+        assert_eq!(
+            &pasted[dropped[1].range.clone()],
+            format!("'{}'", audio.display())
+        );
+        assert_eq!(
+            parse_dropped_paths(&pasted).unwrap(),
+            vec![dropped[0].path.clone(), dropped[1].path.clone()]
+        );
+        assert!(
+            parse_dropped_path(&pasted).is_none(),
+            "a list is not one path"
+        );
+
+        let kinds = classify_paste_paths(&pasted).unwrap();
+        assert!(matches!(
+            kinds.as_slice(),
+            [PasteKind::MediaFile(_), PasteKind::MediaFile(_)]
+        ));
+        // A recognized suffix alone never becomes a native video payload.
+        assert_eq!(media_kind_for_path(&video), None);
+        assert!(matches!(
+            classify_paste_paths(&video.display().to_string())
+                .unwrap()
+                .as_slice(),
+            [PasteKind::NonMediaFile(_)]
+        ));
+        let mut video_ledger = AttachmentLedger::default();
+        let error = video_ledger
+            .attach_explicit_paths(&video.display().to_string(), all_modalities())
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported video input"));
+        assert!(video_ledger.is_empty());
+        assert!(parse_dropped_paths(&format!("{} prose", first.display())).is_none());
+
+        let mut ledger = AttachmentLedger::default();
+        let replaced = ledger
+            .attach_explicit_paths(&pasted, all_modalities())
+            .unwrap()
+            .unwrap();
+        assert_eq!(replaced, "[Image #1]\n[Audio #2]");
+        assert_eq!(ledger.entries.len(), 2);
+    }
+
+    #[test]
+    fn file_urls_with_remote_hosts_are_not_resolved_as_local_paths() {
+        assert!(parse_dropped_path("file://remote-host/tmp/image.png").is_none());
+        assert!(parse_dropped_path("file://localhost").is_none());
+    }
+
+    #[test]
     fn absolute_path_detection_handles_missing_paths_without_hijacking_commands() {
         assert!(looks_like_absolute_path("/Users/example/project/new.txt"));
         assert!(looks_like_absolute_path(
@@ -977,6 +1366,78 @@ mod tests {
         let chip = ledger.attach_media(&image, all_modalities()).unwrap();
         assert_eq!(chip, "[Image #1]");
         assert!(!ledger.is_empty());
+    }
+
+    #[test]
+    fn attach_media_batch_is_atomic_and_composes_ordered_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.png");
+        let audio = dir.path().join("voice.wav");
+        let second = dir.path().join("second.jpg");
+        fs::write(&first, b"first-bytes").unwrap();
+        fs::write(&audio, b"audio-bytes").unwrap();
+        fs::write(&second, b"second-bytes").unwrap();
+
+        let mut ledger = AttachmentLedger::default();
+        let paths = vec![first.clone(), audio.clone(), second.clone()];
+        let chips = ledger.attach_media_batch(&paths, all_modalities()).unwrap();
+        assert_eq!(
+            chips,
+            vec![
+                "[Image #1]".to_owned(),
+                "[Audio #2]".to_owned(),
+                "[Image #3]".to_owned(),
+            ]
+        );
+        let draft = format!("before {} middle {} after {}", chips[0], chips[1], chips[2]);
+        let composed = compose(draft, &mut ledger);
+        let media = composed
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                InputPart::Media(media) => Some(media),
+                InputPart::Text(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let bytes = |media: &Media| -> &[u8] {
+            match media {
+                Media::Image(image) => match &image.source {
+                    octet_ai::ImageSource::Inline(data) => data.as_ref(),
+                    _ => panic!("expected inline image"),
+                },
+                Media::Audio(audio) => match &audio.payload {
+                    octet_ai::AudioPayload::Inline(data) => data.as_ref(),
+                    _ => panic!("expected inline audio"),
+                },
+            }
+        };
+        assert_eq!(bytes(media[0]), b"first-bytes");
+        assert_eq!(bytes(media[1]), b"audio-bytes");
+        assert_eq!(bytes(media[2]), b"second-bytes");
+        assert_eq!(
+            composed
+                .attachments
+                .iter()
+                .map(|attachment| attachment.chip.as_str())
+                .collect::<Vec<_>>(),
+            chips.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+
+        let bad = dir.path().join("unsupported.flac");
+        fs::write(&bad, b"flac-bytes").unwrap();
+        let mut failed = AttachmentLedger::default();
+        let error = failed
+            .attach_media_batch(&[first, bad], all_modalities())
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            AttachError::UnsupportedAudioFormat(AudioFormat::Flac)
+        ));
+        assert!(error.to_string().contains("WAV or MP3"));
+        assert!(
+            failed.is_empty(),
+            "a failed batch must not leave a partial chip"
+        );
     }
 
     #[test]

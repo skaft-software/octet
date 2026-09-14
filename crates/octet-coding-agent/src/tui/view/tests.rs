@@ -2694,6 +2694,212 @@ fn media_path_paste_attaches_a_chip_and_composes_media_parts() {
 }
 
 #[test]
+fn explicit_paste_wires_quoted_escaped_batches_and_preserves_duplicate_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("first image.png");
+    let audio = dir.path().join("voice memo.wav");
+    std::fs::write(&image, b"first image bytes").unwrap();
+    std::fs::write(&audio, b"audio bytes").unwrap();
+
+    let escaped_image = image.display().to_string().replace(' ', r"\ ");
+    let pasted = format!("{escaped_image} '{}' {escaped_image}", audio.display());
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_input_modalities(
+        octet_ai::ModalitySet::none()
+            .with(octet_ai::Modality::Image)
+            .with(octet_ai::Modality::Audio),
+    );
+    shell.apply_edit(EditAction::Paste(pasted));
+
+    let expected = "[Image #1] [Audio #2] [Image #3]";
+    assert_eq!(shell.pending(), expected);
+    let composed = shell.drain_composed();
+    assert_eq!(composed.display_text, expected);
+    assert_eq!(
+        composed
+            .attachments
+            .iter()
+            .map(|attachment| attachment.chip.as_str())
+            .collect::<Vec<_>>(),
+        vec!["[Image #1]", "[Audio #2]", "[Image #3]"]
+    );
+
+    let media = composed
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            octet_agent::InputPart::Media(media) => Some(media),
+            octet_agent::InputPart::Text(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(media.len(), 3);
+    assert!(matches!(media[0], &octet_ai::Media::Image(_)));
+    assert!(matches!(media[1], &octet_ai::Media::Audio(_)));
+    assert!(matches!(media[2], &octet_ai::Media::Image(_)));
+    let inline_bytes = |media: &octet_ai::Media| -> &[u8] {
+        match media {
+            octet_ai::Media::Image(image) => match &image.source {
+                octet_ai::ImageSource::Inline(bytes) => bytes.as_ref(),
+                _ => panic!("expected inline image"),
+            },
+            octet_ai::Media::Audio(audio) => match &audio.payload {
+                octet_ai::AudioPayload::Inline(bytes) => bytes.as_ref(),
+                _ => panic!("expected inline audio"),
+            },
+        }
+    };
+    assert_eq!(inline_bytes(media[0]), b"first image bytes");
+    assert_eq!(inline_bytes(media[1]), b"audio bytes");
+    assert_eq!(inline_bytes(media[2]), b"first image bytes");
+
+    // Separate paste events must not reuse the first mask or merge the two
+    // payloads merely because they identify the same file.
+    let mut consecutive = InteractiveShell::test_shell();
+    consecutive.set_input_modalities(
+        octet_ai::ModalitySet::none()
+            .with(octet_ai::Modality::Image)
+            .with(octet_ai::Modality::Audio),
+    );
+    consecutive.apply_edit(EditAction::Paste(escaped_image));
+    consecutive.apply_edit(EditAction::Paste(format!("'{}'", image.display())));
+    assert_eq!(consecutive.pending(), "[Image #1][Image #2]");
+    let consecutive_input = consecutive.drain_composed();
+    assert_eq!(consecutive_input.attachments.len(), 2);
+    assert_eq!(
+        consecutive_input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.chip.as_str())
+            .collect::<Vec<_>>(),
+        vec!["[Image #1]", "[Image #2]"]
+    );
+    assert_eq!(
+        consecutive_input
+            .parts
+            .iter()
+            .filter(|part| matches!(part, octet_agent::InputPart::Media(_)))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn explicit_paste_batch_failure_keeps_original_text_without_partial_masks() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.png");
+    let bad = dir.path().join("bad.flac");
+    std::fs::write(&good, b"good image").unwrap();
+    std::fs::write(&bad, b"not a native chat codec").unwrap();
+    let pasted = format!("'{}' {}", good.display(), bad.display());
+
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_input_modalities(
+        octet_ai::ModalitySet::none()
+            .with(octet_ai::Modality::Image)
+            .with(octet_ai::Modality::Audio),
+    );
+    shell.apply_edit(EditAction::Paste(pasted.clone()));
+
+    assert_eq!(shell.pending(), pasted);
+    assert!(shell.state.borrow().ledger.is_empty());
+    let diagnostic = shell.debug_snapshot();
+    assert!(diagnostic.contains("WAV or MP3"), "{diagnostic}");
+    let composed = shell.drain_composed();
+    assert_eq!(composed.transcript_text, pasted);
+    assert!(composed.attachments.is_empty());
+    assert!(composed
+        .parts
+        .iter()
+        .all(|part| matches!(part, octet_agent::InputPart::Text(_))));
+}
+
+#[test]
+fn explicit_paste_rejections_keep_input_visible_and_explain_the_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("shot.png");
+    let flac = dir.path().join("voice.flac");
+    let video = dir.path().join("clip.mp4");
+    let oversized = dir.path().join("oversized.png");
+    std::fs::write(&image, b"image").unwrap();
+    std::fs::write(&flac, b"flac").unwrap();
+    std::fs::write(&video, b"video").unwrap();
+    std::fs::write(
+        &oversized,
+        vec![0_u8; (crate::tui::composer::MAX_IMAGE_BYTES + 1) as usize],
+    )
+    .unwrap();
+
+    let all_modalities = || {
+        octet_ai::ModalitySet::none()
+            .with(octet_ai::Modality::Image)
+            .with(octet_ai::Modality::Audio)
+    };
+    let assert_rejected = |shell: &mut InteractiveShell, pasted: String, message: &str| {
+        shell.apply_edit(EditAction::Paste(pasted.clone()));
+        assert_eq!(shell.pending(), pasted);
+        assert!(shell.state.borrow().ledger.is_empty());
+        let diagnostic = shell.debug_snapshot();
+        assert!(diagnostic.contains(message), "expected {message:?} in {diagnostic:?}");
+    };
+
+    let mut no_capability = InteractiveShell::test_shell();
+    no_capability.set_input_modalities(octet_ai::ModalitySet::none());
+    assert_rejected(
+        &mut no_capability,
+        image.display().to_string(),
+        "does not accept image input",
+    );
+
+    let mut unsupported_codec = InteractiveShell::test_shell();
+    unsupported_codec.set_input_modalities(all_modalities());
+    assert_rejected(
+        &mut unsupported_codec,
+        flac.display().to_string(),
+        "WAV or MP3",
+    );
+
+    let mut too_large = InteractiveShell::test_shell();
+    too_large.set_input_modalities(all_modalities());
+    assert_rejected(
+        &mut too_large,
+        oversized.display().to_string(),
+        "5 MB limit",
+    );
+
+    let mut unsupported_video = InteractiveShell::test_shell();
+    unsupported_video.set_input_modalities(all_modalities());
+    assert_rejected(
+        &mut unsupported_video,
+        video.display().to_string(),
+        "unsupported video input",
+    );
+}
+
+#[test]
+fn ordinary_pasted_text_stays_editable_and_slash_commands_are_not_submitted() {
+    let mut shell = InteractiveShell::test_shell();
+    let text = "ordinary pasted text\nwith no attachment consent";
+    shell.apply_edit(EditAction::Paste(text.to_owned()));
+    assert_eq!(shell.pending(), text);
+    assert!(shell.state.borrow().ledger.is_empty());
+    assert!(shell.debug_snapshot().is_empty(), "paste must not submit a prompt");
+
+    let composed = shell.drain_composed();
+    assert!(matches!(
+        composed.parts.as_slice(),
+        [octet_agent::InputPart::Text(value)] if value == text
+    ));
+
+    let mut command = InteractiveShell::test_shell();
+    command.apply_edit(EditAction::Paste("/sta".into()));
+    assert_eq!(command.pending(), "/sta");
+    assert!(command.slash_popup_open());
+    command.slash_menu(SlashMenuAction::Select);
+    assert_eq!(command.pending(), "/status");
+    assert!(command.debug_snapshot().is_empty(), "picker selection must not submit");
+}
+
+#[test]
 fn ordinary_typed_media_path_is_not_upload_consent() {
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("screen shot.png");

@@ -1600,6 +1600,48 @@ fn inline_route_digest(
         .collect()
 }
 
+fn validate_inline_media_route(request: &RunRequest, protocol: Protocol) -> anyhow::Result<()> {
+    let requested_audio = request
+        .input_modalities
+        .iter()
+        .any(|modality| *modality == HostInputModality::Audio);
+    let has_audio_attachment = request
+        .media
+        .iter()
+        .any(|input| matches!(input, MediaInput::Audio { .. }));
+    if protocol != Protocol::OpenAiChat && (requested_audio || has_audio_attachment) {
+        anyhow::bail!(
+            "native audio input is unsupported through {protocol:?}; use an OpenAI Chat Completions route with an audio-capable model (WAV or MP3 only)"
+        );
+    }
+    if has_audio_attachment && !requested_audio {
+        anyhow::bail!(
+            "inline native audio attachments require input_modalities to include \"audio\""
+        );
+    }
+    if protocol == Protocol::OpenAiChat {
+        for input in &request.media {
+            let MediaInput::Audio { path } = input else {
+                continue;
+            };
+            let format = audio_format(path).with_context(|| {
+                format!(
+                    "native audio attachment {} must use WAV or MP3",
+                    path.display()
+                )
+            })?;
+            if !matches!(format, AudioFormat::Wav | AudioFormat::Mp3) {
+                anyhow::bail!(
+                    "native audio attachment {} uses {}; OpenAI Chat Completions accepts only WAV or MP3",
+                    path.display(),
+                    audio_format_name(format),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_run_request(request: &RunRequest) -> anyhow::Result<()> {
     if request.prompt.len() > MAX_PROMPT_BYTES {
         anyhow::bail!("prompt exceeds the {MAX_PROMPT_BYTES}-byte limit");
@@ -1642,7 +1684,8 @@ fn validate_run_request(request: &RunRequest) -> anyhow::Result<()> {
         .filter(|url| !url.is_empty())
     {
         parse_inline_base_url(base_url)?;
-        inline_protocol(request.provider_mode.as_deref())?;
+        let protocol = inline_protocol(request.provider_mode.as_deref())?;
+        validate_inline_media_route(request, protocol)?;
         build_inline_headers(&request.custom_headers)?;
     }
     if request.history.len() > MAX_HISTORY_MESSAGES {
@@ -1766,10 +1809,15 @@ fn load_user_input(
                 Media::image_bytes(bytes::Bytes::from(bytes), mime)
             }
             MediaInput::Audio { .. } => {
-                let format = audio_format(&resolved)?;
+                let format = audio_format(&resolved).with_context(|| {
+                    format!(
+                        "native audio attachment {} must use WAV or MP3",
+                        resolved.display()
+                    )
+                })?;
                 if !model.supports_audio_input(format) {
                     anyhow::bail!(
-                        "model {} does not support native {} audio input through {:?}",
+                        "model {} does not support native {} audio input through {:?}; native input accepts only WAV or MP3 on OpenAI Chat Completions",
                         model.id.0,
                         audio_format_name(format),
                         model.protocol
@@ -2316,6 +2364,41 @@ mod tests {
         assert!(build_inline_headers(&headers).is_ok());
         headers.insert("x-extra".to_owned(), "x".repeat(MAX_CUSTOM_HEADER_BYTES));
         assert!(build_inline_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn inline_media_validation_is_route_effective_and_actionable() {
+        let mut request = base_request(PathBuf::from("."));
+        request.base_url = Some("https://example.com/v1".into());
+        request.input_modalities = vec![HostInputModality::Audio];
+        request.media = vec![MediaInput::Audio {
+            path: PathBuf::from("voice.flac"),
+        }];
+
+        let error = {
+            request.provider_mode = Some("openai-compatible".into());
+            validate_run_request(&request).unwrap_err()
+        };
+        assert!(error.to_string().contains("only WAV or MP3"));
+        assert!(error.to_string().contains("FLAC"));
+
+        request.provider_mode = Some("openai-responses".into());
+        let error = validate_run_request(&request).unwrap_err();
+        assert!(error.to_string().contains("OpenAiResponses"));
+        assert!(error.to_string().contains("WAV or MP3"));
+
+        request.provider_mode = Some("openai-compatible".into());
+        request.media = vec![MediaInput::Audio {
+            path: PathBuf::from("voice.wav"),
+        }];
+        request.input_modalities.clear();
+        let error = validate_run_request(&request).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("input_modalities to include \"audio\""));
+
+        request.input_modalities = vec![HostInputModality::Audio];
+        assert!(validate_run_request(&request).is_ok());
     }
 
     #[test]
