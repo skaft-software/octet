@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_enter_selects_the_popup_then_submits_after_it_closes() {
+    fn slash_enter_selects_the_popup_then_dispatches_after_it_closes() {
         for active in [false, true] {
             assert_eq!(
                 translate(

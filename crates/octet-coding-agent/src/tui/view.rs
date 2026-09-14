@@ -3422,12 +3422,13 @@ impl InteractiveShell {
     }
 
     /// Navigate or accept the live slash-command popup without turning it into
-    /// a heavyweight modal panel.
-    pub fn slash_menu(&mut self, action: SlashMenuAction) {
+    /// a heavyweight modal panel. A selected command returns `true` for the
+    /// ordinary dispatcher; navigation and dismissal return `false`.
+    pub fn slash_menu(&mut self, action: SlashMenuAction) -> bool {
         let mut state = self.state.borrow_mut();
         let suggestions = input_slash_suggestions(&state);
         if suggestions.is_empty() {
-            return;
+            return false;
         }
         let last = suggestions.len().saturating_sub(1);
         state.slash_selection = state.slash_selection.min(last);
@@ -3456,18 +3457,18 @@ impl InteractiveShell {
             }
             SlashMenuAction::Select => {
                 let command = &suggestions[state.slash_selection];
+                let selected = format!("/{}", command.name);
                 state.editor.set_text(format!(
-                    "/{}{}",
-                    command.name,
+                    "{selected}{}",
                     if command.accepts_argument { " " } else { "" }
                 ));
                 state.slash_popup_dismissed = true;
                 invalidate_editor_autocomplete(&mut state);
-                return;
+                return true;
             }
             SlashMenuAction::Close => {
                 state.slash_popup_dismissed = true;
-                return;
+                return false;
             }
         }
         state.slash_popup_dismissed = false;
@@ -3479,6 +3480,7 @@ impl InteractiveShell {
         state.slash_scroll = state
             .slash_scroll
             .min(suggestions.len().saturating_sub(page));
+        false
     }
 
     /// Drop the mention file index so the next `@` completion re-walks the
