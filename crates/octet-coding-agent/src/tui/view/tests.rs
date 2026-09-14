@@ -2736,7 +2736,7 @@ fn explicit_paste_wires_quoted_escaped_batches_and_preserves_duplicate_payloads(
     assert!(matches!(media[0], &octet_ai::Media::Image(_)));
     assert!(matches!(media[1], &octet_ai::Media::Audio(_)));
     assert!(matches!(media[2], &octet_ai::Media::Image(_)));
-    let inline_bytes = |media: &octet_ai::Media| -> &[u8] {
+    fn inline_bytes(media: &octet_ai::Media) -> &[u8] {
         match media {
             octet_ai::Media::Image(image) => match &image.source {
                 octet_ai::ImageSource::Inline(bytes) => bytes.as_ref(),
@@ -2747,7 +2747,7 @@ fn explicit_paste_wires_quoted_escaped_batches_and_preserves_duplicate_payloads(
                 _ => panic!("expected inline audio"),
             },
         }
-    };
+    }
     assert_eq!(inline_bytes(media[0]), b"first image bytes");
     assert_eq!(inline_bytes(media[1]), b"audio bytes");
     assert_eq!(inline_bytes(media[2]), b"first image bytes");
