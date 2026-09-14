@@ -105,6 +105,9 @@ class PlaywrightIntegrationTests(unittest.TestCase):
                 self.assertTrue(launch["open"])
                 tab_id = launch["selected_tab_id"]
                 self.assertIsInstance(tab_id, str)
+                repeated_launch = worker.call("launch", owner, timeout=25)
+                self.assertEqual(repeated_launch["selected_tab_id"], tab_id)
+                self.assertEqual(repeated_launch["tab_count"], 1)
 
                 opened = worker.call("open_url", owner, self.origin + "/", tab_id, timeout=20)
                 self.assertEqual(opened["affected_tab_id"], tab_id)
@@ -112,6 +115,9 @@ class PlaywrightIntegrationTests(unittest.TestCase):
                 self.assertIn("BEGIN UNTRUSTED BROWSER CONTENT", snapshot["text"])
                 self.assertIn("snapshot_generation", snapshot)
                 generation = snapshot["snapshot_generation"]
+                idle = worker.call("wait", owner, tab_id, 100)
+                self.assertEqual(idle["affected_tab_id"], tab_id)
+                self.assertTrue(idle["open"])
 
                 typed = worker.call(
                     "type_text",

@@ -61,6 +61,15 @@ After the extension is running:
 | `/browse close` | Close the owning browser context and invalidate tab state |
 | `/browse reset-profile` | Destructive confirmation, close, lock/sentinel verification, then remove only the isolated profile |
 
+Repeated `/browse open` and `browser_launch` requests reuse the currently open
+context and do not create a new browser process. A context close/crash is
+reported as degraded closed state and its Playwright/profile resources are
+released when the owner worker observes it. Only a subsequent explicit open
+request can relaunch the visible browser; ordinary browser operations never
+silently relaunch or bring it to the foreground. A launch cancelled before
+admission closes the newly created context instead of leaving a visible helper
+behind.
+
 The setup runtime is built in a private temporary directory and published only after a complete marker is written and validated. A cross-process lock makes setup idempotent. Interrupted/failed setup is never reported ready. Status points to `~/.octet/browse/install.log` but does not return its potentially environment-specific contents.
 
 ## Tool surface
