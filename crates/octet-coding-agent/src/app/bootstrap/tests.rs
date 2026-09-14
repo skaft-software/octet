@@ -1214,17 +1214,17 @@ fn codex_luna_fallback_uses_exact_effort_choices_for_auxiliary_requests() {
     assert_eq!(capability.min_effort, octet_ai::ReasoningEffort::Low);
     assert_eq!(capability.max_effort, octet_ai::ReasoningEffort::Max);
     assert_eq!(
-        default_reasoning_for_model(luna),
+        default_reasoning_for_model(&luna),
         ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
     );
     assert_eq!(
-        octet_ai::select_auxiliary_reasoning(luna).unwrap(),
+        octet_ai::select_auxiliary_reasoning(&luna).unwrap(),
         ReasoningConfig::Off
     );
-    assert_eq!(capability.wire_value(&ReasoningConfig::Off), Some("none"));
+    assert_eq!(capability.wire_value(&ReasoningConfig::Off), Some("none".to_owned()));
     assert_eq!(
         capability.wire_value(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
-        Some("max")
+        Some("max".to_owned())
     );
 
     // The observed correction is route-specific; generic sparse fallback keeps
