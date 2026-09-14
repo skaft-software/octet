@@ -212,6 +212,13 @@ or emit a second tool result. Progress is request-scoped, monotonic, bounded,
 and contains only provider/stage/count/byte information—not queries, URLs, or
 retrieved text.
 
+**Unreleased source fix:** TCP connect, TLS handshake, headers, and body reads
+share the request deadline across addresses and redirects. Nonblocking socket
+waits check cancellation at intervals of at most 100 ms; a quiet interval neither
+ends the request nor replays it. Slow responses within the budget can succeed,
+while stalled or continuously trickling responses still respect that budget.
+This does not change the published `0.7.6` bundle.
+
 The optional status contribution is compact and passive:
 
 - `web · Off` when no provider configuration exists;
@@ -244,7 +251,9 @@ user click; `web_fetch` is retrieval, not a browser tab.
 
 ## Test
 
-All tests use only local HTTP fixtures and the bundled SDK:
+All tests use only local HTTP(S) fixtures and the bundled SDK. The checked-in
+TLS certificate/key is test-only; no external provider or `openssl` executable
+is needed:
 
 ```console
 python3 -m unittest discover -s extensions/octet-web-search/tests -v
@@ -254,4 +263,7 @@ They cover normalization, untrusted framing, redirects and private-address
 rejection, truncation and oversized responses, unsupported content,
 cancellation, timeout, provider failure, stable citations, caching, health,
 protocol negotiation/progress, semantic fixtures, and a self-contained release
-smoke test. This inventory is not a claim of live-provider or release qualification.
+smoke test. Transport regressions cover slow-but-within-budget responses,
+partial/chunked reads, TLS verification, and cancellation/deadlines during
+stalled or trickling I/O. This inventory is not a claim of live-provider or
+release qualification.

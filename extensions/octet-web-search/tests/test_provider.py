@@ -114,6 +114,26 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             self.respond(503, b"provider internals must not escape", "text/plain")
         elif parsed.path == "/search-invalid":
             self.respond(200, b"{not json", "application/json")
+        elif parsed.path.startswith("/search-delayed-"):
+            body = json.dumps({"results": [{
+                "title": "Delayed fixture",
+                "url": "https://example.com/delayed",
+                "content": "Complete response after a quiet socket interval.",
+            }]}).encode("utf-8")
+            headers = (
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                "Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body)
+            ).encode("ascii")
+            response = headers + body
+            split = {
+                "/search-delayed-headers": 0,
+                "/search-delayed-status": 12,
+                "/search-delayed-body": len(headers) + 5,
+            }[parsed.path]
+            self.wfile.write(response[:split])
+            self.wfile.flush()
+            time.sleep(1.1)
+            self.wfile.write(response[split:])
         elif parsed.path == "/page":
             body = (
                 "<!doctype html><html><head><title> Fixture Page </title>"
@@ -471,6 +491,27 @@ class ProviderTests(unittest.TestCase):
             self.service.open(self.config, url="http://public.test/oversized")
         with self.assertRaises(UnsupportedContent):
             self.service.open(self.config, url="http://public.test/unsupported")
+
+    def test_slow_search_responses_within_budget_succeed_without_retry(self):
+        for phase in ("headers", "status", "body"):
+            config = parse_configuration({
+                "version": 1,
+                "provider": {
+                    "kind": "searxng",
+                    "endpoint": "http://provider.test/search-delayed-" + phase,
+                },
+            })
+            for budget in (8, 20):
+                with self.subTest(phase=phase, budget=budget):
+                    path = "/search-delayed-" + phase
+                    before = self.server.counts.get(path, 0)
+                    result = self.service.search(
+                        config, query="delayed %d" % budget, timeout_seconds=budget,
+                    )
+                    self.assertEqual(result["result_count"], 1)
+                    self.assertEqual(result["results"][0]["title"], "Delayed fixture")
+                    self.assertEqual(result["cache"], "miss")
+                    self.assertEqual(self.server.counts.get(path, 0), before + 1)
 
     def test_timeout_is_bounded(self):
         started = time.monotonic()
