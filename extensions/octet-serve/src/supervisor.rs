@@ -2687,6 +2687,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ten_sessions_isolate_attach_loss_duplicate_cancel_and_bounded_replay() {
+        let host = Arc::new(MockHost::new());
+        let supervisor = SessionSupervisor::new(
+            host.clone(),
+            SupervisorConfig {
+                actor: ActorConfig {
+                    journal: crate::JournalConfig {
+                        event_capacity: 2,
+                        byte_capacity: 64 * 1024,
+                    },
+                    ..ActorConfig::default()
+                },
+                ..SupervisorConfig::default()
+            },
+        );
+        let mut session_ids = Vec::with_capacity(10);
+        for _ in 0..10 {
+            session_ids.push(
+                supervisor
+                    .create_fresh_session(None)
+                    .await
+                    .unwrap()
+                    .session_id()
+                    .clone(),
+            );
+        }
+        assert_eq!(supervisor.active_session_count().await, 10);
+
+        for (index, session_id) in session_ids.iter().enumerate() {
+            let owner = supervisor.open_session(session_id).await.unwrap();
+            let attached = supervisor.open_session(session_id).await.unwrap();
+            assert!(owner.same_actor(&attached));
+            drop(owner);
+
+            let command_id = format!("command-session-{index}");
+            let prompt = command(session_id.clone(), &command_id, &format!("session-{index}"));
+            let first = supervisor.command(prompt.clone(), 100 + index as u64).await.unwrap();
+            let repeated = supervisor
+                .command(prompt, 200 + index as u64)
+                .await
+                .unwrap();
+            assert!(!first.cached);
+            assert!(repeated.cached);
+            assert_eq!(first.ack, repeated.ack);
+            assert_eq!(host.dispatch_count(session_id), 1);
+
+            let cancelled = supervisor
+                .command(
+                    metadata_command(
+                        session_id.clone(),
+                        &format!("cancel-session-{index}"),
+                        SessionCommand::Abort { run_id: None },
+                    ),
+                    300 + index as u64,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                cancelled.ack.disposition,
+                AckDisposition::Accepted { .. }
+            ));
+
+            let view = supervisor.session_view(session_id).await.unwrap();
+            assert_eq!(view.snapshot.items.len(), 1);
+            assert!(matches!(
+                &view.snapshot.items[0].payload,
+                ItemPayload::UserMessage { text, .. } if text == &format!("session-{index}")
+            ));
+
+            let ReplayResponse::Gap { gap, snapshot } = supervisor
+                .replay_after(session_id, SessionCursor::zero(1))
+                .await
+                .unwrap()
+            else {
+                panic!("the two-event journal must require a snapshot after three events");
+            };
+            assert_eq!(gap.earliest_available.sequence, 2);
+            assert_eq!(gap.latest_available.sequence, 3);
+            assert_eq!(snapshot.session_id, *session_id);
+
+            let ReplayResponse::Events { events, through, .. } = supervisor
+                .replay_after(
+                    session_id,
+                    SessionCursor {
+                        actor_generation: 1,
+                        sequence: 2,
+                    },
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("the retained tail must replay without re-dispatching the command");
+            };
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].cursor.sequence, 3);
+            assert_eq!(through.sequence, 3);
+        }
+
+        assert_eq!(supervisor.active_session_count().await, 10);
+        for (index, session_id) in session_ids.iter().enumerate() {
+            let view = supervisor.session_view(session_id).await.unwrap();
+            assert!(matches!(
+                &view.snapshot.items[0].payload,
+                ItemPayload::UserMessage { text, .. } if text == &format!("session-{index}")
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn duplicate_command_reuses_exact_ack_and_never_dispatches_twice() {
         let host = Arc::new(MockHost::new());
         let supervisor = SessionSupervisor::new(host.clone(), SupervisorConfig::default());
