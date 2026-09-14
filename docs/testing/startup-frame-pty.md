@@ -39,14 +39,36 @@ The expected normalized contracts and row fixtures are in
 `crates/octet-coding-agent/tests/fixtures/startup-frame-pty/`. The harness is
 `crates/octet-coding-agent/tests/startup_frame_pty.rs`.
 
+## Model-discovery startup regression (unreleased)
+
+The discovery tests hold a loopback `/models` response open while the real binary
+starts, in both mouse modes. Before releasing the response they require:
+
+- a synchronized startup frame, with terminal line echo disabled;
+- visible typing, backspace, bracketed paste, and resize, without provisional
+  model branding;
+- Enter retaining the draft rather than submitting a provider request;
+- Ctrl-C exiting within the existing shutdown bound and restoring terminal modes,
+  even when the response is never released.
+
+The successful-discovery case then releases the gate and checks that the same
+draft survives into the resolved model frame. These are bounded regression
+assertions, not latency distributions or a claim of faster provider discovery or
+large-session replay. The composer is editable before submission is ready.
+
 ## Isolation and safety
 
-Each real-binary run creates a disposable HOME, workspace, and session store.
-It writes only an inert custom-provider fixture with an empty API key,
-`auto_discover: false`, and `http://127.0.0.1:9/v1/` as its unreachable base
-URL. The process is invoked with `--offline`, `--no-context-files`, and
-`--no-tools`; no prompt is submitted. Consequently it neither reads a user's
-credentials nor contacts a provider.
+Each real-binary run creates a disposable HOME, workspace, and session store,
+with no inherited credentials. Ordinary startup cases use an empty API key,
+`auto_discover: false`, and `http://127.0.0.1:9/v1/` as their unreachable base
+URL. They run with `--offline`, `--no-context-files`, and `--no-tools`, submitting
+no prompt. API-wait/plain-prompt cases use a gated loopback chat fixture instead
+of a live model.
+
+Only the discovery cases omit `--offline` and enable `auto_discover` against the
+gated loopback fixture. No inference is submitted. The normal independent,
+unauthenticated GitHub update check may also run; its success or failure is not
+part of the test's assertions. No user credentials or live model are used.
 
 The lane requires Unix `openpty` support. It gives the child a controlling TTY
 (`setsid` plus `TIOCSCTTY`) so the resize signal and terminal-size handling
