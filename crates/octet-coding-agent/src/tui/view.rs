@@ -3339,10 +3339,7 @@ impl InteractiveShell {
                     // failing item cannot leave partial chips.
                     let pasted = TextEditor::normalize_paste(&text);
                     let modalities = state.input_modalities;
-                    let inserted = match state
-                        .ledger
-                        .attach_explicit_paths(&pasted, modalities)
-                    {
+                    let inserted = match state.ledger.attach_explicit_paths(&pasted, modalities) {
                         Ok(Some(replaced)) => replaced,
                         Ok(None) => match composer::classify_paste(&pasted) {
                             composer::PasteKind::LargeText => {

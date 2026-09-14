@@ -1230,7 +1230,10 @@ fn codex_luna_fallback_uses_exact_effort_choices_for_auxiliary_requests() {
     // The observed correction is route-specific; generic sparse fallback keeps
     // its prior conservative range and does not gain an inferred Off choice.
     let sol = codex_fallback_reasoning_options("gpt-5.6-sol");
-    assert_eq!(sol.values, ["minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        sol.values,
+        ["minimal", "low", "medium", "high", "xhigh", "max"]
+    );
     assert_eq!(
         codex_min_effort("gpt-5.6-sol"),
         octet_ai::ReasoningEffort::Minimal
