@@ -22,6 +22,21 @@ A failed attachment leaves the path visible and reports a diagnostic rather
 than creating a chip. An enabled `read` tool can still read a named file under
 its policy; use `--no-tools` for explicitly attached input only.
 
+To attach several files from one explicit paste/drop, separate the paths with
+whitespace; quote or backslash-escape names containing spaces. The complete
+path list is admitted in order, and each attachable item receives its own chip
+(non-media source paths remain text):
+
+```text
+/Users/me/first.png '/Users/me/voice memo.wav' /Users/me/last.jpg
+```
+
+Path-list admission is all-or-nothing: a malformed, missing, or non-local token
+leaves the complete payload as visible text rather than creating partial chips.
+Consecutive explicit drops also receive distinct chips. Editing or deleting a
+chip revokes only that attachment; the remaining chips retain their original
+payload identity and order.
+
 ## Formats and limits
 
 | Surface | Supported input |
@@ -31,13 +46,15 @@ its policy; use `--no-tools` for explicitly attached input only.
 | Serve web composer | PNG/JPEG/GIF/WebP and bounded document context. Audio attachments are **not implemented**. [Serve](experimental/octet-serve/README.md). |
 
 Attachments remain ordered with text. Unsupported modalities/formats, unreadable
-files, and oversized files fail diagnostically. File recognition does not establish
-provider support: FLAC/Opus/AAC and host-recognized PCM16 are not native inputs
-merely because their extensions are recognized. Native audio requires both model
-capability and the OpenAI Chat WAV/MP3 codec. Responses, Anthropic, Gemini, and
-arbitrary OpenAI-compatible endpoints must not be advertised as native-audio
-routes on recognition alone. There is no automatic transcription or transcoding
-fallback; even admitted file contents may be rejected by the provider.
+files, and oversized files fail diagnostically. Video paths are never native
+media: an explicit video attachment is refused with a diagnostic and remains
+visible as text. File recognition does not establish provider support:
+FLAC/Opus/AAC and host-recognized PCM16 are not native inputs merely because
+their extensions are recognized. Native audio requires both model capability and
+the OpenAI Chat WAV/MP3 codec. Responses, Anthropic, Gemini, and arbitrary
+OpenAI-compatible endpoints must not be advertised as native-audio routes on
+recognition alone. There is no automatic transcription or transcoding fallback;
+even admitted file contents may be rejected by the provider.
 
 ## Privacy and remote reads
 

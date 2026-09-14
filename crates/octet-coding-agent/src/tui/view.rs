@@ -3333,33 +3333,26 @@ impl InteractiveShell {
             state.composer_preferred_column = None;
             match action {
                 EditAction::Paste(text) => {
-                    // Attachment policy remains shell-owned, but the reusable
-                    // editor is the sole authority for normalized text insertion
-                    // and cursor movement.
+                    // A bracketed paste explicitly grants upload consent.
+                    // Admit the complete path list before the editor sees it,
+                    // so a quoted/escaped batch gets distinct masks and one
+                    // failing item cannot leave partial chips.
                     let pasted = TextEditor::normalize_paste(&text);
-                    let inserted = match composer::classify_paste(&pasted) {
-                        composer::PasteKind::Verbatim | composer::PasteKind::NonMediaFile(_) => {
+                    let modalities = state.input_modalities;
+                    let inserted = match state
+                        .ledger
+                        .attach_explicit_paths(&pasted, modalities)
+                    {
+                        Ok(Some(replaced)) => replaced,
+                        Ok(None) => match composer::classify_paste(&pasted) {
+                            composer::PasteKind::LargeText => {
+                                state.ledger.attach_pasted_text(pasted)
+                            }
+                            _ => pasted,
+                        },
+                        Err(error) => {
+                            state.push_block(TranscriptBlock::Notice(error.to_string()));
                             pasted
-                        }
-                        composer::PasteKind::LargeText => state.ledger.attach_pasted_text(pasted),
-                        composer::PasteKind::MediaFile(path) => {
-                            let modalities = state.input_modalities;
-                            match state.ledger.attach_media(&path, modalities) {
-                                Ok(chip) => chip,
-                                Err(error) => {
-                                    state.push_block(TranscriptBlock::Notice(error.to_string()));
-                                    pasted
-                                }
-                            }
-                        }
-                        composer::PasteKind::DocumentFile(path) => {
-                            match state.ledger.attach_file_reference(&path) {
-                                Ok(chip) => chip,
-                                Err(error) => {
-                                    state.push_block(TranscriptBlock::Notice(error.to_string()));
-                                    pasted
-                                }
-                            }
                         }
                     };
                     state
