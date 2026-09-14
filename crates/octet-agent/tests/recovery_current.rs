@@ -17,8 +17,8 @@ use octet_agent::{
     FinishReason, SandboxConfig, Session,
 };
 use octet_ai::{
-    AiClient, Auth, Capabilities, Endpoint, EndpointId, EndpointTransport, Model, ModelId,
-    ModelLimits, ModelSpec, ModalitySet, Protocol, ReasoningConfig, RequestRuntime,
+    AiClient, Auth, Capabilities, Endpoint, EndpointId, EndpointTransport, ModalitySet, Model,
+    ModelId, ModelLimits, ModelSpec, Protocol, ReasoningConfig, RequestRuntime,
     ResponsesRuntimeProfile,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -252,12 +252,8 @@ async fn current_candidate_interrupted_codex_stream_discards_provisional_tool() 
         .and(path("responses"))
         .respond_with(SseScript {
             bodies: vec![
-                interrupted_function_prefix(
-                    "failed",
-                    "failed-call",
-                    "bash",
-                    &failed_arguments,
-                ) + &provider_stream_error("server_error"),
+                interrupted_function_prefix("failed", "failed-call", "bash", &failed_arguments)
+                    + &provider_stream_error("server_error"),
                 responses_function_turn("accepted", "accepted-call", "bash", &accepted_arguments),
                 responses_text_turn("final", "recovered answer"),
             ],
@@ -273,7 +269,10 @@ async fn current_candidate_interrupted_codex_stream_discards_provisional_tool() 
         &session_path,
         workspace.path(),
     );
-    let mut run = agent.prompt("finish without duplicating effects").await.unwrap();
+    let mut run = agent
+        .prompt("finish without duplicating effects")
+        .await
+        .unwrap();
     let events = collect_events(&mut run).await;
     drop(run);
 
@@ -419,8 +418,7 @@ async fn serve_ws_fallback_connection(
         (
             503,
             "application/json",
-            r#"{"error":{"code":"server_error","message":"synthetic fallback outage"}}"#
-                .to_owned(),
+            r#"{"error":{"code":"server_error","message":"synthetic fallback outage"}}"#.to_owned(),
         )
     } else {
         (
@@ -449,13 +447,19 @@ async fn current_candidate_retired_websocket_uses_http_fallback_without_stale_re
         workspace.path(),
     );
 
-    let first = agent.complete("recover through the retired socket").await.unwrap();
+    let first = agent
+        .complete("recover through the retired socket")
+        .await
+        .unwrap();
     assert_eq!(first.text, "recovered");
     assert_eq!(fixture.websocket_requests.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.http_requests.load(Ordering::SeqCst), 2);
     assert!(agent.session().has_uncertain_usage());
 
-    let second = agent.complete("do not reuse the stale socket").await.unwrap();
+    let second = agent
+        .complete("do not reuse the stale socket")
+        .await
+        .unwrap();
     assert_eq!(second.text, "recovered");
     assert_eq!(fixture.websocket_requests.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.http_requests.load(Ordering::SeqCst), 3);
@@ -465,17 +469,14 @@ struct OfflineCredentials;
 
 #[async_trait]
 impl octet_ai::CredentialResolver for OfflineCredentials {
-    async fn resolve(
-        &self,
-    ) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+    async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
         Err(octet_ai::AuthError::Unavailable)
     }
 }
 
 fn offline_agent(workspace: &tempfile::TempDir) -> Agent {
     let mut model = codex_model("http://127.0.0.1:9", EndpointTransport::Http);
-    Arc::make_mut(&mut model.endpoint).auth =
-        Auth::dynamic(Arc::new(OfflineCredentials));
+    Arc::make_mut(&mut model.endpoint).auth = Auth::dynamic(Arc::new(OfflineCredentials));
     build_agent(
         model,
         &workspace.path().join("session.jsonl"),
@@ -521,5 +522,6 @@ async fn current_candidate_network_wait_is_bounded_and_cancellable() {
     }
     assert!(saw_wait);
     assert!(matches!(finish, Some(FinishReason::Aborted)));
+    drop(run);
     assert!(!cancelled.session().has_uncertain_usage());
 }

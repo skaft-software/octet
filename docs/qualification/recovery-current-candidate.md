@@ -36,7 +36,7 @@ uncertain, and the tests assert that uncertainty where applicable.
 
 Observed without consuming the shared Cargo build slot:
 
-- `git diff --check` — passed.
+- Prior candidate `git diff --check` — passed before this repair.
 - Source and test inspection — completed for the recovery agent loop, AI
   client/transport seams, Responses WebSocket pool, and the existing recovery
   integration matrix.
@@ -54,6 +54,20 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 These commands are pending exact-candidate execution; the presence of test
 definitions is not reported as a passing result.
+
+## Repair record
+
+The exact-candidate recovery-test compile at frozen qualification HEAD
+`71e2c317dc0559654423a9485ef3a2b7d76ab6e4` stopped at E0502 before any
+runtime test ran: the cancellation fixture read `cancelled.session()` while
+its `Run<'_>` still held the mutable borrow through `Drop`. The fixture now
+explicitly drops that run after retaining the `RunFinished::Aborted` and
+no-uncertain-usage assertions. No production recovery source was changed.
+
+The recovery fixture's manually reconciled layout follows every difference
+recorded in `13-rustfmt-changed-rust.log`; `cargo fmt` and rustfmt execution
+remain unrun in this repair session. The verifier must rerun the exact
+recovery test and the pending workspace checks before reporting qualification.
 
 ## Remaining gates and blockers
 
