@@ -223,8 +223,11 @@ text docs/qualification/activity-current-candidate.md
 text docs/qualification/api-v03-current-candidate.md
 text docs/qualification/bedrock-current-candidate.md
 text docs/qualification/copilot-current-candidate.md
+text docs/qualification/google-vertex-current-candidate.md
 text docs/qualification/native-scroll-current-candidate.md
+text docs/qualification/prompt-history-current-candidate.md
 text docs/qualification/quickstart-current-candidate.md
+text docs/qualification/read-concurrency-current-candidate.md
 text docs/qualification/recovery-current-candidate.md
 text docs/qualification/serve-lifecycle-current-candidate.md
 text docs/qualification/setup-cli-current-candidate.md
