@@ -5244,29 +5244,41 @@ fn startup_update_task(
 }
 
 /// Run the interactive frontend with explicit idle and active borrow phases.
-pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
-    let initial_prompt = boot.config.initial_prompt.clone();
-    let theme = load_theme(&boot.config);
+pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
+    let initial_prompt = config.initial_prompt.clone();
+    let theme = load_theme(&config);
     let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
     let mut shell =
-        InteractiveShell::enter_with_mouse(theme, size, boot.config.mouse.application_owned())?;
-    shell.set_runtime_config(boot.config.clone());
+        InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
+    shell.set_runtime_config(config.clone());
     let _update_task = startup_update_task(
-        boot.config.offline,
+        config.offline,
         crate::update::startup_available_update(),
         shell.startup_update_notifier(),
     );
     let mut input = EventStream::new();
-    apply_detected_terminal_background(&mut shell, &mut input, &boot.config).await;
-    if crate::cli::should_offer_theme_onboarding(&boot.config)
+    apply_detected_terminal_background(&mut shell, &mut input, &config).await;
+    if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
-        && !boot.config.plain
+        && !config.plain
     {
-        configure_terminal_theme(&mut shell, &mut input, &mut boot.config, None, true).await?;
+        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true).await?;
         if shell.close_requested() {
             shell.leave();
             return Ok(());
         }
+    }
+    // Cold/expired model inventories can require network discovery. Give the
+    // terminal an input owner before that work, just as for session/extension
+    // startup below. Editing is live; submission still waits for full startup.
+    let mut boot =
+        run_blocking_lifecycle(&mut shell, &mut input, "discovering models…", move || {
+            crate::app::bootstrap::bootstrap(config)
+        })
+        .await?;
+    if shell.close_requested() {
+        shell.leave();
+        return Ok(());
     }
     // Offer setup only when bootstrap has no runnable provider inventory. An
     // explicit --model remains authoritative, and resumed provenance is still

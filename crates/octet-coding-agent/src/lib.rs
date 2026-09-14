@@ -150,14 +150,17 @@ async fn run() -> anyhow::Result<()> {
     let mode = config.mode.clone();
     let initial_prompt = config.initial_prompt.clone();
     let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
-    let boot = app::bootstrap::bootstrap(config)?;
     let result = match mode {
         config::Mode::Interactive if capabilities.interactive => {
-            modes::interactive::run_interactive(boot).await
+            modes::interactive::run_interactive(config).await
         }
-        config::Mode::Interactive => modes::plain::run_plain(boot, initial_prompt).await,
-        config::Mode::Print { prompt } => modes::print::run_print(boot, prompt).await,
-        config::Mode::Rpc => modes::rpc::run_rpc(boot).await,
+        config::Mode::Interactive => {
+            modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await
+        }
+        config::Mode::Print { prompt } => {
+            modes::print::run_print(app::bootstrap::bootstrap(config)?, prompt).await
+        }
+        config::Mode::Rpc => modes::rpc::run_rpc(app::bootstrap::bootstrap(config)?).await,
     };
     // Mode owners have now aborted active work and shut down their children.
     // Preserve the conventional signal status even when cleanup itself found

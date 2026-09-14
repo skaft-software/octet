@@ -193,6 +193,8 @@ impl Pty {
 #[derive(Clone, Copy)]
 enum StartupFixture<'a> {
     Model(&'a str),
+    /// Online catalog discovery against a gated, credential-free loopback API.
+    DiscoveringModel(&'a str),
     /// A persisted selection, resolved through the real registry with no auth.
     ConfiguredGemma,
     /// Empty inventory and no appearance preference: both onboarding owners run.
@@ -245,18 +247,23 @@ impl PtyOctet {
             .expect("canonical PTY fixture root");
         let home = canonical_root.join("home");
         let workspace = match fixture {
-            StartupFixture::Model(_) => canonical_root.join("workspace"),
+            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_) => {
+                canonical_root.join("workspace")
+            }
             _ => home.join("workspace"),
         };
         let sessions = canonical_root.join("sessions");
         create_inert_environment(&home, &workspace, &sessions);
         let credential = home.join(".octet/credentials/custom.json");
         match fixture {
-            StartupFixture::Model(model) if api.is_some() || model != "probe" => {
+            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model)
+                if api.is_some() || model != "probe" =>
+            {
                 let base_url = api.unwrap_or("http://127.0.0.1:9/v1/");
                 let record = serde_json::json!({
                     "base_url": base_url, "api_key": "", "api_name": model,
-                    "headers": [], "auto_discover": false,
+                    "headers": [],
+                    "auto_discover": matches!(fixture, StartupFixture::DiscoveringModel(_)),
                     // The composed-redraw fixture needs genuinely distinct status
                     // values now that successful changes do not append notices.
                     "models": if model == "qwen-3.8-27b" {
@@ -302,7 +309,7 @@ impl PtyOctet {
                 )
                 .unwrap();
             }
-            StartupFixture::Model(_) => {}
+            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_) => {}
         }
 
         let mut pty = Pty::open(dimensions.0, dimensions.1);
@@ -324,9 +331,11 @@ impl PtyOctet {
         let stderr = duplicate_stdio(pty.slave.as_raw_fd());
         let tty_fd = pty.slave.as_raw_fd();
         let mut command = Command::new(binary);
+        if !matches!(fixture, StartupFixture::DiscoveringModel(_)) {
+            command.arg("--offline");
+        }
         command
             .args([
-                "--offline",
                 "--no-context-files",
                 "--no-tools",
                 "--color",
@@ -358,7 +367,7 @@ impl PtyOctet {
             .stderr(stderr);
 
         match fixture {
-            StartupFixture::Model(model) => {
+            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model) => {
                 command.args(["--model", &format!("custom/{model}")]);
             }
             StartupFixture::Changelog { model, initial } => {
@@ -438,13 +447,17 @@ impl PtyOctet {
         );
     }
 
-    fn shutdown(mut self) -> ShutdownCapture {
+    fn shutdown(self) -> ShutdownCapture {
+        self.shutdown_with_input(&[4]) // Ctrl-D
+    }
+
+    fn shutdown_with_input(mut self, input: &[u8]) -> ShutdownCapture {
         let shutdown_start = self.pty.output.len();
-        self.pty.write_input(&[4]); // Ctrl-D
+        self.pty.write_input(input);
         let started = Instant::now();
         let status = loop {
             self.pty.read_available();
-            if let Some(status) = self.child.try_wait().expect("poll Ctrl-D shutdown") {
+            if let Some(status) = self.child.try_wait().expect("poll shutdown") {
                 break status;
             }
             if started.elapsed() >= SHUTDOWN_TIMEOUT {
@@ -453,7 +466,7 @@ impl PtyOctet {
                 }
                 let _ = self.child.wait();
                 panic!(
-                    "octet did not stop after Ctrl-D within {SHUTDOWN_TIMEOUT:?}; transcript: {}",
+                    "octet did not stop after input {input:?} within {SHUTDOWN_TIMEOUT:?}; transcript: {}",
                     visible_bytes(&self.pty.output)
                 );
             }
@@ -1322,8 +1335,116 @@ fn legacy_inline_startup_frame_pty_contract() {
     );
 }
 
+/// Catalog discovery must not own the terminal's input or first-frame boundary.
+/// Keep the real response gated until after edits and resize have been painted.
+#[test]
+fn real_octet_model_discovery_keeps_startup_editable() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        let api = HeldChatApi::start_for_models(true);
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            Some(&api.url),
+            false,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            StartupFixture::DiscoveringModel("probe"),
+        );
+        api.wait_for_request(&mut octet, 1);
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| nth_frame_end(bytes, 1).is_some());
+        assert_eq!(
+            terminal_attributes(octet.pty.slave.as_raw_fd()).c_lflag & (libc::ICANON | libc::ECHO),
+            0,
+            "edits must be handled by octet, not echoed by the line discipline"
+        );
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        let mut consumed = 0;
+        octet
+            .pty
+            .write_input(b"startup draftX\x7f\x1b[200~ pasted\x1b[201~");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "startup draft pasted",
+            Duration::from_millis(500),
+        );
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        assert!(
+            synchronized_frame_end_containing(&octet.pty.output, b"startup draft pasted").is_some()
+        );
+
+        let resized_start = octet.pty.output.len();
+        octet.resize(RESIZED_COLUMNS, RESIZED_ROWS);
+        parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
+        octet.wait_until(Duration::from_millis(500), |bytes| {
+            synchronized_frame_end_containing(&bytes[resized_start..], b"startup draft pasted")
+                .is_some()
+        });
+        // Enter during bootstrap must not submit or silently consume the draft.
+        octet.pty.write_input(b"\r");
+        octet.pty.drain_for(DRAIN_TIME);
+        parser.process(&octet.pty.output[consumed..]);
+        consumed = octet.pty.output.len();
+        assert!(parser.screen().contents().contains("startup draft pasted"));
+        assert_unbranded_startup(&parser, RESIZED_COLUMNS);
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(api.requests.lock().unwrap().is_empty());
+
+        api.release.send(()).unwrap();
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "custom/probe",
+            STARTUP_TIMEOUT,
+        );
+        assert!(parser.screen().contents().contains("startup draft pasted"));
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert!(!uses_alternate_screen(&capture.output));
+    }
+}
+
+#[test]
+fn real_octet_model_discovery_ctrl_c_restores_terminal_while_response_is_held() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        let api = HeldChatApi::start_for_models(true);
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            Some(&api.url),
+            false,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            StartupFixture::DiscoveringModel("probe"),
+        );
+        api.wait_for_request(&mut octet, 1);
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| nth_frame_end(bytes, 1).is_some());
+        let capture = octet.shutdown_with_input(&[3]); // Ctrl-C; do not release HTTP.
+        assert_eq!(capture.status.code(), Some(128 + libc::SIGINT));
+        assert!(capture.termios_restored);
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        parser.process(&capture.output);
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        assert!(!parser.screen().hide_cursor());
+        assert!(!parser.screen().bracketed_paste());
+        assert!(!uses_alternate_screen(&capture.output));
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(api.requests.lock().unwrap().is_empty());
+    }
+}
+
 /// One HTTP owner, one explicit response gate per request. It sends headers
-/// immediately, but no provider events until the test releases the body.
+/// immediately, but no chat events or model inventory until the body is released.
 struct HeldChatApi {
     url: String,
     arrived: std::sync::mpsc::Receiver<usize>,
@@ -1336,6 +1457,10 @@ struct HeldChatApi {
 
 impl HeldChatApi {
     fn start() -> Self {
+        Self::start_for_models(false)
+    }
+
+    fn start_for_models(models: bool) -> Self {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::mpsc;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1380,16 +1505,24 @@ impl HeldChatApi {
                     }
                 };
                 let headers = String::from_utf8_lossy(&request[..header_end]);
-                assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1"));
+                assert!(headers.starts_with(if models {
+                    "GET /v1/models HTTP/1.1"
+                } else {
+                    "POST /v1/chat/completions HTTP/1.1"
+                }));
                 assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap();
+                let length: usize = if models {
+                    0
+                } else {
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap()
+                };
                 assert!(length <= 128 * 1024);
                 while request.len() < header_end + length {
                     let mut bytes = [0; 1024];
@@ -1397,15 +1530,21 @@ impl HeldChatApi {
                     assert!(n > 0);
                     request.extend_from_slice(&bytes[..n]);
                 }
-                recorded.lock().unwrap().push(
-                    serde_json::from_slice(&request[header_end..header_end + length]).unwrap(),
-                );
-                let body = concat!(
-                    "data: {\"id\":\"fixture\",\"model\":\"probe\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"fixture response done\"},\"finish_reason\":null}]}\n\n",
-                    "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
-                    "data: [DONE]\n\n",
-                );
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                if !models {
+                    recorded.lock().unwrap().push(
+                        serde_json::from_slice(&request[header_end..header_end + length]).unwrap(),
+                    );
+                }
+                let (content_type, body) = if models {
+                    ("application/json", r#"{"data":[{"id":"probe"}]}"#)
+                } else {
+                    ("text/event-stream", concat!(
+                        "data: {\"id\":\"fixture\",\"model\":\"probe\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"fixture response done\"},\"finish_reason\":null}]}\n\n",
+                        "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+                        "data: [DONE]\n\n",
+                    ))
+                };
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
                 socket.flush().unwrap();
                 let index = counted.fetch_add(1, Ordering::SeqCst) + 1;
                 if arrived_tx.send(index).is_err() {

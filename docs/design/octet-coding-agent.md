@@ -29,6 +29,15 @@ documented in [`../pi-migration.md`](../pi-migration.md).
 
 ## Startup and resume
 
+Interactive terminal ownership precedes provider-catalog bootstrap. Cold or
+expired model discovery runs through the same blocking-lifecycle worker boundary
+as session/extension startup, so typing, paste, resize, and coordinated Ctrl-C
+shutdown remain live while discovery waits. The pending surface shows the draft
+without a provisional model footer; branded readiness and prompt submission
+still wait for launch resolution, extension startup, and history hydration.
+Plain, print, and RPC retain their non-TUI bootstrap path. This is a responsiveness
+boundary, not a reduction in provider latency or native-history replay work.
+
 Startup resolves the persistent session before final model selection:
 
 1. Select a new, latest, named, or interactively picked session, or fork a
