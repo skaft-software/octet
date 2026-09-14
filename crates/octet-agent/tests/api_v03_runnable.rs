@@ -42,8 +42,10 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
 
     let workspace = TempDir::new().expect("workspace");
     let mut config = ExtensionRuntimeConfig::new(workspace.path());
+    // Shutdown must cancel this delayed request before the request deadline;
+    // otherwise the two independent timers can report a timeout instead.
     config.request_timeout = Duration::from_secs(3);
-    config.shutdown_timeout = Duration::from_secs(3);
+    config.shutdown_timeout = Duration::from_secs(1);
     let process = ExtensionProcess::start(trusted_descriptor(manifest_path, manifest), config)
         .await
         .expect("start the released-install API 0.3 example");
@@ -82,7 +84,23 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
             )
             .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A spawned future can be cancelled before request_inner admits its frame.
+    // Observe host admission instead of racing shutdown against a fixed delay.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if process.health_snapshot().pending_requests > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the delayed tool call was not admitted");
+    assert_eq!(
+        process.health_snapshot().pending_requests,
+        1,
+        "the delayed tool call must be pending before shutdown"
+    );
     assert!(
         process.shutdown().await,
         "the example must acknowledge shutdown"
