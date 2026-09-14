@@ -2839,7 +2839,10 @@ fn explicit_paste_rejections_keep_input_visible_and_explain_the_boundary() {
         assert_eq!(shell.pending(), pasted);
         assert!(shell.state.borrow().ledger.is_empty());
         let diagnostic = shell.debug_snapshot();
-        assert!(diagnostic.contains(message), "expected {message:?} in {diagnostic:?}");
+        assert!(
+            diagnostic.contains(message),
+            "expected {message:?} in {diagnostic:?}"
+        );
     };
 
     let mut no_capability = InteractiveShell::test_shell();
@@ -2882,7 +2885,10 @@ fn ordinary_pasted_text_stays_editable_and_slash_commands_are_not_submitted() {
     shell.apply_edit(EditAction::Paste(text.to_owned()));
     assert_eq!(shell.pending(), text);
     assert!(shell.state.borrow().ledger.is_empty());
-    assert!(shell.debug_snapshot().is_empty(), "paste must not submit a prompt");
+    assert!(
+        shell.debug_snapshot().is_empty(),
+        "paste must not submit a prompt"
+    );
 
     let composed = shell.drain_composed();
     assert!(matches!(
@@ -2896,7 +2902,10 @@ fn ordinary_pasted_text_stays_editable_and_slash_commands_are_not_submitted() {
     assert!(command.slash_popup_open());
     command.slash_menu(SlashMenuAction::Select);
     assert_eq!(command.pending(), "/status");
-    assert!(command.debug_snapshot().is_empty(), "picker selection must not submit");
+    assert!(
+        command.debug_snapshot().is_empty(),
+        "picker selection must not submit"
+    );
 }
 
 #[test]
