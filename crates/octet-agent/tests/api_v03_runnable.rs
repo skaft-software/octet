@@ -31,8 +31,10 @@ fn trusted_descriptor(
 
 #[tokio::test]
 async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
-    let repository =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/extensions/api-v03-minimal");
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/extensions/api-v03-minimal")
+        .canonicalize()
+        .expect("canonical API 0.3 example path");
     let manifest_path = repository.join(EXTENSION_MANIFEST_FILENAME);
     let manifest = ExtensionManifest::load(&manifest_path).expect("minimal API 0.3 manifest");
     assert_eq!(manifest.api_version, "0.3");
