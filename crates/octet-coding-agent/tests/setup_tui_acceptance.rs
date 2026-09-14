@@ -32,6 +32,8 @@ const NARROW_ROWS: u16 = 8;
 const WAIT: Duration = Duration::from_secs(8);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 const DRAIN: Duration = Duration::from_millis(30);
+const MAX_READ_BYTES_PER_POLL: usize = 64 * 1024;
+const MAX_PTY_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const FRAME_BEGIN: &[u8] = b"\x1b[?2026h";
 const FRAME_END: &[u8] = b"\x1b[?2026l";
 const SECRET: &str = "setup-secret-never-render";
@@ -72,6 +74,7 @@ impl SetupServer {
                     Ok((mut stream, _)) => {
                         thread_requests.fetch_add(1, Ordering::SeqCst);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                         let mut request = Vec::new();
                         let mut buffer = [0u8; 1024];
                         while !request.windows(4).any(|window| window == b"\r\n\r\n")
@@ -146,7 +149,7 @@ impl Drop for SetupServer {
         self.stopped.store(true, Ordering::Release);
         // Wake the nonblocking accept loop so dropping a test cannot leave a
         // fixture thread behind.
-        let _ = TcpStream::connect(self.address);
+        let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -203,10 +206,18 @@ impl PtyTerminal {
 
     fn read_available(&mut self) {
         let mut buffer = [0u8; 8192];
-        loop {
+        let mut read_bytes = 0;
+        while read_bytes < MAX_READ_BYTES_PER_POLL {
             match self.master.read(&mut buffer) {
                 Ok(0) => return,
-                Ok(read) => self.output.extend_from_slice(&buffer[..read]),
+                Ok(read) => {
+                    read_bytes += read;
+                    self.output.extend_from_slice(&buffer[..read]);
+                    assert!(
+                        self.output.len() <= MAX_PTY_OUTPUT_BYTES,
+                        "PTY output exceeded {MAX_PTY_OUTPUT_BYTES} bytes"
+                    );
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
                 // PTY masters commonly report EIO after the last slave closes.
                 Err(error) if error.raw_os_error() == Some(libc::EIO) => return,
@@ -447,7 +458,7 @@ impl PtyOctet {
             }
             if Instant::now() >= deadline {
                 unsafe {
-                    let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
+                    let _ = libc::kill(-(self.child.id() as i32), libc::SIGKILL);
                 }
                 let _ = self.child.wait();
                 panic!(
@@ -482,7 +493,7 @@ impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             unsafe {
-                let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
+                let _ = libc::kill(-(self.child.id() as i32), libc::SIGKILL);
             }
             let _ = self.child.wait();
         }
