@@ -4256,13 +4256,25 @@ fn positive_u64(entry: &serde_json::Value, names: &[&str]) -> Option<u64> {
 }
 
 fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::ReasoningOptions {
-    // Sparse Codex metadata cannot establish Off or Ultra. Keep the existing
-    // ordinary fallback range, without inventing a disabling wire value.
+    // Sparse Codex metadata cannot establish Off or Ultra for generic fallback
+    // models. The observed Luna route has an exact supported set of
+    // none/low/medium/high/xhigh/max; keep that narrow evidence scoped to Luna.
     let floor = codex_min_effort(model_id);
     let ceiling = codex_max_effort(model_id);
-    let values = ["minimal", "low", "medium", "high", "xhigh", "max"].into_iter()
-        .filter(|v| matches!(ReasoningConfig::from_provider_value(v), Some(ReasoningConfig::Effort(e)) if e >= floor && e <= ceiling))
-        .map(str::to_owned).collect();
+    let candidates = if model_id == "gpt-5.6-luna" {
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    } else {
+        ["minimal", "low", "medium", "high", "xhigh", "max"]
+    };
+    let values = candidates
+        .into_iter()
+        .filter(|value| match ReasoningConfig::from_provider_value(value) {
+            Some(ReasoningConfig::Off) => true,
+            Some(ReasoningConfig::Effort(effort)) => effort >= floor && effort <= ceiling,
+            _ => false,
+        })
+        .map(str::to_owned)
+        .collect();
     octet_ai::types::ReasoningOptions {
         values,
         default: None,
@@ -4472,7 +4484,7 @@ fn codex_model_limits(
 }
 
 fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if model_id == "gpt-6-astra" {
+    if model_id == "gpt-6-astra" || model_id == "gpt-5.6-luna" {
         octet_ai::ReasoningEffort::Low
     } else {
         octet_ai::ReasoningEffort::Minimal

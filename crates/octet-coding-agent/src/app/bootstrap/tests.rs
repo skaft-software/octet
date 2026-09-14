@@ -1183,6 +1183,61 @@ fn codex_astra_fallback_is_conservative_and_retains_advertised_max() {
 }
 
 #[test]
+fn codex_luna_fallback_uses_exact_effort_choices_for_auxiliary_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let mut catalog = base_model_catalog(true).unwrap();
+    register_openai_codex(
+        &mut catalog,
+        crate::auth::codex::CredentialStore::new(path),
+        true,
+    )
+    .unwrap();
+
+    let luna = catalog
+        .resolve(&ModelId("gpt-5.6-luna".into()))
+        .expect("offline Codex Luna fallback");
+    assert_eq!(luna.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+    let capability = luna
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .expect("Luna reasoning capability");
+    let options = capability.options.as_ref().expect("exact Luna choices");
+    assert_eq!(
+        options.values,
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(options.default, None);
+    assert_eq!(capability.min_effort, octet_ai::ReasoningEffort::Low);
+    assert_eq!(capability.max_effort, octet_ai::ReasoningEffort::Max);
+    assert_eq!(
+        default_reasoning_for_model(luna),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
+    );
+    assert_eq!(
+        octet_ai::select_auxiliary_reasoning(luna).unwrap(),
+        ReasoningConfig::Off
+    );
+    assert_eq!(capability.wire_value(&ReasoningConfig::Off), Some("none"));
+    assert_eq!(
+        capability.wire_value(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
+        Some("max")
+    );
+
+    // The observed correction is route-specific; generic sparse fallback keeps
+    // its prior conservative range and does not gain an inferred Off choice.
+    let sol = codex_fallback_reasoning_options("gpt-5.6-sol");
+    assert_eq!(sol.values, ["minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        codex_min_effort("gpt-5.6-sol"),
+        octet_ai::ReasoningEffort::Minimal
+    );
+}
+
+#[test]
 fn offline_codex_registration_uses_cached_inventory_without_dynamic_capabilities() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cached-codex.json");
