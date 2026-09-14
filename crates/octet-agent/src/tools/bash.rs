@@ -4,34 +4,39 @@
 //! Like Pi, octet always gives the complete command string to one selected shell
 //! with `-c`. On Unix the default selection order is `/bin/bash`, `bash` on
 //! `PATH`, then `sh`; an explicit host-configured shell path takes precedence.
+//! On Windows, only an explicit path or a discovered Git for Windows
+//! `bash.exe` is accepted; `cmd.exe`, PowerShell, `$SHELL`, and `COMSPEC` are
+//! never implicit fallbacks.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::collections::VecDeque;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::PathBuf;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Stdio;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const POST_KILL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// Leave room for exit/capture metadata inside the per-tool result cap.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const CAPTURE_ENVELOPE_RESERVE: usize = 256;
 use bytes::Bytes;
 use octet_ai::ToolDef;
 use serde::Deserialize;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::effect::{ToolEffect, ToolPolicyDenialCode};
 #[cfg(unix)]
 use crate::extension_process::{wait_for_bash_process, BashProcessLaunch};
+#[cfg(windows)]
+use crate::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]
 use crate::sandbox::resolve_shell;
 use crate::tool::{OutputStream, Tool, ToolContext, ToolError, ToolOutput, ToolProgressSink};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::tools::parse_args;
 use crate::tools::validate_effect_path;
 
@@ -54,9 +59,8 @@ struct BashArgs {
 ///
 /// Executes the complete command through a Bash-compatible shell with bounded
 /// stdout/stderr capture and a timeout.
-/// The child's entire process group is killed on timeout or cancellation.
-///
-/// **Unix-only in v0.1.** Process-tree cleanup requires unix process groups.
+/// The child's entire process tree is killed on timeout or cancellation. On
+/// Windows, the child is assigned to a private Job Object before it resumes.
 pub struct BashTool;
 
 #[async_trait::async_trait]
@@ -165,12 +169,15 @@ impl Tool for BashTool {
         args: serde_json::Value,
         ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.execute_windows(args, ctx).await
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (args, ctx);
             Err(ToolError::new(
-                "error unsupported_platform\nbash is unavailable on this platform in v0.1: \
-                 cancellation cleanup requires unix process groups",
+                "error unsupported_platform\nbash is unavailable on this platform",
             ))
         }
         #[cfg(unix)]
@@ -372,8 +379,216 @@ impl BashTool {
     }
 }
 
+#[cfg(windows)]
+fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<PathBuf, ToolError> {
+    if let Some(configured) = configured {
+        // An explicit host path is an intentional contract: it must provide
+        // Bash-compatible `-c` semantics, but octet does not reinterpret it as
+        // cmd.exe or PowerShell.
+        return Ok(configured.to_path_buf());
+    }
+
+    let mut candidates = Vec::new();
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(root) = std::env::var_os(variable) {
+            candidates.push(PathBuf::from(root).join("Git/bin/bash.exe"));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            candidates.push(directory.join("bash.exe"));
+            candidates.push(directory.join("bash"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate.is_file() && !is_legacy_wsl_bash_path(candidate)
+        })
+        .ok_or_else(|| {
+            ToolError::new(
+                "error unsupported_platform\nWindows bash execution requires an explicit \
+                 Bash-compatible shell_path or Git for Windows bash.exe; cmd.exe, PowerShell, \
+                 and legacy WSL bash.exe are not implicit fallbacks",
+            )
+        })
+}
+
+#[cfg(windows)]
+fn is_legacy_wsl_bash_path(path: &std::path::Path) -> bool {
+    let normalized = path.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    normalized.ends_with("\\windows\\system32\\bash.exe")
+        || normalized.ends_with("\\windows\\sysnative\\bash.exe")
+}
+
+#[cfg(windows)]
+impl BashTool {
+    async fn execute_windows(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.effect(&args, ctx)?;
+        let args: BashArgs = parse_args(args)?;
+        let shell = resolve_windows_shell(ctx.sandbox.shell_path.as_deref())?;
+        let mut command = tokio::process::Command::new(&shell);
+
+        // Honour the per-call timeout when present, bounded by sandbox max.
+        let effective_timeout = match args.timeout_ms {
+            Some(ms) => Duration::from_millis(ms).min(ctx.sandbox.bash_timeout),
+            None => ctx.sandbox.bash_timeout,
+        };
+
+        let workdir: PathBuf = match args.cwd.as_ref() {
+            None => ctx.workspace.to_path_buf(),
+            Some(rel) => {
+                let display_path = ctx.display_path(rel);
+                let dir = ctx.resolve_existing(rel)?;
+                if !dir.is_dir() {
+                    return Err(ToolError::new(format!(
+                        "error invalid_cwd\n{display_path}: not a directory"
+                    )));
+                }
+                dir
+            }
+        };
+
+        command
+            .env_clear()
+            .envs(crate::extension_process::sanitized_subprocess_environment())
+            .current_dir(&workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let launch = WindowsProcessLaunch::bash(&mut command).map_err(|error| {
+            ToolError::new(format!(
+                "error spawn\nfailed to prepare shell {} for Job Object supervision: {error}",
+                shell.display()
+            ))
+        })?;
+        command.arg("-c").arg(&args.command);
+
+        let start = Instant::now();
+        let mut child = command.spawn().map_err(|error| {
+            ToolError::new(format!(
+                "error spawn\nfailed to start shell {}: {error}",
+                shell.display()
+            ))
+        })?;
+        let guard = match launch.register(&child) {
+            Ok(guard) => guard,
+            Err(error) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(ToolError::new(format!(
+                    "error spawn\nfailed to register shell {} for Job Object supervision: {error}",
+                    shell.display()
+                )));
+            }
+        };
+
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let capture_budget = ctx
+            .sandbox
+            .max_output_bytes
+            .saturating_sub(CAPTURE_ENVELOPE_RESERVE);
+        let stdout_progress = ctx.progress.clone();
+        let stderr_progress = ctx.progress.clone();
+
+        let work = async {
+            let (out, err, status) = tokio::join!(
+                read_bounded_with_progress(
+                    &mut stdout_pipe,
+                    capture_budget,
+                    &stdout_progress,
+                    OutputStream::Stdout
+                ),
+                read_bounded_with_progress(
+                    &mut stderr_pipe,
+                    capture_budget,
+                    &stderr_progress,
+                    OutputStream::Stderr
+                ),
+                child.wait(),
+            );
+            (out, err, status)
+        };
+        tokio::pin!(work);
+
+        match tokio::time::timeout(effective_timeout, &mut work).await {
+            Err(_elapsed) => {
+                guard.terminate_now();
+                let drained = tokio::time::timeout(POST_KILL_DRAIN_TIMEOUT, &mut work).await;
+                let mut message = format!(
+                    "error timeout\ncommand exceeded the {:.0}s execution limit and was killed",
+                    effective_timeout.as_secs_f64()
+                );
+                match drained {
+                    Ok((mut out, mut err, status)) => {
+                        rebalance_captures(&mut out, &mut err, capture_budget);
+                        guard.disarm();
+                        if out.total_bytes > 0 {
+                            message.push('\n');
+                            message.push_str(&out.render("stdout"));
+                        }
+                        if err.total_bytes > 0 {
+                            message.push('\n');
+                            message.push_str(&err.render("stderr"));
+                        }
+                        if let Ok(status) = status {
+                            let exit = status
+                                .code()
+                                .map_or_else(|| "exit=unknown".to_owned(), |code| format!("exit={code}"));
+                            message.push_str(&format!("\n{exit}"));
+                        }
+                    }
+                    Err(_) => message.push_str(
+                        "\noutput drain abandoned after a descendant kept a capture pipe open",
+                    ),
+                }
+                Err(ToolError::new(message))
+            }
+            Ok((mut out, mut err, status)) => {
+                rebalance_captures(&mut out, &mut err, capture_budget);
+                let status = status.map_err(|error| {
+                    ToolError::new(format!("error io\nfailed to wait for command: {error}"))
+                })?;
+                guard.supervise_bash_descendants(
+                    effective_timeout.saturating_sub(start.elapsed()),
+                    ctx.cancellation.clone(),
+                );
+                let duration = start.elapsed();
+                let exit = status
+                    .code()
+                    .map_or_else(|| "exit=unknown".to_owned(), |code| format!("exit={code}"));
+                let mut text = format!("{exit} duration={:.2}s", duration.as_secs_f64());
+                if out.total_bytes == 0 && err.total_bytes == 0 {
+                    text.push_str("\n(no output)");
+                } else {
+                    if out.total_bytes > 0 {
+                        text.push('\n');
+                        text.push_str(&out.render("stdout"));
+                    }
+                    if err.total_bytes > 0 {
+                        text.push('\n');
+                        text.push_str(&err.render("stderr"));
+                    }
+                }
+                if status.success() {
+                    Ok(ToolOutput::new(text))
+                } else {
+                    Err(ToolError::new(format!("error nonzero_exit\n{text}")))
+                }
+            }
+        }
+    }
+}
+
 /// Byte-bounded stream capture keeping the head and tail halves of the budget.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct Capture {
     head: Vec<u8>,
     tail: VecDeque<u8>,
@@ -381,7 +596,7 @@ struct Capture {
     truncated: bool,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Capture {
     fn empty() -> Self {
         Self {
@@ -470,7 +685,7 @@ impl Capture {
 /// Reads a pipe to EOF keeping at most `budget` bytes: the first half of the
 /// budget verbatim plus a rolling tail of the second half. Forwards every
 /// chunk to `progress` so the consumer sees live output.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     reader: &mut Option<R>,
     budget: usize,
@@ -510,7 +725,7 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     capture
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn shared_capture_budgets(
     stdout_bytes: usize,
     stderr_bytes: usize,
@@ -531,7 +746,7 @@ fn shared_capture_budgets(
     (stdout_budget, stderr_budget)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn rebalance_captures(stdout: &mut Capture, stderr: &mut Capture, budget: usize) {
     let (stdout_budget, stderr_budget) =
         shared_capture_budgets(stdout.total_bytes, stderr.total_bytes, budget);
@@ -1097,5 +1312,31 @@ rm descendant.ready"#
             "grandchild survived cancellation: {}",
             String::from_utf8_lossy(&check.stdout)
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn legacy_wsl_bash_paths_are_not_implicit_candidates() {
+        assert!(is_legacy_wsl_bash_path(Path::new(
+            r"C:\Windows\System32\bash.exe"
+        )));
+        assert!(is_legacy_wsl_bash_path(Path::new(
+            r"C:/Windows/Sysnative/bash.exe"
+        )));
+        assert!(!is_legacy_wsl_bash_path(Path::new(
+            r"C:\Program Files\Git\bin\bash.exe"
+        )));
+    }
+
+    #[test]
+    fn explicit_windows_shell_path_is_not_rewritten() {
+        let path = Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        let resolved = resolve_windows_shell(Some(path)).expect("explicit shell path");
+        assert_eq!(resolved.as_path(), path);
     }
 }
