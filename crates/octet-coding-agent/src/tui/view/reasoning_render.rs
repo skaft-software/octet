@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthStr;
 use super::assistant_block::AssistantBlock;
 use super::{activity_elbow, finish_transcript_block, fit_line, subdued_text};
 use crate::tui::terminal::ColorDepth;
-use crate::tui::theme::OctetTheme;
+use crate::tui::theme::{OctetTheme, TerminalBackground};
 
 /// The status label starts two cells after its margin dot (`• `). Keeping the
 /// dot in the same coordinate space makes the shimmer travel through it before
@@ -24,6 +24,15 @@ const ACTIVITY_RAINBOW: [Rgb; 7] = [
     (216, 120, 240),
 ];
 
+// These margins leave room for ANSI256 quantization while keeping the status
+// readable on representative composited surfaces (#404040 and #e0e0e0). The
+// actual terminal background can still differ; the PTY fixture is not a probe
+// of arbitrary transparency or a user's physical terminal.
+const ACTIVITY_DARK_BASE_LUMINANCE: f64 = 0.78;
+const ACTIVITY_DARK_SWEEP_LUMINANCE: f64 = 0.55;
+const ACTIVITY_LIGHT_BASE_LUMINANCE: f64 = 0.01;
+const ACTIVITY_LIGHT_SWEEP_LUMINANCE: f64 = 0.05;
+
 fn mix_channel(base: u8, accent: u8, strength_percent: u16) -> u8 {
     let base = u32::from(base);
     let accent = u32::from(accent);
@@ -31,9 +40,76 @@ fn mix_channel(base: u8, accent: u8, strength_percent: u16) -> u8 {
     ((base * (100 - strength) + accent * strength + 50) / 100) as u8
 }
 
-/// Return the normal model colour and the background-adjacent shadow colour.
-/// The shadow is used as a foreground only; it must never become a background
-/// fill around the status text.
+fn activity_linear_channel(channel: u8) -> f64 {
+    let channel = f64::from(channel) / 255.0;
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn activity_luminance(color: Rgb) -> f64 {
+    0.2126 * activity_linear_channel(color.0)
+        + 0.7152 * activity_linear_channel(color.1)
+        + 0.0722 * activity_linear_channel(color.2)
+}
+
+fn activity_blend(source: Rgb, destination: Rgb, amount: f64) -> Rgb {
+    let channel = |source: u8, destination: u8| {
+        (f64::from(source) + (f64::from(destination) - f64::from(source)) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (
+        channel(source.0, destination.0),
+        channel(source.1, destination.1),
+        channel(source.2, destination.2),
+    )
+}
+
+fn activity_color_to_luminance(color: Rgb, target: f64, toward_white: bool) -> Rgb {
+    let reached = |candidate: Rgb| {
+        if toward_white {
+            activity_luminance(candidate) >= target
+        } else {
+            activity_luminance(candidate) <= target
+        }
+    };
+    if reached(color) {
+        return color;
+    }
+
+    let destination = if toward_white {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..20 {
+        let amount = (low + high) / 2.0;
+        if reached(activity_blend(color, destination, amount)) {
+            high = amount;
+        } else {
+            low = amount;
+        }
+    }
+    activity_blend(color, destination, high)
+}
+
+fn activity_color_at_least(color: Rgb, target: f64) -> Rgb {
+    activity_color_to_luminance(color, target, true)
+}
+
+fn activity_color_at_most(color: Rgb, target: f64) -> Rgb {
+    activity_color_to_luminance(color, target, false)
+}
+
+/// Return a readable foreground baseline and the narrow moving sweep. Both
+/// colors are foreground-only; no status character paints a background cell.
+/// Known light/dark profiles use conservative luminance margins because a
+/// transparent terminal composites these cells over a surface this code cannot see.
 fn activity_shimmer_palette(theme: &OctetTheme, reasoning: &AssistantBlock) -> Option<(Rgb, Rgb)> {
     let capabilities = theme.capabilities();
     if !capabilities.animation
@@ -43,8 +119,23 @@ fn activity_shimmer_palette(theme: &OctetTheme, reasoning: &AssistantBlock) -> O
         return None;
     }
     let model = theme.model_rgb(reasoning.model_lab)?;
-    let shadow = theme.composer_idle_rgb(model);
-    Some((model, shadow))
+    let palette = match theme.background() {
+        TerminalBackground::Dark => {
+            let baseline = activity_color_at_least(model, ACTIVITY_DARK_BASE_LUMINANCE);
+            let sweep = activity_color_at_most(baseline, ACTIVITY_DARK_SWEEP_LUMINANCE);
+            (baseline, sweep)
+        }
+        TerminalBackground::Light => {
+            let baseline = activity_color_at_most(model, ACTIVITY_LIGHT_BASE_LUMINANCE);
+            let sweep = activity_color_at_least(baseline, ACTIVITY_LIGHT_SWEEP_LUMINANCE);
+            (baseline, sweep)
+        }
+        // Unknown backgrounds cannot promise contrast against both black and
+        // white. Retain the established neutral fallback until the terminal
+        // appearance is known, rather than inventing a background fill.
+        TerminalBackground::Unknown => (theme.composer_idle_rgb(model), model),
+    };
+    Some(palette)
 }
 
 fn rainbow_index(index: isize, shimmer_frame: usize) -> usize {
@@ -53,32 +144,46 @@ fn rainbow_index(index: isize, shimmer_frame: usize) -> usize {
 }
 
 fn activity_shimmer_color(
-    model: (u8, u8, u8),
-    shadow: (u8, u8, u8),
+    baseline: Rgb,
+    sweep: Rgb,
+    background: TerminalBackground,
     label: &str,
     index: isize,
     shimmer_frame: usize,
     rainbow_strength: u16,
-) -> (u8, u8, u8) {
+) -> Rgb {
     // Sweep at one terminal cell per tick, including the marker and enough
     // trailing space for the highlight to leave the entire label before looping.
     let cycle = label.width() + ACTIVITY_LABEL_OFFSET as usize + 2;
     let center = (shimmer_frame % cycle) as isize - ACTIVITY_LABEL_OFFSET;
-    let shadow_strength = match (index - center).unsigned_abs() {
+    let sweep_strength = match (index - center).unsigned_abs() {
         0 => 100,
         1 => 78,
         2 => 48,
-        _ => 28,
+        _ => match background {
+            TerminalBackground::Unknown => 28,
+            TerminalBackground::Dark | TerminalBackground::Light => 0,
+        },
     };
-    // Keep the muted colour as the baseline and let the model colour form the
-    // moving highlight. This is the original lower-contrast treatment.
+    // Known profiles keep a readable foreground at rest and move a narrow
+    // darker sweep through light text on dark profiles. Light profiles invert
+    // the relationship: the sweep is lighter, but remains a dark readable color.
     let normal = (
-        mix_channel(shadow.0, model.0, shadow_strength),
-        mix_channel(shadow.1, model.1, shadow_strength),
-        mix_channel(shadow.2, model.2, shadow_strength),
+        mix_channel(baseline.0, sweep.0, sweep_strength),
+        mix_channel(baseline.1, sweep.1, sweep_strength),
+        mix_channel(baseline.2, sweep.2, sweep_strength),
     );
     if label == "Working" && rainbow_strength > 0 {
         let rainbow = ACTIVITY_RAINBOW[rainbow_index(index, shimmer_frame)];
+        let rainbow = match background {
+            TerminalBackground::Dark => {
+                activity_color_at_least(rainbow, ACTIVITY_DARK_BASE_LUMINANCE)
+            }
+            TerminalBackground::Light => {
+                activity_color_at_most(rainbow, ACTIVITY_LIGHT_BASE_LUMINANCE)
+            }
+            TerminalBackground::Unknown => rainbow,
+        };
         (
             mix_channel(normal.0, rainbow.0, rainbow_strength),
             mix_channel(normal.1, rainbow.1, rainbow_strength),
@@ -97,15 +202,17 @@ fn activity_shimmer_label(
     rainbow_strength: u16,
 ) -> String {
     let static_label = || theme.bold(&theme.model_fg(reasoning.model_lab, label));
-    let Some((model, shadow)) = activity_shimmer_palette(theme, reasoning) else {
+    let Some((baseline, sweep)) = activity_shimmer_palette(theme, reasoning) else {
         return static_label();
     };
+    let background = theme.background();
     let mut rendered = String::with_capacity(label.len().saturating_mul(20));
     let mut index = 0;
     for grapheme in label.graphemes(true) {
         let color = activity_shimmer_color(
-            model,
-            shadow,
+            baseline,
+            sweep,
+            background,
             label,
             index as isize,
             shimmer_frame,
@@ -137,7 +244,7 @@ pub(super) fn activity_shimmer_marker(
     marker: &str,
 ) -> String {
     let static_marker = || theme.model_fg(reasoning.model_lab, marker);
-    let Some((model, shadow)) = activity_shimmer_palette(theme, reasoning) else {
+    let Some((baseline, sweep)) = activity_shimmer_palette(theme, reasoning) else {
         return static_marker();
     };
     let retry_label = reasoning
@@ -145,8 +252,9 @@ pub(super) fn activity_shimmer_marker(
         .as_ref()
         .map(|retry| retry.label_at(Instant::now()));
     let color = activity_shimmer_color(
-        model,
-        shadow,
+        baseline,
+        sweep,
+        theme.background(),
         retry_label
             .as_deref()
             .unwrap_or_else(|| activity_label(reasoning)),
@@ -334,11 +442,42 @@ mod tests {
         render_reasoning_on_surface(reasoning, renderer, theme, width, show_reasoning, None, 0)
     }
 
-    fn foreground_color_codes(rendered: &str) -> Vec<String> {
+    fn rendered_foregrounds(rendered: &str) -> Vec<Rgb> {
         rendered
-            .split("\x1b[38;2;")
-            .skip(1)
-            .filter_map(|part| part.split_once('m').map(|(color, _)| color.to_owned()))
+            .split("\x1b[")
+            .filter_map(|part| {
+                let (sgr, _) = part.split_once('m')?;
+                if let Some(rgb) = sgr.strip_prefix("38;2;") {
+                    let values = rgb
+                        .split(';')
+                        .map(|channel| channel.parse::<u8>().unwrap())
+                        .collect::<Vec<_>>();
+                    return Some((values[0], values[1], values[2]));
+                }
+                let index = sgr.strip_prefix("38;5;")?.parse::<u8>().unwrap();
+                if index >= 232 {
+                    let grey = 8 + (index - 232) * 10;
+                    Some((grey, grey, grey))
+                } else {
+                    // Octet quantizes RGB into the fixed cube/grayscale entries,
+                    // not the terminal-customizable first sixteen colours.
+                    assert!(index >= 16);
+                    let levels = [0, 95, 135, 175, 215, 255];
+                    let cube = usize::from(index - 16);
+                    Some((levels[cube / 36], levels[cube / 6 % 6], levels[cube % 6]))
+                }
+            })
+            .collect()
+    }
+
+    fn luminance(rgb: Rgb) -> f64 {
+        activity_luminance(rgb)
+    }
+
+    fn foreground_color_codes(rendered: &str) -> Vec<String> {
+        rendered_foregrounds(rendered)
+            .into_iter()
+            .map(|(red, green, blue)| format!("{red};{green};{blue}"))
             .collect()
     }
 
@@ -453,6 +592,75 @@ mod tests {
     }
 
     #[test]
+    fn activity_shimmer_contrast_survives_light_and_dark_composite_surfaces() {
+        for (background, surface) in [
+            (TerminalBackground::Dark, (38, 38, 38)),
+            (TerminalBackground::Dark, (64, 64, 64)),
+            (TerminalBackground::Light, (245, 245, 245)),
+            (TerminalBackground::Light, (224, 224, 224)),
+        ] {
+            for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+                let theme = theme::test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, true, depth),
+                );
+                for lab in [None, Some(ModelLab::OpenAi), Some(ModelLab::Alibaba)] {
+                    let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
+                    for label in [
+                        "Working",
+                        "Thinking",
+                        "Compacting context",
+                        "Waiting for network",
+                    ] {
+                        for strength in [0, 50, 100] {
+                            for frame in 0..label.width() + ACTIVITY_LABEL_OFFSET as usize + 2 {
+                                let rendered = activity_shimmer_label(
+                                    &theme, &reasoning, label, frame, strength,
+                                );
+                                assert_eq!(strip_terminal_sequences(&rendered), label);
+                                assert!(!rendered.contains("\x1b[48;"));
+                                assert!(!rendered.contains("\x1b[2m"));
+                                let colors = rendered_foregrounds(&rendered);
+                                assert_eq!(colors.len(), label.chars().count());
+                                for color in colors {
+                                    let foreground = luminance(color);
+                                    let background_luminance = luminance(surface);
+                                    let contrast = (foreground.max(background_luminance) + 0.05)
+                                        / (foreground.min(background_luminance) + 0.05);
+                                    assert!(
+                                        contrast >= 4.5,
+                                        "{background:?}/{depth:?}/{lab:?} {label} frame={frame} rainbow={strength}: {color:?} on {surface:?} has contrast {contrast:.2}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn activity_shimmer_sweep_follows_terminal_profile() {
+        let reasoning =
+            AssistantBlock::streaming_reasoning("").with_model_lab(Some(ModelLab::Alibaba));
+        let dark = theme::test_theme_for(
+            TerminalBackground::Dark,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        );
+        let light = theme::test_theme_for(
+            TerminalBackground::Light,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        );
+        let (dark_baseline, dark_sweep) =
+            activity_shimmer_palette(&dark, &reasoning).expect("dark activity palette");
+        let (light_baseline, light_sweep) =
+            activity_shimmer_palette(&light, &reasoning).expect("light activity palette");
+        assert!(activity_luminance(dark_baseline) > activity_luminance(dark_sweep));
+        assert!(activity_luminance(light_baseline) < activity_luminance(light_sweep));
+    }
+
+    #[test]
     fn model_shimmer_keeps_a_muted_baseline_behind_a_moving_highlight() {
         let theme = theme::test_theme();
         let reasoning =
@@ -543,7 +751,15 @@ mod tests {
             .expect("model colour");
         let shadow = theme.composer_idle_rgb(model);
         let expected = theme.rgb_fg(
-            activity_shimmer_color(model, shadow, "Thinking", ACTIVITY_MARKER_INDEX, 0, 0),
+            activity_shimmer_color(
+                shadow,
+                model,
+                TerminalBackground::Unknown,
+                "Thinking",
+                ACTIVITY_MARKER_INDEX,
+                0,
+                0,
+            ),
             "•",
         );
         assert_eq!(first, expected);
@@ -573,7 +789,15 @@ mod tests {
             assert_eq!(
                 activity_shimmer_marker(&theme, &reasoning, frame, 0, "•"),
                 theme.rgb_fg(
-                    activity_shimmer_color(model, shadow, &label, ACTIVITY_MARKER_INDEX, frame, 0),
+                    activity_shimmer_color(
+                        shadow,
+                        model,
+                        TerminalBackground::Unknown,
+                        &label,
+                        ACTIVITY_MARKER_INDEX,
+                        frame,
+                        0,
+                    ),
                     "•"
                 ),
             );
