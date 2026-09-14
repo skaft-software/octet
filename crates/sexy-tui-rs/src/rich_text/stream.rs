@@ -749,9 +749,7 @@ fn append_prose_suffix(
             continue;
         }
         if *at_boundary {
-            preview
-                .blocks
-                .push(Block::Paragraph(Vec::new()));
+            preview.blocks.push(Block::Paragraph(Vec::new()));
             *preview_epoch = (*preview_epoch).saturating_add(1);
             *at_boundary = false;
         }

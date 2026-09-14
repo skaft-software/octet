@@ -1221,7 +1221,10 @@ fn codex_luna_fallback_uses_exact_effort_choices_for_auxiliary_requests() {
         octet_ai::select_auxiliary_reasoning(&luna).unwrap(),
         ReasoningConfig::Off
     );
-    assert_eq!(capability.wire_value(&ReasoningConfig::Off), Some("none".to_owned()));
+    assert_eq!(
+        capability.wire_value(&ReasoningConfig::Off),
+        Some("none".to_owned())
+    );
     assert_eq!(
         capability.wire_value(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
         Some("max".to_owned())
