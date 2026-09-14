@@ -43,7 +43,7 @@ runtime defaults.
 | Setting | Meaning and documented value |
 | --- | --- |
 | `model` | Model ID; examples include `claude-sonnet-4-6` and legacy `custom/Qwen3 Coder Next`. Prefer [provider-qualified custom IDs](providers.md#custom-registry) for new registry entries. |
-| `reasoning` | Model-supported effort, example `"high"`; [levels and budgets](providers.md#reasoning). |
+| `reasoning` | Model-supported choice, example `"high"`; `"off"` is an explicit preference. Unset uses [model-aware defaults (unreleased)](providers.md#defaults-unreleased), after session restoration. [Levels and budgets](providers.md#reasoning). |
 | `system_prompt` | Replace all composed system instructions, including with `""`; example `"You are a careful and concise reviewer."`. AGENTS/context/skill instructions are ignored while set. |
 | `cache_retention` | Provider prompt-cache retention selection; example `"short"`. |
 | `theme` | Compiled terminal appearance: `"auto"`, `"light"`, or `"dark"`; explicit light/dark choices override detection. |

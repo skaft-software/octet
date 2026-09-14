@@ -47,8 +47,11 @@ Startup resolves the persistent session before final model selection:
 3. Explicit `--model` and `--reasoning` flags override recovered values.
    Project/global defaults apply only when the session has no corresponding
    value.
-4. Resolve the model and normalize reasoning against its advertised
-   capabilities. A persisted legacy Pro bit migrates to Ultra only when the
+4. Resolve the model before filling an unset reasoning preference from its
+   advertised default (or first supported enabled choice). Explicit Off remains
+   distinct from unset; absent usable reasoning metadata stays Off. Normalize
+   the selection against the model's capabilities. A persisted legacy Pro bit
+   migrates to Ultra only when the
    route advertises Ultra effort and V2 collaboration and the host has an
    executable V2 runtime; otherwise it is cleared with a warning while the
    independently selected effort is retained.

@@ -1860,10 +1860,12 @@ fn build_config_with_global_path_and_diagnostics(
         values.model.clone().map(octet_ai::ModelId),
         None,
     );
-    let reasoning = match cli.reasoning.as_deref().or(values.reasoning.as_deref()) {
-        Some(value) => config::parse_reasoning(value)?,
-        None => octet_ai::ReasoningConfig::Off,
-    };
+    let reasoning = cli
+        .reasoning
+        .as_deref()
+        .or(values.reasoning.as_deref())
+        .map(config::parse_reasoning)
+        .transpose()?;
     let reasoning_mode = match cli
         .reasoning_mode
         .as_deref()
@@ -3054,6 +3056,20 @@ max_output_bytes = 4096
                 .resume,
             ResumeSelector::Fork(Some(id)) if id == "session-id"
         ));
+    }
+
+    #[test]
+    fn unset_reasoning_is_distinct_from_explicit_off() {
+        let directory = cwd();
+        let config = config_with_empty_global(base(), directory.path()).unwrap();
+        assert_eq!(config.reasoning, None);
+        assert!(!config.reasoning_explicit);
+
+        let mut cli = base();
+        cli.reasoning = Some("off".into());
+        let config = config_with_empty_global(cli, directory.path()).unwrap();
+        assert_eq!(config.reasoning, Some(octet_ai::ReasoningConfig::Off));
+        assert!(config.reasoning_explicit);
     }
 
     #[test]

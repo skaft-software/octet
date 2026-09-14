@@ -5512,7 +5512,7 @@ command = "does-not-exist"
             invocation_cwd: workspace.to_owned(),
             model: Some(octet_ai::ModelId("gpt-4o-mini".into())),
             model_explicit: false,
-            reasoning: ReasoningConfig::Off,
+            reasoning: None,
             reasoning_explicit: false,
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,

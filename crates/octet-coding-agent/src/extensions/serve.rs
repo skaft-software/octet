@@ -11029,8 +11029,11 @@ fn graphical_model_catalog(catalog: &ModelCatalog, config: &Config) -> Vec<Model
                 .into_iter()
                 .map(thinking_label)
                 .collect::<Vec<_>>();
-            let requested_default =
-                selection_for_model(&model, &config.reasoning, config).reasoning;
+            let preference = config
+                .reasoning
+                .clone()
+                .unwrap_or_else(|| crate::app::default_reasoning_for_model(&model));
+            let requested_default = selection_for_model(&model, &preference, config).reasoning;
             let default_reasoning = reasoning
                 .iter()
                 .find(|choice| choice.as_str() == requested_default.as_str())
@@ -11124,8 +11127,14 @@ fn selection_for_model(
     reasoning: &ReasoningConfig,
     config: &Config,
 ) -> ModelSelection {
-    let normalized =
-        crate::app::normalize_reasoning_for_model(reasoning, model).unwrap_or(ReasoningConfig::Off);
+    let normalized = crate::app::normalize_reasoning_selection_for_model_with_subagents(
+        reasoning,
+        octet_ai::ReasoningMode::Standard,
+        model,
+        subagents_extension_activation_configured(config),
+    )
+    .map(|(reasoning, _, _)| reasoning)
+    .unwrap_or(ReasoningConfig::Off);
     let portable = crate::app::level_from_reasoning(&normalized, model)
         .map(thinking_label)
         .unwrap_or_else(|_| reasoning_label(&normalized));
@@ -11210,7 +11219,8 @@ fn selection_from_persisted_config(
         .map(config::parse_reasoning)
         .transpose()
         .map_err(|_| ServiceError::InvalidSeed)?
-        .unwrap_or_else(|| config.reasoning.clone());
+        .or_else(|| config.reasoning.clone())
+        .unwrap_or_else(|| crate::app::default_reasoning_for_model(&model));
     Ok(selection_for_model(&model, &reasoning, config))
 }
 
@@ -12578,7 +12588,7 @@ mod tests {
             model: None,
             model_explicit: false,
             system_prompt: None,
-            reasoning: ReasoningConfig::Off,
+            reasoning: None,
             reasoning_explicit: false,
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,
@@ -18786,6 +18796,85 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
             input_pricing: None,
             input_modalities: vec![InputModality::Text],
         }
+    }
+
+    #[test]
+    fn graphical_reasoning_defaults_distinguish_unset_config_and_persisted_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = serve_test_config(directory.path());
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let mut spec = (*catalog
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap()
+            .spec)
+            .clone();
+        spec.id = ModelId("reasoning-default-fixture".into());
+        spec.capabilities.reasoning.as_mut().unwrap().options =
+            Some(octet_ai::types::ReasoningOptions {
+                values: vec!["none".into(), "low".into(), "high".into()],
+                default: Some("high".into()),
+            });
+        config.model = Some(spec.id.clone());
+        catalog.register_model(spec).unwrap();
+        for (preference, expected) in [(None, "high"), (Some(ReasoningConfig::Off), "off")] {
+            config.reasoning = preference;
+            let models = graphical_model_catalog(&catalog, &config);
+            let summary = models
+                .iter()
+                .find(|model| model.id == "reasoning-default-fixture")
+                .unwrap();
+            assert_eq!(summary.reasoning, ["off", "low", "high"]);
+            assert_eq!(summary.default_reasoning.as_deref(), Some(expected));
+            assert_eq!(selection_from_summary(summary).reasoning, expected);
+            assert_eq!(
+                selection_from_persisted_config(None, None, &catalog, &config)
+                    .unwrap()
+                    .reasoning,
+                expected
+            );
+            assert_eq!(
+                selection_from_persisted_config(None, Some("off".into()), &catalog, &config)
+                    .unwrap()
+                    .reasoning,
+                "off"
+            );
+            assert_eq!(
+                selection_from_persisted_config(None, Some("low".into()), &catalog, &config)
+                    .unwrap()
+                    .reasoning,
+                "low"
+            );
+        }
+    }
+
+    #[test]
+    fn graphical_model_default_keeps_ultra_gated_without_selecting_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = serve_test_config(directory.path());
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let mut spec = (*catalog
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap()
+            .spec)
+            .clone();
+        spec.id = ModelId("ultra-default-fixture".into());
+        spec.capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+        let capability = spec.capabilities.reasoning.as_mut().unwrap();
+        capability.max_effort = octet_ai::ReasoningEffort::Ultra;
+        capability.options = Some(octet_ai::types::ReasoningOptions {
+            values: ["none", "low", "high", "max", "ultra"]
+                .map(str::to_owned)
+                .to_vec(),
+            default: Some("ultra".into()),
+        });
+        catalog.register_model(spec).unwrap();
+        let models = graphical_model_catalog(&catalog, &config);
+        let summary = models
+            .iter()
+            .find(|model| model.id == "ultra-default-fixture")
+            .unwrap();
+        assert!(!summary.reasoning.iter().any(|choice| choice == "ultra"));
+        assert_eq!(summary.default_reasoning.as_deref(), Some("max"));
     }
 
     #[test]
