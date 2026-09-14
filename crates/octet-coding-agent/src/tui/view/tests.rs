@@ -1428,7 +1428,8 @@ fn slash_command_menu_lists_commands_and_tab_completes_a_unique_prefix() {
 
     shell.slash_menu(SlashMenuAction::First);
     shell.slash_menu(SlashMenuAction::Next);
-    shell.slash_menu(SlashMenuAction::Select);
+    let selected = shell.slash_menu(SlashMenuAction::Select);
+    assert!(selected);
     assert_eq!(shell.pending(), "/resume ");
     assert!(!shell.slash_popup_open());
     let restored = shell_chrome(&shell.state.borrow(), 120, Instant::now());
