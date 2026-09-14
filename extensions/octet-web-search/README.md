@@ -68,9 +68,11 @@ results, diagnostics, or frontend state. Credentialed requests never redirect;
 401/403 invalidates the stored key so setup/search can ask again.
 
 SearXNG settings live at `~/.config/octet/octet-web-search.json`. The provider
-picker preserves them while Brave is selected. Endpoint URLs must be non-secret.
-A private self-hosted provider requires `allow_private_endpoint: true`; this
-exception never permits private `web_fetch`/`web_find` destinations or redirects.
+picker preserves them while Brave is selected. Endpoint URLs must be non-secret;
+configured query parameters such as `timeout_limit` are retained and the search
+request adds its own query, JSON, and safe-search parameters. A private
+self-hosted provider requires `allow_private_endpoint: true`; this exception
+never permits private `web_fetch`/`web_find` destinations or redirects.
 `limits.allowed_domains` is an egress allowlist; a tool's `domains` can only narrow
 it. See the [complete configuration rules](REFERENCE.md#searxng).
 

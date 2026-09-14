@@ -129,10 +129,14 @@ Minimal SearXNG configuration:
 
 The SearXNG instance must permit JSON search responses (`format=json`). Its
 endpoint is deliberately non-secret; credential-bearing URLs and unknown
-credential fields are rejected. A self-hosted endpoint on loopback or a private
-address requires `allow_private_endpoint: true`. That exception applies only to
-the configured provider hostname. Model-supplied `web_fetch` and `web_find`
-destinations and every redirect remain public-address-only.
+credential fields are rejected. A configured endpoint may include non-secret
+query parameters such as `timeout_limit=5` or `language=en`: they are retained
+and the runtime appends the request's `q`, `format=json`, and `safesearch=1`
+parameters. Fragments and tracking parameters are still removed. A self-hosted
+endpoint on loopback or a private address requires
+`allow_private_endpoint: true`. That exception applies only to the configured
+provider hostname. Model-supplied `web_fetch` and `web_find` destinations and
+every redirect remain public-address-only.
 
 Optional `limits.allowed_domains` is an egress allowlist for search results,
 `web_fetch`, `web_find`, and redirects. A tool-supplied `domains` list can narrow
@@ -148,6 +152,31 @@ that configuration but cannot widen it.
 
 Defaults can be made smaller in configuration. Call arguments may select a
 smaller result, byte, redirect, or time limit but cannot exceed the hard limit.
+With the shipped/default configuration, an omitted `web_search` timeout uses
+8 seconds; an explicit 8-second or 20-second argument is passed unchanged
+through the API 0.2 tool boundary. SearXNG and Brave use the same absolute
+provider deadline. It spans provider URL construction, DNS resolution,
+connect/TLS/header/body I/O, redirects, JSON/result normalization, bounded
+result construction, and cache return; it is not reset for a phase or retry.
+The 100 ms socket poll is only a cancellation checkpoint and never a terminal
+success/failure timeout. A host cancellation remains cooperative and wins at
+each checkpoint.
+
+The generic API 0.2 host default is a separate 30-second request timeout with a
+2-second cooperative-cancellation grace. It is the outer authority, not extra
+provider time; a host configured below the requested provider budget can still
+cancel first. The extension cannot enlarge that host budget, so installed-path
+qualification must verify the host setting and leave setup/return/grace
+headroom.
+
+SearXNG `timeout_limit` is an upstream wait, not an Octet timeout. Measure the
+wait distribution for the selected deployment, then leave response and
+normalization headroom in the Octet budget. For example, if deployment
+measurement supports a 5-second upstream arrangement, it can fit under the
+8-second default with roughly 3 seconds for response headroom; this is an
+operational starting point, not a universal SearXNG guarantee. The extension
+preserves the configured parameter instead of inventing or overriding it.
+
 HTML normalization drops script, style, template, SVG, canvas, and noscript
 content. Direct retrieval accepts only HTML, XHTML, and plain text and requests
 identity transfer encoding; compressed, oversized, unsupported, or malformed
@@ -207,17 +236,20 @@ terminal states. None prevents ordinary coding tools from continuing.
 API `0.2` cancellation is cooperative and request-scoped. The runtime checks the
 ambient token before/after resolution, redirects, normalization, and every
 bounded read, and caps individual socket waits below the host's cancellation
-grace. Cancellation settles with JSON-RPC `-32800`; it does not claim rollback
-or emit a second tool result. Progress is request-scoped, monotonic, bounded,
-and contains only provider/stage/count/byte information—not queries, URLs, or
-retrieved text.
+grace. System DNS runs through a fixed four-slot daemon worker boundary, so a
+caller does not wait indefinitely for a blocking OS lookup; an interrupted
+lookup may finish in the background, but its resources are bounded. Cancellation
+settles with JSON-RPC `-32800`; it does not claim rollback or emit a second tool
+result. Progress is request-scoped, monotonic, bounded, and contains only
+provider/stage/count/byte information—not queries, URLs, or retrieved text.
 
-**Unreleased source fix:** TCP connect, TLS handshake, headers, and body reads
-share the request deadline across addresses and redirects. Nonblocking socket
-waits check cancellation at intervals of at most 100 ms; a quiet interval neither
-ends the request nor replays it. Slow responses within the budget can succeed,
-while stalled or continuously trickling responses still respect that budget.
-This does not change the published `0.7.6` bundle.
+**Unreleased source fix:** TCP connect, TLS handshake, headers, body reads, and
+post-HTTP normalization/result return share the request deadline across
+addresses and redirects. Nonblocking socket waits check cancellation at
+intervals of at most 100 ms; a quiet interval neither ends the request nor
+replays it. Slow responses within the budget can succeed, while stalled or
+continuously trickling responses still respect that budget. This does not
+change the published `0.7.6` bundle.
 
 The optional status contribution is compact and passive:
 
@@ -262,8 +294,10 @@ python3 -m unittest discover -s extensions/octet-web-search/tests -v
 They cover normalization, untrusted framing, redirects and private-address
 rejection, truncation and oversized responses, unsupported content,
 cancellation, timeout, provider failure, stable citations, caching, health,
-protocol negotiation/progress, semantic fixtures, and a self-contained release
-smoke test. Transport regressions cover slow-but-within-budget responses,
-partial/chunked reads, TLS verification, and cancellation/deadlines during
-stalled or trickling I/O. This inventory is not a claim of live-provider or
+protocol negotiation/progress, omitted and explicit 8/20-second tool budgets,
+provider-shaped SearXNG/Brave responses, configured SearXNG query parameters,
+semantic fixtures, and a self-contained release smoke test. Transport regressions
+cover slow-but-within-budget responses, partial/chunked reads, TLS verification,
+system-DNS deadlines, and cancellation/deadlines during stalled or trickling I/O
+and post-HTTP result work. This inventory is not a claim of live-provider or
 release qualification.

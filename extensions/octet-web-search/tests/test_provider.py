@@ -21,17 +21,20 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import provider as provider_module  # noqa: E402
 from provider import (  # noqa: E402
     AuthenticationFailed,
     BoundedCache,
     BRAVE_SEARCH_ENDPOINT,
     ConfigError,
     CredentialRequired,
+    Deadline,
     DestinationRejected,
     HttpClient,
     HttpPayload,
     InvalidInput,
     ProviderFailed,
+    RateLimited,
     RequestTimedOut,
     ResolvedAddress,
     TooLarge,
@@ -46,6 +49,7 @@ from provider import (  # noqa: E402
     sanitize_url,
     select_provider,
     store_brave_api_key,
+    system_resolver,
 )
 
 
@@ -114,6 +118,8 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             self.respond(503, b"provider internals must not escape", "text/plain")
         elif parsed.path == "/search-invalid":
             self.respond(200, b"{not json", "application/json")
+        elif parsed.path == "/search-rate-limited":
+            self.respond(429, b"rate limited fixture", "text/plain")
         elif parsed.path.startswith("/search-delayed-"):
             body = json.dumps({"results": [{
                 "title": "Delayed fixture",
@@ -269,6 +275,32 @@ class BraveHttp:
         )
 
 
+class DeadlineProbeHttp:
+    def __init__(self, provider_kind):
+        self.provider_kind = provider_kind
+        self.calls = []
+        self.remaining_at_fetch = []
+
+    def fetch(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        self.remaining_at_fetch.append(kwargs["deadline"].remaining())
+        result = {
+            "title": "Deadline fixture",
+            "url": "https://example.com/deadline",
+            "content": "bounded provider result",
+        }
+        value = {"results": [result]}
+        if self.provider_kind == "brave":
+            value = {"web": value}
+        return HttpPayload(
+            url,
+            200,
+            {"content-type": "application/json; charset=utf-8"},
+            json.dumps(value).encode("utf-8"),
+            0,
+        )
+
+
 class ProviderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -323,6 +355,140 @@ class ProviderTests(unittest.TestCase):
         query = parse_qs(self.server.queries[-1])
         self.assertEqual(query["format"], ["json"])
         self.assertEqual(query["safesearch"], ["1"])
+
+    def test_searxng_endpoint_query_parameters_survive_search_request(self):
+        config = parse_configuration(
+            {
+                "version": 1,
+                "provider": {
+                    "kind": "searxng",
+                    "endpoint": (
+                        "http://provider.test/search?timeout_limit=5&language=en&"
+                        "utm_source=fixture"
+                    ),
+                },
+            }
+        )
+        result = self.service.search(config, query="query parameters")
+        self.assertEqual(result["result_count"], 2)
+        self.assertEqual(config.provider.endpoint.split("?", 1)[1].split("&"), [
+            "language=en",
+            "timeout_limit=5",
+        ])
+        query = parse_qs(self.server.queries[-1])
+        self.assertEqual(query["timeout_limit"], ["5"])
+        self.assertEqual(query["language"], ["en"])
+        self.assertEqual(query["format"], ["json"])
+        self.assertEqual(query["safesearch"], ["1"])
+        self.assertNotIn("utm_source", query)
+
+    def test_search_uses_requested_deadline_for_both_adapters(self):
+        cases = (
+            ("searxng", {"kind": "searxng", "endpoint": "https://provider.example/search"}, {}),
+            ("brave", {"kind": "brave"}, {"api_key": "fixture-api-key"}),
+        )
+        for provider_kind, provider, extra in cases:
+            with self.subTest(provider=provider_kind):
+                config = parse_configuration({"version": 1, "provider": provider})
+                http = DeadlineProbeHttp(provider_kind)
+                service = WebService(http=http, cache=BoundedCache())
+                for index, (requested, expected) in enumerate(
+                    ((None, 8.0), (8, 8.0), (20, 20.0))
+                ):
+                    with self.subTest(requested=requested):
+                        arguments = dict(extra)
+                        arguments.update(
+                            query="deadline %s %d" % (provider_kind, index),
+                            timeout_seconds=requested,
+                        )
+                        result = service.search(config, **arguments)
+                        self.assertEqual(result["result_count"], 1)
+                        remaining = http.remaining_at_fetch[-1]
+                        self.assertGreater(remaining, expected - 0.5)
+                        self.assertLessEqual(remaining, expected)
+
+    def test_search_deadline_covers_result_normalization(self):
+        class ImmediateHttp:
+            def fetch(self, url, **_kwargs):
+                return HttpPayload(
+                    url,
+                    200,
+                    {"content-type": "application/json"},
+                    b'{"results": []}',
+                    0,
+                )
+
+        def delayed_normalization(*_args, **_kwargs):
+            time.sleep(0.15)
+            return [], [], 0
+
+        service = WebService(http=ImmediateHttp(), cache=BoundedCache())
+        with mock.patch.object(
+            provider_module,
+            "_normalize_search_results",
+            side_effect=delayed_normalization,
+        ):
+            with self.assertRaises(RequestTimedOut):
+                service.search(self.config, query="post-http", timeout_seconds=0.1)
+
+    def test_search_cancellation_covers_result_normalization(self):
+        cancellation = Cancellation()
+
+        def cancel_during_normalization(*_args, **_kwargs):
+            cancellation.cancelled.set()
+            return [], [], 0
+
+        service = WebService(
+            http=DeadlineProbeHttp("searxng"),
+            cache=BoundedCache(),
+        )
+        config = parse_configuration(
+            {
+                "version": 1,
+                "provider": {
+                    "kind": "searxng",
+                    "endpoint": "https://provider.example/search",
+                },
+            }
+        )
+        with mock.patch.object(
+            provider_module,
+            "_normalize_search_results",
+            side_effect=cancel_during_normalization,
+        ):
+            with self.assertRaises(FakeCancelled):
+                service.search(
+                    config,
+                    query="cancel post-http",
+                    cancellation=cancellation,
+                    timeout_seconds=2,
+                )
+
+    def test_find_shares_deadline_with_open_and_result_processing(self):
+        document = {
+            "citation_id": "web-0123456789abcdef",
+            "title": "Fixture",
+            "url": "https://example.com/source",
+            "origin": "https://example.com",
+            "content": "needle",
+            "mime_type": "text/plain",
+            "normalized_bytes": 6,
+            "truncated": False,
+            "redirects": 0,
+        }
+
+        def delayed_open(*_args, **_kwargs):
+            time.sleep(0.15)
+            return {"document": document, "cache": "miss"}
+
+        with mock.patch.object(self.service, "open", side_effect=delayed_open):
+            with self.assertRaises(RequestTimedOut):
+                self.service.find(
+                    self.config,
+                    url="https://example.com/source",
+                    pattern="needle",
+                    timeout_seconds=0.1,
+                )
 
     def test_brave_search_uses_fixed_endpoint_secret_header_and_response_shape(self):
         config = parse_configuration(
@@ -513,6 +679,31 @@ class ProviderTests(unittest.TestCase):
                     self.assertEqual(result["cache"], "miss")
                     self.assertEqual(self.server.counts.get(path, 0), before + 1)
 
+    def test_search_timeout_and_rate_limit_remain_distinct(self):
+        delayed = parse_configuration(
+            {
+                "version": 1,
+                "provider": {
+                    "kind": "searxng",
+                    "endpoint": "http://provider.test/search-delayed-body",
+                },
+            }
+        )
+        with self.assertRaises(RequestTimedOut):
+            self.service.search(delayed, query="over budget", timeout_seconds=0.1)
+
+        rate_limited = parse_configuration(
+            {
+                "version": 1,
+                "provider": {
+                    "kind": "searxng",
+                    "endpoint": "http://provider.test/search-rate-limited",
+                },
+            }
+        )
+        with self.assertRaises(RateLimited):
+            self.service.search(rate_limited, query="provider rate limit")
+
     def test_timeout_is_bounded(self):
         started = time.monotonic()
         with self.assertRaises(RequestTimedOut):
@@ -522,6 +713,57 @@ class ProviderTests(unittest.TestCase):
                 timeout_seconds=0.1,
             )
         self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_system_dns_honors_deadline_without_blocking_caller(self):
+        release = threading.Event()
+
+        def blocked_getaddrinfo(*_args, **_kwargs):
+            release.wait(1.0)
+            return []
+
+        started = time.monotonic()
+        try:
+            with mock.patch.object(
+                provider_module.socket,
+                "getaddrinfo",
+                side_effect=blocked_getaddrinfo,
+            ):
+                with self.assertRaises(RequestTimedOut):
+                    system_resolver("provider.example", 443, Deadline(0.1))
+        finally:
+            release.set()
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_system_dns_honors_cancellation(self):
+        release = threading.Event()
+        cancellation = Cancellation()
+        observed = []
+
+        def blocked_getaddrinfo(*_args, **_kwargs):
+            release.wait(1.0)
+            return []
+
+        def run():
+            try:
+                with mock.patch.object(
+                    provider_module.socket,
+                    "getaddrinfo",
+                    side_effect=blocked_getaddrinfo,
+                ):
+                    system_resolver("provider.example", 443, Deadline(2, cancellation))
+            except BaseException as error:
+                observed.append(error)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        time.sleep(0.05)
+        cancellation.cancelled.set()
+        worker.join(timeout=0.5)
+        release.set()
+        worker.join(timeout=0.5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(observed), 1)
+        self.assertIsInstance(observed[0], FakeCancelled)
 
     def test_cancellation_wins_during_streaming_read(self):
         cancellation = Cancellation()
