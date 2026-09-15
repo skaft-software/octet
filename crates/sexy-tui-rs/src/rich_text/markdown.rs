@@ -12,7 +12,10 @@
 //! Rendering happens here, at parse time, and only for a *complete* fenced
 //! block: the streaming layer shows an open fence as its raw growing source (it
 //! builds that preview itself) and publishes the diagram once, when the closing
-//! fence arrives, so a partially received body is never half-drawn.
+//! fence arrives, so a partially received body is never half-drawn. A body line
+//! that merely *looks* like a closer (four-space indentation, trailing text)
+//! does not terminate the block — [`fence_is_closed`] mirrors the parser's own
+//! CommonMark closure rules.
 
 use std::ops::Range;
 
@@ -72,37 +75,69 @@ fn render_diagram_fence(info: &str, code: &str) -> Option<String> {
 /// Whether the fenced block at `range` is terminated by a valid closing fence
 /// line. An unterminated fence at end of input stays literal, matching the
 /// streaming preview.
+///
+/// `End(CodeBlock)` alone is not enough: pulldown also emits it when an open
+/// fence hits end of input. The closing line must therefore satisfy CommonMark's
+/// rules that the parser itself enforces — and this check has to mirror them,
+/// because a body line that merely *looks* like a fence must not turn into a
+/// partial render (see `pseudo_closing_fences_never_render_partial_art`).
 fn fence_is_closed(source: &str, range: &Range<usize>) -> bool {
     let Some(slice) = source.get(range.clone()) else {
         return false;
     };
     let mut lines = slice.lines();
-    let Some((marker, opening_count)) = lines.next().and_then(fence_marker) else {
+    let Some(opening) = lines.next().and_then(fence_marker) else {
         return false;
     };
-    let Some((closing_marker, closing_count)) = lines.next_back().and_then(fence_marker) else {
+    let Some(closing) = lines.next_back().and_then(fence_marker) else {
         return false;
     };
-    closing_marker == marker && closing_count >= opening_count
+    closing.marker == opening.marker
+        && closing.count >= opening.count
+        // A closing fence may be followed only by spaces or tabs; a line like
+        // ```` ``` not a close ```` (or ```` ```latex ````) is body text.
+        && closing.rest.trim_matches([' ', '\t']).is_empty()
+        // ...and may be indented at most three columns relative to the opening
+        // fence: `    ``` ` inside a zero-indented fence is body text too. The
+        // comparison is relative because both lines carry the same container
+        // prefixes (blockquote `>`, list indentation) verbatim in the range.
+        && closing.indent <= opening.indent + 3
 }
 
-/// The fence marker and run length of a line, after any blockquote `>` prefixes
-/// and indentation. Pulldown reports a container-nested block's range with the
+/// One fence line: marker character, marker run length, indentation relative to
+/// its container prefix and the text after the run.
+struct FenceLine<'a> {
+    marker: char,
+    count: usize,
+    indent: usize,
+    rest: &'a str,
+}
+
+/// The fence marker of a line, after any blockquote `>` prefixes and
+/// indentation. Pulldown reports a container-nested block's range with the
 /// surrounding container syntax still attached, so the raw line is stripped
-/// here rather than in the caller.
-fn fence_marker(line: &str) -> Option<(char, usize)> {
+/// here rather than in the caller. Trailing text after the marker run is
+/// returned as [`FenceLine::rest`] for the caller to judge: an info string is
+/// legal on the opening line, illegal on the closing one.
+fn fence_marker(line: &str) -> Option<FenceLine<'_>> {
     let mut rest = line;
-    loop {
+    let indent = loop {
         let candidate = rest.trim_start_matches([' ', '\t']);
         let Some(after) = candidate.strip_prefix('>') else {
+            let indent = rest.len() - candidate.len();
             rest = candidate;
-            break;
+            break indent;
         };
         rest = after.strip_prefix(' ').unwrap_or(after);
-    }
+    };
     let marker = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
     let count = rest.chars().take_while(|c| *c == marker).count();
-    (count >= 3).then_some((marker, count))
+    (count >= 3).then_some(FenceLine {
+        marker,
+        count,
+        indent,
+        rest: &rest[count..],
+    })
 }
 
 /// Parser options chosen for rich terminal prose. Footnotes and raw HTML

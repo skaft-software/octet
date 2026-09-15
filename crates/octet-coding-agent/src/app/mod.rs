@@ -11,6 +11,7 @@ use octet_ai::{
     ReasoningEffort, ReasoningMode,
 };
 
+use crate::app::bootstrap::CodexContextNotes;
 use crate::config::Config;
 use crate::config::ThinkingLevel;
 use crate::extensions::SUBAGENTS_EXTENSION_NAME;
@@ -440,6 +441,21 @@ pub struct App {
     pub goal_store: Arc<DurableGoalStore>,
     pub goal_driver: GoalDriver,
     pub goal_session_id: String,
+    /// The one Codex context note this session may still deliver.
+    ///
+    /// It is never rendered at startup: a frontend pulls it through
+    /// [`App::take_codex_context_note`] on the first assistant turn after
+    /// readiness, or reads it (without consuming) from an on-demand surface such
+    /// as `/context` or `/status` via [`App::codex_context_report`]. The set is
+    /// effective-model-only and once-per-session, and it survives
+    /// `rebuild_app`.
+    pub codex_context_notes: CodexContextNotes,
+    /// Which provider inventories readiness initialized for this launch.
+    ///
+    /// `Fleet` means the catalog is already complete; a narrowed plan means some
+    /// configured providers were deferred and [`App::enrich_catalog`] must run
+    /// before a surface enumerates every route.
+    pub(crate) readiness: crate::app::bootstrap::CatalogReadiness,
 }
 
 fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) -> bool {
@@ -469,6 +485,53 @@ impl App {
                 .iter()
                 .any(|name| name == "subagent_spawn")
             && self.executable_extensions.has_agent_session_service()
+    }
+
+    /// The one Codex context note this session's effective model still owes, if
+    /// any. Read-only: this is the on-demand surface (`/context`, `/status`,
+    /// `/telemetry`) and never delivers or latches.
+    ///
+    /// Returns nothing for a model that needs no note (any non-Codex route, or
+    /// a Codex route whose effective window is the deliberate 272K policy).
+    pub fn codex_context_report(&self) -> Option<&str> {
+        self.codex_context_notes.note_for(&self.model.spec.id)
+    }
+
+    /// Deliver the one Codex context note for the effective model, at most once
+    /// per session.
+    ///
+    /// Startup renders nothing; the frontend calls this when the user can act on
+    /// it (the first assistant turn after readiness) and every later call
+    /// returns `None`, so the note can never repeat or leak into a second model.
+    pub fn take_codex_context_note(&self) -> Option<String> {
+        self.codex_context_notes.take_for(&self.model.spec.id)
+    }
+
+    /// Complete the catalog with the provider inventories a narrowed readiness
+    /// plan deferred at startup.
+    ///
+    /// Enrichment is never readiness: readiness already initialized the active
+    /// model's own route, so a surface that enumerates every route (the `/model`
+    /// picker, provider setup, a status page) calls this first and shows the
+    /// same provider list a fleet launch would have shown. Idempotent: a launch
+    /// whose plan was already the fleet returns immediately, and a second call
+    /// performs nothing.
+    ///
+    /// The live extension-provided routes are re-projected onto the fresh fleet
+    /// catalog, so enrichment cannot drop them. The agent, the session, and the
+    /// active model are untouched.
+    pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
+        use crate::app::bootstrap::{model_catalog_for_readiness, CatalogReadiness};
+        if self.readiness.is_fleet() {
+            return Ok(());
+        }
+        let (catalog, notes) =
+            model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
+        self.catalog = catalog;
+        self.codex_context_notes.merge(notes);
+        self.readiness = CatalogReadiness::Fleet;
+        self.synchronize_extension_provider_catalog();
+        Ok(())
     }
 
     /// Current provider-visible tool schema reserve, including live extension

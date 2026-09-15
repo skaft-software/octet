@@ -797,15 +797,11 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
             | crate::presentation::PriceDisplay::Priced => None,
         }
     };
-    if state.usage_uncertain {
-        segments.push(StatusFooterSegment::new(
-            FooterKind::Cost,
-            vec![match state.displayed_session_cost_microdollars() {
-                Some(cost) => format!("subtotal {} + ?", format_microdollars(cost)),
-                None => "usage/cost unknown".to_owned(),
-            }],
-        ));
-    } else if let Some(cost) = cost {
+    // Plain dollars, nothing else: the coding agent provides the estimate and
+    // the provider API is the source of truth. `usage_uncertain` stays a durable
+    // state fact (surfaced by `/telemetry` and the non-TUI channels) and never
+    // rewrites the footer cost as a subtotal or a `+ ?` marker.
+    if let Some(cost) = cost {
         segments.push(StatusFooterSegment::new(FooterKind::Cost, vec![cost]));
     }
 
@@ -1112,6 +1108,44 @@ mod tests {
             footer_workspace(Path::new("/long/parent/project"), None, 10, false),
             "...project"
         );
+    }
+
+    #[test]
+    fn footer_cost_is_plain_dollars_even_when_usage_is_uncertain() {
+        for usage_uncertain in [true, false] {
+            let mut state = crate::tui::view::ShellState::default();
+            state.theme = crate::tui::theme::test_theme();
+            state.usage_uncertain = usage_uncertain;
+            state.price_display = crate::presentation::PriceDisplay::Priced;
+            state.session_cost_microdollars = Some(123_456);
+            let footer = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                &state,
+                120,
+                Instant::now(),
+            ));
+            assert!(footer.contains("$0.123"), "{footer:?}");
+            for forbidden in ["subtotal", "+", "?", "unknown", "usage/cost"] {
+                assert!(
+                    !footer.contains(forbidden),
+                    "{forbidden:?} leaked into {footer:?}"
+                );
+            }
+            // The durable uncertainty fact is untouched by rendering.
+            assert_eq!(state.usage_uncertain, usage_uncertain);
+        }
+
+        // A configured zero price is still a plain dollar figure.
+        let mut zero = crate::tui::view::ShellState::default();
+        zero.theme = crate::tui::theme::test_theme();
+        zero.usage_uncertain = true;
+        zero.price_display = crate::presentation::PriceDisplay::ExplicitZero;
+        let footer = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+            &zero,
+            120,
+            Instant::now(),
+        ));
+        assert!(footer.contains("$0"), "{footer:?}");
+        assert!(!footer.contains("subtotal"), "{footer:?}");
     }
 
     #[test]

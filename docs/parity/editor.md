@@ -192,6 +192,13 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   halves and the port indexes `char`s.
 - Not modelled: ANSI styling (the renderer returns semantic text; the
   embedding component styles it).
+- Consumer — Landed: a completed ```` ```latex ```` fence is rendered in display
+  mode by `rich_text::markdown::parse` (`markdown.rs::render_diagram_fence`,
+  reached only after the closure check). Other info strings, an oversized body
+  (> `MAX_DIAGRAM_FENCE_BYTES`, 16 KiB), a `None` render, an empty render, and
+  an unterminated fence keep the original source. `$$…$$`/`\[…\]` math is
+  deliberately **not** wired — the parser does not enable math events; see the
+  consumer note under 2c.4.
 
 ## 2c.4 Mermaid box-drawing diagrams — Landed (bounded subset)
 
@@ -224,6 +231,16 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   literally), upstream's style-span/warning channels, and the "unrendered
   diagram" fallback text — the fence consumer below keeps the original source
   for every `Err`.
+- Evidence scope — do **not** overclaim: the 29 goldens below are
+  **self-captured** from this engine's own output; they pin the bounded subset,
+  they are not a differential oracle. Unlike 2c.3 (upstream `latex.ts` run under
+  Node), there is no upstream harness to diff against:
+  `packages/coding-agent/.../mermaid.ts` delegates layout to the external
+  `grok-mermaid` npm package, which is not vendored and cannot be added here (a
+  renderer must build and run offline, with no network/npm dependency). So
+  `BT`/`RL` (rejected rather than mirrored), `subgraph`/`end`/`direction`, `&`
+  node lists and HTML-entity labels are a deliberate, pinned fail-closed
+  boundary — not a verified match to `grok-mermaid`'s layout or error strings.
 - Consumer — Landed (supersedes the earlier "no consumer is wired yet" note):
   `rich_text::markdown::parse` renders a *completed* fenced block whose info
   string explicitly names `latex`, `mermaid`, `graph`, or `flowchart`
@@ -237,7 +254,12 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   (`stream.rs::stabilize`) and publishes the diagram once, when the closing
   fence arrives; later chunks do not move the committed rows. The opener may
   itself arrive in pieces — a `<3`-backtick or partial info string is withheld
-  or shown raw and never dispatches early. `$$…$$` /
+  or shown raw and never dispatches early. A body line that merely *looks* like
+  a closer — indented four spaces, or carrying trailing junk such as
+  ```` ``` not a close ```` — does not terminate the fence either:
+  `fence_is_closed` mirrors the parser's own CommonMark closure rules, so no
+  stray body line can be glued into partial art (the LaTeX engine would
+  otherwise accept the backticks as text). `$$…$$` /
   `\[…\]` math is **not** wired: the parser does not enable math events, so
   `$…$` stays literal text (`Costs $5 and $10 total.` is untouched, and
   `Event::DisplayMath`/`InlineMath` in `markdown.rs` are unreachable arms).
@@ -250,13 +272,14 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   `syntax_highlighting: true` and truecolor on, the glyph rows carry **no** ANSI
   escapes (only the language label is dimmed), so the one-colour-per-grapheme /
   no-background-fill invariants hold for rendered art. Fence-layer tests:
-  `crates/sexy-tui-rs/tests/rich_fences.rs`, 15 tests. Run:
+  `crates/sexy-tui-rs/tests/rich_fences.rs`, 16 tests. Run:
   `cargo test -p sexy-tui-rs --test rich_fences` =>
-  `test result: ok. 15 passed; 0 failed` (LaTeX/Mermaid box-drawing goldens
+  `test result: ok. 16 passed; 0 failed` (LaTeX/Mermaid box-drawing goldens
   through the fence, `graph`/`flowchart` info-string headers, unknown-fence
   non-reinterpretation and byte-for-byte non-dispatch, unsupported/oversized/
-  unterminated degradation, CRLF and `~~~` fences, blockquote nesting,
-  empty-render degradation, math-not-dispatched, syntax-styling invariance, and
+  unterminated degradation, pseudo-closing lines that stay source, CRLF and
+  `~~~` fences, blockquote nesting, empty-render degradation,
+  math-not-dispatched, syntax-styling invariance, and
   three streaming tests: diagram published only at the closing fence with stable
   committed rows, a failed fence that streams its raw source and stays literal
   after the close, and an info string split across chunks that never dispatches
@@ -274,7 +297,7 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
       \frac{1}{2}            (unknown fence: plain code block)
       ```tex\n\\frac{1}{2}\n``` =>
       \frac{1}{2}            (a LaTeX alias, still not dispatched)
-      $$\\frac{1}{2}$$ => $$ \frac{1}{2} $$  (math is not a fence, stays literal)
+      $$\\frac{1}{2}$$ => $$\frac{1}{2}$$  (math is not a fence, stays literal)
       ```latex\n\\cfrac{1}{x}\n``` =>
       \cfrac{1}{x}           (unsupported: original source)
       ```latex\n{}\n``` => {} (empty render: original source, not empty block)

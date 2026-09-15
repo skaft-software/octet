@@ -51,8 +51,8 @@ earlier revisions.
 
 What the agent side does (`crates/octet-agent/src/agent.rs`, 34 `service_tier`
 references, re-counted): it keeps the selection in the `service_tier` field
-(`:727`) and exposes `Agent::set_service_tier` (`:6493`) with the
-`Agent::service_tier` accessor (`:6500`). A requested tier is validated by
+(`:727`) and exposes `Agent::set_service_tier` (`:6505`) with the
+`Agent::service_tier` accessor (`:6512`). A requested tier is validated by
 `resolve_service_tier` (`:3786`), which fails closed with the codec's typed
 `octet_ai::UnsupportedError::ServiceTier` unless
 `model.spec.protocol == Protocol::OpenAiResponses` **and**
@@ -60,12 +60,23 @@ references, re-counted): it keeps the selection in the `service_tier` field
 capability, never a provider name. Both live-run `ResponsesOptions` builders
 (`durable_responses_options` `:3750`, `native_responses_options` `:3801`) call
 `ResponsesOptions::with_service_tier` (`crates/octet-ai/src/responses.rs:362`)
-when a tier is selected, and `responses_prewarm_request` (`:5768`) reuses those
+when a tier is selected, and `responses_prewarm_request` (`:5780`) reuses those
 same builders, so the WebSocket pre-warm carries the identical tier. Every other
 route fails closed rather than silently dropping a billing-changing control.
+The codec re-checks the same declaration independently
+(`crates/octet-ai/src/protocol/openai_responses.rs:1154`): a tier on a route
+whose profile does not declare the field is a typed error, and the field is
+absent from the wire when no tier was requested.
+Verified behavior (both run green on this tree):
+`crates/octet-agent/src/agent.rs:10552`
+`a_requested_service_tier_is_gated_by_the_route_and_never_silently_dropped`
+(non-Codex route rejected, `None` clears, Codex profile accepted, a requested
+tier still rides on the request when there is no replay window) and
+`crates/octet-ai/src/protocol/openai_responses.rs:3173`
+`service_tier_fails_closed_on_a_profile_that_does_not_declare_it`.
 
 What is still missing for `/fast` to reach the wire: `apply_fast_command`
-(`crates/octet-coding-agent/src/modes/interactive.rs:1644`) still reports "this
+(`crates/octet-coding-agent/src/modes/interactive.rs:1651`) still reports "this
 build's Codex request path does not send a service tier yet" and never calls
 `Agent::set_service_tier` — `rg -n set_service_tier crates/` shows only the
 definition plus the agent's own tests

@@ -160,12 +160,45 @@ pub(crate) fn environment_discovery_headers(
     Ok(headers)
 }
 
-/// Return a request-signing auth strategy after confirming that the bounded AWS
-/// credential chain has a usable source. The signer resolves the chain again on
-/// each request, allowing ECS/EC2 metadata credentials to rotate without
-/// leaking the private source into provider declarations.
+/// Standard Bedrock API-key variable.
+///
+/// AWS documents `AWS_BEARER_TOKEN_BEDROCK` as an alternative to SigV4 for the
+/// Bedrock Runtime: the token is presented as `Authorization: Bearer <token>`
+/// and the request is not signed. It is checked first so an operator who
+/// configured an API key neither depends on nor pays for the SigV4 chain.
+const AWS_BEDROCK_BEARER_VARIABLE: &str = "AWS_BEARER_TOKEN_BEDROCK";
+
+/// Return the Bedrock request auth strategy.
+///
+/// Precedence is the documented Bedrock order: a configured Bedrock API key is
+/// presented as a bearer token, and otherwise the bounded AWS credential chain
+/// is confirmed to have a usable source before SigV4 signing is selected. The
+/// signer resolves the chain again on each request, allowing ECS/EC2 metadata
+/// credentials to rotate without leaking the private source into provider
+/// declarations.
 pub(crate) fn aws_bedrock_auth(region: &str) -> anyhow::Result<Option<Auth>> {
-    if resolve_aws_credentials()?.is_none() {
+    aws_bedrock_auth_with(
+        region,
+        |variable| optional_bounded_env(variable),
+        resolve_aws_credentials,
+    )
+}
+
+fn aws_bedrock_auth_with<R, C>(
+    region: &str,
+    mut read_env: R,
+    resolve_credentials: C,
+) -> anyhow::Result<Option<Auth>>
+where
+    R: FnMut(&str) -> anyhow::Result<Option<String>>,
+    C: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
+{
+    // A whitespace-only value cannot authenticate, so it is treated as absent
+    // rather than disabling the working SigV4 chain for a typo.
+    if read_env(AWS_BEDROCK_BEARER_VARIABLE)?.is_some_and(|token| !token.trim().is_empty()) {
+        return Ok(Some(Auth::bearer_env(AWS_BEDROCK_BEARER_VARIABLE)));
+    }
+    if resolve_credentials()?.is_none() {
         return Ok(None);
     }
     Ok(Some(Auth::request_signer(std::sync::Arc::new(
@@ -261,26 +294,44 @@ impl octet_ai::RequestSigner for AwsBedrockSigner {
 const MAX_AWS_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_AWS_METADATA_BYTES: usize = 64 * 1024;
 const AWS_METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Total per-attempt bound for the single web-identity STS exchange.
+///
+/// A web-identity role is an explicit configuration statement, so unlike the
+/// heuristic metadata probe this may talk to a real regional service; the bound
+/// is still a hard cap with no retries.
+const AWS_STS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Upper bound on the web-identity token read from the token file. OIDC tokens
+/// are a few KiB; anything larger is not a token and must not be uploaded.
+const MAX_AWS_WEB_IDENTITY_TOKEN_BYTES: u64 = 64 * 1024;
 
 fn resolve_aws_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
     resolve_aws_credentials_with(
         aws_environment_credentials,
+        aws_web_identity_credentials,
         aws_profile_credentials,
         aws_metadata_credentials,
     )
 }
 
-fn resolve_aws_credentials_with<E, P, M>(
+/// Resolve the bounded AWS credential chain in documented order: environment
+/// keys, web identity, the selected shared profile, then the indicated metadata
+/// sources.
+fn resolve_aws_credentials_with<E, W, P, M>(
     environment: E,
+    web_identity: W,
     profile: P,
     metadata: M,
 ) -> anyhow::Result<Option<octet_ai::AwsCredentials>>
 where
     E: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
+    W: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
     P: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
     M: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
 {
     if let Some(credentials) = environment()? {
+        return Ok(Some(credentials));
+    }
+    if let Some(credentials) = web_identity()? {
         return Ok(Some(credentials));
     }
     if let Some(credentials) = profile()? {
@@ -1043,6 +1094,247 @@ fn credentials_from_metadata_body(body: String) -> anyhow::Result<octet_ai::AwsC
     aws_credentials(access_key_id, secret_access_key, token)
 }
 
+/// Web-identity variable names (AWS IAM Roles for Service Accounts and any
+/// other OIDC issuer that writes the standard triple).
+const AWS_WEB_IDENTITY_TOKEN_FILE: &str = "AWS_WEB_IDENTITY_TOKEN_FILE";
+const AWS_ROLE_ARN: &str = "AWS_ROLE_ARN";
+const AWS_ROLE_SESSION_NAME: &str = "AWS_ROLE_SESSION_NAME";
+/// Standard AWS SDK endpoint override for STS: a private or fixture STS must be
+/// selectable without changing the role/token configuration under test.
+const AWS_STS_ENDPOINT_VARIABLE: &str = "AWS_ENDPOINT_URL_STS";
+/// Session name used when `AWS_ROLE_SESSION_NAME` is absent.
+const DEFAULT_AWS_ROLE_SESSION_NAME: &str = "octet";
+
+/// The already-read web-identity configuration, kept as data so the decisions
+/// ("configured?", "well-formed?") are directly unit-testable without a network
+/// request or a mutated process environment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AwsWebIdentityInputs {
+    token_file: Option<String>,
+    role_arn: Option<String>,
+    session_name: Option<String>,
+    endpoint_override: Option<String>,
+}
+
+fn aws_web_identity_inputs_with<R>(mut read_env: R) -> anyhow::Result<AwsWebIdentityInputs>
+where
+    R: FnMut(&str) -> anyhow::Result<Option<String>>,
+{
+    Ok(AwsWebIdentityInputs {
+        token_file: read_env(AWS_WEB_IDENTITY_TOKEN_FILE)?,
+        role_arn: read_env(AWS_ROLE_ARN)?,
+        session_name: read_env(AWS_ROLE_SESSION_NAME)?,
+        endpoint_override: read_env(AWS_STS_ENDPOINT_VARIABLE)?,
+    })
+}
+
+/// Resolve web-identity credentials through one STS `AssumeRoleWithWebIdentity`
+/// exchange.
+///
+/// A half-configured web identity (only one of the two required variables)
+/// fails closed instead of silently falling through to another identity source:
+/// resolving the wrong role would sign requests for an account the operator did
+/// not select.
+fn aws_web_identity_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
+    let inputs = aws_web_identity_inputs_with(|variable| optional_bounded_env(variable))?;
+    let region = aws_bedrock_region()?;
+    aws_web_identity_credentials_from(
+        &inputs,
+        &region,
+        read_bounded_web_identity_token,
+        sts_assume_role_with_web_identity,
+    )
+}
+
+fn aws_web_identity_credentials_from<T, F>(
+    inputs: &AwsWebIdentityInputs,
+    region: &str,
+    read_token_file: T,
+    fetch: F,
+) -> anyhow::Result<Option<octet_ai::AwsCredentials>>
+where
+    T: FnOnce(&str) -> anyhow::Result<String>,
+    F: FnOnce(&url::Url, &[(&'static str, String)]) -> anyhow::Result<String>,
+{
+    let (Some(token_file), Some(role_arn)) = (&inputs.token_file, &inputs.role_arn) else {
+        if inputs.token_file.is_some() || inputs.role_arn.is_some() {
+            anyhow::bail!(
+                "AWS web identity requires both {AWS_ROLE_ARN} and \
+                 {AWS_WEB_IDENTITY_TOKEN_FILE}; only one is set"
+            );
+        }
+        return Ok(None);
+    };
+    let role_arn = checked_aws_role_arn(role_arn)?;
+    let session_name = checked_aws_role_session_name(
+        inputs
+            .session_name
+            .as_deref()
+            .unwrap_or(DEFAULT_AWS_ROLE_SESSION_NAME),
+    )?;
+    let token = read_token_file(token_file)?;
+    let endpoint = aws_sts_endpoint(region, inputs.endpoint_override.as_deref())?;
+    let form = [
+        ("Action", "AssumeRoleWithWebIdentity".to_owned()),
+        ("Version", "2011-06-15".to_owned()),
+        ("RoleArn", role_arn),
+        ("RoleSessionName", session_name),
+        ("WebIdentityToken", token),
+    ];
+    let body = fetch(&endpoint, &form)?;
+    sts_credentials_from_xml(&body).map(Some)
+}
+
+fn checked_aws_role_arn(arn: &str) -> anyhow::Result<String> {
+    if arn.len() > 2048
+        || !arn.starts_with("arn:")
+        || !arn
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'?' && byte != b'#')
+    {
+        anyhow::bail!("invalid {AWS_ROLE_ARN}");
+    }
+    Ok(arn.to_owned())
+}
+
+fn checked_aws_role_session_name(name: &str) -> anyhow::Result<String> {
+    if !(2..=64).contains(&name.len())
+        || name
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'=' | b',' | b'.' | b'@' | b'-' | b'_'))
+    {
+        anyhow::bail!("invalid {AWS_ROLE_SESSION_NAME}");
+    }
+    Ok(name.to_owned())
+}
+
+fn read_bounded_web_identity_token(path: &str) -> anyhow::Result<String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| anyhow::anyhow!("{AWS_WEB_IDENTITY_TOKEN_FILE} cannot be read"))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_AWS_WEB_IDENTITY_TOKEN_BYTES {
+        anyhow::bail!("{AWS_WEB_IDENTITY_TOKEN_FILE} is not a bounded token file");
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|_| anyhow::anyhow!("{AWS_WEB_IDENTITY_TOKEN_FILE} cannot be read"))?;
+    if bytes.len() as u64 > MAX_AWS_WEB_IDENTITY_TOKEN_BYTES {
+        anyhow::bail!("{AWS_WEB_IDENTITY_TOKEN_FILE} exceeds the byte limit");
+    }
+    let token = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("{AWS_WEB_IDENTITY_TOKEN_FILE} is not a UTF-8 token"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("{AWS_WEB_IDENTITY_TOKEN_FILE} is empty");
+    }
+    Ok(token.to_owned())
+}
+
+/// STS endpoint for a region: the standard AWS SDK override wins, then the
+/// regional endpoint. Every candidate is validated fail-closed (`https`, or
+/// loopback `http` for a private fixture), like the other AWS endpoints here.
+fn aws_sts_endpoint(region: &str, override_url: Option<&str>) -> anyhow::Result<url::Url> {
+    if let Some(value) = override_url {
+        let url = url::Url::parse(value)
+            .map_err(|_| anyhow::anyhow!("invalid {AWS_STS_ENDPOINT_VARIABLE}"))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || (url.scheme() == "http" && !aws_metadata_host_is_link_local_or_loopback(&url))
+        {
+            anyhow::bail!("invalid {AWS_STS_ENDPOINT_VARIABLE}");
+        }
+        return Ok(url);
+    }
+    let region = checked_aws_region(region.to_owned(), "AWS region")?;
+    url::Url::parse(&format!("https://sts.{region}.amazonaws.com/"))
+        .map_err(|_| anyhow::anyhow!("invalid AWS region"))
+}
+
+fn sts_assume_role_with_web_identity(
+    endpoint: &url::Url,
+    form: &[(&'static str, String)],
+) -> anyhow::Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(AWS_STS_TIMEOUT)
+        .timeout(AWS_STS_TIMEOUT)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| anyhow::anyhow!("AWS STS client could not be created"))?;
+    let response = client
+        .post(endpoint.clone())
+        .form(form)
+        .send()
+        .map_err(|_| anyhow::anyhow!("AWS STS AssumeRoleWithWebIdentity request failed"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let code = read_bounded_response(response)
+            .ok()
+            .and_then(|body| xml_tag(&body, "Code"))
+            .filter(|code| code.len() <= 64 && !code.chars().any(char::is_control));
+        return Err(match code {
+            Some(code) => anyhow::anyhow!(
+                "AWS STS AssumeRoleWithWebIdentity failed with {status}: {code}"
+            ),
+            None => anyhow::anyhow!("AWS STS AssumeRoleWithWebIdentity failed with {status}"),
+        });
+    }
+    read_bounded_response(response)
+}
+
+/// Extract the three credential fields from the STS XML result.
+///
+/// Only the documented `AssumeRoleWithWebIdentityResult` fields are read, each
+/// bounded and validated, and the session token is required because the
+/// resulting credentials are always temporary. The response is never logged.
+fn sts_credentials_from_xml(body: &str) -> anyhow::Result<octet_ai::AwsCredentials> {
+    let access_key_id = xml_tag(body, "AccessKeyId")
+        .ok_or_else(|| anyhow::anyhow!("AWS STS returned incomplete credentials"))?;
+    let secret_access_key = xml_tag(body, "SecretAccessKey")
+        .ok_or_else(|| anyhow::anyhow!("AWS STS returned incomplete credentials"))?;
+    let session_token = xml_tag(body, "SessionToken")
+        .ok_or_else(|| anyhow::anyhow!("AWS STS returned incomplete credentials"))?;
+    aws_credentials(access_key_id, secret_access_key, Some(session_token))
+}
+
+/// Read the first occurrence of `<tag>value</tag>` with the five predefined XML
+/// entities decoded. Unknown or malformed content yields `None` (fail closed)
+/// rather than an approximation of a credential value.
+fn xml_tag(body: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body.find(&open)? + open.len();
+    let end = body[start..].find(&close)? + start;
+    let raw = &body[start..end];
+    if raw.len() > octet_ai::auth::MAX_ENV_VALUE_BYTES {
+        return None;
+    }
+    let mut value = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(index) = rest.find('&') {
+        value.push_str(&rest[..index]);
+        let tail = &rest[index..];
+        let (decoded, consumed) = [
+            ("&amp;", '&'),
+            ("&lt;", '<'),
+            ("&gt;", '>'),
+            ("&quot;", '"'),
+            ("&apos;", '\''),
+        ]
+        .into_iter()
+        .find_map(|(entity, decoded)| tail.starts_with(entity).then_some((decoded, entity.len())))?;
+        value.push(decoded);
+        rest = &tail[consumed..];
+    }
+    value.push_str(rest);
+    let value = value.trim().to_owned();
+    (!value.is_empty() && !value.chars().any(char::is_control)).then_some(value)
+}
+
 /// Return a credential-free diagnostic for an unavailable API-key declaration.
 #[cfg(test)]
 pub(crate) fn missing_environment_diagnostic(
@@ -1098,12 +1390,43 @@ ignored key = ignored
 
     #[test]
     fn aws_chain_precedence_is_ordered_without_metadata_fallback() {
+        // The documented chain order: environment keys, web identity, the
+        // selected profile, then the indicated metadata sources. Every source
+        // after the one that resolves must stay untouched.
+        let web_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let profile_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let metadata_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let web_flag = web_called.clone();
+        let profile_flag = profile_called.clone();
+        let metadata_flag = metadata_called.clone();
+        let selected = resolve_aws_credentials_with(
+            || Ok(Some(fixture_credentials("environment"))),
+            move || {
+                web_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("web-identity")))
+            },
+            move || {
+                profile_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("profile")))
+            },
+            move || {
+                metadata_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("metadata")))
+            },
+        )
+        .unwrap();
+        assert!(selected.is_some());
+        assert!(!web_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!profile_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!metadata_called.load(std::sync::atomic::Ordering::SeqCst));
+
         let profile_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let metadata_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let profile_flag = profile_called.clone();
         let metadata_flag = metadata_called.clone();
         let selected = resolve_aws_credentials_with(
-            || Ok(Some(fixture_credentials("environment"))),
+            || Ok(None),
+            || Ok(Some(fixture_credentials("web-identity"))),
             move || {
                 profile_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(Some(fixture_credentials("profile")))
@@ -1121,6 +1444,7 @@ ignored key = ignored
         let metadata_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let metadata_flag = metadata_called.clone();
         let selected = resolve_aws_credentials_with(
+            || Ok(None),
             || Ok(None),
             || Ok(Some(fixture_credentials("profile"))),
             move || {
@@ -1135,23 +1459,27 @@ ignored key = ignored
         let selected = resolve_aws_credentials_with(
             || Ok(None),
             || Ok(None),
+            || Ok(None),
             || Ok(Some(fixture_credentials("metadata"))),
         )
         .unwrap();
         assert!(selected.is_some());
 
-        let profile_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let profile_flag = profile_called.clone();
+        // A failing earlier source fails the chain: a later source must not be
+        // silently substituted for an environment/role the operator selected.
+        let web_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let web_flag = web_called.clone();
         assert!(resolve_aws_credentials_with(
             || Err(anyhow::anyhow!("environment source failed")),
             move || {
-                profile_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(Some(fixture_credentials("profile")))
+                web_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("web-identity")))
             },
+            || Ok(None),
             || Ok(None),
         )
         .is_err());
-        assert!(!profile_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!web_called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -1490,22 +1818,48 @@ ignored key = ignored
     fn disabled_activation_opens_no_connection_to_a_live_metadata_endpoint() {
         // The measured defect, asserted against a *live* loopback endpoint rather
         // than a stub closure: an unrelated-provider launch must not put a single
-        // packet on the wire. No sleeps and no millisecond thresholds are used --
-        // the pre-flight connect proves the fixture is reachable, and the
-        // post-call drain counts every connection the (synchronous) probe would
-        // have queued in the listener backlog before returning.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        // packet on the wire. The fixture is a blocking accept (so the control
+        // connection is observed without racing a non-blocking accept against the
+        // TCP handshake), the disabled call runs synchronously, and only then is
+        // the listener drained: every connection the probe would have queued is
+        // counted, and the assertion is a request count, not a timing threshold.
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-        let control_connection = std::net::TcpStream::connect(listener.local_addr().unwrap())
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let base = url::Url::parse(&format!("http://{address}/")).unwrap();
+        let control_seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let observer = control_seen.clone();
+        let (drain, drain_ready) = std::sync::mpsc::channel::<()>();
+        let fixture = std::thread::spawn(move || {
+            let _control = listener
+                .accept()
+                .expect("the loopback metadata fixture must be reachable");
+            observer.fetch_add(1, AtomicOrdering::SeqCst);
+            // Hold the listener open until the disabled call has returned, then
+            // count every connection still queued behind the control connection.
+            let _ = drain_ready.recv_timeout(std::time::Duration::from_secs(30));
+            listener.set_nonblocking(true).unwrap();
+            let mut drained = 0_usize;
+            while listener.accept().is_ok() {
+                drained += 1;
+            }
+            drained
+        });
+        let control_connection = std::net::TcpStream::connect(address)
             .expect("the loopback metadata fixture must be reachable");
-        let mut drained = 0_usize;
-        while listener.accept().is_ok() {
-            drained += 1;
+        // Wait for the fixture's accept to observe the control connection: this
+        // proves reachability before the assertion, without a timing threshold on
+        // the behavior under test.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while control_seen.load(AtomicOrdering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the control connection must be observed before the assertion runs"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert_eq!(drained, 1, "the control connection must be observed");
-        drop(control_connection);
+        assert_eq!(control_seen.load(AtomicOrdering::SeqCst), 1);
 
         let activation = aws_metadata_activation_from(&laptop_inputs());
         assert_eq!(
@@ -1525,10 +1879,9 @@ ignored key = ignored
         .unwrap();
         assert!(credentials.is_none());
 
-        let mut after = 0_usize;
-        while listener.accept().is_ok() {
-            after += 1;
-        }
+        drop(control_connection);
+        drain.send(()).unwrap();
+        let after = fixture.join().unwrap();
         assert_eq!(
             after, 0,
             "a disabled activation must not connect to the metadata endpoint at all"
@@ -1562,21 +1915,30 @@ ignored key = ignored
         );
 
         let endpoint = base.to_string();
-        let credentials = resolve_aws_credentials_with(
-            || Ok(None),
-            || Ok(None),
-            move || {
-                aws_metadata_credentials_with(
-                    activation,
-                    None,
-                    |name| {
-                        Ok((name == "AWS_METADATA_SERVICE_ENDPOINT").then(|| endpoint.clone()))
-                    },
-                    metadata_credentials_from_url,
-                    ec2_metadata_credentials,
-                )
-            },
-        )
+        // Resolve on a blocking thread, exactly like the production signer
+        // (`AwsBedrockSigner::sign` wraps its resolver in `spawn_blocking`): the
+        // metadata client is a blocking client, and dropping its internal
+        // runtime from inside the async test context panics.
+        let credentials = tokio::task::spawn_blocking(move || {
+            resolve_aws_credentials_with(
+                || Ok(None),
+                || Ok(None),
+                || Ok(None),
+                move || {
+                    aws_metadata_credentials_with(
+                        activation,
+                        None,
+                        |name| {
+                            Ok((name == "AWS_METADATA_SERVICE_ENDPOINT").then(|| endpoint.clone()))
+                        },
+                        metadata_credentials_from_url,
+                        ec2_metadata_credentials,
+                    )
+                },
+            )
+        })
+        .await
+        .expect("the blocking credential resolver must not panic")
         .unwrap()
         .expect("an indicated machine must still resolve instance credentials");
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 3);
@@ -1637,6 +1999,7 @@ ignored key = ignored
         let counter = metadata_calls.clone();
         let credentials = resolve_aws_credentials_with(
             || Ok(Some(fixture_credentials("environment"))),
+            || panic!("the web-identity source must not run once environment keys resolved"),
             || panic!("the profile source must not run once environment keys resolved"),
             move || {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1942,7 +2305,9 @@ ignored key = ignored
     fn metadata_endpoint_precedence_is_standard_name_then_alias_then_profile() {
         // The AWS-standard name wins, the older alias still works, and a profile
         // that pins IMDS actually selects that endpoint (an indication that is
-        // not also the target would leave the host unprobed).
+        // not also the target would leave the host unprobed). Every accepted
+        // endpoint is normalized with a trailing slash so that the IMDS path
+        // segments append instead of replacing the last component.
         let standard = aws_metadata_service_endpoint_with(
             |name| {
                 Ok(match name {
@@ -1956,7 +2321,7 @@ ignored key = ignored
             Some("http://127.0.0.1:3/profile"),
         )
         .unwrap();
-        assert_eq!(standard.as_str(), "http://127.0.0.1:1/standard");
+        assert_eq!(standard.as_str(), "http://127.0.0.1:1/standard/");
 
         let alias = aws_metadata_service_endpoint_with(
             |name| {
@@ -1966,11 +2331,11 @@ ignored key = ignored
             Some("http://127.0.0.1:3/profile"),
         )
         .unwrap();
-        assert_eq!(alias.as_str(), "http://127.0.0.1:2/alias");
+        assert_eq!(alias.as_str(), "http://127.0.0.1:2/alias/");
 
         let profile = aws_metadata_service_endpoint_with(|_| Ok(None), Some("http://127.0.0.1:3/profile"))
             .unwrap();
-        assert_eq!(profile.as_str(), "http://127.0.0.1:3/profile");
+        assert_eq!(profile.as_str(), "http://127.0.0.1:3/profile/");
     }
 
     #[test]
@@ -2141,6 +2506,326 @@ ignored key = ignored
                 ]
             ),
             other => panic!("unexpected authentication {other:?}"),
+        }
+    }
+
+    // --- Bedrock API key + web identity (roadmap row 1c.5) -----------------
+
+    /// A loopback STS fixture that answers exactly one POST and records its
+    /// form body, so a test can assert both the request and the exchange.
+    fn sts_fixture(
+        status: &'static str,
+        body: &'static str,
+    ) -> (url::Url, std::sync::Arc<std::sync::Mutex<String>>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                match stream.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => request.push(byte[0]),
+                }
+            }
+            let head = String::from_utf8_lossy(&request).to_owned();
+            let content_length = head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut form = vec![0_u8; content_length];
+            let _ = stream.read_exact(&mut form);
+            *recorder.lock().unwrap() = String::from_utf8_lossy(&form).into_owned();
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        (
+            url::Url::parse(&format!("http://{address}/")).unwrap(),
+            seen,
+        )
+    }
+
+    const STS_SUCCESS_XML: &str = "<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult>\
+<Credentials><AccessKeyId>fixture-access</AccessKeyId>\
+<SecretAccessKey>fixture-secret</SecretAccessKey>\
+<SessionToken>fixture-token</SessionToken>\
+<Expiration>2030-01-01T00:00:00Z</Expiration></Credentials>\
+</AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>";
+
+    #[test]
+    fn bedrock_api_key_takes_precedence_over_the_sigv4_chain() {
+        let auth = aws_bedrock_auth_with(
+            "us-east-1",
+            |name| {
+                Ok((name == AWS_BEDROCK_BEARER_VARIABLE).then(|| "bedrock-api-key".to_owned()))
+            },
+            || panic!("the SigV4 credential chain must not run when a Bedrock API key is configured"),
+        )
+        .unwrap()
+        .expect("the configured API key must select an auth strategy");
+        match auth {
+            Auth::BearerEnv { var } => assert_eq!(var, AWS_BEDROCK_BEARER_VARIABLE),
+            _ => panic!("a configured Bedrock API key must select bearer auth"),
+        }
+    }
+
+    #[test]
+    fn blank_bedrock_api_key_falls_back_to_the_sigv4_chain() {
+        let resolves = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = resolves.clone();
+        let auth = aws_bedrock_auth_with(
+            "us-east-1",
+            |name| Ok((name == AWS_BEDROCK_BEARER_VARIABLE).then(|| "   ".to_owned())),
+            move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("sigv4")))
+            },
+        )
+        .unwrap()
+        .expect("the SigV4 chain must still provide an auth strategy");
+        assert!(matches!(auth, Auth::RequestSigner(_)));
+        assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn bedrock_without_any_credential_source_offers_no_auth() {
+        let auth =
+            aws_bedrock_auth_with("us-east-1", |_| Ok(None), || Ok(None)).unwrap();
+        assert!(auth.is_none(), "no credential source means no auth strategy");
+    }
+
+    #[test]
+    fn web_identity_requires_both_standard_variables() {
+        let token_only = AwsWebIdentityInputs {
+            token_file: Some("/var/run/secrets/eks.amazonaws.com/serviceaccount/token".to_owned()),
+            ..AwsWebIdentityInputs::default()
+        };
+        let error = aws_web_identity_credentials_from(
+            &token_only,
+            "us-east-1",
+            |_| panic!("no token file may be read while the configuration is half set"),
+            |_, _| panic!("no STS request may be sent while the configuration is half set"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("AWS_ROLE_ARN"), "{error}");
+
+        let role_only = AwsWebIdentityInputs {
+            role_arn: Some("arn:aws:iam::123456789012:role/octet".to_owned()),
+            ..AwsWebIdentityInputs::default()
+        };
+        let error = aws_web_identity_credentials_from(
+            &role_only,
+            "us-east-1",
+            |_| panic!("no token file may be read while the configuration is half set"),
+            |_, _| panic!("no STS request may be sent while the configuration is half set"),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("AWS_WEB_IDENTITY_TOKEN_FILE"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn web_identity_without_configuration_makes_no_request() {
+        let credentials = aws_web_identity_credentials_from(
+            &AwsWebIdentityInputs::default(),
+            "us-east-1",
+            |_| panic!("no token file may be read without configuration"),
+            |_, _| panic!("no STS request may be sent without configuration"),
+        )
+        .unwrap();
+        assert!(credentials.is_none());
+    }
+
+    #[test]
+    fn web_identity_posts_the_documented_sts_form_and_resolves_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("token");
+        std::fs::write(&token_path, "fixture-oidc-token\n").unwrap();
+        let (endpoint, seen) = sts_fixture("200 OK", STS_SUCCESS_XML);
+        let inputs = AwsWebIdentityInputs {
+            token_file: Some(token_path.to_string_lossy().into_owned()),
+            role_arn: Some("arn:aws:iam::123456789012:role/octet-web-identity".to_owned()),
+            session_name: None,
+            endpoint_override: Some(endpoint.to_string()),
+        };
+
+        let credentials = aws_web_identity_credentials_from(
+            &inputs,
+            "us-east-1",
+            read_bounded_web_identity_token,
+            sts_assume_role_with_web_identity,
+        )
+        .unwrap()
+        .expect("a successful exchange must resolve credentials");
+        // Signing proves the parsed credentials are structurally usable and
+        // that the session token is presented as the SigV4 security token.
+        let signer = octet_ai::AwsSigV4Signer::new(
+            credentials,
+            "us-east-1".to_owned(),
+            "bedrock".to_owned(),
+        )
+        .expect("the STS credentials must be a valid SigV4 credential set");
+        let request = octet_ai::SigningRequest::new(
+            http::Method::POST,
+            url::Url::parse("https://bedrock-runtime.us-east-1.amazonaws.com/model/x/converse")
+                .unwrap(),
+            bytes::Bytes::from_static(b"{}"),
+            http::HeaderMap::new(),
+        );
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(octet_ai::RequestSigner::sign(&signer, &request))
+            .expect("web-identity credentials must sign a Bedrock request");
+
+        // The exchange used the documented form and never put the token in a URL.
+        let form = seen.lock().unwrap().clone();
+        assert!(form.contains("Action=AssumeRoleWithWebIdentity"), "{form}");
+        assert!(form.contains("Version=2011-06-15"), "{form}");
+        assert!(
+            form.contains("RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Foctet-web-identity"),
+            "{form}"
+        );
+        assert!(form.contains("RoleSessionName=octet"), "{form}");
+        assert!(form.contains("WebIdentityToken=fixture-oidc-token"), "{form}");
+        assert!(!form.contains("fixture-token"), "no response token in the request");
+    }
+
+    #[test]
+    fn web_identity_sts_failure_is_reported_and_never_downgraded() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("token");
+        std::fs::write(&token_path, "fixture-oidc-token").unwrap();
+        let (endpoint, _) = sts_fixture(
+            "403 Forbidden",
+            "<ErrorResponse><Error><Code>ExpiredTokenException</Code>\
+             <Message>token expired</Message></Error></ErrorResponse>",
+        );
+        let inputs = AwsWebIdentityInputs {
+            token_file: Some(token_path.to_string_lossy().into_owned()),
+            role_arn: Some("arn:aws:iam::123456789012:role/octet-web-identity".to_owned()),
+            session_name: Some("octet-test".to_owned()),
+            endpoint_override: Some(endpoint.to_string()),
+        };
+        let error = aws_web_identity_credentials_from(
+            &inputs,
+            "us-east-1",
+            read_bounded_web_identity_token,
+            sts_assume_role_with_web_identity,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("403"), "{message}");
+        assert!(message.contains("ExpiredTokenException"), "{message}");
+        // Provider prose and the token itself are never echoed.
+        assert!(!message.contains("token expired"), "{message}");
+        assert!(!message.contains("fixture-oidc-token"), "{message}");
+    }
+
+    #[test]
+    fn web_identity_token_file_is_bounded_and_never_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        assert!(read_bounded_web_identity_token(&missing.to_string_lossy()).is_err());
+
+        let empty = directory.path().join("empty");
+        std::fs::write(&empty, "  \n").unwrap();
+        let error = read_bounded_web_identity_token(&empty.to_string_lossy()).unwrap_err();
+        assert!(error.to_string().contains("empty"), "{error}");
+
+        let oversized = directory.path().join("oversized");
+        std::fs::write(
+            &oversized,
+            "x".repeat(MAX_AWS_WEB_IDENTITY_TOKEN_BYTES as usize + 1),
+        )
+        .unwrap();
+        let error = read_bounded_web_identity_token(&oversized.to_string_lossy()).unwrap_err();
+        assert!(error.to_string().contains("bounded"), "{error}");
+
+        let valid = directory.path().join("valid");
+        std::fs::write(&valid, " token-value\n").unwrap();
+        assert_eq!(
+            read_bounded_web_identity_token(&valid.to_string_lossy()).unwrap(),
+            "token-value"
+        );
+    }
+
+    #[test]
+    fn sts_xml_parsing_requires_every_credential_field() {
+        // The full documented result parses into a usable credential set; a
+        // missing field, an empty field, and an unknown XML entity all fail
+        // closed instead of producing an approximate credential value.
+        assert!(sts_credentials_from_xml(STS_SUCCESS_XML).is_ok());
+
+        let missing_token = STS_SUCCESS_XML.replace("<SessionToken>fixture-token</SessionToken>", "");
+        let error = sts_credentials_from_xml(&missing_token).unwrap_err();
+        assert!(error.to_string().contains("incomplete credentials"), "{error}");
+
+        let empty_secret = STS_SUCCESS_XML
+            .replace("<SecretAccessKey>fixture-secret</SecretAccessKey>", "<SecretAccessKey></SecretAccessKey>");
+        assert!(sts_credentials_from_xml(&empty_secret).is_err());
+
+        assert_eq!(
+            xml_tag("<a>one&amp;two&lt;three&gt;</a>", "a").as_deref(),
+            Some("one&two<three>")
+        );
+        assert_eq!(xml_tag("<a>bad&nbsp;value</a>", "a"), None);
+        assert_eq!(xml_tag("<a></a>", "a"), None);
+        assert_eq!(xml_tag("<b>x</b>", "a"), None);
+    }
+
+    #[test]
+    fn sts_endpoint_is_regional_and_validates_overrides_fail_closed() {
+        assert_eq!(
+            aws_sts_endpoint("us-west-2", None).unwrap().as_str(),
+            "https://sts.us-west-2.amazonaws.com/"
+        );
+        assert_eq!(
+            aws_sts_endpoint("us-east-1", Some("http://127.0.0.1:9/"))
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:9/"
+        );
+        for rejected in [
+            "http://sts.example.com/",
+            "https://user@sts.example.com/",
+            "https://sts.example.com/?query=1",
+            "https://sts.example.com/#fragment",
+            "ftp://sts.example.com/",
+        ] {
+            assert!(
+                aws_sts_endpoint("us-east-1", Some(rejected)).is_err(),
+                "STS endpoint override must be rejected: {rejected}"
+            );
+        }
+        assert!(aws_sts_endpoint("not a region", None).is_err());
+    }
+
+    #[test]
+    fn role_arn_and_session_name_are_validated_fail_closed() {
+        assert!(checked_aws_role_arn("arn:aws:iam::123456789012:role/octet").is_ok());
+        for rejected in ["", "role/octet", "arn:aws:iam::123:role/bad?query"] {
+            assert!(checked_aws_role_arn(rejected).is_err(), "{rejected}");
+        }
+        for accepted in ["octet", "octet-session_1@example.com"] {
+            assert!(checked_aws_role_session_name(accepted).is_ok(), "{accepted}");
+        }
+        for rejected in ["", "a", "two words", "control\u{7}"] {
+            assert!(checked_aws_role_session_name(rejected).is_err(), "{rejected:?}");
         }
     }
 }

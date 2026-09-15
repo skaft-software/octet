@@ -171,6 +171,56 @@ fn oversized_and_unterminated_fences_stay_literal() {
     assert!(!rendered.contains("⎛"), "{rendered}");
 }
 
+/// A body line that *looks* like a closer but is not one — indented four
+/// spaces, or carrying trailing junk — must not terminate the fence. The body
+/// is still source, so the whole block degrades to raw text; rendering it would
+/// glue the stray body line into the art (observed before the closure check
+/// mirrored the parser's own rules).
+#[test]
+fn pseudo_closing_fences_never_render_partial_art() {
+    // Four-space indent: the parser keeps this line in the body, so the fence
+    // is unterminated and the block stays source.
+    let indented = "```latex\nx = \\frac{1}{2}\n    ```\n";
+    let code = code_block(indented);
+    assert_eq!(code.code, "x = \\frac{1}{2}\n    ```\n");
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(indented), 80)
+        .plain_text();
+    assert!(rendered.contains("\\frac{1}{2}"), "{rendered}");
+    assert!(!rendered.contains('─'), "{rendered}");
+
+    // An info-string-like tail is not a closing fence either.
+    let tail = "```latex\nx = \\frac{1}{2}\n``` not a close\n";
+    let code = code_block(tail);
+    assert_eq!(code.code, "x = \\frac{1}{2}\n``` not a close\n");
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(tail), 80)
+        .plain_text();
+    assert!(rendered.contains("not a close"), "{rendered}");
+    assert!(!rendered.contains('─'), "{rendered}");
+
+    // Same for Mermaid.
+    let mermaid = "```mermaid\ngraph LR\n  A[One] --> B[Two]\n    ```\n";
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(mermaid), 80)
+        .plain_text();
+    assert!(rendered.contains("A[One] --> B[Two]"), "{rendered}");
+    assert!(!rendered.contains('┌'), "{rendered}");
+
+    // Positive controls: trailing spaces and up to three spaces of indentation
+    // are valid closers, so these still dispatch.
+    for closed in [
+        "```latex\nx = \\frac{1}{2}\n```   \n",
+        "```latex\nx = \\frac{1}{2}\n  ```\n",
+    ] {
+        assert_eq!(
+            markdown::parse(closed).plain_text(),
+            "    1\nx = ─\n    2\n",
+            "{closed:?}"
+        );
+    }
+}
+
 #[test]
 fn a_diagram_fence_inside_a_blockquote_still_dispatches() {
     let source = "> ```mermaid\n> graph LR\n>   A[X] --> B[Y]\n> ```\n";

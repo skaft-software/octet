@@ -64,7 +64,8 @@ use crate::tool::{
     AdaptivePreviewCoalescer, CancellationToken, OutputStream, PartialOutputCheckpointSink,
     PreviewPublication, ReplaySafety, Tool, ToolConcurrency, ToolContext, ToolError, ToolOutput,
     ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
-    ToolProgressDecoration, ToolProgressSink, ToolPromptContribution, PROGRESS_CHANNEL_CAPACITY,
+    ToolProgressDecoration, ToolProgressSink, ToolPromptContribution,
+    DEFAULT_PREVIEW_MIN_EMIT_INTERVAL, PROGRESS_CHANNEL_CAPACITY,
 };
 #[cfg(any(unix, windows))]
 use crate::tools::{
@@ -10738,9 +10739,23 @@ mod tests {
             "the header survives bounding: {}",
             &bounded[..bounded.len().min(200)]
         );
+        // The newest bytes are what a recovery consumer needs, and the oldest are
+        // what got elided: the stdout section keeps the burst's tail. The render
+        // carries stdout first and the stderr section last, so the marker sits at
+        // the end of its own section rather than at the end of the snapshot.
+        let stdout_section = bounded
+            .split_once("\nstderr: ")
+            .map(|(stdout, _)| stdout)
+            .expect("the render always carries both stream sections");
         assert!(
-            bounded.ends_with("NEWEST-MARKER"),
-            "the newest bytes are the ones kept"
+            stdout_section.ends_with("NEWEST-MARKER"),
+            "the newest bytes are the ones kept: {}",
+            &stdout_section[stdout_section.len().saturating_sub(120)..]
+        );
+        assert!(
+            stdout_section.len() <= PARTIAL_STREAM_CAP + PARTIAL_HEADER_RESERVE,
+            "a retained stream section stays inside its half of the cap: {} bytes",
+            stdout_section.len()
         );
         let stats = totals.stats();
         assert_eq!(stats.published, 3);
@@ -10773,6 +10788,94 @@ mod tests {
         assert_eq!(totals.stats().failures, 1);
         assert_eq!(totals.stats().published, 0);
         assert!(sink.snapshots().is_empty());
+    }
+
+    /// Row 4.8's run-path consumer: the live panel's *replaceable* state is
+    /// paced by [`AdaptivePreviewCoalescer`] while append-only flavors are
+    /// forwarded verbatim.
+    #[test]
+    fn live_preview_pacer_publishes_immediately_collapses_and_settles_the_latest() {
+        let start = std::time::Instant::now();
+        let decoration = |step: usize| {
+            ToolProgressDecoration::new(format!("step {step}"), Some(format!("detail {step}")))
+                .expect("bounded decoration")
+        };
+        let mut pacer = LivePreviewPacer::new();
+
+        // The first replaceable state after idle is published immediately.
+        let first = pacer
+            .observe(decoration(0), start)
+            .expect("the first state is immediate");
+        assert_eq!(first.label(), "step 0");
+
+        // Every intermediate state before the deadline collapses into one held
+        // slot: no queue grows and no intermediate state is published.
+        for step in 1..12 {
+            assert!(
+                pacer.observe(decoration(step), start).is_none(),
+                "step {step} must be paced away"
+            );
+        }
+        assert_eq!(
+            pacer.stats(),
+            (1, 10),
+            "ten intermediates collapsed into the single held state"
+        );
+
+        // Append-only flavors bypass the coalescer completely.
+        let forwarded = forward_tool_progress(
+            ToolProgress::Status("still running".into()),
+            &mut pacer,
+            start,
+        );
+        assert!(
+            matches!(forwarded, Some(ToolProgress::Status(message)) if message == "still running"),
+            "an append-only status is forwarded verbatim"
+        );
+        let chunk = forward_tool_progress(
+            ToolProgress::Output {
+                stream: OutputStream::Stdout,
+                bytes: bytes::Bytes::from_static(b"verbatim\n"),
+            },
+            &mut pacer,
+            start,
+        );
+        assert!(
+            matches!(chunk, Some(ToolProgress::Output { bytes, .. }) if bytes.as_ref() == b"verbatim\n"),
+            "a stdout chunk is never collapsed"
+        );
+        assert_eq!(pacer.stats().0, 1, "verbatim forwarding is not a publication");
+
+        // Nothing is published before the deadline, and the deadline publishes
+        // the *latest* state rather than one that was paced away.
+        assert!(pacer.take_due(start).is_none(), "the held state is not due yet");
+        let deadline = pacer
+            .flush_deadline(start)
+            .expect("the held state has one trailing timer");
+        assert_eq!(deadline, start + DEFAULT_PREVIEW_MIN_EMIT_INTERVAL);
+        let due = pacer
+            .take_due(deadline)
+            .expect("the deadline publishes the held state");
+        assert_eq!(due.label(), "step 11", "the latest state survives collapse");
+        assert_eq!(
+            pacer.flush_deadline(deadline),
+            None,
+            "the trailing timer is cancelled by its own publication"
+        );
+        assert_eq!(pacer.stats(), (2, 10));
+
+        // A terminal boundary forces whatever is still held, exactly once: a
+        // finished call can never leave the panel on stale state.
+        assert!(pacer.observe(decoration(20), start).is_none());
+        let settled = pacer
+            .settle(start)
+            .expect("the terminal boundary publishes the held state");
+        assert_eq!(settled.label(), "step 20");
+        assert!(
+            pacer.settle(start).is_none(),
+            "a settled call publishes nothing twice"
+        );
+        assert_eq!(pacer.stats(), (3, 10));
     }
 
     #[test]

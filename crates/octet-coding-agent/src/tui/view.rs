@@ -1031,6 +1031,22 @@ impl SubagentStateGroup {
         Self::of_declared_state(subagent_activity_state_label(state))
     }
 
+    /// Canonical group of one `/subagents` panel group label. The panel names
+    /// its groups with the presentation protocol's own words, so a narrowing
+    /// chosen there must land on the group the transcript block prints for the
+    /// same workers.
+    fn of_panel_label(label: &str) -> Self {
+        match label.to_lowercase().as_str() {
+            "done" | "completed" | "succeeded" | "finished" => Self::Completed,
+            "failed" | "unavailable" | "cancelled" | "timed_out" => Self::Failed,
+            "stopped" => Self::Stopped,
+            // `running`, `queued`, `blocked`, `active`, `pending state`, and an
+            // unpublished label all mean "not settled yet", which is the one
+            // classification that never hides a worker.
+            _ => Self::Running,
+        }
+    }
+
     fn is_terminal(self) -> bool {
         !matches!(self, Self::Running)
     }
@@ -1286,6 +1302,7 @@ fn subagent_grid_line(
     width: u16,
 ) -> String {
     let mut body = String::new();
+    let ellipsis = theme.glyph("ellipsis");
     for (index, column) in columns.iter().enumerate() {
         if index > 0 {
             body.push_str("  ");
@@ -1294,7 +1311,7 @@ fn subagent_grid_line(
             .get(index)
             .map(|(text, _)| text.as_str())
             .unwrap_or_default();
-        let clipped = sexy_tui_rs::truncate_to_width(cell, widths[index], Some("…"));
+        let clipped = sexy_tui_rs::truncate_to_width(cell, widths[index], Some(ellipsis));
         let padding = widths[index].saturating_sub(visible_width(&clipped));
         let role = cells
             .get(index)
@@ -1361,6 +1378,59 @@ fn sort_subagent_rows(rows: &mut [SubagentRow], sort: SubagentActivitySort) {
     rows.sort_by_key(|row| std::cmp::Reverse(sort.key(row).unwrap_or_default()));
 }
 
+/// One bounded summary row for a collapsed terminal group.
+///
+/// The row spends its width in priority order: the declared state word and its
+/// count, then the failure reason (the evidence a reader opens a settled event
+/// for), then the worker names, then the disclosure hint. A collapsed group can
+/// therefore never hide *how many* workers it holds, nor *why* one failed; only
+/// the trailing cells are shortened when the terminal is narrow.
+fn collapsed_subagent_groups_row(
+    theme: &OctetTheme,
+    group: SubagentStateGroup,
+    count: usize,
+    names: &str,
+    reason: Option<&str>,
+    width: u16,
+) -> String {
+    let unicode = theme.unicode();
+    let separator = if unicode { " · " } else { " | " };
+    let ellipsis = theme.glyph("ellipsis");
+    let hint = "ctrl+o shows all";
+    // The row is drawn as `indent + elbow + space + text`.
+    let budget = usize::from(width)
+        .saturating_sub(visible_width(ACTIVITY_DETAIL_INDENT) + 2)
+        .max(8);
+    let head = format!("{}{separator}{count}", group.declared());
+    if visible_width(&head) > budget {
+        return sexy_tui_rs::truncate_to_width(&head, budget, Some(ellipsis));
+    }
+    let mut text = head;
+    let mut room = budget - visible_width(&text);
+    // Priority: the declared state and its count, then the reason a failed
+    // group must not hide, then the names, then the disclosure hint. A cell is
+    // shortened to whatever room is left, so a narrow terminal trims the tail
+    // instead of cutting the count off the front.
+    for cell in [
+        reason.map(|reason| format!("{separator}Failed: {reason}")),
+        (!names.is_empty()).then(|| format!("{separator}{names}")),
+        Some(format!("{separator}{hint}")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let cell_width = visible_width(&cell);
+        if cell_width <= room {
+            text.push_str(&cell);
+            room -= cell_width;
+        } else if room > visible_width(separator) + 2 {
+            text.push_str(&sexy_tui_rs::truncate_to_width(&cell, room, Some(ellipsis)));
+            room = 0;
+        }
+    }
+    text
+}
+
 /// Render the settled delegation event as grouped, column-aligned, bounded
 /// rows. Terminal groups collapse to one counted summary row by default so a
 /// finished team cannot bury the live workers above it; `expanded` (ctrl+o)
@@ -1391,14 +1461,16 @@ pub(super) fn subagent_activity_render_rows(
     )];
     if rows.is_empty() {
         if let Some(reason) = view.failure_reason.as_deref() {
-            lines.push(fit_line(
+            // A spawn that failed before it produced any worker is the whole
+            // event, so the reason wraps at the indent instead of being cut off
+            // in a narrow terminal.
+            lines.extend(wrap_hanging(
                 &theme.fg(
                     "error",
-                    &format!(
-                        "{ACTIVITY_DETAIL_INDENT}Failed: {}",
-                        sanitize_for_terminal(reason)
-                    ),
+                    &format!("Failed: {}", sanitize_for_terminal(reason)),
                 ),
+                ACTIVITY_DETAIL_INDENT,
+                ACTIVITY_DETAIL_INDENT,
                 width,
             ));
         }
@@ -1433,30 +1505,7 @@ pub(super) fn subagent_activity_render_rows(
                 .collect::<Vec<_>>()
                 .join(", ");
             let reason = members.iter().find_map(|row| row.reason.as_deref());
-            let mut text = format!(
-                "{} {separator}{} {separator}{names}",
-                group.declared(),
-                members.len()
-            );
-            if let Some(reason) = reason {
-                text.push_str(&format!("{separator}Failed: {reason}"));
-            }
-            let hint = "ctrl+o shows all";
-            let budget = usize::from(width)
-                .saturating_sub(visible_width(ACTIVITY_DETAIL_INDENT) + 2 + visible_width(hint) + 1)
-                .max(8);
-            let names_len = visible_width(&text);
-            if names_len + visible_width(hint) + 1 > budget {
-                text = sexy_tui_rs::truncate_to_width(
-                    &text,
-                    budget.saturating_sub(visible_width(hint) + 1),
-                    Some("…"),
-                );
-                text.push(' ');
-                text.push_str(hint);
-            } else {
-                text.push_str(&format!("{separator}{hint}"));
-            }
+            let text = collapsed_subagent_groups_row(theme, group, members.len(), &names, reason, width);
             lines.push(fit_line(
                 &format!(
                     "{ACTIVITY_DETAIL_INDENT}{} {}",
@@ -1470,7 +1519,7 @@ pub(super) fn subagent_activity_render_rows(
             continue;
         }
 
-        let heading = format!("{} {separator}{}", group.declared(), members.len());
+        let heading = format!("{}{separator}{}", group.declared(), members.len());
         lines.push(fit_line(
             &theme.bold(&subdued_text(theme, &format!("{ACTIVITY_DETAIL_INDENT}{heading}"))),
             width,
@@ -1498,15 +1547,22 @@ pub(super) fn subagent_activity_render_rows(
                     &subdued_text(
                         theme,
                         &format!(
-                            "{ACTIVITY_DETAIL_INDENT}{}… {omitted} more{separator}ctrl+o shows all",
-                            if unicode { "└" } else { "\\" }
+                            "{ACTIVITY_DETAIL_INDENT}{}{} {omitted} more{separator}ctrl+o shows all",
+                            if unicode { "└" } else { "`-" },
+                            theme.glyph("ellipsis"),
                         ),
                     ),
                     width,
                 ));
                 break;
             }
-            let elbow = if index + 1 == members.len() { "└" } else { "├" };
+            let elbow = if unicode { "└" } else { "`-" };
+            let branch = if unicode { "├" } else { "+-" };
+            let elbow = if index + 1 == members.len() {
+                elbow
+            } else {
+                branch
+            };
             if grid_fits {
                 let cells: Vec<(String, SubagentStateGroup)> = columns
                     .iter()
@@ -1536,7 +1592,7 @@ pub(super) fn subagent_activity_render_rows(
                                 usize::from(width)
                                     .saturating_sub(visible_width(ACTIVITY_DETAIL_INDENT) + 2)
                                     .max(8),
-                                Some("…"),
+                                Some(theme.glyph("ellipsis")),
                             )
                         ),
                     ),
@@ -1558,25 +1614,32 @@ pub(super) fn subagent_activity_render_rows(
             .join(", ");
         let text = if summary.is_empty() {
             format!(
-                "{ACTIVITY_DETAIL_INDENT}no {} workers",
+                "no {} workers",
                 view.state_filter
                     .map(SubagentStateGroup::filter_label)
                     .unwrap_or("declared")
             )
         } else {
-            format!("{ACTIVITY_DETAIL_INDENT}{summary}")
+            summary
         };
-        lines.push(fit_line(&subdued_text(theme, &text), width));
+        lines.extend(wrap_hanging(
+            &subdued_text(theme, &text),
+            ACTIVITY_DETAIL_INDENT,
+            ACTIVITY_DETAIL_INDENT,
+            width,
+        ));
     }
     if let Some(reason) = view.failure_reason.as_deref() {
-        lines.push(fit_line(
+        // A failure that produced no workers at all is still the whole point of
+        // the event, so the reason wraps at the indent instead of being cut off
+        // in a narrow terminal.
+        lines.extend(wrap_hanging(
             &theme.fg(
                 "error",
-                &format!(
-                    "{ACTIVITY_DETAIL_INDENT}Failed: {}",
-                    sanitize_for_terminal(reason)
-                ),
+                &format!("Failed: {}", sanitize_for_terminal(reason)),
             ),
+            ACTIVITY_DETAIL_INDENT,
+            ACTIVITY_DETAIL_INDENT,
             width,
         ));
     }
@@ -2323,11 +2386,16 @@ impl ShellState {
                     let same_presentation = previous.same_presentation(&view);
                     let was_active = !panel.finished;
                     panel.update_subagent_activity(&view);
+                    let is_active = !panel.finished;
+                    // The retained presentation is what the drill-in, the
+                    // footer cost, and the reader's own controls read, so it
+                    // moves on every snapshot - including one whose row
+                    // projection did not change.
+                    self.subagent_activity = Some(view);
                     self.settled_subagent_workers.extend(workers);
                     if same_presentation {
                         return;
                     }
-                    let is_active = !panel.finished;
                     if was_active && !is_active {
                         self.unregister_active_event(index);
                     } else if !was_active && is_active {
@@ -2340,8 +2408,13 @@ impl ShellState {
             self.subagent_activity_block = None;
         }
 
+        // Only a roster that has something to hide can be suppressed: an empty
+        // snapshot that carries a failure reason is a spawn that never produced
+        // workers, and that evidence must still reach the transcript.
         if self.subagent_activity_block.is_none()
             && !active
+            && !workers.is_empty()
+            && view.failure_reason.is_none()
             && workers
                 .iter()
                 .all(|worker| self.settled_subagent_workers.contains(worker))
@@ -2368,6 +2441,7 @@ impl ShellState {
         self.insert_block(index, TranscriptBlock::Tool(Box::new(panel)));
         self.subagent_activity_block = Some(index);
         self.settled_subagent_workers.extend(workers);
+        self.subagent_activity = Some(view);
         if active {
             self.register_active_event(index);
             // Keep the model-status row below the delegated event while the
@@ -4183,6 +4257,14 @@ impl InteractiveShell {
             prompt_color,
             persisted: false,
         });
+        // Closing the streaming blocks removed the turn's transient status row,
+        // and the prompt was appended after it. Reopen the liveness row below
+        // the prompt the reader just submitted: an active run must show its
+        // `Working`/`Thinking` status immediately, not only from the provider's
+        // first event onward.
+        if state.run.is_active() {
+            state.open_working_status();
+        }
         // A local submission deliberately returns to the live tail; model
         // output itself never does this while the reader is browsing history.
         state.jump_to_tail();
@@ -6122,9 +6204,41 @@ impl InteractiveShell {
                                 // All -> each non-empty group -> All. The
                                 // visible index set changes, so the selection
                                 // restarts at the first visible row.
-                                if let PanelAction::SelectSubagent(subagents) = panel_action {
-                                    subagents.cycle_state_filter();
-                                    *selected = 0;
+                                let mirror =
+                                    if let PanelAction::SelectSubagent(subagents) = &mut *panel_action
+                                    {
+                                        subagents.cycle_state_filter();
+                                        *selected = 0;
+                                        Some(subagents.state_filter_label().map(
+                                            SubagentStateGroup::of_panel_label,
+                                        ))
+                                    } else {
+                                        None
+                                    };
+                                if let Some(filter) = mirror {
+                                    // The panel and the settled transcript event
+                                    // describe the same roster, so one reader
+                                    // narrowing must not leave them disagreeing.
+                                    // The panel borrow ends here; the settled
+                                    // event is a separate transcript block.
+                                    Self::apply_subagent_activity_controls(
+                                        &mut state,
+                                        |view| view.state_filter = filter,
+                                    );
+                                }
+                            }
+                            KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => {
+                                // Cycle the settled event's row ordering:
+                                // state -> elapsed -> tokens -> state. Ordering
+                                // is display-only, so this never changes which
+                                // workers the event reports.
+                                if panel_action.subagent_panel().is_some() {
+                                    // The panel borrow ends here; the settled
+                                    // event is a separate transcript block.
+                                    Self::apply_subagent_activity_controls(
+                                        &mut state,
+                                        |view| view.sort = view.sort.next(),
+                                    );
                                 }
                             }
                             KeyCode::Char(c)
