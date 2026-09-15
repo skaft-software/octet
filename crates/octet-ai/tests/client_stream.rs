@@ -14,8 +14,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use octet_ai::{
     AiClient, AiError, Auth, Capabilities, CompatibilityMode::Strict, Endpoint, EndpointId, Media,
     Message, Modality, ModalitySet, Model, ModelId, ModelLimits, ModelSpec, OutputFormat,
-    OutputModalities, Protocol, ProviderLifecycleState, Request, StreamEvent, UserMessage,
-    UserPart,
+    OutputModalities, Protocol, ProviderLifecycleState, Request, StreamEvent, StreamProtocolError,
+    UserMessage, UserPart,
 };
 
 fn make_test_model(base_url_str: &str, protocol: Protocol, is_audio: bool) -> Model {
@@ -682,6 +682,13 @@ async fn handle_test_responses_connection(
         match behavior {
             WebSocketBehavior::CloseBeforeEvents => return Ok(()),
             WebSocketBehavior::Stall => {
+                // A genuinely half-open peer: it accepts `response.create`,
+                // sends the lifecycle prelude, and then holds the connection
+                // open without ever reading a probe (so no Pong is produced)
+                // and without any model progress. This is the failure the
+                // transport heartbeat exists to detect, so the cause of the
+                // surfaced error is the heartbeat deadline and not a socket
+                // reset.
                 socket
                     .send(WebSocketMessage::Text(
                         serde_json::json!({
@@ -692,7 +699,7 @@ async fn handle_test_responses_connection(
                         .into(),
                     ))
                     .await?;
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
                 return Ok(());
             }
             WebSocketBehavior::StallWithPongs => {
@@ -911,6 +918,10 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
         )
         .await
         .unwrap();
+    // The provider rejected the socket with `websocket_connection_limit_reached`
+    // after sending the lifecycle prelude. The prelude is delivered (the
+    // consumer still learns the provider accepted the response) and the row
+    // retries the generation on a fresh socket, exactly like upstream Codex.
     assert!(matches!(
         stream.next().await,
         Some(Ok(StreamEvent::Started { .. }))
@@ -923,14 +934,37 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
     let AiError::StreamFailure { inner, progress } = &error else {
         panic!("expected annotated stream failure, got {error:?}");
     };
-    assert!(matches!(
-        inner.as_ref(),
-        AiError::ResponsesFailed(provider)
-            if provider.code.as_deref() == Some("websocket_connection_limit_reached")
-    ));
+    let typed = match inner.as_ref() {
+        AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+            attempts,
+            detail,
+            ..
+        }) => {
+            assert_eq!(*attempts, 3, "the reconnect budget bounds the retry loop");
+            // The provider code survives the recovery attempt in the bounded,
+            // credential-free detail instead of being reported as a terminal
+            // provider failure.
+            assert!(
+                detail.contains("websocket_connection_limit_reached"),
+                "the provider rejection code must survive: {detail}"
+            );
+            true
+        }
+        _ => false,
+    };
+    assert!(
+        typed,
+        "an unrecovered provider connection limit must fail closed: {inner:?}"
+    );
     assert!(progress.first_body_seen);
     assert!(progress.last_event_ms.is_some());
     assert!(stream.next().await.is_none());
+    // One generation plus one bounded replay per reconnect attempt.
+    assert_eq!(
+        server.requests().await.len(),
+        1 + 3,
+        "the connection-limit retry must stay inside the bounded budget"
+    );
 
     // Retirement is authoritative before the provider error is published, so
     // an immediate next request deterministically takes HTTP/SSE.
@@ -1052,6 +1086,14 @@ async fn responses_credential_resolution_failure_never_opens_a_transport() {
 
 #[tokio::test]
 async fn responses_websocket_failure_after_send_is_terminal() {
+    // The pre-row contract surfaced a post-send socket failure immediately and
+    // left the replay decision to the caller. Dropped-socket protection
+    // deliberately replaces it: a socket that dies before any consumer-visible
+    // output is retried on a bounded budget with the full local body (nothing
+    // was published, so the replay cannot duplicate output), and only when the
+    // budget is spent does the turn fail closed with the typed non-resumable
+    // error. The client itself still never replays over HTTP; the caller owns
+    // that decision for its next request.
     let server = TestResponsesServer::start(
         WebSocketBehavior::CloseBeforeEvents,
         fallback_responses_body(),
@@ -1059,6 +1101,7 @@ async fn responses_websocket_failure_after_send_is_terminal() {
     .await;
     let model = websocket_test_model(&server.base_url);
     let mut stream = AiClient::new()
+        .with_stream_timeouts(Duration::from_secs(10), Duration::from_secs(30))
         .stream(
             &model,
             responses_request(vec![user_message("fallback")], Some("session-close")),
@@ -1073,17 +1116,30 @@ async fn responses_websocket_failure_after_send_is_terminal() {
     let AiError::StreamFailure { inner, progress } = &error else {
         panic!("expected annotated stream failure, got {error:?}");
     };
-    assert!(matches!(
-        inner.as_ref(),
-        AiError::Transport(transport)
-            if transport.phase == octet_ai::TransportPhase::Body && !transport.timeout
-    ));
+    assert!(
+        matches!(
+            inner.as_ref(),
+            AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+                attempts, visible_output: false, ..
+            }) if *attempts == 3
+        ),
+        "expected the typed non-resumable error after the bounded budget, got {inner:?}"
+    );
+    // The provider never produced an event, so the consumer saw nothing.
     assert!(!progress.first_body_seen);
     assert_eq!(progress.last_event_ms, None);
     assert!(stream.next().await.is_none());
+    // The bound is observable end to end: one accepted generation plus exactly
+    // one replay per reconnect attempt, and no HTTP transport request.
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].get("transport").is_none());
+    assert_eq!(
+        requests.len(),
+        1 + 3,
+        "the reconnect budget must be exactly bounded: {requests:?}"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.get("transport").is_none()));
 }
 
 #[tokio::test]
@@ -1126,10 +1182,24 @@ async fn responses_websocket_failed_output_next_explicit_request_uses_full_http_
         let AiError::StreamFailure { inner, progress } = error else {
             panic!("expected annotated stream failure");
         };
+        // A drop after consumer-visible output is only recoverable by a cursor
+        // resume, and this request is a durable-replay (`store: false`) one, so
+        // the provider retains nothing to resume: the row fails closed with the
+        // typed non-resumable error instead of the pre-row replay-safe
+        // `TransportPhase::Body` timeout, which could not distinguish
+        // "resume impossible" from "transport failed".
         match behavior {
             WebSocketBehavior::DropAfterOutput | WebSocketBehavior::CloseAfterOutput => {
-                assert!(matches!(*inner, AiError::Transport(ref transport)
-                    if transport.phase == octet_ai::TransportPhase::Body && !transport.timeout));
+                assert!(
+                    matches!(
+                        *inner,
+                        AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+                            visible_output: true,
+                            ..
+                        })
+                    ),
+                    "an unresumable mid-stream drop must be typed: {inner:?}"
+                );
             }
             _ => assert!(matches!(*inner, AiError::Decode(_))),
         }
@@ -1167,11 +1237,23 @@ async fn responses_websocket_failed_output_next_explicit_request_uses_full_http_
 
 #[tokio::test]
 async fn responses_websocket_heartbeat_timeout_after_created_is_terminal() {
+    // The pre-row contract made a half-open socket an immediate replay-safe
+    // `TransportPhase::Body` timeout. Dropped-socket protection deliberately
+    // replaces it: a heartbeat failure before any consumer-visible output is
+    // retried on the bounded reconnect budget, and only when the budget is
+    // spent does the turn fail closed with the typed non-resumable error that
+    // carries the heartbeat cause. The provider's lifecycle prelude still
+    // reaches the consumer before that terminal error (the attempt can never be
+    // retried at that point), so `Started`/`first_body_seen` are unchanged.
     let server =
         TestResponsesServer::start(WebSocketBehavior::Stall, fallback_responses_body()).await;
     let model = websocket_test_model(&server.base_url);
+    // The transport heartbeat scales with the caller's inter-chunk idle bound
+    // (one quarter), while the first-event bound stays generous so the bounded
+    // reconnect budget can run to its conclusion.
     let mut stream = AiClient::new()
-        .with_stream_timeouts(Duration::from_millis(100), Duration::from_millis(500))
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(30))
+        .with_initial_stream_timeout(Duration::from_secs(10))
         .stream(
             &model,
             responses_request(vec![user_message("timeout")], Some("session-timeout")),
@@ -1190,17 +1272,35 @@ async fn responses_websocket_heartbeat_timeout_after_created_is_terminal() {
     let AiError::StreamFailure { inner, progress } = &error else {
         panic!("expected annotated stream failure, got {error:?}");
     };
-    assert!(matches!(
-        inner.as_ref(),
-        AiError::Transport(transport)
-            if transport.phase == octet_ai::TransportPhase::Body && transport.timeout
-    ));
+    let detail = match inner.as_ref() {
+        AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+            attempts,
+            detail,
+            ..
+        }) => {
+            assert_eq!(*attempts, 3, "the reconnect budget bounds the retry loop");
+            detail.clone()
+        }
+        other => panic!("expected the typed non-resumable error, got {other:?}"),
+    };
+    assert!(
+        detail.contains("heartbeat"),
+        "the heartbeat cause must survive: {detail}"
+    );
     assert!(progress.first_body_seen);
     assert!(progress.last_event_ms.is_some());
     assert!(stream.next().await.is_none());
+    // One generation plus one bounded replay per reconnect attempt, and no HTTP
+    // transport request (the client never replays on its own).
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].get("transport").is_none());
+    assert_eq!(
+        requests.len(),
+        1 + 3,
+        "the heartbeat retry must stay inside the bounded budget: {requests:?}"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.get("transport").is_none()));
 }
 
 #[tokio::test]
@@ -1208,8 +1308,15 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
     let server =
         TestResponsesServer::start(WebSocketBehavior::Stall, fallback_responses_body()).await;
     let model = websocket_test_model(&server.base_url);
-    let client =
-        AiClient::new().with_stream_timeouts(Duration::from_millis(400), Duration::from_secs(1));
+    // The heartbeat interval and acknowledgement deadline are each one quarter
+    // of the response-idle bound. The pre-row contract failed the turn on the
+    // first heartbeat failure; dropped-socket protection retries it within a
+    // bounded budget instead, so the caller's own bound must be generous enough
+    // for that recovery to run to its conclusion.
+    let client = AiClient::new()
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(30))
+        .with_initial_stream_timeout(Duration::from_secs(10));
+    let started_at = std::time::Instant::now();
     let mut stream = client
         .stream(
             &model,
@@ -1217,28 +1324,44 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
         )
         .await
         .unwrap();
+    // The half-open attempt's lifecycle prelude is delivered when the retry
+    // budget is spent, so the consumer still learns the provider accepted the
+    // response before the transport failed.
     assert!(matches!(
         stream.next().await,
         Some(Ok(StreamEvent::Started { .. }))
     ));
 
-    // The heartbeat interval and acknowledgement deadline are each one quarter
-    // of the response-idle bound. A peer that accepts `response.create` but
-    // never reads the Ping must fail before the ordinary 400 ms idle timeout.
-    let error = tokio::time::timeout(Duration::from_millis(350), stream.next())
+    let error = tokio::time::timeout(Duration::from_secs(20), stream.next())
         .await
-        .expect("half-open WebSocket must fail before the response-idle timeout")
+        .expect("the bounded heartbeat recovery must terminate")
         .expect("half-open WebSocket must report an error")
         .expect_err("post-send heartbeat failure must not replay over HTTP");
     let AiError::StreamFailure { inner, progress } = &error else {
         panic!("expected annotated stream failure, got {error:?}");
     };
-    let AiError::Transport(transport) = inner.as_ref() else {
-        panic!("expected transport failure, got {inner:?}");
+    let detail = match inner.as_ref() {
+        AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+            attempts,
+            detail,
+            ..
+        }) => {
+            assert_eq!(*attempts, 3, "the reconnect budget bounds the retry loop");
+            detail.clone()
+        }
+        other => panic!("expected the typed non-resumable error, got {other:?}"),
     };
-    assert_eq!(transport.phase, octet_ai::TransportPhase::Body);
-    assert!(transport.timeout);
-    assert!(transport.message.contains("heartbeat"), "{transport:?}");
+    assert!(
+        detail.contains("heartbeat"),
+        "the heartbeat cause must survive: {detail}"
+    );
+    assert!(
+        started_at.elapsed() < Duration::from_secs(10),
+        "the bounded budget must bound the whole recovery: {:?}",
+        started_at.elapsed()
+    );
+    // Exactly one lifecycle prelude reached the consumer: the abandoned
+    // attempts' preludes stayed in the transport's buffer.
     assert_eq!(progress.provider_events, 1);
     assert_eq!(progress.decoded_events, 1);
     assert_eq!(progress.content_bytes, 0);
@@ -1248,9 +1371,17 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
     assert!(last_event_ms <= progress.elapsed_ms);
     assert!(stream.next().await.is_none());
 
+    // One accepted generation plus exactly one replay per reconnect attempt,
+    // and no HTTP transport request: the client never replays on its own.
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 1, "heartbeat failure must not auto-replay");
-    assert!(requests[0].get("transport").is_none());
+    assert_eq!(
+        requests.len(),
+        1 + 3,
+        "the heartbeat retry must stay inside the bounded budget: {requests:?}"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.get("transport").is_none()));
 
     // The actor disables the failed pooled session before publishing the error,
     // so a caller-owned explicit next request can safely use HTTP/SSE.
@@ -1274,7 +1405,7 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
     }
     assert_eq!(text, "http");
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1 + 3 + 1);
     assert!(requests
         .iter()
         .any(|request| request["transport"] == "http"));
@@ -1295,11 +1426,13 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        stream.next().await,
-        Some(Ok(StreamEvent::Started { .. }))
-    ));
-
+    // The provider sends `response.created` and then answers control probes
+    // forever without producing model progress. The transport's lifecycle
+    // prelude stays buffered until the attempt produces output or ends (so a
+    // retry cannot publish an abandoned attempt's prelude twice), which means
+    // the consumer sees no event at all here: `Started` is not delivered before
+    // the caller's own bound expires. Its absence is asserted explicitly rather
+    // than assumed away.
     let error = tokio::time::timeout(Duration::from_millis(800), stream.next())
         .await
         .expect("responsive control path must still reach response idle timeout")
@@ -1314,11 +1447,11 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
     assert_eq!(transport.phase, octet_ai::TransportPhase::Body);
     assert!(transport.timeout);
     assert!(
-        transport.message.contains("idle beyond its timeout"),
+        transport.message.contains("idle beyond its"),
         "control Pongs must not reset response progress: {transport:?}"
     );
-    assert!(progress.first_body_seen);
-    assert!(progress.last_event_ms.is_some());
+    assert!(!progress.first_body_seen);
+    assert_eq!(progress.last_event_ms, None);
     assert_eq!(server.requests().await.len(), 1);
     // Do not poll/drop the failed stream before immediately replacing it.
     let mut replacement = client

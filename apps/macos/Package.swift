@@ -19,12 +19,13 @@ let package = Package(
         .executableTarget(
             name: "OctetMacOS",
             dependencies: [
-                .product(name: "OctetServeClient", package: "apple-shared"),
+                .product(name: "OctetServe", package: "apple-shared"),
             ],
             path: "Sources/OctetMacOS",
-            resources: [
-                .process("Resources"),
-            ],
+            // `Resources/Info.plist` is consumed by `scripts/build-app.sh` (installed
+            // into `Contents/Info.plist` of the assembled bundle); SwiftPM forbids
+            // Info.plist as a resource of an executable target, so it is excluded.
+            exclude: ["Resources/Info.plist"],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
             ]

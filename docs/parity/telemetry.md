@@ -74,24 +74,34 @@ bound enforcement without suppressing callbacks.
 
 Test: `every_conformance_case_passes_for_the_recording_adapter`.
 
-## 3.5 Span boundaries — NOT landed
+## 3.5 Span boundaries — landed
 
-The seven named boundaries (run, turn, provider request, provider stream, tool,
-compaction/summary, delegation) are **not** wired into the `octet-agent` run
-generator. No behavioral boundary test exists.
+All seven named boundaries (run, turn, provider request, provider stream, tool,
+compaction/summary, delegation) are wired into the `octet-agent` run generator
+through `TelemetryContext::begin_typed` / `SpanGuard::context`, and behavioral
+boundary tests exist:
 
-- Missing primitive: none — the substrate and the generator-driven hooks exist.
-  `TelemetryContext::begin_typed` and `SpanGuard::context` (crate-internal) are
-  the intended hooks, and `crates/octet-agent/src/telemetry/schema.rs` unit tests
-  exercise that path directly (nesting, completion-usage recording, and
-  drop-settles-as-error). The remaining work is a reviewable edit to
-  `crates/octet-agent/src/agent.rs` (and `delegation.rs`) plus a scripted-provider
-  integration test (`wiremock`), which was deliberately not started rather than
-  left partially applied in the shared 11k-line generator.
-- Design note for the follow-up: `SpanGuard` settles on drop as an error, so
-  every successful `continue 'run` / `break 'run` inside a generator scope must
-  settle the guard explicitly; a bare guard around the turn loop would otherwise
-  mislabel tool-continuation turns.
+- `crates/octet-agent/src/agent.rs:6389` `begin_typed::<RunSpan>`,
+  `agent.rs:6462` `TurnSpan`, `agent.rs:6863` `ProviderRequestSpan`,
+  `agent.rs:7006` `ProviderStreamSpan`, `agent.rs:7770`/`agent.rs:7870`
+  `ToolSpan`, `agent.rs:4784`/`agent.rs:4946` `CompactionSpan`,
+  `agent.rs:4540`/`agent.rs:4541` `SummarySpan` plus its provider request.
+- `crates/octet-agent/src/delegation.rs:3214` `begin_typed::<DelegationSpan>`,
+  with the child run re-parented through `agent.set_telemetry_context(...)`.
+- Completion attributes are recorded at `agent.rs:4659`, `agent.rs:7006`, and
+  `agent.rs:7195` through `CompletionAttributes::record`.
+- Tests: `typed_spans_nest_run_turn_provider_and_tool_boundaries`
+  (`crates/octet-agent/tests/agent_run.rs:9411`),
+  `typed_spans_label_failed_runs_without_changing_accounting`
+  (`agent_run.rs:9513`), `typed_spans_cover_compaction_and_summary_boundaries`
+  (`agent_run.rs:9598`), `delegation_span_owns_the_child_run_and_nests_child_spans`
+  (`crates/octet-agent/src/delegation.rs:7343`), and
+  `typed_instrumentation_nests_children_under_the_typed_span`
+  (`crates/octet-agent/tests/telemetry_conformance.rs:113`).
+
+`SpanGuard` settles on drop as an error, so every successful `continue 'run` /
+`break 'run` inside a generator scope settles the guard explicitly; a bare guard
+around the turn loop would mislabel tool-continuation turns.
 
 ## 3.6 Tool and summary usage in totals, cache-hit rate, distinct cacheWrite1h, uncertainty
 

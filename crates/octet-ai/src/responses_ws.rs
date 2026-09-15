@@ -806,9 +806,11 @@ enum GenerationEnd {
     Completed,
     /// The consumer dropped the request; retire and fence the pool key.
     Abandoned,
-    /// A provider failure was already forwarded; retire and fence the key so a
-    /// later request cannot race this socket.
-    Forwarded,
+    /// The provider failed this generation or rejected the socket. The event is
+    /// handed back unpublished so the actor retires and fences the key
+    /// *before* the consumer can observe it; a later request must not race this
+    /// socket, and an immediate retry must take the safe HTTP fallback.
+    Forwarded { value: Value },
     /// Retire before publishing the terminal error.
     Fatal { error: AiError },
 }
@@ -817,8 +819,9 @@ enum GenerationEnd {
 enum AttemptOutcome {
     /// A provider terminal event was forwarded.
     Completed,
-    /// A provider failure event was already forwarded to the consumer.
-    Forwarded,
+    /// The provider failed the generation or rejected the socket. The event is
+    /// carried out of the attempt unpublished so the actor can retire first.
+    Forwarded { value: Value },
     /// The socket or heartbeat died, or the provider rejected the connection.
     /// `visible` records whether output was already forwarded, and `progress`
     /// carries the consumer's response cursor. Together they decide between a
@@ -859,6 +862,29 @@ fn interrupted(
     }
 }
 
+/// Flushes this attempt's buffered pre-output lifecycle events to the consumer.
+///
+/// Marks the attempt consumer-visible: once its own prelude reached the
+/// consumer, a later retry on this attempt would duplicate it. Returns `false`
+/// when the consumer is gone.
+async fn flush_pre_output(
+    reply: &mpsc::Sender<Result<Value, AiError>>,
+    pre_output: &mut Vec<Value>,
+    pre_output_bytes: &mut usize,
+    visible: &mut bool,
+    progress: &mut GenerationProgress,
+) -> bool {
+    *visible = true;
+    for buffered in pre_output.drain(..) {
+        progress.observe(&buffered);
+        if reply.send(Ok(buffered)).await.is_err() {
+            return false;
+        }
+    }
+    *pre_output_bytes = 0;
+    true
+}
+
 /// Publishes one provider event.
 ///
 /// Pre-output lifecycle events are buffered until the first output-bearing
@@ -886,14 +912,17 @@ async fn publish_event(
             pre_output.push(value);
             return true;
         }
-        *visible = true;
-        for buffered in pre_output.drain(..) {
-            progress.observe(&buffered);
-            if reply.send(Ok(buffered)).await.is_err() {
-                return false;
-            }
+        if !flush_pre_output(
+            reply,
+            pre_output,
+            pre_output_bytes,
+            visible,
+            progress,
+        )
+        .await
+        {
+            return false;
         }
-        *pre_output_bytes = 0;
     }
     progress.observe(&value);
     reply.send(Ok(value)).await.is_ok()
@@ -913,12 +942,12 @@ async fn handle_provider_event(
     progress: &mut GenerationProgress,
 ) -> Option<AttemptOutcome> {
     let is_terminal = terminal_kind(&value).is_some();
-    let connection_refresh = connection_refresh_error(&value) || failed_terminal(&value);
     // A connection-lifetime rejection or a stale provider-side continuation
     // before any output is retryable: nothing visible was published, so a fresh
     // socket with the full local replay cannot duplicate output or work.
     // Upstream does the same (`openai-codex-responses.ts:337-344`). Every other
-    // provider failure keeps the pre-existing behavior: publish it and retire.
+    // provider failure keeps the pre-existing behavior: retire the poisoned
+    // socket, then publish the failure event.
     let retryable_provider = connection_refresh_error(&value) || stale_continuation_error(&value);
     if retryable_provider && !*visible {
         return Some(interrupted(
@@ -933,6 +962,31 @@ async fn handle_provider_event(
     if is_terminal {
         update_continuation(&command.body, &value, continuation);
     }
+    if connection_refresh_error(&value) || failed_terminal(&value) {
+        // The provider failed this generation or rejected the socket. Hand the
+        // event back unpublished: the actor retires and fences the pool key
+        // before it reaches the consumer, so an immediate retry observes the
+        // disabled key and takes the safe HTTP fallback instead of racing
+        // another command onto this actor.
+        //
+        // This attempt's buffered lifecycle prelude is flushed first: the
+        // provider did accept the response, and the consumer's `Started`/
+        // `first_body_seen` diagnostics must still reflect that (the pre-row
+        // contract). Flushing here is safe because the attempt ends with the
+        // failure, so nothing is duplicated by a later attempt.
+        if !flush_pre_output(
+            &command.reply,
+            pre_output,
+            pre_output_bytes,
+            visible,
+            progress,
+        )
+        .await
+        {
+            return Some(AttemptOutcome::Abandoned);
+        }
+        return Some(AttemptOutcome::Forwarded { value });
+    }
     if !publish_event(
         &command.reply,
         pre_output,
@@ -945,13 +999,28 @@ async fn handle_provider_event(
     {
         return Some(AttemptOutcome::Abandoned);
     }
-    if connection_refresh {
-        return Some(AttemptOutcome::Forwarded);
-    }
     if is_terminal {
         return Some(AttemptOutcome::Completed);
     }
     None
+}
+
+/// Flushes the abandoned attempt's buffered prelude before a typed terminal.
+///
+/// The consumer must still learn that the provider accepted the response
+/// before the transport failed (the pre-row `Started` / `first_body_seen`
+/// contract), and this happens only once the attempt can never be retried, so
+/// nothing is duplicated later. Returns `false` when the consumer is gone.
+async fn flush_pending_prelude(
+    reply: &mpsc::Sender<Result<Value, AiError>>,
+    prelude: &mut Vec<Value>,
+) -> bool {
+    for buffered in prelude.drain(..) {
+        if reply.send(Ok(buffered)).await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Pumps one attempt's provider events into the consumer channel, including the
@@ -960,14 +1029,14 @@ async fn pump_generation<S>(
     socket: &mut S,
     command: &RequestCommand,
     continuation: &mut Option<Continuation>,
+    pre_output: &mut Vec<Value>,
+    pre_output_bytes: &mut usize,
 ) -> AttemptOutcome
 where
     S: futures_core::Stream<Item = Result<Message, tungstenite::Error>>
         + futures_util::Sink<Message, Error = tungstenite::Error>
         + Unpin,
 {
-    let mut pre_output: Vec<Value> = Vec::new();
-    let mut pre_output_bytes = 0_usize;
     let mut visible = false;
     let mut progress = GenerationProgress::default();
     // Heartbeats prove only that the transport path still carries control
@@ -1054,8 +1123,8 @@ where
                     value,
                     command,
                     continuation,
-                    &mut pre_output,
-                    &mut pre_output_bytes,
+                    pre_output,
+                    pre_output_bytes,
                     &mut visible,
                     &mut progress,
                 )
@@ -1079,8 +1148,8 @@ where
                     value,
                     command,
                     continuation,
-                    &mut pre_output,
-                    &mut pre_output_bytes,
+                    pre_output,
+                    pre_output_bytes,
                     &mut visible,
                     &mut progress,
                 )
@@ -1159,6 +1228,11 @@ where
     let mut attempts = 0_u32;
     let reconnect_started = tokio::time::Instant::now();
     let mut cursor = GenerationProgress::default();
+    // The current attempt's buffered lifecycle prelude. It belongs to the
+    // attempt, not to the generation: a retry rebuilds it so the abandoned
+    // attempt's prefix is never published twice.
+    let mut prelude: Vec<Value> = Vec::new();
+    let mut prelude_bytes = 0_usize;
     // Once output is visible a fresh socket cannot be replayed without
     // duplicating it, so every later attempt must be a cursor resume.
     let mut resuming = false;
@@ -1167,6 +1241,9 @@ where
             let (Some(resumer), Some(response_id), Some(last_sequence)) =
                 (resumer, cursor.response_id.clone(), cursor.last_sequence)
             else {
+                if !flush_pending_prelude(&command.reply, &mut prelude).await {
+                    return GenerationEnd::Abandoned;
+                }
                 return GenerationEnd::Fatal {
                     error: not_resumable(attempts, true, "no resumable cursor"),
                 };
@@ -1183,13 +1260,30 @@ where
                 ),
             }
         } else {
-            pump_generation(socket, command, continuation).await
+            // A retry replays the full body on a fresh socket, so the previous
+            // attempt's prelude can never be delivered and is replaced by the
+            // replacement attempt's own.
+            prelude.clear();
+            prelude_bytes = 0;
+            pump_generation(
+                socket,
+                command,
+                continuation,
+                &mut prelude,
+                &mut prelude_bytes,
+            )
+            .await
         };
         match outcome {
             AttemptOutcome::Completed => return GenerationEnd::Completed,
-            AttemptOutcome::Forwarded => return GenerationEnd::Forwarded,
+            AttemptOutcome::Forwarded { value } => return GenerationEnd::Forwarded { value },
             AttemptOutcome::Abandoned => return GenerationEnd::Abandoned,
-            AttemptOutcome::Fatal { error } => return GenerationEnd::Fatal { error },
+            AttemptOutcome::Fatal { error } => {
+                if !flush_pending_prelude(&command.reply, &mut prelude).await {
+                    return GenerationEnd::Abandoned;
+                }
+                return GenerationEnd::Fatal { error };
+            }
             AttemptOutcome::Interrupted {
                 detail,
                 visible,
@@ -1201,6 +1295,9 @@ where
                 }
                 let elapsed = reconnect_started.elapsed();
                 if attempts >= MAX_SOCKET_RECONNECT_ATTEMPTS || elapsed >= RECONNECT_TOTAL_BUDGET {
+                    if !flush_pending_prelude(&command.reply, &mut prelude).await {
+                        return GenerationEnd::Abandoned;
+                    }
                     return GenerationEnd::Fatal {
                         error: not_resumable(attempts, visible, &detail),
                     };
@@ -1212,6 +1309,9 @@ where
                         || cursor.response_id.is_none()
                         || cursor.last_sequence.is_none()
                     {
+                        if !flush_pending_prelude(&command.reply, &mut prelude).await {
+                            return GenerationEnd::Abandoned;
+                        }
                         return GenerationEnd::Fatal {
                             error: not_resumable(attempts, true, &detail),
                         };
@@ -1219,6 +1319,9 @@ where
                 } else if replay_frame.is_none() {
                     // Without a replayable body a reconnect cannot restart the
                     // generation at all, so fail closed instead of guessing.
+                    if !flush_pending_prelude(&command.reply, &mut prelude).await {
+                        return GenerationEnd::Abandoned;
+                    }
                     return GenerationEnd::Fatal {
                         error: not_resumable(attempts, false, &detail),
                     };
@@ -1453,9 +1556,19 @@ async fn run_connection<S>(
         .await
         {
             GenerationEnd::Completed => {}
-            GenerationEnd::Abandoned | GenerationEnd::Forwarded => {
+            GenerationEnd::Abandoned => {
                 alive.store(false, Ordering::Release);
                 disable_key(&state, key.as_deref()).await;
+                break 'actor;
+            }
+            GenerationEnd::Forwarded { value } => {
+                // Retire the socket and fence the key *before* publishing the
+                // provider failure: the consumer (or an agent retry it drives)
+                // must observe the disabled key and take the safe HTTP
+                // fallback, never race another command onto this actor.
+                alive.store(false, Ordering::Release);
+                disable_key(&state, key.as_deref()).await;
+                let _ = command.reply.send(Ok(value)).await;
                 break 'actor;
             }
             GenerationEnd::Fatal { error } => {
@@ -2006,12 +2119,17 @@ mod tests {
 
     #[tokio::test]
     async fn fatal_events_retire_before_publishing_with_a_contended_pool() {
-        for failure in [
-            None, // TCP EOF without a Close frame is a WebSocket read error.
-            Some(Message::Close(None)),
-            Some(Message::Text("{".into())),
-            Some(Message::Binary(vec![0xff].into())),
-            Some(Message::Text("test EOF".into())),
+        // `malformed` marks a socket event the codec cannot decode at all; the
+        // other cases are transport failures detected while output was already
+        // visible, which the row turns into the typed non-resumable error
+        // instead of the replayable heartbeat timeout that pre-dated it.
+        for (failure, malformed) in [
+            // TCP EOF without a Close frame is a WebSocket read error.
+            (None, false),
+            (Some(Message::Close(None)), false),
+            (Some(Message::Text("{".into())), true),
+            (Some(Message::Binary(vec![0xff].into())), true),
+            (Some(Message::Text("test EOF".into())), false),
         ] {
             let (client, mut server) = websocket_pair().await;
             // Tungstenite normally turns unclean TCP EOF into a read error.
@@ -2084,7 +2202,24 @@ mod tests {
                 .expect("retirement did not publish the failure")
                 .unwrap()
                 .unwrap_err();
-            assert!(matches!(error, AiError::Transport(_) | AiError::Decode(_)));
+            // A malformed frame is a decode failure. Every other injected
+            // failure arrives after visible output was published (`provisional`
+            // above) and this request carries no resumer, so the terminal is the
+            // typed non-resumable error rather than the old replayable
+            // `TransportPhase::Body` heartbeat timeout.
+            match (malformed, &error) {
+                (true, AiError::Decode(_)) => {}
+                (
+                    false,
+                    AiError::StreamProtocol(
+                        crate::error::StreamProtocolError::ResponseNotResumable {
+                            visible_output: true,
+                            ..
+                        },
+                    ),
+                ) => {}
+                _ => panic!("unexpected terminal error: {error:?}"),
+            }
             assert!(state.lock().await.disabled.contains("poisoned"));
             assert!(events.recv().await.is_none());
             tokio::time::timeout(Duration::from_secs(2), actor)
@@ -2287,6 +2422,19 @@ mod tests {
         (address, handle)
     }
 
+    /// Joins a scripted server under a bounded wait.
+    ///
+    /// The accept loop serves exactly one connection per script, so an
+    /// over-provisioned list would block forever on an `accept` that never
+    /// arrives. Bounding the join turns that harness mismatch into a loud
+    /// failure instead of a hang.
+    async fn finish_scripted_server(server: JoinHandle<()>) {
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("scripted server did not finish: script count must match the connection count")
+            .expect("a scripted server task panicked");
+    }
+
     fn text_frame(value: Value) -> Message {
         Message::Text(value.to_string().into())
     }
@@ -2441,6 +2589,12 @@ mod tests {
                     .unwrap();
                 socket
                     .send(text_frame(serde_json::json!({
+                        "type": "response.in_progress", "response": {"id": "resp_2"}
+                    })))
+                    .await
+                    .unwrap();
+                socket
+                    .send(text_frame(serde_json::json!({
                         "type": "response.output_text.delta", "delta": "Hello "
                     })))
                     .await
@@ -2484,6 +2638,10 @@ mod tests {
 
         assert!(error.is_none(), "a resumable drop must not surface: {error:?}");
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "exactly one reconnect");
+        // Both attempts emit a lifecycle prelude. The abandoned attempt's
+        // prelude is buffered, then discarded with its socket; the replacement
+        // attempt publishes its own exactly once. Duplicating or leaking the
+        // abandoned prelude would show up as a count of 2 here.
         assert_eq!(
             count_of(&events, "response.created"),
             1,
@@ -2501,7 +2659,7 @@ mod tests {
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
-        server.await.unwrap();
+        finish_scripted_server(server).await;
     }
 
     #[tokio::test]
@@ -2568,7 +2726,7 @@ mod tests {
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
-        server.await.unwrap();
+        finish_scripted_server(server).await;
     }
 
     /// A resumer that records every `(response_id, starting_after)` and serves
@@ -2647,8 +2805,35 @@ mod tests {
 
     #[tokio::test]
     async fn a_mid_stream_drop_resumes_from_the_cursor_with_each_delta_once() {
-        let (address, server) =
-            scripted_server(vec![scripted_stream_that_drops_after("Hello ")]).await;
+        let (address, server) = scripted_server(vec![
+            scripted_stream_that_drops_after("Hello "),
+            // The next turn after a resumed drop must reach a live session: the
+            // pool dials a fresh socket for the same key.
+            Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
+                Box::pin(async move {
+                    let body = next_generation_frame(&mut socket).await;
+                    assert!(
+                        body.get("previous_response_id").is_none(),
+                        "a fresh session must receive the full local body"
+                    );
+                    socket
+                        .send(text_frame(serde_json::json!({
+                            "type": "response.created", "response": {"id": "resp_2"}
+                        })))
+                        .await
+                        .unwrap();
+                    socket
+                        .send(text_frame(serde_json::json!({
+                            "type": "response.completed",
+                            "response": {"id": "resp_2", "output": []}
+                        })))
+                        .await
+                        .unwrap();
+                    let _ = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
+                })
+            }),
+        ])
+        .await;
         let (dialer, reconnect_attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
@@ -2695,12 +2880,63 @@ mod tests {
             "a cursor resume is not a socket redial"
         );
         assert_eq!(*calls.lock().await, vec![("resp_1".to_owned(), 1)]);
-        assert!(connection.alive.load(Ordering::Acquire));
+        // The resumed read supersedes the socket that dropped mid-generation.
+        // The dead socket must not stay advertised as usable (`alive` is what
+        // `ResponsesWsPool::connect` reuses), but the pool key must stay enabled
+        // so the next turn dials a fresh session instead of failing.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let retired = !connection.alive.load(Ordering::Acquire)
+                    && !state.lock().await.sessions.contains_key("resume-mid");
+                if retired {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a socket dropped mid-generation must not stay advertised as usable");
         assert!(!state.lock().await.disabled.contains("resume-mid"));
+
+        // A later turn on the same key must still complete: the pool dials a
+        // fresh session and sends the full local body to it.
+        let pool = ResponsesWsPool {
+            state: Arc::clone(&state),
+        };
+        let mut next = pool
+            .request(
+                Some("resume-mid"),
+                Url::parse(&format!("ws://{address}/")).unwrap(),
+                http::HeaderMap::new(),
+                test_generation_request(),
+                liveness(),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .expect("the key left behind by a resumed drop must be reusable");
+        let mut completed = false;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), next.recv())
+                .await
+                .expect("the replacement session stopped forwarding events")
+            {
+                Some(Ok(value)) if terminal_kind(&value).is_some() => {
+                    assert_eq!(value["type"], "response.completed");
+                    completed = true;
+                    break;
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => panic!("the replacement session failed: {error:?}"),
+                None => break,
+            }
+        }
+        assert!(completed, "the replacement session must finish the turn");
+        drop(next);
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
-        server.await.unwrap();
+        finish_scripted_server(server).await;
     }
 
     #[tokio::test]
@@ -2754,7 +2990,7 @@ mod tests {
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
-        server.await.unwrap();
+        finish_scripted_server(server).await;
     }
 
     #[tokio::test]
@@ -2808,7 +3044,7 @@ mod tests {
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
-        server.await.unwrap();
+        finish_scripted_server(server).await;
     }
 
     #[tokio::test]
@@ -2823,7 +3059,7 @@ mod tests {
             });
             script
         };
-        let scripts: Vec<ServerScript> = (0..MAX_SOCKET_RECONNECT_ATTEMPTS as usize + 2)
+        let scripts: Vec<ServerScript> = (0..MAX_SOCKET_RECONNECT_ATTEMPTS as usize + 1)
             .map(|_| script())
             .collect();
         let (address, server) = scripted_server(scripts).await;
@@ -2876,7 +3112,7 @@ mod tests {
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
-        server.await.unwrap();
+        finish_scripted_server(server).await;
     }
 
     #[tokio::test]
@@ -2978,6 +3214,6 @@ mod tests {
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
-        server.await.unwrap();
+        finish_scripted_server(server).await;
     }
 }

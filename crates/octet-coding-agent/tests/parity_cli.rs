@@ -566,7 +566,7 @@ fn no_session_discards_the_transcript_but_keeps_durable_accounting() {
     let sessions = fixture.run(&["sessions", "list"]);
     assert_success(&sessions);
     assert!(
-        stdout_of(&sessions).contains("No sessions"),
+        stdout_of(&sessions).contains("No matching sessions"),
         "the ephemeral session is not listed: {}",
         stdout_of(&sessions)
     );

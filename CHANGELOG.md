@@ -2,6 +2,149 @@
 
 ## [Unreleased]
 
+Additive Pi-parity pass against `earendil-works/pi` @
+`8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`, plus the tracked roadmap. Per-row
+status is in [`docs/parity/README.md`](docs/parity/README.md); the adversarial
+verification pass is in
+[`docs/parity/VERIFICATION.md`](docs/parity/VERIFICATION.md). `Landed` below
+means code plus a behavioural test that was actually run.
+
+### Interaction
+
+- Slash commands now work while a run is active. `/help`, `/cost`, `/cache`,
+  `/tree`, `/context`, `/update`, `/name`, `/export`, `/extensions status`,
+  `/extensions inspect` and `/thinking` render or open their real surface
+  immediately instead of being queued to the next idle boundary; `/model` opens
+  its picker inline. Previously these commands were unusable during streaming.
+- Add platform-aware discoverability hints, including the queued-follow-up edit
+  binding (`option+↑` on macOS, `alt+↑` elsewhere).
+- Strengthen the model-adaptive activity shimmer: the `Thinking` label now
+  carries a coloured sweep instead of a luminance-only wash, and both the dark
+  and light profiles meet a quantified minimum luminance/chroma separation at
+  the sweep centre (the light profile previously moved 0.01→0.05 and was
+  effectively invisible).
+- Redesign the `/subagents` panel: group by state with counts, collapse terminal
+  groups by default, aligned columns with a header row, bounded failure reasons
+  and bounded rendering.
+- Stop rendering absence as text in subagent rows: `no ceiling`,
+  `inherited no ceiling` and every `?` placeholder are gone, elapsed and token
+  counts are human-formatted, and no internal Rust API or operation id is
+  printed into the transcript.
+
+### Codex subscription behaviour
+
+- Make the deliberate 272K Codex request cap visible and overridable instead of
+  silent. It remains the default because OpenAI recommends a 272K Codex context
+  limit, usage above 272K is double-priced, and oversized long-running sessions
+  can drop the Codex websocket.
+- Emit at most one bounded clamp notice per session, for the effective model
+  only, and only when that model is a Codex route.
+- Add an explicit opt-in override (`--codex-context-window`, the equivalent
+  environment variable, and the reasoning/effort menu) that requires the
+  Pro/ProLite entitlement and a separate acknowledgement naming both
+  consequences; un-acknowledged or above-entitlement values fail closed.
+- Record cost and usage above 272K as uncertain rather than exact
+  (`Session::record_usage_uncertainty`), since the whole request is priced at the
+  long-context tier rather than only the excess.
+- Protect the Codex websocket from dropping: bounded-backoff reconnect that
+  resumes the in-flight response instead of failing the turn, a typed error when
+  resumption is impossible, and no duplicated or gapped deltas on resume.
+
+### Subagents
+
+- Add `/subagents open-all tmux` and `/subagents open-all herdr`, opening the
+  parent and every running worker as separate interactive sessions, one per pane.
+  Fails closed when the multiplexer is absent; never auto-installs; passes ids as
+  separate argv elements with no shell interpolation; never places credentials in
+  argv or messages; bounded pane count.
+- Add per-spawn and per-worker provider, model and reasoning selection for
+  multimodel orchestration, validated fail-closed and clamped to the model's
+  supported levels.
+- Workers survive the parent turn: durable child records are owned by the
+  session rather than the run, with reattachment on a later turn and an explicit
+  parent wait. A detached worker parks at the approval boundary in a bounded
+  state instead of mutating unattended.
+
+### Providers, codecs and tools
+
+- Land the strict JSON-schema and grammar/regex custom-tool paths across the
+  codec families, and remove a declared-but-unimplemented capability claim.
+- Land Anthropic caller-beta merge, refusal fallbacks, and the Mistral
+  Conversations finish/base-URL classification fixes that previously failed
+  assertions.
+- Add the Codex `service_tier` request field. (*The `/fast` command remains
+  inert: the live-run `ResponsesOptions` builders do not yet set a tier.*)
+- Add the assistant-message frame encoder/reducer for durable partial republish.
+- Add typed provider declarations covering sampling params, headers,
+  `vllmPriority`, `supportsMaxOutputTokens`, thinking-token budget fields,
+  `$var` chat-template interpolation and bearer-token credential aliases.
+- Tool parity: `ls`/`find`/`grep` limits, dotfiles, gitignore and context
+  handling; bash output spill, bounded interval checkpoints and the session
+  environment contract; original-file non-overlapping multi-edit with legacy
+  normalization; adopted preview coalescing; unanimous finalized-result batch
+  termination; durable invocation memos; deferred suspend/resume handles; tool
+  prompt snippets and guidelines; summarization retry distinct from compaction
+  failure.
+
+### CLI and sessions
+
+- Add `--mode json` session-event JSONL, `--list-models` search,
+  `--session-id`/`--name`, sequential positional prompts with bounded `@file`
+  and media expansion, and piped stdin in every mode.
+- Add incremental session/entry search backed by a disposable SQLite projection
+  that re-reads only changed transcripts, and fail-closed catalog publish gates
+  (checksum, count, schema, minimum client version, required providers) with an
+  immutable install path.
+- Add single-file HTML session export with a script-free escaping CSP.
+- Accept a session name when starting `octet serve`.
+- Split configuration diagnostics into a dedicated module without behaviour
+  change.
+
+### Telemetry
+
+- Add a callback-based, vendor-neutral telemetry substrate
+  (`TelemetryContext`/`TelemetrySpan`, NOOP and InMemory implementations,
+  serializable typed schema and a span-assertion harness) with no global and no
+  exporter, and wire run, turn, provider-request, provider-stream, tool,
+  compaction, summary and delegation span boundaries.
+- Keep accounting independent of observation: the JSONL observer and the
+  fail-closed uncertain-usage path are unchanged, and identical business outcomes
+  are asserted under NOOP and InMemory.
+- Fold tool and summary usage into totals with a cache-hit rate and a distinct
+  `cacheWrite1h` bucket, preserving uncertainty.
+
+### Editor and TUI
+
+- Namespaced, user-configurable JSON keybindings with conflict reporting,
+  platform defaults and legacy-name migration.
+- Undo/redo with fish-style coalescing; kill-ring with yank and yank-pop;
+  word/line deletion and forward/backward jumps; OSC 133 A/B/C zones; focus
+  reporting with focus-out interaction reset.
+- Port LaTeX rendering (symbol tables, parser, fraction/operator/matrix layout)
+  and add a bounded, self-contained Mermaid box-drawing engine; both fail closed
+  on unsupported syntax instead of misrendering it.
+
+### Repository tooling and docs
+
+- Add `scripts/changelog.py` (release extraction and link repair) and
+  `scripts/create-source-archive.py` (deterministic source artifact).
+- Add the additive-parity ledger, per-domain detail documents, an independent
+  verification report, and Codex context documentation.
+
+### Known gaps at this checkpoint
+
+- `cargo check --workspace --all-targets --locked` is clean, but the `octet-ai`
+  test suite is **red and partly non-terminating** at this checkpoint following
+  the Codex websocket rewrite; this is being repaired.
+- Rows recorded as blocked name an exact missing primitive rather than a
+  timeframe: the radius/`pi-messages` codec, `GOOGLE_CLOUD_API_KEY` for
+  vertex (ADC-only today), `--no-session` ephemeral mode pending an
+  accounting-only session backend, and the deferred additional-tools/tool-search
+  emit paths.
+- Windows PowerShell execution evidence, native Firefox/Safari operation,
+  physical terminal paint/scroll acceptance and the Serve/companion security
+  audit are hardware-, human- or authority-gated and remain unqualified.
+
 ## [0.7.6]
 
 - Fix stale models.dev integration for discovered names, context/output limits

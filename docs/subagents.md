@@ -87,7 +87,12 @@ independently of the parent.
   refuses with an actionable message. octet never downloads or installs a
   multiplexer.
 - **Running workers only.** `done`/`failed`/`limit_reached`/`stopped`/`timed_out`
-  and detached workers get no pane; the parent always gets one.
+  workers get no pane; the parent always gets one. A worker that is still owned
+  by the session but not attached to any run — or parked at the host approval
+  boundary — gets no pane either, and is **named in the report** with the
+  reattach/approve step: a detached worker is alive and reattachable, so dropping
+  its row silently would be wrong, and opening a stale pane for it would target
+  the wrong session.
 - **Bounded.** At most nine panes (the eight-worker fleet cap plus the parent);
   above that the whole request is refused before anything is created.
 - **Shell-safe.** Every session id, path, and flag is a separate `argv` element,
@@ -104,12 +109,18 @@ independently of the parent.
 
 The parent pane resumes the host session id directly. A worker's only
 host-published handle is the opaque, one-way `agent-session:<sha256>` reference,
-which names a transcript inside the owner-private delegation directory and which
-`octet --resume` cannot address today. The worker argv is still planned and
-validated, but no resume is fabricated for it: the pane is reported **blocked**
-with the exact missing primitive — a host-side resolver for the opaque reference,
-the same primitive that session-scoped reattachment needs. The normal read-only
-parent-controlled mode is unaffected.
+which names a transcript inside the owner-private delegation directory. The
+session store resolves an id only as `<session-dir>/<id>.jsonl`
+(`crates/octet-coding-agent/src/session_store.rs` `path_by_id`), so
+`octet --resume <reference>` cannot open it; and the host's only resolver for
+that reference (`crates/octet-coding-agent/src/extensions/serve.rs`
+`driver_for_delegated_session`) hands back a **read-only, locked inspection**
+session reachable inside the owning process, not a launchable interactive one.
+So the worker argv is still planned and validated, but no resume is fabricated
+for it: the pane is reported **blocked**, naming the exact missing primitive — a
+launchable handle for a session-owned delegated child, the same primitive
+session-scoped reattachment supplies. The normal read-only parent-controlled mode
+is unaffected.
 
 ## Session-scoped delegation
 
@@ -137,9 +148,11 @@ The extension models the gap as **detached, not dead**:
   renders the bounded `awaiting approval` state. `subagent_continue` refuses it
   with `worker_awaiting_approval`, because queueing work into a parked worker
   would be unattended mutation; `subagent_stop` still stops it explicitly.
-- `open-all` composes with the same contract: it resolves each running worker
-  through the host's opaque session reference, so a pane targets the live session
-  rather than a stale one.
+- `open-all` composes with the same contract: only workers the host currently
+  reports as running are planned, each through the host's opaque session
+  reference, so a pane never targets a stale session. A detached or parked worker
+  is excluded **and named** in the report with its reattach/approve step, and a
+  worker reattached by `/subagents wait` is planned again on the next run.
 
 ## Where the rest lives
 

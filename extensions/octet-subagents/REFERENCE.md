@@ -261,8 +261,12 @@ property below is enforced in code and covered by
   with a read-only `PATH` lookup. If the multiplexer is missing — or the `octet`
   binary is missing — the command refuses with an actionable message naming it.
   octet never downloads or installs a multiplexer.
-- **Running workers only.** `done`/`failed`/`limit_reached`/`stopped`/
-  `timed_out`/detached workers get no pane; the parent always gets one.
+- **Running workers only.** `done`/`failed`/`limit_reached`/`stopped`/`timed_out`
+  workers get no pane; the parent always gets one. A worker that is still owned
+  by the session but not attached to any run, and a worker parked by the host at
+  the approval boundary, get no pane either — and are returned in the result's
+  `skipped` rows and named in the report with the reattach/approve step, so the
+  row can never become a silent omission.
 - **Bounded.** At most `MAX_OPEN_ALL_PANES` panes (the eight-worker fleet cap plus
   the parent). Above the cap the whole request is refused before anything is
   created.
@@ -287,12 +291,19 @@ property below is enforced in code and covered by
   directly. A worker's only host-published handle is the opaque
   `agent-session:<sha256>` reference (`crates/octet-agent/src/delegation.rs`
   `delegated_session_reference`), which is one-way and names a delegated child
-  transcript under the owner-private `.delegation/team-*/` directory that the
-  session store cannot address. The worker argv is still planned and validated,
-  but no resume is fabricated for it: the pane is reported as **blocked** with
-  the exact missing primitive (a host-side resolver for the opaque reference, the
-  same primitive session-scoped reattachment supplies). The normal read-only
-  parent-controlled mode is untouched by this command.
+  transcript under the owner-private `.delegation/team-*/` directory. The session
+  store resolves an id only as `<session-dir>/<id>.jsonl`
+  (`crates/octet-coding-agent/src/session_store.rs` `path_by_id`), so
+  `octet --resume <reference>` cannot open it; the host's only resolver for that
+  reference (`crates/octet-coding-agent/src/extensions/serve.rs`
+  `driver_for_delegated_session`: `AuthorityProfile::ReadOnly`,
+  `SessionLiveState::Locked`) returns a read-only locked inspection session
+  reachable inside the owning process, not a launchable interactive one. The
+  worker argv is still planned and validated, but no resume is fabricated for it:
+  the pane is reported as **blocked**, naming the exact missing primitive — a
+  launchable handle for a session-owned delegated child, which session-scoped
+  reattachment supplies. The normal read-only parent-controlled mode is untouched
+  by this command.
 
 ## Lifecycle and restart behavior
 

@@ -116,10 +116,15 @@ downloads one), refuses above the eight-worker pane cap, passes every session id
 and path as a separate argv element, and never prints or argv-passes a credential
 or token. Panes are created one at a time; the first failure reports exactly what
 exists and destroys nothing. A worker's only host-published handle is the opaque
-`agent-session:<sha256>` reference, which `octet --resume` cannot resolve today,
-so the worker argv is planned and validated but the pane is reported **blocked**
-with the exact missing host primitive instead of a fabricated resume; the parent
-pane opens normally. See
+`agent-session:<sha256>` reference, which `octet --resume` cannot resolve today
+(the session store knows only `<session-dir>/<id>.jsonl`, and the host's only
+resolver for the reference returns a read-only locked inspection session), so the
+worker argv is planned and validated but the pane is reported **blocked** with the
+exact missing primitive — a launchable child handle — instead of a fabricated
+resume; the parent pane opens normally. A worker that is still owned but detached
+from any run, or parked at the approval boundary, is deliberately not opened and
+is named in the report with the reattach/approve step (`skipped` rows), so no
+stale pane is opened and no live worker is hidden. See
 [`/subagents open-all`](REFERENCE.md#subagents-open-all-tmuxherdr) and
 [`docs/subagents.md`](../../docs/subagents.md).
 

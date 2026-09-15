@@ -1,6 +1,33 @@
 # Octet Serve for macOS
 
-Native SwiftUI companion for an authoritative Serve host. This target is deliberately source-only: it uses the sibling `../apple-shared` `OctetServeClient` for discovery, TLS/HostId validation, pairing, Keychain storage, bootstrap, replay, reconnect, and idempotent commands.
+Native SwiftUI companion for an authoritative Serve host. This target is deliberately source-only: it expects the sibling `../apple-shared` shared client for discovery, TLS/HostId validation, pairing, Keychain storage, bootstrap, replay, reconnect, and idempotent commands.
+
+## Current build status (observed, not inferred)
+
+- The sibling package now compiles: `swift build` in `apps/apple-shared` -> `Build complete!`.
+- This target still does **not** build. `apps/macos/Package.swift` names the shared package's only
+  real product (`OctetServe`), excludes `Sources/OctetMacOS/Resources/Info.plist` from the executable
+  target (`scripts/build-app.sh` installs it into `Contents/Info.plist`; SwiftPM forbids Info.plist as
+  a resource), and the three source files that referenced the absent module import `OctetServe`
+  instead. `swift build` then reports exactly three errors, all in
+  `Sources/OctetMacOS/MacOSClientFactory.swift` and all caused by one missing surface:
+  `cannot find type 'ServeClient' in scope` (`:7`), `cannot find 'ServeClientConfiguration' in scope`
+  (`:11`), `cannot find 'ServeClient' in scope` (`:17`).
+- Missing primitive (nothing was invented here): a shared client module that exports the API this
+  target consumes — `ServeClient`, `ServeClientConfiguration`, `ServeClientError`,
+  `ServeConnectionState`, `ServeBootstrap`, `ServeCommands`/`ServeCommand`/`ServeCommandResult` and
+  `ServeEvent` (transport, TLS/HostId validation, pairing, Keychain credential storage, replay,
+  reconnect, idempotent commands). None of those names is declared anywhere in this tree
+  (`apps/apple-shared/Sources/OctetServe` holds wire DTOs only: `Identifiers`, `JSON`,
+  `RuntimeModels`, `WireEnums`, `WireModels`). The alternative is to rewire this target onto the
+  app-owned boundary idiom that `apps/ios` uses (`ServeClientBoundary` + a closure factory), which is
+  a redesign rather than a missing file.
+- Still hardware/qualification-gated and not claimed: Xcode app build, code signing, notarization,
+  DMG/install/update, a live Serve host, LAN discovery, pairing, and sleep/wake reconnect.
+
+## Dependency contract
+
+`Package.swift` expects the sibling package at `apps/apple-shared` (the app path is `apps/macos`, so the relative package path is `../apple-shared`) and its `OctetServe` product. The required public API is recorded in the private macOS handoff artifact and must be kept compatible by the shared package; no HTTP, WebSocket, QR, TLS, or credential implementation belongs in this target.
 
 ## Scope
 
@@ -25,7 +52,7 @@ The scripts under `scripts/` are authored but intentionally not run in this sour
 - `notarize-app.sh` submits a Developer ID-signed app through an explicit notarytool keychain profile, staples and validates it, and replaces it only with `CONFIRM_NOTARIZE=OCTET_NOTARIZE`.
 - `install.sh` verifies the bundle identity/signature and installs a locally supplied, already signed app with `CONFIRM_INSTALL=OCTET_INSTALL`.
 - `update.sh` verifies a local artifact's SHA-256, signature, bundle identity, and version, then replaces the app only with `CONFIRM_UPDATE=OCTET_UPDATE`.
-- `remove.sh` requires an explicit confirmation before deleting only the installed app; shared pairing credentials remain owned by `OctetServeClient`.
+- `remove.sh` requires an explicit confirmation before deleting only the installed app; shared pairing credentials remain owned by the shared Serve client package.
 
 Replacement operations stage beside the installed app and retain a rollback copy until the new app has been moved into place. No script removes quarantine metadata.
 

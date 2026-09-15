@@ -190,3 +190,245 @@ START 2026-09-15T15:43:44Z editor5 alive
 START 2026-09-15T16:28:34Z editor6 alive
 
 START 2026-09-15T16:50:13Z editor7 alive
+
+START 2026-09-15T17:13:27Z editor8 alive
+
+## editor8 — rows 2c.3 (finished) + 2c.4 (landed) — evidence
+
+2026-09-15T17:13Z.. (editor8). Scope: `crates/sexy-tui-rs/**`,
+`docs/parity/editor.md`, this file. No commits, no branch changes.
+
+### Row 2c.3 LaTeX — finished, tested, documented
+
+Files touched:
+- `crates/sexy-tui-rs/src/rich_text/latex/mod.rs` — module docs rewritten
+  (Contract / Supported / Fails-closed / Known difference / Tests), new
+  `pub const MAX_LATEX_NESTING_DEPTH = 64`, `LatexParser` gained `depth`
+  (propagated into `render_nested`), `parse_sequence` split into a
+  guard + `parse_sequence_inner`, and `!self.supported` early-exits in
+  `parse_command`, `parse_required_argument_value` and the
+  `parse_sequence_inner` loop.
+- `crates/sexy-tui-rs/tests/latex_render.rs` — 11 -> 16 tests: added
+  `DISPLAY_LAYOUT_CORPUS` (34 captured display goldens), `INLINE_LAYOUT_CORPUS`
+  (11), `UNSUPPORTED_COMMANDS` (10), `operator_limits_stack_over_their_operator`,
+  `matrix_environments_draw_their_delimiters`,
+  `display_layout_corpus_matches_reference_renderer`,
+  `inline_layout_corpus_matches_reference_renderer`,
+  `unsupported_commands_fail_closed_without_panicking`; rewrote
+  `nesting_is_bounded_and_never_panics` around `MAX_LATEX_NESTING_DEPTH`.
+
+Port bug fixed (this is the substantive change, not just tests): the recursive
+parser had **no depth bound**, and its argument path re-entered `parse_command`
+on the same unconsumed token after a failure, so `\frac{` x N recursively grew
+with the input length. `cargo test -p sexy-tui-rs` was RED because of it:
+`crates/sexy-tui-rs/tests/_latex_stress.rs::deep_braces` aborted the whole test
+binary with `fatal runtime error: stack overflow` (SIGABRT). Measured:
+`{`x500/1000 -> None (ok), `{`x2000 -> abort; `\frac{`x300 -> None, x500 ->
+abort; `rav` recursion depth reached 469 with input depth 500 while the
+parse_sequence depth counter read 64, which is how the second recursion path was
+found.
+
+Observed after the fix (`cargo test -p sexy-tui-rs --test _latex_stress
+-- --nocapture`):
+
+    braces depth=10000 => None
+    env depth=2000 in 1.869458ms => None
+    wide 16000 bytes in 2.381166ms => Some(15999)
+    frac depth=10000 => None
+    2000 fractions in 43.20075ms => Some(21996)
+    test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Observed (`cargo test -p sexy-tui-rs --test latex_render`):
+
+    running 16 tests
+    test case_environments_use_brace_delimiters ... ok
+    test default_options_are_inline ... ok
+    test matrices_align_columns_and_draw_delimiters ... ok
+    test matrix_column_width_is_cell_correct_for_wide_and_combining_glyphs ... ok
+    test inline_layout_corpus_matches_reference_renderer ... ok
+    test unsupported_and_malformed_input_fails_closed ... ok
+    test display_mode_stacks_operator_limits ... ok
+    test operator_limits_stack_over_their_operator ... ok
+    test display_mode_draws_stacked_fractions ... ok
+    test unsupported_commands_fail_closed_without_panicking ... ok
+    test matrix_environments_draw_their_delimiters ... ok
+    test upstream_suite_failures_render_nothing ... ok
+    test observed_upstream_output_matches_reference_renderer ... ok
+    test display_layout_corpus_matches_reference_renderer ... ok
+    test upstream_suite_corpus_matches_reference_renderer ... ok
+    test nesting_is_bounded_and_never_panics ... ok
+
+    test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Observed box-drawing output newly asserted as goldens (captured from the
+reference renderer, see the oracle note below):
+
+    \prod_{i=1}^{n} a_i        -> " n\n ∏  aᵢ\ni=1"
+    \oint_C \frac{dz}{z}       -> "   dz\n∮  ──\nC  z"
+    \bigcap_{i \in I} B_i      -> " ⋂  Bᵢ\ni∈I"
+    \max_{1 \le i \le n} x_i   -> " max  xᵢ\n1≤i≤n"
+    \frac{\partial f}{\partial x} -> "∂ f\n───\n∂ x"
+    \begin{bmatrix}a&b\\c&d\end{bmatrix} -> "⎡ a │ b ⎤\n⎣ c │ d ⎦"
+    \begin{Bmatrix}a&b\\c&d\end{Bmatrix} -> "⎧ a │ b ⎫\n⎩ c │ d ⎭"
+    \begin{vmatrix}a&b\\c&d\end{vmatrix} -> "│ a │ b │\n│ c │ d │"
+    \begin{Vmatrix}a&b\\c&d\end{Vmatrix} -> "║ a │ b ║\n║ c │ d ║"
+    \begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}
+      -> "⎛ 1 │ 2 │ 3 ⎞\n⎜ 4 │ 5 │ 6 ⎟\n⎝ 7 │ 8 │ 9 ⎠"
+    \int\limits_0^1 f(x)\,dx   -> "1\n∫ f(x) dx\n0"
+    \int\nolimits_0^1 f(x)\,dx -> "∫₀¹ f(x) dx"
+
+Differential oracle (re-run for this row, faithful this time): upstream
+`packages/tui/src/latex.ts` copied to `/tmp/ed8/latex.ts` together with its real
+`utils.ts` (`visibleWidth` backing `get-east-asian-width` from
+`/opt/homebrew/node_modules`), driven by a Node runner. Corpora: 232 curated
+real-LaTeX cases + 2626 randomized token-soup cases (astral code points
+removed) + the 55 new golden cases = **2913 cases, 0 divergences**. The first
+shim I used counted combining marks as width 1, which produced 2 false
+divergences (`\frac{\hat{x}}{\vec{y}}`); with the real `visibleWidth` they
+disappear — it was a harness bug, not a port bug. The 3000-case randomized run
+including astral characters has exactly 11 divergences, all on inputs containing
+non-BMP code points (JS splits UTF-16 surrogate halves; the port indexes
+`char`s).
+
+Fail-closed inventory stated honestly: `\cfrac`, `\genfrac`, `\cancel`,
+`\phantom`, `\hspace`, `\xrightarrow`, `\verb`, `\def`, `\usepackage`,
+`tikzpicture`, unknown commands, unbalanced groups and nesting past 64 all
+return `None`. `\substack{i=1\\j=2}` renders as plain text rows and
+`\text{a \textbf{b}}` renders `a b` — that is the reference behaviour, so the
+port matches it rather than rejecting it.
+
+### Row 2c.4 Mermaid — landed (bounded self-contained subset)
+
+Files touched:
+- `crates/sexy-tui-rs/src/rich_text/mermaid.rs` — module docs rewritten
+  (Contract / Supported / Fails-closed / Bounds / Output and consumers / Tests);
+  fixed `:::` class annotations (only two of the three colons were consumed, so
+  `A[Foo]:::highlight` failed), rejected `BT`/`RL` instead of silently drawing
+  them as `TD`/`LR`, made `---` draw a plain connector with no arrow head,
+  accepted a trailing `;` on the header line, and added `row_to_line` so the
+  covered cell of a double-width glyph is not emitted (a CJK label used to push
+  a box's right border one column right).
+- `crates/sexy-tui-rs/tests/mermaid_render.rs` (new) — 10 tests: 22 supported
+  goldens, 16 fail-closed messages, width invariant, wide-label alignment,
+  directed/undirected heads, link labels, LR vs TD layout, size limits, typed
+  error variants.
+
+Observed (`cargo test -p sexy-tui-rs --test mermaid_render`):
+
+    running 10 tests
+    test error_variants_are_typed ... ok
+    test undirected_links_have_no_arrow_head ... ok
+    test link_labels_sit_on_the_connector ... ok
+    test directed_links_point_at_their_target ... ok
+    test wide_labels_keep_box_borders_aligned ... ok
+    test unsupported_input_fails_closed_with_a_typed_error ... ok
+    test layouts_place_the_same_graph_differently ... ok
+    test size_limits_fail_closed ... ok
+    test supported_graphs_render_the_expected_box_drawing ... ok
+    test every_rendered_row_fits_the_reported_width ... ok
+
+    test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Observed diagram output (pasted from the renderer, now golden-asserted):
+
+    flowchart LR / A[Start] --> B[Done]
+      ┌───────┐    ┌──────┐
+      │ Start ├───▶│ Done │
+      └───────┘    └──────┘
+    graph TD / A[Start] --> B[Done]
+      ┌───────┐
+      │ Start │
+      └───┬───┘
+          │
+          │
+          ▼
+      ┌──────┐
+      │ Done │
+      └──────┘
+    flowchart TD / A[In] --> B{Valid?} ; B --> C[Store] ; B --> D[Reject]
+      ┌────┐
+      │ In │
+      └──┬─┘
+         │
+         └─┐
+           ▼
+      ┌────────┐
+      │ Valid? │
+      └────┬───┘
+           │
+          ┌┘───────────┐
+          ▼            ▼
+      ┌───────┐   ┌────────┐
+      │ Store │   │ Reject │
+      └───────┘   └────────┘
+    flowchart LR / A -->|start| B ; B --> C
+      ┌───┐start  ┌───┐    ┌───┐
+      │ A ├──────▶│ B ├───▶│ C │
+      └───┘       └───┘    └───┘
+    flowchart LR / A[One] --- B[Two]        (undirected: no head)
+      ┌─────┐    ┌─────┐
+      │ One ├────│ Two │
+      └─────┘    └─────┘
+    flowchart LR / A[界_x] --> B[y界]        (wide glyphs aligned)
+      ┌──────┐    ┌─────┐
+      │ 界_x ├───▶│ y界 │
+      └──────┘    └─────┘
+
+Fail-closed observed messages (exact strings asserted):
+`dropped, unsupported diagram type: "pie"` / `"sequenceDiagram"` / `"BT"` /
+`"RL"` / `"XY"`, `dropped, expected a graph or flowchart header`,
+`dropped, line 2: expected a link, found "-- text --> B"`,
+`dropped, line 2: node lists with \`&\` are not supported`,
+`dropped, line 2: expected a link, found "S"` (subgraph),
+`dropped, cycle through node "A"`,
+`dropped, link A --> C spans 2 layers; only links between adjacent layers are supported`,
+`dropped, line 2: unbalanced node label opened with \`[\``,
+`dropped, line 2: trailing link without a target node`,
+`dropped, line 2: unterminated link label`,
+`dropped, diagram has more than 64 nodes`,
+`dropped, line 2: label wider than 48 cells`,
+`dropped, source is 51796 bytes, limit is 16384`.
+
+Not modelled (stated, not pretended): shape outlines (diamonds/stadiums draw as
+boxes), link stroke styling (`-.->`/`==>` draw a solid connector), subgraphs,
+`BT`/`RL`, upstream's style-span + warnings channels and the upstream
+"unrendered diagram" fallback text. No consumer is wired yet
+(`crates/octet-coding-agent` has no `rich_text::mermaid` call site), so the
+embedding component still has to map `Err` to that fallback.
+
+### Row 2b.5 addendum
+
+`docs/parity/editor.md` now records the exact view-side change required
+(`view/viewport.rs` + `view.rs::scroll`/`scroll_lines` + `tui/keymap.rs`); no
+view file was touched by this worker.
+
+### Scratch harnesses on disk (untracked, throwaway)
+
+`crates/sexy-tui-rs/tests/_latex_probe.rs`, `_latex_stress.rs`,
+`_latex_debug.rs`, `_latex_diff.rs` (398 KB, from editor5), `_mermaid_debug.rs`.
+Root's `git rm --cached` + `.gitignore` means they can never be committed again.
+Only `_latex_stress.rs` is still useful (bounded stress evidence, quoted above);
+the rest are disposable. My own probes (`_latex_ed8_probe.rs`,
+`_mermaid_ed8_probe.rs`) were deleted. The valuable output of the 398 KB
+`_latex_diff.rs` blob has been replaced by the bounded corpora in
+`tests/latex_render.rs` and by the 2913-case `/tmp` oracle run recorded above.
+
+### CHANGELOG-ready bullets
+
+- Fix `sexy-tui-rs` LaTeX rendering so pathological nesting fails closed: the
+  recursive parser now stops at `MAX_LATEX_NESTING_DEPTH` (64) and stops
+  descending as soon as input is unrenderable, instead of exhausting the thread
+  stack and aborting the process (`cargo test -p sexy-tui-rs` was red on
+  `_latex_stress`).
+- Add captured behavioral goldens for LaTeX operator limits, stacked fractions,
+  roots and every supported matrix/cases/aligned environment (16 tests in
+  `tests/latex_render.rs`), and verify the port against the upstream reference
+  renderer over 2913 differential cases with zero divergences outside
+  JavaScript's UTF-16 surrogate handling.
+- Add a self-contained, bounded Mermaid `graph`/`flowchart` renderer
+  (`sexy_tui_rs::rich_text::mermaid::render_mermaid`) that emits box-drawing
+  diagrams for `TD`/`TB`/`LR` graphs with labels, branches and edge labels; it
+  fails closed with a typed `MermaidError` for `BT`/`RL`, subgraphs, inline
+  link labels, other diagram types, cycles, layer-skipping edges and oversized
+  input, and aligns box borders correctly for CJK labels (10 tests in
+  `tests/mermaid_render.rs`).

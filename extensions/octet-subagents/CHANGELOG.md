@@ -13,8 +13,15 @@
   never prints or argv-passes a credential or token, and reports exactly what
   existed when the multiplexer fails partway. Worker panes are planned and
   validated but reported **blocked** for the opaque `agent-session:*` handle that
-  `octet --resume` cannot resolve today, naming that missing host primitive
-  instead of fabricating a resume. herdr support is verified against herdr's own
+  `octet --resume` cannot resolve today, naming the exact missing primitive — a
+  *launchable* handle for a session-owned delegated child (the session store
+  resolves only `<session-dir>/<id>.jsonl`, and the host's only resolver for the
+  reference returns a read-only locked inspection session) — instead of
+  fabricating a resume. Workers that are still owned but not attached to any run,
+  or parked at the host approval boundary, are returned as `skipped` rows and
+  named in the report with the reattach/approve step, so open-all never opens a
+  stale pane and never hides a live worker. herdr support is verified against
+  herdr's own
   documentation (pane split via `.result.pane.pane_id`, `pane run` command string,
   the `HERDR_ENV=1` ownership guardrail).
 - Per-worker `provider`, `model`, and `reasoning` spawn inputs

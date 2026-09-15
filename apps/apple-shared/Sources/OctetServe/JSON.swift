@@ -178,7 +178,7 @@ public enum OctetJSONBounds {
             let directional = value == 0x061c || value == 0x200e || value == 0x200f
                 || (0x202a...0x202e).contains(value) || (0x2066...0x2069).contains(value)
             let allowedWhitespace = multiline && (scalar == "\n" || scalar == "\r" || scalar == "\t")
-            if directional || (scalar.properties.isControl && !allowedWhitespace) {
+            if directional || (scalar.properties.generalCategory == .control && !allowedWhitespace) {
                 throw OctetDecodeError.invalidPublicText(path: path)
             }
         }

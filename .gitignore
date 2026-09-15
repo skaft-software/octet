@@ -49,3 +49,12 @@ docs/superpowers/
 
 # Internal release-audit working documents
 /OCTET_ADVERSARIAL_REVIEW.md
+
+# Renderer development scratch harnesses: never commit these.
+/crates/sexy-tui-rs/tests/_*.rs
+
+# Apple/Swift toolchain build output
+.build/
+DerivedData/
+.swiftpm/
+*.xcuserstate

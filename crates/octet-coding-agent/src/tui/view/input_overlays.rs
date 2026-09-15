@@ -4,11 +4,12 @@ use sexy_tui_rs::{strip_terminal_sequences, truncate_to_width, visible_width};
 
 use super::{
     activity_elbow, fit_line, fit_prioritized_footer, join_ordinary_metadata,
-    sanitize_ordinary_surface_cell, semantic_separator, FooterSegment, ShellState,
+    sanitize_ordinary_surface_cell, semantic_separator, subdued_text, FooterSegment, ShellState,
     ACTIVITY_DETAIL_INDENT,
 };
 use crate::commands;
 use crate::tui::composer;
+use crate::tui::keymap::keybindings;
 
 /// Provenance remains semantic data until the display projection joins it to
 /// untrusted metadata. Raw command identity never includes this label.
@@ -492,6 +493,84 @@ fn clipped_steering_content(state: &ShellState, content: &str, width: usize) -> 
     format!("{}{suffix}", body.trim_end())
 }
 
+/// Namespaced binding the compiled default declares for restoring a queued
+/// message (`crates/octet-coding-agent/src/tui/keymap/keybindings.rs`).
+const QUEUED_EDIT_BINDING: &str = "app.message.dequeue";
+
+/// TODO(resolved-binding): the translator still hardcodes
+/// `KeyCode::Up + KeyModifiers::ALT` (`tui/keymap.rs`), so this hint cannot yet
+/// read a user override. The exact accessor needed is
+/// `KeybindingsManager::get_keys("app.message.dequeue")` reached from a
+/// `KeybindingsManager` owned by the shell, with `KeybindingsManager::matches`
+/// replacing that hardcoded arm. Until both exist, the hint reports the chord
+/// the binary provably consumes: the compiled default on every platform whose
+/// default set is not Windows-flavoured, and the translator's chord on Windows
+/// where the Windows-flavoured default set declares `alt+q` instead.
+const QUEUED_EDIT_TRANSLATOR_CHORD: &str = "alt+up";
+
+/// Resolve the key id for the platform named in `host` (`std::env::consts::OS`
+/// vocabulary).
+pub(super) fn queued_edit_key_id_for(host: &str) -> String {
+    let platform = match host {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    keybindings::default_definitions(platform, false)
+        .into_iter()
+        .find(|definition| definition.id == QUEUED_EDIT_BINDING)
+        .map(|definition| definition.default_keys)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|key| key.ends_with("up") || key == "up")
+        .unwrap_or_else(|| QUEUED_EDIT_TRANSLATOR_CHORD.to_owned())
+}
+
+/// The resolved key id for this process, computed once.
+fn queued_edit_key_id() -> &'static str {
+    static RESOLVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RESOLVED.get_or_init(|| queued_edit_key_id_for(std::env::consts::OS))
+}
+
+/// Human-readable label for one normalized key id.
+///
+/// `keymap::encode` is a terminal-*byte* encoder, not a label formatter, so the
+/// display names live here. `macos` is a parameter (never a `cfg!` branch
+/// inside) so both namings stay assertable on one host, matching the crate's
+/// convention for platform-dependent text.
+fn key_display_label(key_id: &str, macos: bool) -> String {
+    let mut parts: Vec<&str> = key_id.split('+').collect();
+    let base = parts.pop().unwrap_or_default().to_ascii_lowercase();
+    let base = match base.as_str() {
+        "up" | "arrowup" => "↑".to_owned(),
+        "down" | "arrowdown" => "↓".to_owned(),
+        "left" | "arrowleft" => "←".to_owned(),
+        "right" | "arrowright" => "→".to_owned(),
+        other => other.to_owned(),
+    };
+    let modifiers: Vec<String> = parts
+        .iter()
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "alt" if macos => "option".to_owned(),
+            "super" | "cmd" | "meta" if macos => "cmd".to_owned(),
+            "control" => "ctrl".to_owned(),
+            other => other.to_owned(),
+        })
+        .collect();
+    if modifiers.is_empty() {
+        base
+    } else {
+        format!("{}+{}", modifiers.join("+"), base)
+    }
+}
+
+/// The `(option+↑ to edit)` / `(alt+↑ to edit)` affordance shown beside a
+/// queued follow-up heading, matching the established `(ctrl+o to expand)`
+/// style. `macos` is a parameter so both namings are assertable on one host.
+pub(super) fn queued_edit_hint(key_id: &str, macos: bool) -> String {
+    format!("({} to edit)", key_display_label(key_id, macos))
+}
+
 pub(super) fn render_pending_steering(
     state: &ShellState,
     width: u16,
@@ -500,7 +579,6 @@ pub(super) fn render_pending_steering(
     if (state.steering_queue.is_empty() && state.follow_up_queue.is_empty()) || max_rows == 0 {
         return Vec::new();
     }
-
     let max_rows = max_rows.min(crate::tui::layout::MAX_STEERING_PREVIEW_ROWS);
     let count = state.steering_queue.len() + state.follow_up_queue.len();
     let label = if state.follow_up_queue.is_empty() {
@@ -519,9 +597,23 @@ pub(super) fn render_pending_steering(
             count
         )
     };
+    // Discoverability for Option/Alt+Up. It edits the *local* follow-up queue
+    // only, so it is shown only while a follow-up is queued; admitted steering
+    // cannot be recalled and must not advertise an affordance it lacks.
+    let hint = if state.follow_up_queue.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            subdued_text(
+                &state.theme,
+                &queued_edit_hint(queued_edit_key_id(), cfg!(target_os = "macos"))
+            )
+        )
+    };
     let mut lines = vec![fit_line(
         &format!(
-            "{ACTIVITY_DETAIL_INDENT}{}",
+            "{ACTIVITY_DETAIL_INDENT}{}{hint}",
             state
                 .theme
                 .bold(&state.theme.model_fg(state.model_lab, &heading))
@@ -568,4 +660,46 @@ pub(super) fn render_pending_steering(
         width,
     ));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_edit_binding_resolves_from_the_keybinding_registry() {
+        // The compiled default declares this chord on every platform whose
+        // default set is not Windows-flavoured; the hint must read the
+        // registry rather than a literal copy of it.
+        for host in ["macos", "linux", "freebsd"] {
+            assert_eq!(
+                queued_edit_key_id_for(host),
+                "alt+up",
+                "{host} must declare the registry binding for {QUEUED_EDIT_BINDING}"
+            );
+        }
+        // Windows-flavoured defaults declare `alt+q` for the same binding while
+        // the translator still consumes `KeyCode::Up + ALT`, so the hint names
+        // the chord the binary accepts. Recorded in the TODO above.
+        assert_eq!(queued_edit_key_id_for("windows"), QUEUED_EDIT_TRANSLATOR_CHORD);
+        assert_eq!(
+            keybindings::default_definitions("win32", false)
+                .into_iter()
+                .find(|definition| definition.id == QUEUED_EDIT_BINDING)
+                .map(|definition| definition.default_keys),
+            Some(vec!["alt+q".to_owned()]),
+            "the recorded Windows divergence must stay real"
+        );
+    }
+
+    #[test]
+    fn queued_edit_hint_names_option_on_macos_and_alt_elsewhere() {
+        assert_eq!(queued_edit_hint("alt+up", true), "(option+↑ to edit)");
+        assert_eq!(queued_edit_hint("alt+up", false), "(alt+↑ to edit)");
+        // Modifier and key display mapping is total, so an unexpected binding
+        // never renders as an empty affordance.
+        assert_eq!(key_display_label("ctrl+alt+down", true), "ctrl+option+↓");
+        assert_eq!(key_display_label("super+up", false), "super+↑");
+        assert_eq!(key_display_label("alt+q", true), "option+q");
+    }
 }

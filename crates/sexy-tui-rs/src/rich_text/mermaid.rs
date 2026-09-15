@@ -3,34 +3,68 @@
 //! Upstream delegates diagram layout to the external `grok-mermaid` package
 //! (`packages/coding-agent/src/modes/interactive/components/mermaid.ts`), which
 //! this workspace cannot depend on (no network dependency in a renderer).
-//! This module is an honest subset: it parses `graph`/`flowchart` with
-//! `TD`/`TB`/`BT`/`LR`/`RL` direction, node definitions with labels, and
-//! chained/plain links, then lays the graph out on a character grid and emits
+//! [`render_mermaid`] is an honest subset: it parses `graph`/`flowchart` with
+//! `TD`/`TB`/`LR` direction, node definitions with labels, and chained/plain
+//! links, layers the graph, lays it out on a character grid and emits
 //! box-drawing output.
 //!
-//! Supported
-//! - header: `graph <dir>`, `flowchart <dir>`
+//! # Contract
+//!
+//! [`render_mermaid`] returns [`MermaidArt`] (one plain-text line per terminal
+//! row plus the widest row's cell width) or a typed [`MermaidError`]. It never
+//! panics, never blocks on I/O, never returns a partially drawn diagram, and
+//! never exceeds the size limits exported by this module.
+//!
+//! # Supported
+//!
+//! - header: `graph <dir>` / `flowchart <dir>` with `TD`, `TB` or `LR`, with an
+//!   optional trailing `;`
 //! - node ids (`[A-Za-z0-9_.-]`, stopped at a link token) with or without labels
 //! - shapes `id[label]`, `id(label)`, `id{label}`, `id((label))`, `id([label])`,
 //!   `id[[label]]`, `id{{label}}` — every shape renders as a box (the shape
 //!   outline itself is not modelled)
 //! - `:::class` decorations are ignored, as are `classDef`/`class`/`style`/
 //!   `linkStyle`/`click` directives and `%%` comments
-//! - links `-->`, `->`, `---`, `-.->`, `==>` with an optional `|label|`
-//! - link direction `BT`/`RL` mirrors the arrow head of `TD`/`LR`
+//! - links `-->`, `->`, `-.->`, `==>` (arrow head) and `---` (no head), each
+//!   with an optional `|label|`; link *styling* is not modelled, so `-.->` and
+//!   `==>` draw the same solid connector as `-->`
+//! - quoted labels, wide (CJK) labels, and disconnected components (rendered as
+//!   separate bands of rows)
 //!
-//! Fails closed (typed [`MermaidError`], never a panic or unbounded work)
+//! # Fails closed (typed [`MermaidError`], never a panic or unbounded work)
+//!
 //! - any other diagram type (`pie`, `sequenceDiagram`, `stateDiagram`, …)
+//! - `BT`/`RL` layouts (accepted by Mermaid, but mirroring the grid would
+//!   reverse node labels, so they are rejected rather than misrendered)
 //! - subgraphs, `&` node lists, `A -- text --> B` inline link labels, other
 //!   arrow tokens, unbalanced node brackets
 //! - cyclic graphs and any edge that skips a layer (a longer path exists), so
 //!   routing stays inside the gap between two adjacent layers
 //! - inputs over the size limits in this module
 //!
+//! # Bounds
+//!
+//! Source bytes, node count, edge count, label width and the rendered diagram
+//! size are all capped by the `MAX_MERMAID_*` constants; over-limit input
+//! returns [`MermaidError::TooLarge`]. Layering is Kahn's algorithm (linear),
+//! and every layout loop runs a bounded number of times over at most the
+//! accepted node/edge counts.
+//!
+//! # Output and consumers
+//!
 //! The output is plain text. Upstream returns semantic style spans
 //! (`border`/`text`/`edge`/…) and a warnings channel; theming and the
 //! "unrendered diagram" fallback belong to the embedding component, which this
-//! engine reports through `Err` instead of partially-rendered output.
+//! engine reports through `Err` instead of partially-rendered output. The
+//! embedding component should also map `Err` onto upstream's
+//! "could not render" fallback text.
+//!
+//! # Tests
+//!
+//! `crates/sexy-tui-rs/tests/mermaid_render.rs` locks the observed box-drawing
+//! output for every supported construct, the fail-closed error messages, the
+//! width invariant (no row wider than [`MermaidArt::width`]) and the size
+//! limits.
 
 use crate::width::display_width;
 
@@ -126,6 +160,9 @@ struct Edge {
     from: usize,
     to: usize,
     label: Option<String>,
+    /// `false` for the undirected `---` link, which draws a plain connector
+    /// instead of an arrow head.
+    directed: bool,
 }
 
 /// Render a Mermaid `graph`/`flowchart` block as box-drawing text.
@@ -152,13 +189,29 @@ pub fn render_mermaid(source: &str) -> Result<MermaidArt, MermaidError> {
             ),
         });
     }
-    let lines: Vec<String> = canvas
-        .rows
-        .iter()
-        .map(|row| row.iter().collect::<String>().trim_end().to_owned())
-        .collect();
+    let lines: Vec<String> = canvas.rows.iter().map(|row| row_to_line(row)).collect();
     let width = lines.iter().map(|line| display_width(line)).max().unwrap_or(0);
     Ok(MermaidArt { lines, width })
+}
+
+/// Join one grid row, dropping the grid cell that a double-width glyph covers.
+///
+/// A wide glyph occupies two terminal columns but one grid cell, so the cell a
+/// `Canvas::text` caller advanced past must not be emitted: the terminal
+/// already advances two columns for the glyph itself. Without this the right
+/// border of every box with a CJK label drifts one column right.
+fn row_to_line(row: &[char]) -> String {
+    let mut line = String::with_capacity(row.len());
+    let mut covered = 0usize;
+    for &character in row {
+        if covered > 0 {
+            covered -= 1;
+            continue;
+        }
+        covered = display_width(&character.to_string()).saturating_sub(1);
+        line.push(character);
+    }
+    line.trim_end().to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +271,8 @@ fn boundary(rest: &str) -> bool {
 }
 
 fn parse_header(line: &str) -> Result<Direction, MermaidError> {
+    // Mermaid tolerates a trailing statement terminator on the header line.
+    let line = line.trim_end().trim_end_matches(';').trim_end();
     let mut parts = line.split_whitespace();
     let keyword = parts.next().unwrap_or_default().to_ascii_lowercase();
     if keyword != "graph" && keyword != "flowchart" {
@@ -228,8 +283,8 @@ fn parse_header(line: &str) -> Result<Direction, MermaidError> {
     let direction = match parts.next().map(str::to_ascii_uppercase).as_deref() {
         Some("TD") | Some("TB") => Direction::TopDown,
         Some("LR") => Direction::LeftRight,
-        Some("BT") => Direction::TopDown,
-        Some("RL") => Direction::LeftRight,
+        // `BT`/`RL` would need a mirrored grid, which would reverse the node
+        // labels; reject instead of drawing the wrong picture.
         other => {
             return Err(MermaidError::UnsupportedDiagram {
                 header: other.unwrap_or(line).to_owned(),
@@ -273,6 +328,7 @@ fn parse_statement(
     let mut position = 0usize;
     let mut pending_from: Option<usize> = None;
     let mut pending_label: Option<Option<String>> = None;
+    let mut pending_directed = true;
 
     loop {
         position = skip_spaces(&characters, position);
@@ -295,6 +351,7 @@ fn parse_statement(
                 from,
                 to: index,
                 label: pending_label.take().flatten(),
+                directed: pending_directed,
             });
         }
 
@@ -305,7 +362,7 @@ fn parse_statement(
         if characters[position] == '&' {
             return Err(syntax(line, "node lists with `&` are not supported".to_owned()));
         }
-        let (_, next) = read_link(&characters, position).ok_or_else(|| {
+        let (token, next) = read_link(&characters, position).ok_or_else(|| {
             syntax(
                 line,
                 format!("expected a link, found \"{}\"", rest(&characters, position)),
@@ -322,6 +379,7 @@ fn parse_statement(
         }
         pending_from = Some(index);
         pending_label = Some(label);
+        pending_directed = token != "---";
     }
 }
 
@@ -341,6 +399,9 @@ fn skip_class_annotation(characters: &[char], mut position: usize) -> usize {
         let mut cursor = skip_spaces(characters, position);
         if characters.get(cursor) == Some(&':') && characters.get(cursor + 1) == Some(&':') {
             cursor += 2;
+            while characters.get(cursor) == Some(&':') {
+                cursor += 1;
+            }
             while cursor < characters.len()
                 && (characters[cursor].is_alphanumeric() || characters[cursor] == '_' || characters[cursor] == '-')
             {
@@ -684,7 +745,7 @@ fn layout_left_right(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
                 canvas.put(x, end_y, '─');
             }
         }
-        canvas.put(end_x, end_y, '▶');
+        canvas.put(end_x, end_y, if edge.directed { '▶' } else { '─' });
     }
     canvas
 }
@@ -725,7 +786,7 @@ fn layout_top_down(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
             for y in start_y + 1..end_y.saturating_sub(1) {
                 canvas.put(start_x, y, '│');
             }
-            canvas.put(end_x, end_y.saturating_sub(1), '▼');
+            canvas.put(end_x, end_y.saturating_sub(1), if edge.directed { '▼' } else { '│' });
         } else {
             let jog_y = end_y.saturating_sub(2);
             for y in start_y + 1..jog_y {
@@ -749,7 +810,7 @@ fn layout_top_down(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
                 jog_y,
                 if start_x < end_x { '┐' } else { '┌' },
             );
-            canvas.put(end_x, end_y.saturating_sub(1), '▼');
+            canvas.put(end_x, end_y.saturating_sub(1), if edge.directed { '▼' } else { '│' });
         }
         if let Some(label) = &edge.label {
             canvas.text(start_x + 2, start_y + 1, label);

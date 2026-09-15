@@ -111,6 +111,23 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   handling, which on focus-out clears selection press, auto-scroll, scrollbar
   hover/drag, pressed URL, the mouse gesture, and the last click.
 - Enabling `?1004h` remains terminal-backend-owned (as the brief states).
+- View-side wiring still to do (not in this worker's paths):
+  `crates/octet-coding-agent/src/tui/view/viewport.rs` owns the rendered rows
+  (`transcript_lines` → `ShellState::rendered_transcript(width)`, cached in
+  `view/transcript_cache.rs` by width/dirty/overlay) and the scroll offset
+  (`ShellState::scroll_from_bottom`, normalised by
+  `max_scroll_from_bottom`/`resolved_scroll_from_bottom`). Exact change:
+  (1) build `text_editor::prompt_zones::PromptZones::scan(&*transcript_lines(state, width))`
+  whenever the row cache is rebuilt (same `dirty`/`width`/`overlay`
+  invalidation) and keep it on `ShellState`, since the markers are only present
+  in the cached rows before `sanitize_ordinary_surface_cell` strips escapes at
+  paint time; (2) add `scroll_to_previous_prompt`/`scroll_to_next_prompt` next
+  to `InteractiveShell::scroll`/`scroll_lines` (`tui/view.rs:4350`, `:4392`)
+  that take `PromptZones::previous_prompt`/`next_prompt` for the current
+  top/bottom visible row and convert the target row into `scroll_from_bottom`
+  with the same `max_scroll_from_bottom` clamp; (3) bind those actions in
+  `tui/keymap.rs` (upstream binds them in `tui-alt-screen.ts::scrollToPrompt`;
+  `InputAction::PageUp`/`PageDown` already exist as the scrolling precedent).
 
 ## Roadmap #349 Alt+Up queue editing — Landed (keymap layer)
 
@@ -122,20 +139,86 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
 - Tests: `queued_controls_are_one_shot_and_slash_escape_keeps_ownership` plus
   the updated queue/dispatch expectations.
 
-## 2c.3 LaTeX rendering — Blocked (missing primitive)
+## 2c.3 LaTeX rendering — Landed
 
-Upstream `packages/tui/src/latex.ts` (1394 lines: symbol tables, a
-`LatexParser`, fraction/operator/matrix layout nodes, and `renderLatex`) has no
-Rust equivalent in the workspace. A faithful port is a dedicated deliverable;
-a partial port would misrender unsupported input instead of returning
-`undefined`. Not attempted here.
+- Source: `crates/sexy-tui-rs/src/rich_text/latex/mod.rs` +
+  `crates/sexy-tui-rs/src/rich_text/latex/tables.rs`. Entry point
+  `sexy_tui_rs::rich_text::latex::render_latex(&str, RenderLatexOptions) -> Option<String>`,
+  with the upstream contract: `Some(text)` or `None` (the upstream `undefined`
+  result) — never a panic, never a partial guess.
+- Upstream anchor: `packages/tui/src/latex.ts` (1394 lines: symbol tables,
+  `LatexParser`, fraction/operator/matrix layout) at
+  `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`.
+- Covered: the generated symbol tables (224 symbols, 88 relation commands, 32
+  named operators, blackboard/negated/accent/sub-superscript tables),
+  sub/superscripts, `\frac`/`\dfrac`/`\tfrac`, `\sqrt[n]`, `\binom`, `\boxed`,
+  operator limits (`\sum_{i=1}^{n}` stacks its bounds in display mode;
+  `\limits`/`\nolimits` override), `\left…\right`/`\bigl…` sizing, and the
+  environment set `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`,
+  `Vmatrix`, `smallmatrix`, `array`, `cases`(`*`), `aligned`, `align`(`*`),
+  `alignedat`/`alignat`, `gather`ed, `multline`, `split`, `equation`(`*`).
+- Bounded: `MAX_LATEX_NESTING_DEPTH` (64) caps recursive descent; past the cap
+  the parser stops descending and returns `None`. Real-world nesting is far
+  below it. `None` is also returned for every command the reference renderer
+  refuses (`\cfrac`, `\genfrac`, `\cancel`, `\phantom`, `\hspace`,
+  `\xrightarrow`, `\verb`, `\def`, `\usepackage`, `tikzpicture`, unknown
+  commands, unbalanced groups).
+- Port bug found and fixed by this row: the recursive parser had **no depth
+  bound**, so a chain like `\frac{`×N (or `{`×N, or nested `cases`) exhausted
+  the thread stack and *aborted the process* — `cargo test -p sexy-tui-rs` was
+  red because of it. The parser now fails closed, and once an expression is
+  known to be unrenderable it stops descending (without that, the
+  `\frac` → argument → `\frac` chain kept re-entering on the same unconsumed
+  token and grew with the input).
+- Tests: `crates/sexy-tui-rs/tests/latex_render.rs`, 16 tests. Run:
+  `cargo test -p sexy-tui-rs --test latex_render` =>
+  `test result: ok. 16 passed; 0 failed` (upstream `latex.test.ts` corpus,
+  captured display/inline layout corpora, operator-limit, matrix-delimiter,
+  fail-closed and nesting tests).
+- Differential oracle: the real upstream `latex.ts` run under Node 26 with its
+  real `visibleWidth` against this port over 2913 cases (upstream suite +
+  curated real LaTeX + 2626 randomized token-soup cases) => **0 divergences**.
+  The only observed differences (11 of 3000 randomized cases) are inputs
+  containing non-BMP characters, where the reference splits UTF-16 surrogate
+  halves and the port indexes `char`s.
+- Not modelled: ANSI styling (the renderer returns semantic text; the
+  embedding component styles it).
 
-## 2c.4 Mermaid box-drawing diagrams — Blocked (missing primitive)
+## 2c.4 Mermaid box-drawing diagrams — Landed (bounded subset)
 
-Upstream
-`packages/coding-agent/src/modes/interactive/components/mermaid.ts` delegates
-the actual diagram layout to the external `grok-mermaid` package
-(`render` → `MermaidArt`) and then re-emits styled rows as Markdown code spans.
-No Rust Mermaid graph-layout engine exists in the workspace; the row requires a
-new primitive (Mermaid source → styled box-drawing art with width/warning
-metadata).
+- Source: `crates/sexy-tui-rs/src/rich_text/mermaid.rs`, entry point
+  `sexy_tui_rs::rich_text::mermaid::render_mermaid(&str) -> Result<MermaidArt, MermaidError>`.
+- Upstream anchor:
+  `packages/coding-agent/src/modes/interactive/components/mermaid.ts` delegates
+  layout to the external `grok-mermaid` package. That dependency cannot be added
+  here (no network/npm dependency in a renderer), so this row ships a
+  self-contained engine instead of a port.
+- Covered: `graph`/`flowchart` with `TD`/`TB`/`LR` (with optional `;`), node ids
+  with or without labels, the label shapes `[]`, `()`, `{}`, `(())`, `([])`,
+  `[[]]`, `{{}}` (all drawn as a box), chained and repeated links, `-->`/`->`
+  (arrow head), `---` (no head), `-.->`/`==>` (arrow head; stroke styling not
+  modelled), `|label|` edge labels, `:::class` decorations, `classDef`/`class`/
+  `style`/`linkStyle`/`click` directives, `%%` comments, quoted and CJK labels,
+  and disconnected components.
+- Fails closed with a typed `MermaidError` (no panic, no partial diagram, no
+  unbounded work): other diagram types (`pie`, `sequenceDiagram`, …), `BT`/`RL`
+  (rejected rather than misrendered — mirroring the grid would reverse labels),
+  subgraphs, `&` node lists, `A -- text --> B` inline labels, other arrow
+  tokens, unbalanced brackets, cycles, edges that skip a layer, and anything
+  over `MAX_MERMAID_*` (16 KiB source, 64 nodes, 256 edges, 48-cell labels,
+  400×200 art).
+- Not modelled: shape outlines (diamonds/stadiums render as boxes), link stroke
+  styling, subgraphs, `BT`/`RL`, upstream's style-span/warning channels, and
+  the "unrendered diagram" fallback text — the embedding component owns them
+  and should map `Err` onto that fallback. **No consumer is wired yet**
+  (`crates/octet-coding-agent` has no `rich_text::mermaid` call site).
+- Tests: `crates/sexy-tui-rs/tests/mermaid_render.rs`, 10 tests. Run:
+  `cargo test -p sexy-tui-rs --test mermaid_render` =>
+  `test result: ok. 10 passed; 0 failed` (22 supported goldens, 16 fail-closed
+  messages, width invariant, wide-label alignment, size limits).
+- Fixed while landing this row: `:::` class annotations parsed only two colons
+  (so `A[Foo]:::highlight` failed), `BT`/`RL` were silently drawn as `TD`/`LR`,
+  `---` drew an arrow head, a trailing `;` on the header line was rejected, and
+  a CJK label pushed the box's right border one column right (the covered cell
+  of a double-width glyph was emitted as a space).
+

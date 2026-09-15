@@ -28,10 +28,181 @@ const ACTIVITY_RAINBOW: [Rgb; 7] = [
 // readable on representative composited surfaces (#404040 and #e0e0e0). The
 // actual terminal background can still differ; the PTY fixture is not a probe
 // of arbitrary transparency or a user's physical terminal.
-const ACTIVITY_DARK_BASE_LUMINANCE: f64 = 0.78;
-const ACTIVITY_DARK_SWEEP_LUMINANCE: f64 = 0.55;
+//
+// Contrast, not taste, sets the outer bounds. `nearest_ansi256` guarantees
+// every emitted cell stays within a 1.2:1 contrast ratio of the requested
+// colour, so a requested luminance `L` may reach `1.2 * (L + 0.05) - 0.05`
+// after quantization. Against the composite surfaces the existing matrix pins
+// (#404040, relative luminance ~0.051, and #e0e0e0, ~0.745):
+//
+//   dark  floor  0.50: (0.50 + 0.05) / 1.2 = 0.458 -> 0.508 / 0.101 = 5.0:1
+//   light ceiling 0.09: 1.2 * 0.14 - 0.05 = 0.118 -> 0.795 / 0.168 = 4.7:1
+//
+// The *separation* between the two is what was reported as "too subtle". A
+// resting foreground must move far enough that the travelling highlight is
+// unmistakable, so both profiles now separate by at least 0.35 (dark) and
+// 0.08 (light, which the light profile's contrast ceiling caps) of relative
+// luminance instead of 0.23 and 0.04 (0.01 -> 0.05, essentially invisible).
+const ACTIVITY_DARK_BASE_LUMINANCE: f64 = 0.85;
+const ACTIVITY_DARK_SWEEP_LUMINANCE: f64 = 0.50;
 const ACTIVITY_LIGHT_BASE_LUMINANCE: f64 = 0.01;
-const ACTIVITY_LIGHT_SWEEP_LUMINANCE: f64 = 0.05;
+const ACTIVITY_LIGHT_SWEEP_LUMINANCE: f64 = 0.09;
+
+/// The `Working` rainbow is clamped to its own readable band. These are
+/// deliberately separate from the resting baselines above: retuning resting
+/// contrast must never silently rewrite the established rainbow identity. The
+/// dark floor sits inside the sweep band (so the rainbow centre stays a
+/// visible darkening) and the light ceiling is the light-profile sweep band,
+/// so a rainbow centre always moves at least as far from the resting colour as
+/// the plain sweep does.
+const ACTIVITY_RAINBOW_DARK_MIN_LUMINANCE: f64 = 0.62;
+const ACTIVITY_RAINBOW_LIGHT_MAX_LUMINANCE: f64 = ACTIVITY_LIGHT_SWEEP_LUMINANCE;
+
+/// Upper bound on a tint entry's channel spread. Hues differ in how much
+/// chroma their luminance budget allows, so the cap keeps the travelling tint
+/// from swinging between pastel and neon.
+const ACTIVITY_TINT_MAX_SPREAD: f64 = 170.0;
+
+/// Which chromatic ramp an activity label carries. A ramp is a list of HSV
+/// hues; the `Working` and `Thinking` bands are deliberately disjoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivityTint {
+    /// Warm amber → coral (hue 0°..45°).
+    Working,
+    /// Cool cyan → violet (hue 190°..262°).
+    Thinking,
+}
+
+const ACTIVITY_WORKING_HUES: [f64; 4] = [0.0, 14.0, 30.0, 45.0];
+const ACTIVITY_THINKING_HUES: [f64; 4] = [190.0, 212.0, 236.0, 262.0];
+
+impl ActivityTint {
+    fn hues(self) -> &'static [f64] {
+        match self {
+            Self::Working => &ACTIVITY_WORKING_HUES,
+            Self::Thinking => &ACTIVITY_THINKING_HUES,
+        }
+    }
+}
+
+fn activity_tint(label: &str) -> Option<ActivityTint> {
+    match label {
+        "Working" => Some(ActivityTint::Working),
+        "Thinking" => Some(ActivityTint::Thinking),
+        _ => None,
+    }
+}
+
+/// The channel spread of `hue`'s colour family offset by one grey amount.
+///
+/// Adding the same amount to all three channels moves luminance monotonically
+/// and leaves both the spread and the hue untouched, which is exactly the
+/// property the quantized-offset construction below depends on.
+fn activity_hue_family(hue: f64, spread: f64, offset: f64) -> Rgb {
+    let sector = hue.rem_euclid(360.0) / 60.0;
+    let fraction = sector - sector.floor();
+    let pure = match sector as usize % 6 {
+        0 => (1.0, fraction, 0.0),
+        1 => (1.0 - fraction, 1.0, 0.0),
+        2 => (0.0, 1.0, fraction),
+        3 => (0.0, 1.0 - fraction, 1.0),
+        4 => (fraction, 0.0, 1.0),
+        _ => (1.0, 0.0, 1.0 - fraction),
+    };
+    let channel = |value: f64| (value + offset).round().clamp(0.0, 255.0) as u8;
+    (
+        channel(pure.0 * spread),
+        channel(pure.1 * spread),
+        channel(pure.2 * spread),
+    )
+}
+
+/// Whether `hue`'s `spread`-wide family can contain `target` luminance: its
+/// dark end is at or below the target and its bright end at or above it. Both
+/// ends move away from the target as the spread grows, so this is monotone.
+fn activity_spread_reaches(hue: f64, spread: f64, target: f64) -> bool {
+    let dark = activity_hue_family(hue, spread, 0.0);
+    if activity_luminance(dark) > target {
+        return false;
+    }
+    let bright = activity_hue_family(hue, spread, 255.0 - spread);
+    activity_luminance(bright) >= target
+}
+
+/// The widest family of `hue` that still reaches `target` luminance, capped at
+/// [`ACTIVITY_TINT_MAX_SPREAD`].
+///
+/// Hues do not share one luminance budget: at the dark profile's sweep
+/// luminance a red entry can only hold a modest spread while a cyan entry
+/// holds a large one, and the light profile's low ceiling pushes every entry
+/// into the dark end of its family. Taking the most chroma each hue can afford
+/// (instead of one nominal value some hues could not reach without leaving the
+/// contrast band) keeps the tint inside the palette's promise.
+fn activity_tint_spread(hue: f64, target: f64) -> f64 {
+    let (mut low, mut high) = (0.0, ACTIVITY_TINT_MAX_SPREAD);
+    for _ in 0..18 {
+        let spread = (low + high) / 2.0;
+        if activity_spread_reaches(hue, spread, target) {
+            low = spread;
+        } else {
+            high = spread;
+        }
+    }
+    low.round()
+}
+
+/// Build one tint entry: HSV `hue` degrees, the widest affordable spread, and
+/// a relative luminance as close to `target` as the family allows.
+fn activity_hue_color(hue: f64, target: f64) -> Rgb {
+    let spread = activity_tint_spread(hue, target);
+    let (mut low, mut high) = (0.0, 255.0 - spread);
+    for _ in 0..24 {
+        let amount = (low + high) / 2.0;
+        if activity_luminance(activity_hue_family(hue, spread, amount)) < target {
+            low = amount;
+        } else {
+            high = amount;
+        }
+    }
+    activity_hue_family(hue, spread, high)
+}
+
+/// Resolve one ramp entry for the current cell.
+///
+/// The entry is built at the cell's *own* resting luminance, so the tint adds
+/// hue and chroma only: it can never move a cell outside the luminance band the
+/// plain palette already proved contrast-safe, and the luminance falloff stays
+/// the plain one. Pinning to the profile-wide sweep luminance instead would let
+/// a tinted neighbour overshoot the centre (measured), which is exactly the
+/// "centre is the most distinct cell" property this must keep.
+fn activity_tint_color(tint: ActivityTint, luminance: f64, index: isize, shimmer_frame: usize) -> Rgb {
+    let hues = tint.hues();
+    let hue = hues[ramp_index(hues, index, shimmer_frame)];
+    activity_hue_color(hue, luminance)
+}
+
+/// The max/ultra emphasis keeps the established whole-label rainbow. It is
+/// clamped to its own readable band, separate from the resting baselines, so
+/// retuning resting contrast never silently rewrites the rainbow identity. The
+/// dark floor sits inside the sweep band and the light ceiling matches the
+/// light-profile sweep band, so a rainbow centre still moves at least as far
+/// from the resting colour as the plain sweep does.
+fn activity_rainbow_color(
+    background: TerminalBackground,
+    index: isize,
+    shimmer_frame: usize,
+) -> Rgb {
+    let color = ACTIVITY_RAINBOW[ramp_index(&ACTIVITY_RAINBOW, index, shimmer_frame)];
+    match background {
+        TerminalBackground::Dark => {
+            activity_color_at_least(color, ACTIVITY_RAINBOW_DARK_MIN_LUMINANCE)
+        }
+        TerminalBackground::Light => {
+            activity_color_at_most(color, ACTIVITY_RAINBOW_LIGHT_MAX_LUMINANCE)
+        }
+        TerminalBackground::Unknown => color,
+    }
+}
 
 fn mix_channel(base: u8, accent: u8, strength_percent: u16) -> u8 {
     let base = u32::from(base);
@@ -138,9 +309,10 @@ fn activity_shimmer_palette(theme: &OctetTheme, reasoning: &AssistantBlock) -> O
     Some(palette)
 }
 
-fn rainbow_index(index: isize, shimmer_frame: usize) -> usize {
-    (index - (shimmer_frame % ACTIVITY_RAINBOW.len()) as isize)
-        .rem_euclid(ACTIVITY_RAINBOW.len() as isize) as usize
+/// Index into one ramp so it advances one entry per shimmer tick and wraps at
+/// the ramp's own length.
+fn ramp_index<T>(ramp: &[T], index: isize, shimmer_frame: usize) -> usize {
+    (index - (shimmer_frame % ramp.len()) as isize).rem_euclid(ramp.len() as isize) as usize
 }
 
 fn activity_shimmer_color(
@@ -156,10 +328,18 @@ fn activity_shimmer_color(
     // trailing space for the highlight to leave the entire label before looping.
     let cycle = label.width() + ACTIVITY_LABEL_OFFSET as usize + 2;
     let center = (shimmer_frame % cycle) as isize - ACTIVITY_LABEL_OFFSET;
+    // The falloff is deliberately wider than the old 100/78/48/0 ramp. With
+    // the increased luminance separation one lit neighbour cell used to sit at
+    // ~78% of a 0.04 move (invisible); now four trailing cells stay visibly
+    // graded (84/64/40/18) so the highlight reads as a moving sweep rather than
+    // a single blinking cell. Every step is monotone in distance, so the centre
+    // remains the most distinct cell.
     let sweep_strength = match (index - center).unsigned_abs() {
         0 => 100,
-        1 => 78,
-        2 => 48,
+        1 => 84,
+        2 => 64,
+        3 => 40,
+        4 => 18,
         _ => match background {
             TerminalBackground::Unknown => 28,
             TerminalBackground::Dark | TerminalBackground::Light => 0,
@@ -173,24 +353,33 @@ fn activity_shimmer_color(
         mix_channel(baseline.1, sweep.1, sweep_strength),
         mix_channel(baseline.2, sweep.2, sweep_strength),
     );
+    // The status's own chromatic ramp travels with the sweep: resting cells
+    // (strength 0) keep the plain foreground, so the label never becomes a
+    // flat wash of hue. Unknown backgrounds keep the established neutral
+    // fallback and never take a label tint.
+    let tinted = match activity_tint(label) {
+        Some(tint) if background != TerminalBackground::Unknown => {
+            let accent =
+                activity_tint_color(tint, activity_luminance(normal), index, shimmer_frame);
+            (
+                mix_channel(normal.0, accent.0, sweep_strength),
+                mix_channel(normal.1, accent.1, sweep_strength),
+                mix_channel(normal.2, accent.2, sweep_strength),
+            )
+        }
+        _ => normal,
+    };
+    // `Working` keeps the established whole-label rainbow: the max/ultra level
+    // emphasis tints every cell, not only the travelling centre.
     if label == "Working" && rainbow_strength > 0 {
-        let rainbow = ACTIVITY_RAINBOW[rainbow_index(index, shimmer_frame)];
-        let rainbow = match background {
-            TerminalBackground::Dark => {
-                activity_color_at_least(rainbow, ACTIVITY_DARK_BASE_LUMINANCE)
-            }
-            TerminalBackground::Light => {
-                activity_color_at_most(rainbow, ACTIVITY_LIGHT_BASE_LUMINANCE)
-            }
-            TerminalBackground::Unknown => rainbow,
-        };
+        let rainbow = activity_rainbow_color(background, index, shimmer_frame);
         (
-            mix_channel(normal.0, rainbow.0, rainbow_strength),
-            mix_channel(normal.1, rainbow.1, rainbow_strength),
-            mix_channel(normal.2, rainbow.2, rainbow_strength),
+            mix_channel(tinted.0, rainbow.0, rainbow_strength),
+            mix_channel(tinted.1, rainbow.1, rainbow_strength),
+            mix_channel(tinted.2, rainbow.2, rainbow_strength),
         )
     } else {
-        normal
+        tinted
     }
 }
 
@@ -474,6 +663,42 @@ mod tests {
         activity_luminance(rgb)
     }
 
+    /// Normalized absolute chroma: the sRGB channel spread in `[0, 1]`.
+    fn chroma(rgb: Rgb) -> f64 {
+        let max = f64::from(rgb.0.max(rgb.1).max(rgb.2));
+        let min = f64::from(rgb.0.min(rgb.1).min(rgb.2));
+        (max - min) / 255.0
+    }
+
+    fn hue_degrees(rgb: Rgb) -> f64 {
+        let channel = |value: u8| f64::from(value) / 255.0;
+        let (red, green, blue) = (channel(rgb.0), channel(rgb.1), channel(rgb.2));
+        let max = red.max(green).max(blue);
+        let min = red.min(green).min(blue);
+        let spread = max - min;
+        if spread <= f64::EPSILON {
+            return 0.0;
+        }
+        let sector = if max == red {
+            ((green - blue) / spread).rem_euclid(6.0)
+        } else if max == green {
+            (blue - red) / spread + 2.0
+        } else {
+            (red - green) / spread + 4.0
+        };
+        (sector * 60.0).rem_euclid(360.0)
+    }
+
+    fn contrast_ratio(first: f64, second: f64) -> f64 {
+        (first.max(second) + 0.05) / (first.min(second) + 0.05)
+    }
+
+    /// The colour the theme's own encoder emits for `color`, read back through
+    /// the same parser the render assertions use.
+    fn quantized(theme: &OctetTheme, color: Rgb) -> Rgb {
+        rendered_foregrounds(&theme.rgb_fg(color, "x"))[0]
+    }
+
     fn foreground_color_codes(rendered: &str) -> Vec<String> {
         rendered_foregrounds(rendered)
             .into_iter()
@@ -658,6 +883,206 @@ mod tests {
             activity_shimmer_palette(&light, &reasoning).expect("light activity palette");
         assert!(activity_luminance(dark_baseline) > activity_luminance(dark_sweep));
         assert!(activity_luminance(light_baseline) < activity_luminance(light_sweep));
+        // The maintainer read the previous separation as "too subtle": 0.23 for
+        // dark and 0.04 for light (0.01 -> 0.05). Both profiles must now move at
+        // least 0.08 of relative luminance, which is more than a single ANSI256
+        // grayscale step (~0.02 at these levels) can explain.
+        assert!(
+            activity_luminance(dark_baseline) - activity_luminance(dark_sweep) >= 0.30,
+            "dark sweep separation"
+        );
+        assert!(
+            activity_luminance(light_sweep) - activity_luminance(light_baseline) >= 0.08,
+            "light sweep separation"
+        );
+    }
+
+    /// The maintainer's acceptance criterion for the activity shimmer: the
+    /// travelling highlight must be *measurably* visible on both known terminal
+    /// profiles, for several modelled accents, while the resting colour keeps
+    /// its contrast.
+    ///
+    /// Thresholds, and why each cannot be satisfied by encoder rounding alone:
+    ///
+    /// * `MIN_LUMINANCE_DELTA = 0.06` relative luminance for true colour. The
+    ///   rejected light profile moved 0.04 (0.01 -> 0.05), which the maintainer
+    ///   reported as invisible. The ANSI256 grayscale tail (indices 232..255)
+    ///   steps in 10 sRGB units, i.e. ~0.02 relative luminance near the light
+    ///   profile's target band, so 0.06 is at least three quantization steps.
+    /// * ANSI256 cells are bounded by `nearest_ansi256`'s 1.2:1 contrast-ratio
+    ///   filter around the requested colour, which is the only reason a lower
+    ///   `MIN_LUMINANCE_DELTA_ANSI256 = 0.045` threshold is admissible: a 0.08
+    ///   requested separation can compress to
+    ///   `(0.09 + 0.05) / 1.2 - ((0.01 + 0.05) * 1.2 - 0.05) = 0.045` on the
+    ///   bound. The encoder is the limiter here, not the palette.
+    /// * `MIN_CHROMA_DELTA = 0.08` normalized channel spread. The fixed ANSI256
+    ///   color cube only moves in `40/255 = 0.157` chroma steps (levels
+    ///   `0,95,135,175,215,255`), so a 0.08 move is a real hue change rather
+    ///   than a rounding artifact.
+    /// * `MIN_RESTING_CONTRAST = 7.0`, WCAG AAA for body text, against the
+    ///   darkest and lightest representative composite surfaces. The resting
+    ///   colour is what the label shows for most of each cycle, so the visible
+    ///   highlight must not have been bought with a dimmer baseline.
+    #[test]
+    fn activity_shimmer_highlight_is_measurably_visible_on_both_profiles() {
+        const MIN_LUMINANCE_DELTA: f64 = 0.06;
+        const MIN_LUMINANCE_DELTA_ANSI256: f64 = 0.045;
+        const MIN_CHROMA_DELTA: f64 = 0.08;
+        const MIN_RESTING_CONTRAST: f64 = 7.0;
+        for (background, surfaces) in [
+            (TerminalBackground::Dark, [(38, 38, 38), (64, 64, 64)]),
+            (TerminalBackground::Light, [(245, 245, 245), (224, 224, 224)]),
+        ] {
+            for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+                let theme = theme::test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, true, depth),
+                );
+                let min_luminance_delta = match depth {
+                    ColorDepth::TrueColor => MIN_LUMINANCE_DELTA,
+                    _ => MIN_LUMINANCE_DELTA_ANSI256,
+                };
+                // The chroma claim is asserted on the exact encoder. ANSI256
+                // additionally passes every cell through `nearest_ansi256`,
+                // whose grid is sparse at the light profile's luminance band
+                // (the only chromatic entries near relative luminance 0.09 are
+                // saturated primaries), so a modest chroma can legitimately
+                // collapse onto a grey entry there. Luminance, ordering, and
+                // resting contrast are asserted at both depths.
+                let exact_colour = depth == ColorDepth::TrueColor;
+                for lab in [
+                    None,
+                    Some(ModelLab::OpenAi),
+                    Some(ModelLab::Alibaba),
+                    Some(ModelLab::Meta),
+                    Some(ModelLab::Google),
+                ] {
+                    let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
+                    let (palette_baseline, palette_sweep) =
+                        activity_shimmer_palette(&theme, &reasoning).expect("activity palette");
+                    // The lifecycle row is asserted against the palette itself:
+                    // it must render exactly the plain palette colours and gain
+                    // no tint at all. The two status rows must move at least as
+                    // far as that palette does *and* carry chroma.
+                    for (label, tinted) in [
+                        ("Working", true),
+                        ("Thinking", true),
+                        ("Compacting context", false),
+                    ] {
+                        // `ACTIVITY_LABEL_OFFSET` puts the sweep centre on the
+                        // first grapheme while the final grapheme is more than
+                        // four cells away, so one render shows the lit centre and
+                        // the resting colour side by side.
+                        let rendered =
+                            activity_shimmer_label(&theme, &reasoning, label, 2, 0);
+                        let colors = rendered_foregrounds(&rendered);
+                        assert_eq!(colors.len(), label.chars().count(), "{rendered:?}");
+                        let center = colors[0];
+                        let resting = *colors.last().expect("resting grapheme");
+                        assert_ne!(center, resting, "{background:?} {lab:?} {label}");
+
+                        let luminance_delta = (luminance(center) - luminance(resting)).abs();
+                        assert!(
+                            luminance_delta >= min_luminance_delta,
+                            "{background:?}/{depth:?}/{lab:?} {label}: centre {center:?} moves only {luminance_delta:.3} \
+                             of relative luminance from resting {resting:?}"
+                        );
+                        let chroma_delta = (chroma(center) - chroma(resting)).abs();
+                        if tinted && exact_colour {
+                            assert!(
+                                chroma_delta >= MIN_CHROMA_DELTA,
+                                "{background:?}/{depth:?}/{lab:?} {label}: centre {center:?} moves only \
+                                 {chroma_delta:.3} of chroma from resting {resting:?}"
+                            );
+                        }
+                        if !tinted {
+                            assert_eq!(
+                                center,
+                                quantized(&theme, palette_sweep),
+                                "{background:?}/{depth:?}/{lab:?} {label}: a lifecycle row must render \
+                                 the plain palette sweep, never a tint"
+                            );
+                            assert_eq!(
+                                resting,
+                                quantized(&theme, palette_baseline),
+                                "{background:?}/{depth:?}/{lab:?} {label}: a lifecycle row must rest on \
+                                 the plain palette baseline"
+                            );
+                        }
+
+                        // The centre is the most distinct cell, measured on the
+                        // luminance channel: every tint is pinned to the sweep
+                        // luminance and the falloff is monotone in distance, so
+                        // no neighbour may move further from the resting colour.
+                        // (Chroma is deliberately not part of this ordering: it
+                        // is carried per ramp entry, and each hue can afford a
+                        // different amount of it at one luminance.)
+                        let distinctness =
+                            |color: Rgb| (luminance(color) - luminance(resting)).abs();
+                        let center_distinctness = distinctness(center);
+                        // True colour is exact: the centre is strictly the cell
+                        // furthest from the resting colour. ANSI256 runs every
+                        // cell through `nearest_ansi256`, whose documented 1.2:1
+                        // contrast-ratio filter can lift one cell's luminance by
+                        // up to `1.2 * (L + 0.05) - 0.05 - L`; the same bound is
+                        // allowed here (0.10 for the dark profile, 0.03 for the
+                        // light one) and is still a small fraction of the
+                        // >= 0.35 / >= 0.08 move the centre must make.
+                        let ordering_tolerance = if exact_colour {
+                            0.0
+                        } else {
+                            let sweep_luminance = luminance(palette_sweep);
+                            1.2 * (sweep_luminance + 0.05) - 0.05 - sweep_luminance
+                        };
+                        for (index, color) in colors.iter().enumerate().skip(1) {
+                            assert!(
+                                distinctness(*color)
+                                    <= center_distinctness + ordering_tolerance + 1e-9,
+                                "{background:?}/{depth:?}/{lab:?} {label}: cell {index} {color:?} is \
+                                 at least as far from the resting colour as the centre {center:?}"
+                            );
+                        }
+
+                        for surface in surfaces {
+                            let contrast = contrast_ratio(luminance(resting), luminance(surface));
+                            assert!(
+                                contrast >= MIN_RESTING_CONTRAST,
+                                "{background:?}/{depth:?}/{lab:?} {label}: resting {resting:?} has only \
+                                 {contrast:.2}:1 against {surface:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `Working` and `Thinking` must never read as the same wash. Their ramps
+    /// are separated by more than 60 degrees of hue after the profile clamp, so
+    /// the two statuses stay distinguishable on both known backgrounds.
+    #[test]
+    fn working_and_thinking_sweeps_keep_disjoint_hue_bands() {
+        for (background, working_band, thinking_band) in [
+            (TerminalBackground::Dark, (0.0, 90.0), (150.0, 300.0)),
+            (TerminalBackground::Light, (0.0, 90.0), (150.0, 300.0)),
+        ] {
+            let theme = theme::test_theme_for(
+                background,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            );
+            for lab in [None, Some(ModelLab::Alibaba), Some(ModelLab::Meta)] {
+                let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
+                for (label, band) in [("Working", working_band), ("Thinking", thinking_band)] {
+                    let rendered = activity_shimmer_label(&theme, &reasoning, label, 2, 0);
+                    let center = rendered_foregrounds(&rendered)[0];
+                    let hue = hue_degrees(center);
+                    assert!(
+                        band.0 <= hue && hue <= band.1,
+                        "{background:?}/{lab:?} {label}: centre {center:?} has hue {hue:.1}, outside {band:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

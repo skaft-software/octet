@@ -13777,3 +13777,39 @@ fn queued_follow_up_preview_is_bounded_and_control_safe() {
         assert!(rows.iter().all(|row| !row.contains("\x1b[3J")));
     }
 }
+
+#[test]
+fn queued_follow_up_heading_advertises_the_platform_edit_hint() {
+    let mut steering_shell = InteractiveShell::test_shell();
+    steering_shell.queue_steering(&ComposedInput::from_text("steering only".into()));
+    let steering_only =
+        input_overlays::render_pending_steering(&steering_shell.state.borrow(), 80, 2);
+    let heading = strip_terminal_sequences(&steering_only[0]);
+    assert!(heading.contains("Steering"), "{heading:?}");
+    assert!(
+        !heading.contains("to edit"),
+        "admitted steering cannot be recalled, so it must not advertise an edit \
+         affordance: {heading:?}"
+    );
+
+    let mut shell = InteractiveShell::test_shell();
+    shell.queue_follow_up(ComposedInput::from_text("local follow-up".into()));
+    let with_follow_up = input_overlays::render_pending_steering(&shell.state.borrow(), 80, 2);
+    let heading = strip_terminal_sequences(&with_follow_up[0]);
+    let expected = if cfg!(target_os = "macos") {
+        "option+↑ to edit"
+    } else {
+        "alt+↑ to edit"
+    };
+    assert!(heading.contains(expected), "{heading:?}");
+    // The hint rides on the heading row and stays inside the viewport budget.
+    assert_eq!(with_follow_up.len(), 2);
+    assert_eq!(
+        strip_terminal_sequences(&with_follow_up[1]),
+        "  └ local follow-up"
+    );
+    for width in [20, 40, 80] {
+        let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10);
+        assert!(rows.iter().all(|row| visible_width(row) <= width as usize));
+    }
+}

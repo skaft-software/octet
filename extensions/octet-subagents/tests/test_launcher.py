@@ -26,14 +26,17 @@ except ImportError:  # unittest discover -s tests
 
 from fake_agent_sessions import fake_session_reference
 from octet_subagents.launcher import (
+    DETACHED_WORKER_NOT_OPENED_REASON,
     MAX_OPEN_ALL_PANES,
     MULTIPLEXERS,
+    PARKED_WORKER_NOT_OPENED_REASON,
     LaunchPlan,
     execute_plan,
     open_all,
     plan_argv_rows,
     plan_open_all,
     render_outcome,
+    skipped_worker_row,
 )
 from octet_subagents.model import Worker
 from octet_subagents.orchestrator import Orchestrator
@@ -403,6 +406,46 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([pane.resolvable for pane in plan.panes], [True, False, False])
         self.assertEqual(plan.blocked[1].blocked_reason, plan.panes[1].blocked_reason)
         self.assertIn("agent-session", plan.panes[1].blocked_reason)
+        # The blocked reason states the real, evidence-checked gap: the session
+        # store cannot resolve the reference, and the host's only resolver for it
+        # hands back a read-only locked inspection session -- the missing
+        # primitive is a *launchable* handle, not a resolver.
+        self.assertIn("octet --resume", plan.panes[1].blocked_reason)
+        self.assertIn("read-only", plan.panes[1].blocked_reason)
+        self.assertIn("launchable", plan.panes[1].blocked_reason)
+
+    def test_session_owned_workers_that_are_not_opened_are_named_with_a_reason(self):
+        """A detached or parked worker is reported, never silently dropped."""
+        detached = skipped_worker_row(worker("orphaned", name="detached", index=4))
+        parked = skipped_worker_row(worker("awaiting_approval", name="parked", index=7))
+        self.assertEqual([row["state"] for row in (detached, parked)], ["orphaned", "awaiting_approval"])
+        self.assertEqual([row["name"] for row in (detached, parked)], ["detached", "parked"])
+        self.assertEqual(detached["reason"], DETACHED_WORKER_NOT_OPENED_REASON)
+        self.assertEqual(parked["reason"], PARKED_WORKER_NOT_OPENED_REASON)
+        self.assertTrue(detached["reattachable"])
+        self.assertFalse(parked["reattachable"])
+        self.assertIn("Reattach", detached["reason"])
+        self.assertIn("stale pane", detached["reason"])
+        self.assertIn("unattended mutation", parked["reason"])
+
+        stub = Stub()
+        try:
+            with stub.path(TMUX=None):
+                plan, outcome = open_all(
+                    multiplexer="tmux",
+                    parent_session_id=PARENT_ID,
+                    workers=[],
+                    workspace=None,
+                )
+        finally:
+            stub.close()
+        text = render_outcome(plan, outcome, skipped=[detached, parked])
+        self.assertIn("1 pane(s) created, 0 blocked, 2 not opened, clean", text)
+        self.assertIn("- not opened detached worker (detached)", text)
+        self.assertIn("- not opened parked worker (parked)", text)
+        for secret in SECRETS.values():
+            self.assertNotIn(secret, text)
+            self.assertNotIn(secret, json.dumps([detached, parked]))
 
     def test_herdr_requires_ownership_and_builds_one_command_string(self):
         stub = Stub()
@@ -435,10 +478,11 @@ class PlanTests(unittest.TestCase):
             (os.path.join(stub.directory.name, "octet"), "--resume", PARENT_ID),
         )
         # The pane split and the submitted command are two separate argv calls.
+        # The split uses only the documented `--direction right` form.
         self.assertEqual(
             calls,
             [
-                ["pane", "split", "--current", "--direction", "down", "--no-focus"],
+                ["pane", "split", "--current", "--direction", "right", "--no-focus"],
                 [
                     "pane",
                     "run",
