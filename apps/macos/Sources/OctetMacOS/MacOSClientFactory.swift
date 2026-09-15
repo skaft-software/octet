@@ -1,13 +1,12 @@
 import Foundation
-import OctetServeClient
+import OctetServe
 
 /// Composition root for the native client. All transport, TLS, pairing,
 /// Keychain, replay, and idempotency behavior is supplied by apple-shared.
 enum MacOSClientFactory {
     static func make() -> ServeClient {
-        let deviceName = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
-            .flatMap { $0.isEmpty ? nil : $0 }
-            ?? "Mac"
+        let hostName = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let deviceName = hostName.isEmpty ? "Mac" : hostName
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         let configuration = ServeClientConfiguration(
             platform: .macOS,

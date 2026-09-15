@@ -152,8 +152,8 @@ impl TelemetryContext {
         })
     }
 
-    // Used by the generator-driven boundary wiring in row 3.5 and its tests.
-    #[allow(dead_code)]
+    /// Generator-driven boundary hook: opens the typed span for a run, turn,
+    /// provider, tool, compaction, or summary boundary.
     pub(crate) fn begin_typed<S: SpanSchema>(&self, start: S::Start) -> super::spans::SpanGuard {
         self.begin(SpanOptions {
             name: S::NAME.into(),
@@ -257,8 +257,7 @@ impl CompletionAttributes {
         self
     }
 
-    // Adapter-style completion recording used by the boundary wiring in row 3.5.
-    #[allow(dead_code)]
+    /// Adapter-style completion recording used to settle a boundary span.
     pub(crate) fn record(self, span: &TelemetrySpan) {
         if let Some(attributes) = attributes_of(&self) {
             span.set_attributes(attributes);

@@ -51,17 +51,40 @@ xcrun --sdk iphonesimulator swiftc -typecheck -target arm64-apple-ios16.0-simula
   Sources/OctetCompanionApp.swift Sources/OctetCompanion/*.swift Sources/OctetCompanion/Views/*.swift
 ```
 
-The Xcode application build also needs a compiling sibling
-`../apple-shared` package: `xcodegen generate --spec project.yml` followed by
-`xcodebuild -scheme OctetCompanion -destination 'generic/platform=iOS Simulator'`.
-At the time of writing `apps/apple-shared/Sources/OctetServe` does not compile
-(`WireEnums.swift` uses `extension` as an enum case name; `RuntimeModels.swift:44` is a
-collapsed line), so the application target cannot be linked yet. That package is
-owned outside this directory.
+The Xcode application build needs the sibling `../apple-shared` package, which now
+compiles. Build a copy outside the repository so the shared worktree stays clean:
+
+```sh
+rm -rf /tmp/octet-ios-verify && mkdir -p /tmp/octet-ios-verify
+cd apps && rsync -a --exclude '.build' ios apple-shared /tmp/octet-ios-verify/
+cd /tmp/octet-ios-verify/ios
+xcodegen generate --spec project.yml
+xcodebuild -project OctetCompanion.xcodeproj -scheme OctetCompanion \
+  -destination 'generic/platform=iOS Simulator' -configuration Debug CODE_SIGNING_ALLOWED=NO build
+```
+
+Generating the project in place matters: `INFOPLIST_FILE` and the `Resources`
+entry are relative to the project, so `xcodegen --project <elsewhere>` fails with
+`error: Build input file cannot be found: '.../Resources/Info.plist'`.
+
+Observed at the time of writing: `** BUILD SUCCEEDED **` (and
+`** TEST BUILD SUCCEEDED **` for `build-for-testing`), with only two warnings
+(`Metadata extraction skipped, no AppIntents.framework dependency found`,
+`UnnecessaryEffectMarker` at `CompanionSessionService.swift:57`). Running the tests
+*inside a simulator* still stops at app installation (`error: App installation
+failed: Unable to Install "Octet Companion"` under `CODE_SIGNING_ALLOWED=NO`),
+which is a signing/simulator gate rather than a source defect; the same 19 tests
+execute on the host through `swift test`.
+
+A `xcrun ... swiftc -typecheck` against the iOS 27 simulator SDK is a faster check
+for the `@main` entry point and the views.
 
 ## Status
 
-Source and unit tests are delivered. No Xcode application build, signing,
-notarization, installation, simulator run or device run has been performed or is
-claimed; the SwiftPM dependency on `../apple-shared` is intentionally absent from
-`Package.swift` until that package compiles.
+Source, unit tests, the SwiftPM host-side build and the Xcode application build
+(`build` and `build-for-testing`, unsigned, simulator destination) are delivered
+and were observed to succeed. Code signing, notarization, installation, a
+simulator test *run* and any device run have not been performed and are not
+claimed. The SwiftPM dependency on `../apple-shared` stays absent from
+`Package.swift` because this library imports nothing from it; the Xcode app target
+links it through `project.yml`.

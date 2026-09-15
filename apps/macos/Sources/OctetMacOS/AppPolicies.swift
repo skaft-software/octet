@@ -1,5 +1,5 @@
 import Foundation
-import OctetServeClient
+import OctetServe
 
 /// Pure app-side policies. Wire state and protocol transitions stay in
 /// OctetServeClient; these helpers only decide how native UI presents it.

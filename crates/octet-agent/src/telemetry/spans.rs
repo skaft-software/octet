@@ -240,8 +240,7 @@ pub(crate) struct SpanGuard {
 }
 
 impl SpanGuard {
-    // Used by the generator-driven boundary wiring in row 3.5 and its tests.
-    #[allow(dead_code)]
+    /// Context for children nested under this settled-on-drop guard.
     pub(crate) fn context(&self) -> TelemetryContext {
         self.span.context()
     }

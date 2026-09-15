@@ -1,7 +1,7 @@
 import AppKit
 import Combine
 import Foundation
-import OctetServeClient
+import OctetServe
 import UserNotifications
 
 @MainActor

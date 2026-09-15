@@ -156,6 +156,29 @@ impl ParityOptions {
         Ok(scope.into_iter().map(|scoped| scoped.id).collect())
     }
 
+    /// `--no-session` is headless-only, and the frontend must be chosen
+    /// explicitly.
+    ///
+    /// A bare `octet --no-session` in a terminal would be interactive, and piped
+    /// stdin promotes a bare invocation to print mode (`prepare_input`), so the
+    /// requirement is checked against the flags the operator actually typed
+    /// before stdin is consumed. The ephemeral transcript lives in a temporary
+    /// store whose lifetime is one non-interactive run.
+    pub fn require_headless_frontend(&self, cli: &Cli) -> anyhow::Result<()> {
+        if !self.no_session {
+            return Ok(());
+        }
+        let explicit_mode_is_headless = cli.mode.as_deref().is_some_and(|mode| {
+            mode.eq_ignore_ascii_case("json") || mode.eq_ignore_ascii_case("rpc")
+        });
+        if !cli.print && !explicit_mode_is_headless {
+            anyhow::bail!(
+                "--no-session requires a headless frontend (--print, --mode json, or --mode rpc)"
+            );
+        }
+        Ok(())
+    }
+
     pub fn select_session(&self, config: &mut Config) -> anyhow::Result<()> {
         if self.no_session {
             return self.begin_ephemeral(config);

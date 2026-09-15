@@ -97,13 +97,62 @@ that only those files can add.
   choosing between `reasoning_effort` and `prompt_mode` needs a per-model Mistral
   reasoning profile. Both live in `catalog.rs` (other worker).
 
+### 1c.6 Codex transport — dropped-socket protection (partial, landed)
+
+- Upstream: `api/openai-codex-responses.ts` (websocket transport, cached
+  `previous_response_id` continuation, `openai-beta: responses_websockets=…`,
+  stale-cursor retry `:337-344`).
+- Landed in `crates/octet-ai/src/responses_ws.rs` + `client.rs`: a pooled,
+  session-affine Responses websocket with ping/pong heartbeats carrying
+  sequence payloads, and recovery instead of `Err(heartbeat_timeout(...))`
+  (the pre-row behavior, which killed the turn):
+  - a drop **before** any consumer-visible output is retried on a fresh socket
+    with the full local body, bounded by `MAX_SOCKET_RECONNECT_ATTEMPTS = 3`
+    and `RECONNECT_TOTAL_BUDGET = 6s` (`reconnect_delay` backs off 250ms → 2s);
+  - a drop **after** output is resumed from the consumer's
+    `(response_id, sequence_number)` cursor, and every event at or before the
+    cursor is dropped, so each delta is delivered exactly once;
+  - when neither is possible (no resumer, no cursor, budget spent) the turn
+    fails closed with the typed
+    `StreamProtocolError::ResponseNotResumable { attempts, visible_output, detail }`
+    — never a fabricated terminal, never a silently lost turn;
+  - a provider failure terminal (`response.failed`, `cancelled`, unknown
+    `response.incomplete`) retires the socket and fences the pool key
+    **before** the event reaches the consumer, so an immediate agent retry takes
+    the safe HTTP fallback instead of racing another command onto the actor.
+- Tests (`cargo test -p octet-ai --lib responses_ws`): 25 tests, including
+  `a_drop_before_output_reconnects_and_resumes_with_each_delta_once`,
+  `a_mid_stream_drop_resumes_from_the_cursor_with_each_delta_once`,
+  `a_resume_that_drops_again_continues_from_the_advanced_cursor`,
+  `an_unrecoverable_mid_stream_drop_yields_the_typed_error_with_a_bounded_retry`,
+  `reconnect_attempts_and_total_wait_are_bounded`,
+  `a_drop_after_visible_output_fails_closed_without_resuming`,
+  `a_stale_continuation_is_retried_with_the_full_local_body`.
+- **Root cause found (unfixed, cross-boundary):** resumption only engages when
+  the request body asks the provider to retain the response
+  (`body_requests_storage`, `store: true`). Every live octet Codex request is
+  built by `ResponsesOptions::full_replay(...)` (`store: false`), so
+  `client.rs` never installs a `ResponseResumer` and a **post-output** drop still
+  fails closed with `ResponseNotResumable` instead of resuming. The
+  pre-output reconnect (the maintainer's long-first-token case) is unaffected.
+  Missing primitive: the agent-side builders
+  (`crates/octet-agent/src/agent.rs`, `durable_responses_options` /
+  `native_responses_options`) must opt into `store: true` (upstream Codex's
+  stored session) on a `WebSocketPreferred` Codex endpoint, or the codec must be
+  told to emit it by declaration data. Not changed here: it is a request-semantics
+  and provider-retention decision, and `agent.rs` is another worker's file.
+- Still blocked (rest of 1c.6): per-request `sse`/`websocket`/`websocket-cached`/
+  `auto` selection, an explicit connect deadline, and debug stats. Transport
+  selection today is endpoint-declared (`EndpointTransport::WebSocketPreferred`),
+  not per request.
+
 ## Blocked rows (exact missing primitive)
 
 | Row | Missing primitive | Owning file |
 | --- | --- | --- |
 | 1a.2 radius/pi-messages | New `Protocol::PiMessages` codec + client dispatch + catalog registration. Upstream `api/pi-messages.ts`: POST `<base>/messages` `{model,context,options}`, SSE `start/text_*/thinking_*/toolcall_*/done/error`, terminal usage, `rewrite` diagnostics, `providerThinkingLevel`, native block-end replacement. Not an OpenAI alias. | client dispatch lives in `client.rs`; registration in `catalog.rs`/`declarations` |
 | 1c.5 Bedrock profiles | Profile-ARN region resolution, application-inference-profile, web-identity and bearer-token auth | `auth.rs` (not in this worker's paths) |
-| 1c.6 Codex transport | Per-request `sse`/`websocket`/`websocket-cached`/`auto`, connect deadline, debug stats | `responses_ws.rs`, `client.rs` |
+| 1c.6 Codex transport | Dropped-socket recovery is landed (see above). Still missing: per-request `sse`/`websocket`/`websocket-cached`/`auto` selection, an explicit connect deadline, debug stats, and the `store: true` opt-in that would make cursor resumption reachable in live runs (agent-side builder) | `responses_ws.rs`, `client.rs` (landed); `crates/octet-agent/src/agent.rs` for the `store` opt-in |
 | 1c.7 Azure | Deployment map + per-call deployment/base-URL/resource/API-version overrides | `catalog.rs`, `client.rs` |
 | 1c.9 xAI Responses | encrypted-reasoning replay plumbing for the Responses shared module | `responses.rs` |
 | 1c.10 response metadata | `AssistantMessage.responseModel` / `providerThinkingLevel` / `rawStopReason` / `diagnostics` / `ToolResult.usage` are public `Response` fields consumed across `octet-agent`/`octet-coding-agent`; adding them changes every constructor outside this worker's paths | `types.rs` + downstream crates |

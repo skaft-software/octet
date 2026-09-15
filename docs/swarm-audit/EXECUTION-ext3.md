@@ -358,3 +358,159 @@ START 2026-09-15T16:50:13Z ext7 alive
 - Workspace hygiene note: `swift build`/`swift test` created untracked build outputs under
   `apps/ios/.build/` (`out/`, `debug`, `manifest.pif`, `.lock`); `.build` is already tracked in this
   repo from an earlier wave. Nothing was committed, branched, reset, stashed or switched.
+
+START 2026-09-15T17:13:23Z ext8 alive
+
+## ext8 — 2026-09-15T17:1x-17:3xZ — wave-8 list verified at HEAD `9c43111d`; the four "missing" rows were already landed
+
+Independent re-verification (I ran every command myself; nothing below is copied from another worker's
+note). Files touched by me: `apps/apple-shared/Sources/OctetServe/{WireEnums,RuntimeModels,JSON}.swift`,
+`apps/ios/{Package.swift,README.md}`, `apps/macos/{Package.swift,README.md}`,
+`apps/macos/Sources/OctetMacOS/**` (imports + one source defect), `docs/README.md`.
+
+### Row #179 octet-mcp (static credentials + permanent GET stream) — LANDED, re-verified
+- Command: `cd extensions/octet-mcp && PYTHONPATH=vendor:. python3 -m unittest discover -s tests -t . -p 'test_*.py'`
+  -> `Ran 75 tests in 19.425s` / `OK`.
+- Static extension-scoped credentials: `octet_mcp/streamable_http.py:77` `StaticEnvironmentCredentialProvider`
+  reads one `OCTET_MCP_*` name per request via `config.py:89` `is_static_credential_environment`;
+  composed only for an explicit `{"type": "static-bearer", "environment": ...}` descriptor
+  (`runtime.py:54`); fail-closed before any socket; never logged/echoed (regressions
+  `tests/test_streamable_http.py:781`, `tests/test_config.py:112`, both re-run green).
+- Permanent GET stream: opened only when negotiated capabilities declare a change notification;
+  committed cursor + `Last-Event-ID` reconnect, replayed identity fails closed, `405` inert.
+- Gating stays HONEST and was NOT flipped: `config.py:41` still requires the process owner to pass
+  `--experimental-streamable-http-mcp` (`runtime.py:34`, `manager.py:148`,
+  code `experimental_streamable_http_mcp_required`); `REFERENCE.md:150-199` keeps the nine-defect
+  remediation table (18 tests in `tests/test_http_hardening.py`) and lists the two open gates.
+
+### Row #65 octet-serve multi-pane layout — LANDED, re-verified (no web file changed by me)
+- `apps/web`: `npm test` -> `Test Files 35 passed (35)` / `Tests 299 passed (299)`;
+  `npx tsc -b --pretty false` -> `exit=0`; `npm run build` -> `✓ built in 404ms`,
+  `production fixture boundary verified (6 text assets)`; `npm run bundle:check` ->
+  `embedded web bundle matches Vite output (d23a4571b5908fdfe79624ff2b6e097ded506dc00a8e1bfc92c93a1d56ce60e5)`.
+- The user-created split/rearrangeable persisted layout the row calls missing exists:
+  `apps/web/src/workspace-layout.ts` (+ `workspace-layout.test.ts`), `App.tsx` split toggle and
+  `octet.ui.dock.layout` persistence.
+
+### Rows #383/#386 computer use — wired, re-verified; #383 still host-gated
+- `extensions/octet-computer-use`: `python3 -m unittest discover -s tests -p 'test_*.py'` ->
+  `Ran 93 tests in 0.176s` / `OK`; `python3 -m py_compile main.py octet_computer_use/*.py` -> OK.
+- `main.py:26` imports `LifecycleError`, `main.py:27` imports `MacOSRuntime`, `main.py:17`/`:121`
+  compose `PolicyGate`; `octet_computer_use/runtime.py:82` builds
+  `LifecycleSession(self.owner, self._target, self, policy=self)`, so `lifecycle.py` is reached by
+  the dispatcher. `tests/test_policy.py` and `tests/test_lifecycle.py` exist (the row's "no test
+  target" claim is stale) and the fail-closed regressions live at
+  `tests/test_runtime.py:299/:322/:340`.
+- #383 REMAINS POLICY/HOST-GATED — exact missing primitive unchanged: a negotiated API 0.3
+  host-brokered automation authorization service (typed `policy/evaluate` + host-owned approval,
+  target selection and owner settlement). Nothing was fabricated.
+
+### Parity 6.1 / 6.2 — present, plus one link added
+- All 12 topic pages exist (`docs/{configuration,session-format,commands,context,instructions,providers,packages,shell-aliases,terminal,tmux,termux,windows}.md`); `docs/providers.md` was NOT
+  edited (other owner), it is linked from `docs/README.md`.
+- 6.2 artifacts exist: `AGENTS.md`, `docs/maintainers/README.md`, prompts `cl|is|pr|wr.md`, skills
+  `release|add-provider|interactive-testing`. The maintainer set was not reachable from
+  `docs/README.md`; I added `- [Maintainer prompts, skills and playbooks](maintainers/README.md)`
+  under `## Development`.
+
+### REPAIR (deliberate exception to my path list): `apps/apple-shared` now compiles
+Rationale: it is the single documented blocker for two rows in my lane (#221, #394), no writer had
+touched it in 8h (all five files mtime 09:16, `.build` 12:34), it is Swift-only so the Rust
+`cargo check` cannot be affected, and I hash-checked before/after each write.
+- Baseline `swift build` in `apps/apple-shared` -> 19 diagnostics: `WireEnums.swift:21` `keyword
+  'extension' cannot be used as an identifier here`, `WireEnums.swift:42` `expected expression in
+  assignment` + `'default' label can only appear inside a 'switch' statement`, `JSON.swift:181`
+  `Unicode.Scalar.Properties has no member 'isControl'`, `WireEnums.swift:58` `UInt8 has no member
+  'isLetter'/'isNumber'` (the archive round-trip also collapsed generated statements, so `self=.idle`
+  lexed as the operator `=.`), then `ApprovalOperation does not conform to Comparable` (a `String`
+  raw type blocks synthesis).
+- Fixes: `self=.` -> `self = .` (16 occurrences in `RuntimeModels.swift`/`WireEnums.swift`);
+  ``case skill, `extension` ``; `init(default defaultValue:)` so the keyword is never a bare
+  identifier; an explicit declaration-order `<` on `ApprovalOperation` mirroring
+  `extensions/octet-serve/src/runtime_status.rs:1341`'s `#[derive(PartialOrd, Ord)]`; ASCII
+  alphanumeric bytes `(48...57)/(65...90)/(97...122)` mirroring `runtime_status.rs:988`
+  `is_ascii_alphanumeric`; `scalar.properties.generalCategory == .control` mirroring
+  `extensions/octet-serve/src/bounds.rs:72` `character.is_control()`.
+- `swift build` (apps/apple-shared) -> `Build complete! (0.86 sec)`.
+- Behavioral probe (out-of-tree, `/tmp/octetserve-probe`; compiled against `libOctetServe.a`):
+  17/17 PASS — declaration-order sort parity, strict `<`, `CommandName` accepts
+  `octet-serve_1.0+x`/`ABC123` and rejects `""`,`"octet serve"`,`"octet/serve"`,`"octet:serve"`,
+  `"café"`; `DomainName` rejects `Example.com`/`a..b`/`-lead.com`/`trail-.com`; `validateText`
+  rejects controls and bidi (`U+202E`), rejects `\n` unless `multiline: true`; `OctetJSONDecoder`
+  decodes `ApprovalConsequence.requiredFor` and rejects unknown keys/unknown cases for both
+  `ApprovalConsequence` and `RuntimeRuleSet<CommandName>` (fail-closed).
+
+### Row #221 apps/ios — app target now BUILDS (source-only no longer)
+- `swift build` -> `Build complete! (0.23 sec)`; `swift test` ->
+  `Executed 19 tests, with 0 failures (0 unexpected)`.
+- Out-of-tree copy (`/tmp/octet-ios-verify`, `diff -r` identical apart from `.build`/`.xcodeproj`):
+  `xcodegen generate` + `xcodebuild -scheme OctetCompanion -destination 'generic/platform=iOS Simulator' -configuration Debug CODE_SIGNING_ALLOWED=NO build` -> `** BUILD SUCCEEDED **`
+  (warnings only: `Metadata extraction skipped, no AppIntents.framework dependency found`,
+  `UnnecessaryEffectMarker` at `CompanionSessionService.swift:57`);
+  `build-for-testing` -> `** TEST BUILD SUCCEEDED **`; app binary linked at
+  `.../Build/Products/Debug-iphonesimulator/OctetCompanion.app/OctetCompanion` (72,992 bytes).
+- NOT done: simulator test *run* (`error: App installation failed: Unable to Install "Octet
+  Companion"` under `CODE_SIGNING_ALLOWED=NO` — a signing/simulator gate), signing, notarization,
+  install, device run.
+- Also learned and documented: `xcodegen --project <elsewhere>` breaks the relative
+  `INFOPLIST_FILE`/`Resources` entries (`error: Build input file cannot be found: '.../Resources/Info.plist'`);
+  generate in place in a copy instead.
+
+### Row #394 apps/macos — two real defects repaired; ONE missing surface left, recorded exactly
+- `apps/macos/Package.swift`: product corrected to the shared package's only real product
+  (`OctetServe`); `resources: [.process("Resources")]` replaced by `exclude: ["Resources/Info.plist"]`
+  (SwiftPM rejects Info.plist as an executable resource; `scripts/build-app.sh` installs it into
+  `Contents/Info.plist`).
+- 7 source files: `import OctetServeClient` -> `import OctetServe` (no `OctetServeClient` module exists
+  anywhere in the tree).
+- `MacOSClientFactory.swift:8-10`: the `Host.current().localizedName?.trimmingCharacters(...)  .flatMap { ... } ?? "Mac"` chain resolved to `Sequence.flatMap` (`'String.Element' has no member 'isEmpty'`,
+  `binary operator '??' cannot be applied to '[String.Element]?'`) and was rewritten to
+  `hostName.isEmpty ? "Mac" : hostName`.
+- `swift build` now reports exactly THREE errors, all from one missing surface:
+  `Sources/OctetMacOS/MacOSClientFactory.swift:7 cannot find type 'ServeClient' in scope`,
+  `:11 cannot find 'ServeClientConfiguration' in scope`, `:17 cannot find 'ServeClient' in scope`.
+- MISSING PRIMITIVE (not invented, not stubbed): a shared client module exporting `ServeClient`,
+  `ServeClientConfiguration`, `ServeClientError`, `ServeConnectionState`, `ServeBootstrap`,
+  `ServeCommands`/`ServeCommand`/`ServeCommandResult`, `ServeEvent` (transport, TLS/HostId
+  validation, pairing, Keychain storage, replay, reconnect, idempotent commands);
+  `apps/apple-shared/Sources/OctetServe` holds wire DTOs only. Alternative is a redesign onto the
+  app-owned `ServeClientBoundary` idiom used by `apps/ios`.
+- #394 stays SOURCE-ONLY: no build, signature, notarization, DMG, install, update or live run
+  (hardware/qualification gate).
+- `apps/macos/README.md` and `apps/ios/README.md` updated to the observed build status and exact
+  remaining primitive; the stale "apple-shared does not compile" comments in `apps/ios/Package.swift`
+  and `apps/ios/README.md` were corrected.
+
+### ext8 — CHANGELOG-ready bullets
+- `apps/apple-shared`: repair the shared Swift Serve package so it compiles — restore statement
+  formatting that an archive round-trip had collapsed (`self=.` parsed as the `=.` operator), escape
+  the `extension` enum case, name the `default` initializer parameter, and implement `Comparable` for
+  `ApprovalOperation` plus ASCII alphanumeric/Unicode-control checks that mirror the Rust wire model.
+- `apps/ios`: the companion app target and its test bundle now build (`xcodebuild` `BUILD SUCCEEDED`,
+  `TEST BUILD SUCCEEDED`); document the reproducible out-of-tree build and the signing/simulator gate.
+- `apps/macos`: align the manifest with the shared package's real product, stop declaring
+  `Info.plist` as an executable resource, and fix the host-name fallback; record the missing client
+  surface as the single remaining blocker.
+- `docs`: link the maintainer prompt/skill playbooks from `docs/README.md`.
+
+### ext8 — Gates (explicit, nothing substituted)
+- HARDWARE/QUALIFICATION-GATED (not claimed): #385 macOS native automation qualification (needs a
+  real macOS host with Accessibility/AX trust for a selected window); #389 Windows UIA/Composition
+  host; #390 packaged parity release (needs physical human takeover observation and hard
+  process-loss release evidence); #179 live remote MCP qualification (external MCP server, real
+  credential, long-duration stream); #221 simulator test *run* + signing/notarization/device run;
+  #394 Xcode build/sign/notarize/DMG/install/live host.
+- POLICY-GATED (exact primitives): host-brokered MCP OAuth/credential authorization (typed
+  `authorization/request` capability + host-owned token store and refresh ownership); host-brokered
+  computer-use automation authorization (typed `policy/evaluate` + host-owned approval, target
+  selection, owner settlement).
+- Untouched hard gates: persisted project trust, clipboard image capture, rg/fd auto-download,
+  chord/CBOR/unix-socket architecture. No OAuth flow, credential store or policy was invented.
+
+### ext8 — Hygiene
+- Nothing committed, branched, reset, stashed or switched. `cargo check` was NOT re-run (no `.rs`
+  file was edited by me); `npm run bundle:check` re-verified after `npm run build` (identical hash);
+  `python3 scripts/generate-extension-api-v03.py --check` -> `exit=0`.
+- All long verifications ran outside the tree (`/tmp/octet-ios-verify`, `/tmp/octetserve-probe`);
+  the booted `iPhone 17` simulator was shut down again (`simctl shutdown` rc=0). `apps/web/dist` is
+  untracked and unchanged by me.

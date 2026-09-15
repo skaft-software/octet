@@ -55,6 +55,7 @@
 - [Performance philosophy and execution contract](design/performance.md)
 - [Build profiles](build-profiles.md)
 - [Distribution](distribution.md)
+- [Maintainer prompts, skills and playbooks](maintainers/README.md)
 - [Contributing](../CONTRIBUTING.md)
 
 ## Project

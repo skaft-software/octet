@@ -282,3 +282,167 @@ Fix (in flight):
   `Bootstrap::codex_context_note(&ModelId)` is the single effective-model
   boundary a frontend calls once per session (stderr for print/json/rpc,
   `shell.notice` for the interactive shell).
+
+START 2026-09-15T17:13:24Z cli8 alive
+
+### Round 8 (cli8) — P0 Codex note, --no-session headless gate, above-tier uncertainty wiring
+
+Verification note: the shared worktree's `crates/octet-coding-agent/src/tui/view/reasoning_render.rs`
+is a live mid-edit by the TUI worker (does not compile: `ramp[rainbow_index(ramp, index, frame)]`
+type mismatch), so `octet-coding-agent` lib tests cannot build in the shared tree. I verified in a
+scratch clone `/tmp/cli8-verify` (rsync of the shared tree minus `target/ .git/ apps/ artifacts/
+research/ docs/`, with `reasoning_render.rs` replaced by its committed HEAD revision and the untracked
+`crates/sexy-tui-rs/tests/_latex_ed8_probe.rs` removed). Only the file under test was patched; every
+other file is byte-identical to the shared tree.
+
+TASK 1 (P0) — the half-done clamp-note refactor is now consistent:
+- `CodexContextNotes` (#[derive(Default)]) *records* one note per reduced catalog model and
+  *prints* nothing. `Bootstrap::codex_context_note(&ModelId)` remains the single effective-model
+  emission boundary (print/json/rpc -> stderr at `resolve_launch_print`, interactive -> `shell.notice`).
+- The regression module's `catalog_id` helper was WRONG: it re-derived registration's
+  collision-namespacing rule *after* registration, so it returned `codex/gpt-5.6-sol` for a model
+  registration stored as bare `gpt-5.6-sol`. It now resolves the actual catalog id by
+  `(endpoint == openai-codex, api_name == model_id)`. This was the actual cause of the two red tests.
+- The other red test's expectation was also wrong: on a Plus plan `gpt-6-astra`'s backend *default*
+  window is 272K, so effective == advertised == cap and it is NOT reduced (no note). Notes are now
+  asserted table-driven for Plus (luna/sol/terra) and Pro (astra/5.4/luna/sol/terra).
+
+Observed (clone):
+```
+cargo test -p octet-coding-agent --lib -- codex_context_note_regression_tests --test-threads=1
+running 4 tests
+test app::bootstrap::codex_context_note_regression_tests::a_non_codex_effective_model_has_no_note_while_the_catalog_has_codex_models ... ok
+test app::bootstrap::codex_context_note_regression_tests::an_above_standard_tier_route_marks_the_session_uncertain_once ... ok
+test app::bootstrap::codex_context_note_regression_tests::registration_records_one_note_per_reduced_model_and_none_for_an_unreduced_route ... ok
+test app::bootstrap::codex_context_note_regression_tests::the_recorded_note_matches_the_effective_resolution ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1360 filtered out; finished in 0.05s
+```
+
+TASK 2 — the override entry points the TUI worker must call:
+- `crate::codex_context::CodexContextOverride::publish(self)` (also `octet_sdk::codex_context`):
+  sets/clears `OCTET_CODEX_CONTEXT_WINDOW` + `OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF`.
+  This is THE stable in-process entry point; bootstrap resolves it via
+  `codex_context_override_from_env()`.
+- `CodexContextOverride::raising(tokens, acknowledged)` builds the value; render
+  `CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING` before accepting it.
+- `ParityOptions::install_codex_context_env()` (CLI) already calls `publish`.
+- New: launch-time uncertainty wiring. `CodexContextNotes` also maps each above-272K route to
+  `CODEX_ABOVE_STANDARD_TIER_OPERATION`; `build_app_with_runtime_manager` calls
+  `record_codex_context_uncertainty(&mut session, &notes, &bootstrap_model)` right after the
+  session is opened, so a raised/372K Codex route is durably `has_uncertain_usage` BEFORE the first
+  request (sticky, at most once; <=272K and non-Codex routes untouched).
+
+TASK 3 — `--no-session` headless gate. Piped stdin promoted a bare `octet --no-session` to print
+mode inside `prepare_input`, so `begin_ephemeral`'s interactive refusal never fired and the run died
+with "--print requires a prompt". New `ParityOptions::require_headless_frontend(&Cli)` is called in
+`run()` before `prepare_input` and requires an explicit `--print`/`--mode json`/`--mode rpc`.
+Observed (clone): `cargo test -p octet-coding-agent --test parity_cli -- --test-threads=1`
+-> `test result: ok. 16 passed; 0 failed; ... finished in 2.28s` (was 14 passed / 2 failed).
+Also fixed the test's empty-list expectation to the established `sessions list` wording
+("No matching sessions", already asserted three times by `configuration_diagnostics_full`).
+
+TASK 4 (5.11 eval harness) — already complete in the tree and re-verified. Observed (clone):
+```
+cargo test -p octet-coding-agent --test eval_harness -- --test-threads=1
+test eval_run_ignores_ambient_credentials_and_uses_only_its_own_loopback_fixture ... ok
+test eval_run_leaves_the_invoking_workspace_and_session_root_untouched ... ok
+test eval_run_records_cases_isolation_and_deltas_in_its_artifact_directory ... ok
+test eval_run_rejects_a_suite_that_tries_to_declare_a_remote_provider ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+```
+`octet eval run <SUITE> [--artifact-dir DIR] [--baseline report.json]`; child spawned with `env_clear()`
+and only the harness's own loopback fixture credential; `deny_unknown_fields` suite schema refuses any
+remote-provider field; report schema `octet-eval-run-1` with per-case pass/latency/cost/`usage_uncertain`
+and candidate-minus-baseline deltas. No live/paid path exists by construction.
+
+Broader regression run after the TASK 2 launch wiring (clone, `--test-threads=1`):
+- `--lib -- cli::` -> `103 passed; 0 failed` (includes `codex_context_window_flag_parses_and_fails_closed_above_the_cap`)
+- `--lib -- app::bootstrap` -> `130 passed; 3 failed; 1 ignored`; the 3 failures are PRE-EXISTING and
+  outside my rows (cli5 recorded the same three in Round 5):
+  `disabled_tools_are_absent_from_both_schema_and_execution_registry` and
+  `tool_schema_reserve_is_positive_and_deterministic` (tool registry now also carries `ls/find/grep`,
+  a parity-tools in-flight change), and
+  `unknown_api_03_last_initial_provider_model_preflights_restarts_and_reloads_with_fresh_routes`
+  (ambient `~/.octet/extensions/octet-browse` visible to the process).
+- `--lib -- modes::print` -> `4 passed`, `--lib -- modes::rpc` -> `6 passed`,
+  `--lib -- session_store::` -> `36 passed`, `--lib -- session_commands::` -> `20 passed`.
+- `--test codex_context_window` -> `14 passed`; `--test parity_cli` -> `16 passed`.
+
+Docs + changelog-ready bullets (both written):
+- `docs/parity/cli.md`: row 5.4 Blocked -> Verified, row 5.11 Not started -> Verified, Codex override
+  row now describes the launch-time uncertainty record, anchors add `src/cli/eval.rs`, dispatch order
+  adds `require_headless_frontend`.
+- `docs/codex-context.md`: implementation anchors fixed (`codex_context_report` no longer exists),
+  section 3 documents the launch-time uncertainty record, section 5 wiring note rewritten, section 8
+  test list updated.
+- Bullets: `octet --no-session` ephemeral with durable accounting; `octet eval run`; clamp note once
+  per effective model with no internal identifiers.
+
+Cross-worker handoff (NOT my paths, NOT edited):
+- `crates/octet-coding-agent/src/tui/view/reasoning_render.rs` is a live mid-edit that does not
+  compile (`ramp[rainbow_index(ramp, index, shimmer_frame)]` — ramp array arity mismatch, and an
+  `ACTIVITY_*` tuple arity 7-vs-4 mismatch), which blocks every `octet-coding-agent` lib-test build in
+  the shared tree. The full workspace cannot be `cargo check`ed green until it lands.
+- `crates/octet-coding-agent/src/commands.rs:475` (`summary_lines`) still renders three bare numbers
+  ("{} context window: {} tokens") and leaks `Session::record_usage_uncertainty(...)` into the
+  user-facing effort menu; the contract in `docs/codex-context.md` is labelled
+  advertised/entitled/effective with no internal API names. `commands.rs` is the TUI worker's file.
+- TUI worker entry point: call `crate::codex_context::CodexContextOverride::raising(tokens, acknowledged)`
+  after rendering `CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING`, then `CodexContextOverride::publish()`
+  (stable name) to apply it for the next launch; validate first with `ModelCodexContext::raise`.
+
+### Round 8 addendum (cli8) — shared-tree verification after the refactor
+
+The shared worktree's TUI and octet-agent mid-edits landed, so the final code was verified in the
+real tree (not only the clone):
+
+`CARGO_PROFILE_DEV_DEBUG=0 cargo check --workspace --all-targets --locked --message-format short`
+-> no `error` lines (GREEN). `cargo check -p octet-coding-agent --all-targets --locked` -> GREEN.
+
+```
+cargo test -p octet-coding-agent --lib -- codex_context --test-threads=1
+running 13 tests
+test app::bootstrap::codex_context_note_regression_tests::a_non_codex_effective_model_has_no_note_while_the_catalog_has_codex_models ... ok
+test app::bootstrap::codex_context_note_regression_tests::an_above_standard_tier_route_marks_the_session_uncertain_once ... ok
+test app::bootstrap::codex_context_note_regression_tests::registration_records_one_note_per_reduced_model_and_none_for_an_unreduced_route ... ok
+test app::bootstrap::codex_context_note_regression_tests::the_recorded_note_matches_the_effective_resolution ... ok
+test app::bootstrap::tests::codex_context_tier_follows_the_plan_entitlement ... ok
+test cli::tests::codex_context_window_flag_parses_and_fails_closed_above_the_cap ... ok
+test codex_context::tests::deliberate_cap_is_kept_and_reported_as_a_clamp ... ok
+test codex_context::tests::override_gates_fail_closed ... ok
+test codex_context::tests::parse_is_fail_closed ... ok
+test codex_context::tests::reporter_fires_once_per_transition ... ok
+test commands::tests::codex_context_surface_is_absent_for_every_other_route ... ok
+test commands::tests::codex_context_surface_reports_the_deliberate_cap_and_why ... ok
+test modes::interactive::tests::codex_context_surface_follows_the_declared_route_and_the_effective_window ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 1356 filtered out; finished in 0.15s
+```
+
+```
+cargo test -p octet-coding-agent --test parity_cli --test codex_context_window --test eval_harness -- --test-threads=1
+test result: ok. 14 passed; 0 failed   (codex_context_window)
+test result: ok. 4 passed; 0 failed    (eval_harness)
+test result: ok. 16 passed; 0 failed   (parity_cli)
+```
+
+```
+cargo test -p octet-coding-agent --lib -- ephemeral --test-threads=1
+test session_store::tests::ephemeral_accounting_keeps_usage_and_uncertainty_without_the_transcript ... ok
+test result: ok. 1 passed; 0 failed
+```
+
+Final shape of the uncertainty wiring (slightly simpler than the first draft): `CodexContextNotes`
+is notes-only again; one helper decides the route,
+`codex_context_uncertainty_operation(model) = endpoint == "openai-codex" && limits.context_window > 272K`,
+and `record_codex_context_uncertainty(&mut session, &model)` is called at BOTH session boundaries
+(`build_app_with_runtime_manager` after `open_launch_session`, and `rebuild_app` for a mid-session
+model switch). The endpoint term matters: a 1M-context non-Codex provider must keep exact accounting.
+The regression test now asserts exactly that.
+
+Clone-only failures (all outside my rows, none caused by this work):
+- `resources::tests::embedded_documentation_*` fail only in the clone because the clone excludes
+  `docs/` ("embedded documentation is incomplete"); they are not failures in the real tree.
+- `tui::pickers::tests::live_subagent_picker_*` and `tui::view::tests::subagent_panel_*` are the
+  subagents/TUI workers' in-flight surface, unrelated to Codex context.
+- The three `app::bootstrap::tests::*` and two `modes::interactive::*` failures are the pre-existing
+  ones recorded in Round 5 (tool-registry additions + ambient extension state), unchanged.

@@ -4894,6 +4894,43 @@ fn codex_context_record_note(
     }
 }
 
+/// The durable uncertainty operation for one resolved catalog model, if any.
+///
+/// `Some` only for a Codex route whose effective window is above the 272K
+/// standard tier, where the whole request is priced differently. A public
+/// provider with a large context window (1M Gemini, for example) is not a Codex
+/// route and keeps exact accounting, so the endpoint is part of the decision.
+fn codex_context_uncertainty_operation(model: &Model) -> Option<&'static str> {
+    (model.endpoint.id.0 == crate::auth::codex::ENDPOINT_ID
+        && model.spec.limits.context_window > crate::codex_context::CODEX_CONTEXT_WINDOW_CAP)
+        .then_some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
+}
+
+/// Mark a route whose effective Codex context window is above the 272K standard
+/// tier as uncertain on the session before the first request.
+///
+/// Above 272K the whole request is priced differently, so the durable session
+/// record must say the known totals are only a subtotal instead of letting an
+/// exact-looking cost stand. The uncertainty record is sticky and written at
+/// most once per session; a route at or below 272K, or any non-Codex route, is
+/// left exact. Called at every launch boundary, including a mid-session model
+/// switch, so a switch onto a raised Codex route cannot leave an exact-looking
+/// cost behind.
+fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> anyhow::Result<()> {
+    let Some(operation) = codex_context_uncertainty_operation(model) else {
+        return Ok(());
+    };
+    if session.has_uncertain_usage() {
+        return Ok(());
+    }
+    session.record_usage_uncertainty(
+        model.endpoint.id.clone(),
+        model.spec.id.clone(),
+        operation,
+    )?;
+    Ok(())
+}
+
 /// Register the OpenAI Codex (Sign in with ChatGPT) endpoint and discover the
 /// account's current model inventory, but only for a validated subscription
 /// credential. Codex-specific headers are composed from static endpoint
@@ -6062,6 +6099,10 @@ pub(crate) fn build_app_with_runtime_manager(
     let requested_reasoning_mode = launch.reasoning_mode;
     let mut prepared_session = prepared_session.into_inner();
     let mut session = open_launch_session(&mut prepared_session, launch.session)?;
+    // Above 272K the whole request is priced differently, so the durable record
+    // must mark the route uncertain at launch rather than let a later
+    // exact-looking cost claim stand. Sticky, and written at most once.
+    record_codex_context_uncertainty(&mut session, &bootstrap_model)?;
 
     if let Some((_, mut extensions)) = prestarted_extensions.take() {
         extensions.clear_provider_catalog(&mut catalog, &client);
@@ -6327,6 +6368,10 @@ pub fn rebuild_app(
             Session::open_with_file(current_path, file)?
         }
     };
+    // A mid-session switch onto a raised Codex route must not leave an
+    // exact-looking cost behind; the record is sticky, so an ordinary rebuild is
+    // a no-op.
+    record_codex_context_uncertainty(&mut session, &model)?;
     let goal_session_id = terminal_goal_session_id(&session)?;
     let goal_driver = GoalDriver::new(goal_store.clone(), goal_session_id.clone());
 
@@ -6591,7 +6636,7 @@ mod reasoning_ingress_review_tests {
 mod codex_context_note_regression_tests {
     use super::tests::codex_discovered_model;
     use super::*;
-    use crate::codex_context::{codex_context_session_note, CODEX_CONTEXT_WINDOW_CAP};
+    use crate::codex_context::codex_context_session_note;
 
     /// A synthetic, non-localhost subscription credential (the shape
     /// `crate::auth::codex` accepts) so registration produces the full fallback
@@ -6634,65 +6679,81 @@ mod codex_context_note_regression_tests {
         (catalog, notes)
     }
 
+    /// The catalog id a Codex api id was registered under.
+    ///
+    /// Registration namespaces by collision (`codex/gpt-6-astra` is always
+    /// namespaced; other ids only when the bare id was already taken), so the
+    /// test resolves the actual catalog id from the Codex endpoint instead of
+    /// re-deriving the rule after the fact.
     fn catalog_id(catalog: &ModelCatalog, model_id: &str) -> ModelId {
-        // The same namespacing rule the registration loop applies.
-        if model_id == "gpt-6-astra" || catalog.resolve(&ModelId(model_id.to_owned())).is_ok() {
-            ModelId(format!("codex/{model_id}"))
-        } else {
-            ModelId(model_id.to_owned())
-        }
+        let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
+        catalog
+            .models()
+            .find(|model| model.endpoint == codex_endpoint && model.api_name == model_id)
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|| panic!("{model_id} is registered on the Codex endpoint"))
     }
 
     /// Catalog enumeration must never print. It records at most one note for the
     /// models whose effective window needs one, and nothing for a route whose
     /// window is the deliberate cap itself.
+    ///
+    /// A "reduced" route is one whose effective window is below what the plan
+    /// advertises, or above the 272K standard tier (`gpt-5.6-luna`). On a Plus
+    /// plan the backend applies its own default window, so `gpt-6-astra` is not
+    /// reduced even though its entitlement ceiling is 872K; on a Pro plan the
+    /// advertised window is raised and every 872K/1M family is reduced.
     #[test]
-    fn registration_records_one_note_per_clamped_model_and_none_for_an_unclamped_route() {
-        let (catalog, notes) = registered_notes("plus");
-        assert!(
-            !crate::auth::codex::MODELS.is_empty(),
-            "the fallback Codex inventory is registered"
-        );
-
-        let mut clamped = 0;
-        let mut unclamped = 0;
-        for model_id in crate::auth::codex::MODELS {
-            let id = catalog_id(&catalog, model_id);
-            let model = catalog.resolve(&id).unwrap();
-            let effective = model.spec.limits.context_window;
-            let note = notes.note_for(&id);
-            if effective == CODEX_CONTEXT_WINDOW_CAP && !model_id.starts_with("gpt-5.6-luna") {
-                // `gpt-5.5`/`gpt-5.4-mini` advertise the cap itself; gpt-5.6-*
-                // advertise 372K and are therefore reduced.
-                if crate::codex_context::entitled_max_context_window(model_id)
-                    <= CODEX_CONTEXT_WINDOW_CAP
-                {
-                    assert_eq!(note, None, "{model_id} is not reduced and needs no note");
-                    unclamped += 1;
-                } else {
-                    assert!(note.is_some(), "{model_id} is reduced and needs a note");
-                    clamped += 1;
-                }
-            } else if model_id == &"gpt-5.6-luna" {
-                assert_eq!(effective, crate::codex_context::CODEX_5_6_CONTEXT_WINDOW);
-                assert!(note.is_some(), "luna is above the standard tier");
-                clamped += 1;
-            }
-        }
-        assert!(clamped > 0 && unclamped > 0, "both branches are covered");
-
-        // Every recorded note is one bounded, plain-language string per model.
-        for model_id in crate::auth::codex::MODELS {
-            let id = catalog_id(&catalog, model_id);
-            if let Some(note) = notes.note_for(&id) {
-                assert_eq!(notes.note_for(&id), Some(note), "one note per model");
-                assert!(note.starts_with("note: Codex model"), "{note}");
-                assert!(!note.contains("Session::"), "{note}");
-                assert!(!note.contains("record_usage_uncertainty"), "{note}");
+    fn registration_records_one_note_per_reduced_model_and_none_for_an_unreduced_route() {
+        for (plan, reduced, plain) in [
+            (
+                "plus",
+                &["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"][..],
+                &["gpt-6-astra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"][..],
+            ),
+            (
+                "pro",
+                &[
+                    "gpt-6-astra",
+                    "gpt-5.4",
+                    "gpt-5.6-luna",
+                    "gpt-5.6-sol",
+                    "gpt-5.6-terra",
+                ][..],
+                &["gpt-5.5", "gpt-5.4-mini"][..],
+            ),
+        ] {
+            let (catalog, notes) = registered_notes(plan);
+            assert!(
+                !crate::auth::codex::MODELS.is_empty(),
+                "the fallback Codex inventory is registered"
+            );
+            for model_id in crate::auth::codex::MODELS {
                 assert!(
-                    !note.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
-                    "{note}"
+                    reduced.contains(model_id) || plain.contains(model_id),
+                    "{plan}: {model_id} is not covered by the expectation table"
                 );
+                let id = catalog_id(&catalog, model_id);
+                let note = notes.note_for(&id);
+                if reduced.contains(model_id) {
+                    let note = note.unwrap_or_else(|| {
+                        panic!("{plan}: {model_id} is reduced and needs a note")
+                    });
+                    assert!(note.starts_with("note: Codex model"), "{note}");
+                    assert!(!note.contains("Session::"), "{note}");
+                    assert!(!note.contains("record_usage_uncertainty"), "{note}");
+                    assert!(
+                        !note.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
+                        "{note}"
+                    );
+                    // Exactly one note per model: the lookup is stable.
+                    assert_eq!(notes.note_for(&id), Some(note));
+                } else {
+                    assert_eq!(
+                        note, None,
+                        "{plan}: {model_id} is not reduced and needs no note"
+                    );
+                }
             }
         }
     }
@@ -6736,6 +6797,68 @@ mod codex_context_note_regression_tests {
             .expect("a reduced Codex model has one note")
             .to_owned();
         assert_eq!(notes.note_for(&effective), Some(note.as_str()));
+    }
+
+    /// Above the 272K standard tier the session is durably marked uncertain
+    /// before its first request, so no exact-looking cost is ever claimed. The
+    /// record is sticky and written at most once; a route at or below the
+    /// standard tier stays exact.
+    #[test]
+    fn an_above_standard_tier_route_marks_the_session_uncertain_once() {
+        let (catalog, notes) = registered_notes("plus");
+        let directory = tempfile::tempdir().unwrap();
+
+        // `gpt-5.6-luna`'s documented 372K working window is above the tier.
+        let luna_id = catalog_id(&catalog, "gpt-5.6-luna");
+        let luna = catalog.resolve(&luna_id).unwrap();
+        assert!(
+            notes.note_for(&luna_id).is_some(),
+            "an above-tier route carries the one session note"
+        );
+        assert_eq!(
+            codex_context_uncertainty_operation(&luna),
+            Some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
+        );
+        let mut session = Session::create(directory.path().join("luna.jsonl")).unwrap();
+        assert!(!session.has_uncertain_usage());
+        record_codex_context_uncertainty(&mut session, &luna).unwrap();
+        assert!(
+            session.has_uncertain_usage(),
+            "372K must route cost/usage through has_uncertain_usage"
+        );
+        let records = session.usage_uncertainty_records().to_vec();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(
+            records[0].operation,
+            crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
+        );
+        assert_eq!(records[0].endpoint.0, crate::auth::codex::ENDPOINT_ID);
+        assert_eq!(records[0].model, luna_id);
+
+        // Sticky: a second launch of the same session appends nothing.
+        record_codex_context_uncertainty(&mut session, &luna).unwrap();
+        assert_eq!(session.usage_uncertainty_records().len(), 1);
+
+        // A route whose effective window is the deliberate 272K cap is exact.
+        let capped_id = catalog_id(&catalog, "gpt-5.5");
+        let capped = catalog.resolve(&capped_id).unwrap();
+        assert_eq!(codex_context_uncertainty_operation(&capped), None);
+        let mut exact = Session::create(directory.path().join("exact.jsonl")).unwrap();
+        record_codex_context_uncertainty(&mut exact, &capped).unwrap();
+        assert!(!exact.has_uncertain_usage());
+        assert!(exact.usage_uncertainty_records().is_empty());
+
+        // A non-Codex route is never marked uncertain, even when its context
+        // window is far above 272K: the cap is a Codex policy, not a global one.
+        let non_codex_id = catalog
+            .models()
+            .find(|model| model.endpoint != EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned()))
+            .map(|model| model.id.clone())
+            .expect("the catalog carries other providers");
+        let non_codex = catalog.resolve(&non_codex_id).unwrap();
+        assert_eq!(codex_context_uncertainty_operation(&non_codex), None);
+        record_codex_context_uncertainty(&mut exact, &non_codex).unwrap();
+        assert!(!exact.has_uncertain_usage());
     }
 
     /// The note the effective model needs is produced from the same resolution

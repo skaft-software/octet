@@ -28,6 +28,7 @@ use crate::compaction::{
 use crate::context::{ContextBreakdown, ContextSnapshot, ContextTracker};
 use crate::delegation::{
     enable_root_delegation, DelegationBinding, DelegationConfig, DelegationError,
+    SessionDelegationHandle,
     DelegationRuntimeSettings, DelegationTemplate,
 };
 use crate::effect::{
@@ -796,6 +797,19 @@ impl Run<'_> {
     /// event stream is being consumed.
     pub fn control(&self) -> RunControl {
         self.control.clone()
+    }
+
+    /// Returns an owned snapshot of incrementally tracked response,
+    /// tool-boundary, and provider token-usage state.
+    /// Session-owned delegation handle, when delegation is enabled.
+    ///
+    /// Host-side callers use it to resolve a worker's launchable interactive
+    /// handle (`agent-session:<sha256>` -> session-owned transcript) without
+    /// widening what an extension can see.
+    pub fn session_delegation(&self) -> Option<SessionDelegationHandle> {
+        self.delegation
+            .as_ref()
+            .map(DelegationBinding::session_handle)
     }
 
     /// Returns an owned snapshot of incrementally tracked response,

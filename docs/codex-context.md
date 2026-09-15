@@ -8,7 +8,8 @@ Implementation: `crates/octet-coding-agent/src/codex_context.rs` (policy, pure
 resolution, notice). Bootstrap application:
 `crates/octet-coding-agent/src/app/bootstrap.rs`
 (`codex_context_override_from_env`, `codex_context_resolve_for_registration`,
-`codex_context_report`, `register_openai_codex`).
+`codex_context_record_note`, `record_codex_context_uncertainty`,
+`register_openai_codex_with_notes`).
 
 ## 1. The cap is deliberate
 
@@ -116,6 +117,14 @@ loop. `CodexContextClampReporter::observe` remains available for a frontend that
 tracks transitions after launch (a model switch mid-session reports again, at most
 once per transition).
 
+The same launch boundary records uncertainty: `build_app_with_runtime_manager`
+calls `record_codex_context_uncertainty(&mut session, &model)` right after the
+session is opened (and `rebuild_app` repeats it on a mid-session model switch), so
+a route whose effective window is above 272K is durably `has_uncertain_usage`
+before its first request. The decision is the Codex endpoint plus an effective
+window above 272K, so a non-Codex provider with a large context window keeps exact
+accounting. The record is sticky and written at most once per session.
+
 ## 4. The opt-in override
 
 Requirements: opt-in only, bounded by the model's entitled ceiling, requiring the
@@ -176,11 +185,13 @@ The effective-model note for such a route says so in plain language ("this
 session's usage is recorded as uncertain instead of an exact cost") without
 naming the API or the operation id.
 
-Wiring note: the durable record must be appended by the agent/attempt path that
-owns the provider attempt. octet's agent loop currently has no pre-attempt hook
-for a route-level accounting decision, so the frontends that consume
-`has_uncertain_usage` own that wiring; the flag and the bounded operation id are
-exported for exactly that purpose.
+Wiring note: the record is appended by the launch boundary that owns the session
+before the first request — `build_app_with_runtime_manager` calls
+`record_codex_context_uncertainty`, and `rebuild_app` repeats it for a mid-session
+model switch, using the operation id `uncertain_usage_operation()` returns. The
+agent loop keeps its own attempt-scoped uncertainty records (failed/unknown
+attempts) and treats `has_uncertain_usage` as sticky, so known-cost totals and hard
+ceilings fail closed for the whole session.
 
 ## 6. It is client-side budgeting, not a wire field
 
@@ -219,9 +230,10 @@ compaction threshold; provider-side enforcement is unchanged.
   variant, and no note names an internal API or operation id.
 * `crates/octet-coding-agent/src/app/bootstrap.rs`
   (`codex_context_note_regression_tests`) — registration records one note per
-  reduced model and none for an unreduced route, a non-Codex effective model has
-  no note while the catalog carries Codex models, and the recorded note matches
-  the effective resolution.
+  reduced model and none for an unreduced route (table-driven for Plus and Pro),
+  a non-Codex effective model has no note while the catalog carries Codex models,
+  the recorded note matches the effective resolution, and an above-272K route
+  marks the session uncertain exactly once while a 272K route stays exact.
 * `crates/octet-coding-agent/tests/parity_cli.rs`
   (`codex_context_notes_are_not_emitted_for_a_non_codex_session_or_per_turn`) —
   process boundary: with a synthetic Codex credential (so the catalog carries

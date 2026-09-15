@@ -2,11 +2,22 @@
 //!
 //! Every expected value in this file was captured by running the upstream
 //! reference implementation `packages/tui/src/latex.ts`
-//! (pi @ `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`) on the same input. The
-//! first table is the upstream `packages/tui/test/latex.test.ts` corpus (each
-//! entry was verified to reproduce the upstream suite's literal expectation);
-//! the second table is additional real-LaTeX input covering box-drawing layout
-//! in display mode.
+//! (pi @ `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`) on the same input:
+//!
+//! - [`UPSTREAM_SUITE`] is the upstream `packages/tui/test/latex.test.ts`
+//!   corpus (each entry reproduces the upstream suite's literal expectation).
+//! - [`UPSTREAM_OBSERVED`], [`DISPLAY_LAYOUT_CORPUS`] and
+//!   [`INLINE_LAYOUT_CORPUS`] are real-LaTeX inputs whose box-drawing output was
+//!   captured from that reference implementation.
+//! - [`UNSUPPORTED_COMMANDS`] are inputs the reference implementation refuses
+//!   (`undefined`); the port must fail closed.
+//!
+//! The differential harness that produced these values ran the reference
+//! renderer under Node (with its real `visibleWidth`, so wide/combining-glyph
+//! alignment is measured the same way) against this port over the upstream
+//! suite, the tables below, 232 curated real-LaTeX cases and 2626 randomized
+//! token-soup cases, with zero divergences outside JavaScript's UTF-16
+//! surrogate handling of non-BMP code points (see the module docs).
 
 use sexy_tui_rs::rich_text::latex::{render_latex, RenderLatexOptions};
 
@@ -191,6 +202,77 @@ const UPSTREAM_OBSERVED: &[(&str, Option<&str>, bool)] = &[
 ];
 
 
+/// `(source, expected)` in display mode: operator limits, stacked fractions and
+/// every matrix environment the port supports. Captured from the upstream
+/// reference implementation.
+const DISPLAY_LAYOUT_CORPUS: &[(&str, &str)] = &[
+    (r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}", " n      n(n+1)\n ∑  i = ──────\ni=1       2"),
+    (r"\prod_{i=1}^{n} a_i", " n\n ∏  aᵢ\ni=1"),
+    (r"\prod_{k=0}^{\infty} \frac{1}{k!}", " ∞   1\n ∏   ──\nk=0  k!"),
+    (r"\oint_C \frac{dz}{z}", "   dz\n∮  ──\nC  z"),
+    (r"\bigcup_{i=1}^{n} A_i", " n\n ⋃  Aᵢ\ni=1"),
+    (r"\bigcap_{i \in I} B_i", " ⋂  Bᵢ\ni∈I"),
+    (r"\lim_{x\to\infty} \frac{1}{x} = 0", "     1\nlim  ─ = 0\nx→∞  x"),
+    (r"\max_{1 \le i \le n} x_i", " max  xᵢ\n1≤i≤n"),
+    (r"\operatorname*{arg\,max}_{x \in X} f(x)", "arg max f(x)\n  x∈X"),
+    (r"\frac{\partial f}{\partial x}", "∂ f\n───\n∂ x"),
+    (r"\frac{\partial^2 f}{\partial x \partial y}", " ∂² f\n───────\n∂ x ∂ y"),
+    (r"\frac{1+\frac{1}{x}}{1-\frac{1}{x}}", "1+1/x\n─────\n1-1/x"),
+    (r"\frac{\frac{a}{b}}{\frac{c}{d}}", "a/b\n───\nc/d"),
+    (r"\begin{matrix}a&b\\c&d\end{matrix}", "a │ b\nc │ d"),
+    (r"\begin{bmatrix}a&b\\c&d\end{bmatrix}", "⎡ a │ b ⎤\n⎣ c │ d ⎦"),
+    (r"\begin{Bmatrix}a&b\\c&d\end{Bmatrix}", "⎧ a │ b ⎫\n⎩ c │ d ⎭"),
+    (r"\begin{vmatrix}a&b\\c&d\end{vmatrix}", "│ a │ b │\n│ c │ d │"),
+    (r"\begin{Vmatrix}a&b\\c&d\end{Vmatrix}", "║ a │ b ║\n║ c │ d ║"),
+    (r"\begin{smallmatrix}a&b\\c&d\end{smallmatrix}", "a │ b\nc │ d"),
+    (r"\begin{array}{c|c}a&b\\c&d\end{array}", "a │ b\nc │ d"),
+    (r"\begin{array}{ll}a&b\\c&d\end{array}", "a │ b\nc │ d"),
+    (r"\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}", "⎛ 1 │ 2 │ 3 ⎞\n⎜ 4 │ 5 │ 6 ⎟\n⎝ 7 │ 8 │ 9 ⎠"),
+    (r"\begin{pmatrix}a\\b\end{pmatrix}", "⎛ a ⎞\n⎝ b ⎠"),
+    (r"\begin{pmatrix}a&b\end{pmatrix}", "⎛ a │ b ⎞"),
+    (r"\left(\begin{matrix}a&b\\c&d\end{matrix}\right)", "(a │ b)\n c │ d"),
+    (r"\left[\begin{matrix}a&b\\c&d\end{matrix}\right]", "[a │ b]\n c │ d"),
+    (r"\begin{pmatrix}\frac{1}{2}&\sqrt{2}\\\pi&e\end{pmatrix}", "⎛ 1/2 │ √2 ⎞\n⎝ π   │ e  ⎠"),
+    (r"\begin{pmatrix}\frac{\partial f_1}{\partial x}&\frac{\partial f_1}{\partial y}\\\frac{\partial f_2}{\partial x}&\frac{\partial f_2}{\partial y}\end{pmatrix}", "⎛ (∂ f₁)/(∂ x) │ (∂ f₁)/(∂ y) ⎞\n⎝ (∂ f₂)/(∂ x) │ (∂ f₂)/(∂ y) ⎠"),
+    (r"\begin{pmatrix}界&a\\b&c\end{pmatrix}", "⎛ 界 │ a ⎞\n⎝ b  │ c ⎠"),
+    (r"\begin{alignedat}{2}a&=b&\quad c&=d\\e&=f&g&=h\end{alignedat}", "a = b c = d\ne = f g = h"),
+    (r"\begin{equation}\begin{split}a&=b\\&=c\end{split}\end{equation}", "a = b\n= c"),
+    (r"\int_{-\infty}^{+\infty} e^{-x^2}\,dx = \sqrt{\pi}", "+∞\n∫  e^(-x²) dx = √π\n-∞"),
+    (r"\int\limits_0^1 f(x)\,dx", "1\n∫ f(x) dx\n0"),
+    (r"\int\nolimits_0^1 f(x)\,dx", "∫₀¹ f(x) dx"),
+];
+
+/// `(source, expected)` in inline mode: environments, scripts and delimiters.
+/// Captured from the upstream reference implementation.
+const INLINE_LAYOUT_CORPUS: &[(&str, &str)] = &[
+    (r"\begin{cases}a&x<0\\b&x=0\\c&x>0\end{cases}", "⎧ a if x < 0\n⎨ b if x = 0\n⎩ c if x > 0"),
+    (r"\begin{pmatrix}a&b\\c&d\end{pmatrix}", "⎛ a │ b ⎞\n⎝ c │ d ⎠"),
+    (r"\begin{cases}x^2 & x \ge 0 \\ -x^2 & x < 0\end{cases}", "⎧ x² if x ≥ 0\n⎩ -x² if x < 0"),
+    (r"\begin{aligned} a &= b + c \\ d &= e \end{aligned}", "a = b + c\nd = e"),
+    (r"\overbrace{a+b}^{n}", "a+bⁿ"),
+    (r"\underbrace{a+b}_{n}", "a+bₙ"),
+    (r"\binom{n}{k}", "(n choose k)"),
+    (r"\left\{x \middle| x>0\right\}", "{x | x > 0}"),
+    (r"\operatorname{rank} A = n", "rank A = n"),
+    (r"\substack{i=1\\j=2}", "i = 1\nj = 2"),
+    (r"\text{a \textbf{b}}", "a b"),
+];
+
+/// Commands the reference renderer returns `undefined` for. The port must fail
+/// closed (return `None`) instead of guessing or recursing.
+const UNSUPPORTED_COMMANDS: &[&str] = &[
+    r"\cfrac{1}{1+x}",
+    r"\hspace{1em}",
+    r"\phantom{x}",
+    r"\cancel{x}",
+    r"\genfrac{}{}{}{}{a}{b}",
+    r"\verb|x|",
+    r"\begin{tikzpicture}\draw (0,0);\end{tikzpicture}",
+    r"\def\foo{}",
+    r"\usepackage{amsmath}",
+    r"\xrightarrow{f}",
+];
+
 #[test]
 fn upstream_suite_corpus_matches_reference_renderer() {
     for (source, expected, display) in UPSTREAM_SUITE {
@@ -211,6 +293,87 @@ fn observed_upstream_output_matches_reference_renderer() {
             render_latex(source, options).as_deref(),
             *expected,
             "source = {source:?} (display = {display})"
+        );
+    }
+}
+
+#[test]
+fn display_layout_corpus_matches_reference_renderer() {
+    for (source, expected) in DISPLAY_LAYOUT_CORPUS {
+        assert_eq!(
+            render_latex(source, RenderLatexOptions { display: true }).as_deref(),
+            Some(*expected),
+            "source = {source:?}"
+        );
+    }
+}
+
+#[test]
+fn inline_layout_corpus_matches_reference_renderer() {
+    for (source, expected) in INLINE_LAYOUT_CORPUS {
+        assert_eq!(
+            render_latex(source, RenderLatexOptions::default()).as_deref(),
+            Some(*expected),
+            "source = {source:?}"
+        );
+    }
+}
+
+#[test]
+fn operator_limits_stack_over_their_operator() {
+    // Every limit-taking operator composes the same way: the operator glyph in
+    // the middle row, the upper bound above it and the lower bound below it.
+    assert_eq!(
+        render_latex(r"\prod_{i=1}^{n} a_i", RenderLatexOptions { display: true }).as_deref(),
+        Some(" n\n ∏  aᵢ\ni=1")
+    );
+    assert_eq!(
+        render_latex(r"\oint_C \frac{dz}{z}", RenderLatexOptions { display: true }).as_deref(),
+        Some("   dz\n∮  ──\nC  z")
+    );
+    assert_eq!(
+        render_latex(r"\lim_{x\to\infty} \frac{1}{x} = 0", RenderLatexOptions { display: true })
+            .as_deref(),
+        Some("     1\nlim  ─ = 0\nx→∞  x")
+    );
+    // `\nolimits` keeps the bounds as scripts; `\limits` forces the stacked
+    // form even for operators that default to inline limits.
+    assert_eq!(
+        render_latex(r"\int\nolimits_0^1 f(x)\,dx", RenderLatexOptions { display: true }).as_deref(),
+        Some("∫₀¹ f(x) dx")
+    );
+    assert_eq!(
+        render_latex(r"\int\limits_0^1 f(x)\,dx", RenderLatexOptions { display: true }).as_deref(),
+        Some("1\n∫ f(x) dx\n0")
+    );
+}
+
+#[test]
+fn matrix_environments_draw_their_delimiters() {
+    let cases = [
+        (r"\begin{pmatrix}a&b\\c&d\end{pmatrix}", "⎛ a │ b ⎞\n⎝ c │ d ⎠"),
+        (r"\begin{bmatrix}a&b\\c&d\end{bmatrix}", "⎡ a │ b ⎤\n⎣ c │ d ⎦"),
+        (r"\begin{Bmatrix}a&b\\c&d\end{Bmatrix}", "⎧ a │ b ⎫\n⎩ c │ d ⎭"),
+        (r"\begin{vmatrix}a&b\\c&d\end{vmatrix}", "│ a │ b │\n│ c │ d │"),
+        (r"\begin{Vmatrix}a&b\\c&d\end{Vmatrix}", "║ a │ b ║\n║ c │ d ║"),
+        (r"\begin{matrix}a&b\\c&d\end{matrix}", "a │ b\nc │ d"),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(
+            render_latex(source, RenderLatexOptions { display: true }).as_deref(),
+            Some(expected),
+            "source = {source:?}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_commands_fail_closed_without_panicking() {
+    for source in UNSUPPORTED_COMMANDS {
+        assert_eq!(
+            render_latex(source, RenderLatexOptions::default()),
+            None,
+            "source = {source:?}"
         );
     }
 }
@@ -331,22 +494,51 @@ fn unsupported_and_malformed_input_fails_closed() {
 
 #[test]
 fn nesting_is_bounded_and_never_panics() {
+    use sexy_tui_rs::rich_text::latex::MAX_LATEX_NESTING_DEPTH;
+
+    // Well inside the bound: groups and fraction chains still render.
     let mut source = String::from("x");
-    for _ in 0..64 {
+    for _ in 0..32 {
         source = format!("{{{source}}}");
     }
     assert_eq!(render_latex(&source, RenderLatexOptions::default()).as_deref(), Some("x"));
 
     let mut nested = String::new();
-    for _ in 0..64 {
+    for _ in 0..32 {
         nested.push_str(r"\frac{");
     }
     nested.push('1');
-    for _ in 0..64 {
+    for _ in 0..32 {
         nested.push_str("}{2}");
     }
-    let rendered = render_latex(&nested, RenderLatexOptions { display: true });
-    assert!(rendered.is_some());
+    assert!(render_latex(&nested, RenderLatexOptions { display: true }).is_some());
+
+    // Past the bound the parser stops descending and fails closed. Before the
+    // bound existed these inputs exhausted the thread stack and aborted the
+    // process, which is why the assertion is "no panic, `None`" rather than a
+    // rendered value.
+    let deep_braces = "{".repeat(MAX_LATEX_NESTING_DEPTH + 1);
+    assert_eq!(render_latex(&deep_braces, RenderLatexOptions::default()), None);
+
+    let mut deep_fractions = String::new();
+    for _ in 0..10_000 {
+        deep_fractions.push_str(r"\frac{");
+    }
+    deep_fractions.push('1');
+    for _ in 0..10_000 {
+        deep_fractions.push_str("}{2}");
+    }
+    assert_eq!(render_latex(&deep_fractions, RenderLatexOptions::default()), None);
+    assert_eq!(
+        render_latex(&deep_fractions, RenderLatexOptions { display: true }),
+        None
+    );
+
+    let deep_environments = r"\begin{cases}".repeat(2_000);
+    assert_eq!(render_latex(&deep_environments, RenderLatexOptions::default()), None);
+
+    // Unbalanced input never panics either.
+    assert_eq!(render_latex("}".repeat(1_000).as_str(), RenderLatexOptions::default()), None);
 }
 
 #[test]

@@ -2,12 +2,71 @@
 //!
 //! Port of the upstream reference `packages/tui/src/latex.ts`
 //! (pi @ `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`): the symbol tables, the
-//! `LatexParser`, and the fraction/operator/matrix layout pass. The port keeps
-//! the upstream contract: [`render_latex`] returns `None` — never a panic, never
-//! a partial guess — when the expression uses syntax the parser cannot render.
+//! `LatexParser`, and the fraction/operator/matrix layout pass. [`render_latex`]
+//! is the entry point; the `tables` module holds the mechanically generated
+//! symbol tables.
+//!
+//! # Contract
+//!
+//! [`render_latex`] returns `Some(rendered)` or `None` — never a panic, never a
+//! partial guess. `None` is the upstream `undefined` result: the expression
+//! used syntax this renderer does not implement, or was malformed.
 //!
 //! Layout composes *semantic text*, not ANSI. Embedding components decide how
 //! the returned lines are styled, wrapped, or clipped.
+//!
+//! # Supported
+//!
+//! - the upstream symbol tables: greek letters, relations, arrows, operators,
+//!   delimiters, `\mathbb`, `\mathcal`, `\mathfrak`, `\mathbf`, `\mathrm`,
+//!   `\text`, negation (`\not`, `\nleq`, …), accents, and wrapped names
+//! - sub/superscripts, including the Unicode-script fallback
+//!   (`x_i^2` → `xᵢ²`)
+//! - fractions (`\frac`, `\dfrac`, `\tfrac`), roots (`\sqrt`, `\sqrt[n]`),
+//!   `\binom`, `\boxed`
+//! - operator limits: in display mode a limit-taking command stacks its bounds
+//!   over and under the operator (`\sum_{i=1}^{n}` renders three rows);
+//!   `\limits` forces stacking and `\nolimits` forces inline scripts
+//! - delimiter sizing: `\left…\right`, `\bigl`/`\Bigl`/…, `\middle`, and
+//!   `\left.`/`\right|`
+//! - environments: `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`,
+//!   `Vmatrix`, `smallmatrix`, `array`, `cases` (and `cases*`), `aligned`,
+//!   `align`(`*`), `alignedat`/`alignat`, `gather`ed, `multline`,
+//!   `split`, `equation`(`*`)
+//! - multiple lines: `\\` row breaks and `&` alignment columns inside
+//!   environments, with the upstream whitespace and line-joining rules
+//!
+//! # Fails closed
+//!
+//! Unsupported commands, missing/mismatched arguments and unbalanced groups
+//! return `None` rather than rendering something misleading. Commands the
+//! reference renderer does not implement (`\cfrac`, `\genfrac`, `\cancel`,
+//! `\phantom`, `\hspace`, `\xrightarrow`, `\verb`, `\def`, `\usepackage`,
+//! `tikzpicture`, …) are unsupported here too — see
+//! `tests/latex_render.rs::UNSUPPORTED_COMMANDS`.
+//!
+//! Recursion is bounded by [`MAX_LATEX_NESTING_DEPTH`]: input deeper than the
+//! cap fails closed instead of exhausting the stack. Once an expression is
+//! known to be unrenderable the parser stops descending, so neither a deeply
+//! nested `\frac` chain nor a wide expression does unbounded work.
+//!
+//! # Known difference from the reference
+//!
+//! The reference implementation indexes JavaScript UTF-16 code units, so a
+//! non-BMP character (emoji, regional indicator) can be split mid-code-point
+//! and produce lone surrogates. This port indexes `char`s, so it never emits
+//! invalid UTF-8/UTF-16; on 2913 differential cases the only divergences were
+//! of exactly this kind (11 of 3000, all on inputs containing non-BMP
+//! characters, 0 on the same corpus with those inputs removed).
+//!
+//! # Tests
+//!
+//! `crates/sexy-tui-rs/tests/latex_render.rs` holds the behavioral goldens:
+//! the upstream `latex.test.ts` corpus, captured box-drawing expectations for
+//! operator limits / fractions / every matrix environment, and fail-closed
+//! cases. Every expectation in it was captured from the reference renderer
+//! running under Node with its real `visibleWidth`, so wide and combining
+//! glyphs are measured identically.
 
 mod tables;
 
@@ -40,6 +99,23 @@ const NAMED_OPERATOR_START: char = '\u{f0004}';
 const NAMED_OPERATOR_END: char = '\u{f0005}';
 const NEGATIVE_SPACE: &str = "\u{0000}";
 const COMBINING_LONG_SOLIDUS: char = '\u{338}';
+
+/// Hard cap on recursive descent (`{…}` groups, `\frac` arguments, nested
+/// environments).
+///
+/// The parser is recursive, so a hostile or malformed expression such as
+/// thousands of unmatched `{` or `\frac{` would otherwise exhaust the thread
+/// stack and abort the process — an unbounded-work failure, not a rendering
+/// failure. Real math nesting stays far below this bound; input that exceeds
+/// it fails closed ([`render_latex`] returns `None`) instead of recursing
+/// further.
+///
+/// 64 is chosen against the smallest stack the renderer realistically runs
+/// with (Rust's 2 MiB default thread stack) in an unoptimised build: a
+/// `\frac` chain costs four parser frames per level, and that chain aborts
+/// somewhere between 300 and 500 levels of input on a 2 MiB stack, so the cap
+/// keeps a wide margin.
+pub const MAX_LATEX_NESTING_DEPTH: usize = 64;
 
 /// Render a basic LaTeX math expression as terminal-friendly Unicode text.
 ///
@@ -576,10 +652,20 @@ struct LatexParser<'nodes> {
     position: usize,
     supported: bool,
     stack_fractions: bool,
+    depth: usize,
 }
 
 impl<'nodes> LatexParser<'nodes> {
     fn new(source: &str, layout_nodes: &'nodes mut Vec<LayoutNode>, display: bool) -> Self {
+        Self::nested(source, layout_nodes, display, 0)
+    }
+
+    fn nested(
+        source: &str,
+        layout_nodes: &'nodes mut Vec<LayoutNode>,
+        display: bool,
+        depth: usize,
+    ) -> Self {
         Self {
             source: source.chars().collect(),
             layout_nodes,
@@ -587,6 +673,7 @@ impl<'nodes> LatexParser<'nodes> {
             position: 0,
             supported: true,
             stack_fractions: true,
+            depth,
         }
     }
 
@@ -603,8 +690,26 @@ impl<'nodes> LatexParser<'nodes> {
     }
 
     fn parse_sequence(&mut self, end_character: Option<char>) -> String {
+        if self.depth >= MAX_LATEX_NESTING_DEPTH {
+            self.supported = false;
+            return String::new();
+        }
+        self.depth += 1;
+        let result = self.parse_sequence_inner(end_character);
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_sequence_inner(&mut self, end_character: Option<char>) -> String {
         let mut result = String::new();
         while self.position < self.source.len() {
+            // Once the expression is known to be unrenderable (unsupported
+            // syntax or the nesting cap), stop descending. Continuing would
+            // keep re-entering the argument parser on the same unconsumed
+            // token and grow the stack with the input length.
+            if !self.supported {
+                return result;
+            }
             let character = self.source[self.position];
             if end_character == Some(character) {
                 self.position += 1;
@@ -712,6 +817,9 @@ impl<'nodes> LatexParser<'nodes> {
     }
 
     fn parse_command(&mut self) -> String {
+        if !self.supported {
+            return String::new();
+        }
         self.position += 1;
         if self.position >= self.source.len() {
             self.supported = false;
@@ -1001,6 +1109,9 @@ impl<'nodes> LatexParser<'nodes> {
     }
 
     fn parse_required_argument_value(&mut self) -> String {
+        if !self.supported {
+            return String::new();
+        }
         while self.position < self.source.len() && self.source[self.position].is_whitespace() {
             self.position += 1;
         }
@@ -1291,8 +1402,9 @@ impl<'nodes> LatexParser<'nodes> {
 
     fn render_nested(&mut self, source: &str, stack_fractions: bool) -> String {
         let display = self.display && stack_fractions;
+        let depth = self.depth;
         let rendered = {
-            let mut parser = LatexParser::new(source, &mut *self.layout_nodes, display);
+            let mut parser = LatexParser::nested(source, &mut *self.layout_nodes, display, depth);
             parser.render()
         };
         match rendered {

@@ -1,5 +1,5 @@
 import SwiftUI
-import OctetServeClient
+import OctetServe
 
 struct RootView: View {
     @EnvironmentObject private var model: MacOSAppModel

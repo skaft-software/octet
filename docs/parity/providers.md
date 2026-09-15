@@ -37,7 +37,15 @@ route/discovery/credential declaration is landed; the static catalog needs a
 models.dev generation pass. Deterministic checks here do not qualify live
 provider availability.
 
-## Codex `service_tier` (row 1a.1 — landed, unblocks roadmap #175 `/fast`)
+## Codex `service_tier` (row 1a.1 — field landed; `/fast` NOT yet unblocked)
+
+`/fast` (roadmap #175) stays **inert**: the codec field is landed, but no live
+run selects a tier, so no request carries `service_tier` today. `octet-agent`'s
+`ResponsesOptions` builders (`crates/octet-agent/src/agent.rs`,
+`durable_responses_options` / `native_responses_options`) only ever construct
+`ResponsesOptions::full_replay(...)`, which leaves `service_tier` unset;
+`apply_fast_command` (`crates/octet-coding-agent/src/modes/interactive.rs`)
+correctly fails loudly instead of pretending the flag took effect.
 
 Upstream anchors: `packages/ai/src/api/openai-responses.ts:105`, `:321`
 (`params.service_tier = options.serviceTier`), `:362-389`
@@ -45,8 +53,8 @@ Upstream anchors: `packages/ai/src/api/openai-responses.ts:105`, `:321`
 `packages/ai/src/api/openai-codex-responses.ts:75`, `:566`, `:600-625`
 (same field and multipliers on the Codex envelope).
 
-Outcome (landed): octet:`crates/octet-ai/src/types.rs` adds the typed
-`ServiceTier` (`auto | default | flex | priority`) and
+Outcome (codec field landed): octet:`crates/octet-ai/src/types.rs` adds the
+typed `ServiceTier` (`auto | default | flex | priority`) and
 `ResponsesRuntimeProfile::accepts_service_tier`, the declared capability.
 octet:`crates/octet-ai/src/responses.rs` (`ResponsesOptions::service_tier`,
 `with_service_tier`) carries the per-request selection;
@@ -58,7 +66,15 @@ Behavioral tests: `service_tier_is_absent_unless_the_caller_requests_it`,
 `service_tier_fails_closed_on_a_profile_that_does_not_declare_it`
 (`cargo test -p octet-ai --lib service_tier` -> 3 passed).
 
-Gap: `applyServiceTierPricing` (usage-cost multiplier 0.5 flex, 2 priority,
+Gap 1 (blocks `/fast`, outside the `octet-ai` boundary): the live-run
+`ResponsesOptions` builders in `crates/octet-agent/src/agent.rs`
+(`durable_responses_options`, `native_responses_options`) never call
+`with_service_tier`, so the field is never set on a real request. Named missing
+primitive: set `ResponsesOptions::service_tier = Some(ServiceTier::Priority)`
+for `on` (and leave it unset for `off`) at those builders, after checking
+`model.endpoint.runtime.responses_profile.accepts_service_tier()`.
+
+Gap 2: `applyServiceTierPricing` (usage-cost multiplier 0.5 flex, 2 priority,
 2.5 for `gpt-5.5` priority) is not applied to `Response.cost`. Named missing
 primitive: thread the requested/echoed tier into
 `ResponseBuilder::finish` (`crates/octet-ai/src/stream.rs:809-822`, the only

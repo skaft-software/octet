@@ -76,6 +76,9 @@ async fn run() -> anyhow::Result<()> {
     let top_level_command = cli.command.clone();
     let parity = cli.parity.clone();
     parity.validate()?;
+    // `--no-session` must be an explicitly headless frontend; checked before
+    // stdin can promote a bare invocation to print mode.
+    parity.require_headless_frontend(&cli)?;
     // Bridge the opt-in Codex context-window override to the resolution policy
     // before any bootstrap or mode dispatch reads it.
     parity.install_codex_context_env();

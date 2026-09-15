@@ -282,6 +282,10 @@ pub enum DelegationError {
     /// A child agent could not be initialized.
     #[error("delegated agent failed: {0}")]
     Agent(#[from] AgentError),
+    /// A session-owned worker could not be handed over as a launchable
+    /// interactive session.
+    #[error("delegated session is not launchable: {0}")]
+    Unlaunchable(String),
     /// Delegation activation failed and secure rollback also could not finish.
     #[error("delegation activation failed ({activation}); rollback failed ({rollback})")]
     ActivationRollback {
@@ -617,6 +621,13 @@ impl DelegationBinding {
     /// written instead of a silent vanish.
     pub(crate) fn detach_run(&self) {
         self.manager.detach_run(&self.identity);
+    }
+
+    /// Session-owned launchable-handle resolver for the root owner.
+    pub(crate) fn session_handle(&self) -> SessionDelegationHandle {
+        SessionDelegationHandle {
+            manager: Arc::clone(&self.manager),
+        }
     }
 
     pub(crate) fn delegated_usage_records(&self) -> Vec<DelegatedUsageRecord> {
@@ -1282,6 +1293,11 @@ struct AgentRecord {
     /// while they need no new authority, and park in
     /// [`DelegatedAgentStatus::AwaitingApproval`] when they do.
     detached: bool,
+    /// Process-local liveness of this record's worker task. `true` while a task
+    /// in this process owns the child session; cleared by every exit path of
+    /// `run_worker`. It is deliberately not durable: after a restart no task is
+    /// live, which is exactly what a launchable handle needs to know.
+    live_task: bool,
     /// Command receiver parked for a detached record restored from the
     /// durable roster. Keeping it alive buffers a later turn's steering or
     /// follow-up until reattachment; it is taken exactly once.
@@ -1454,6 +1470,27 @@ struct WorkerStartup {
     extension_policy: Option<ExtensionAgentSessionPolicy>,
     deadline: Option<tokio::time::Instant>,
     deadline_ms: Option<u64>,
+}
+
+/// Clears a record's process-local liveness flag when its worker task ends.
+struct WorkerLiveness {
+    manager: Arc<DelegationManager>,
+    id: String,
+}
+
+impl WorkerLiveness {
+    fn new(manager: &Arc<DelegationManager>, id: String) -> Self {
+        Self {
+            manager: Arc::clone(manager),
+            id,
+        }
+    }
+}
+
+impl Drop for WorkerLiveness {
+    fn drop(&mut self) {
+        self.manager.mark_worker_stopped(&self.id);
+    }
 }
 
 struct ChildRunContext<'a> {
@@ -2028,6 +2065,7 @@ impl DelegationManager {
                     deadline_at_ms: durable.deadline_at_ms,
                     turn_limit: durable.turn_limit,
                     detached: true,
+                    live_task: false,
                     detached_commands: recoverable.then_some(command_rx),
                     durable_diagnostic: durable.durable_diagnostic,
                     mirrored_usage: durable.mirrored_usage,
@@ -2112,13 +2150,34 @@ impl DelegationManager {
             if let Some(error) = &state.persistence_error {
                 return Err(format!("delegation persistence is unavailable: {error}"));
             }
+            // Two kinds of record are reattachable at a new owning run:
+            // * a live worker that survived the previous turn in this process
+            //   (`detached` marker set while its task keeps running), and
+            // * a durable record reconstructed from the roster with no live
+            //   task (`Detached`/`AwaitingApproval`).
             let ids = state
                 .records
                 .iter()
-                .filter(|(_, record)| record.status.is_recoverable())
+                .filter(|(_, record)| {
+                    record.status.is_recoverable() || (record.detached && record.status.is_running())
+                })
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>();
             for id in ids {
+                let live_task = state
+                    .records
+                    .get(&id)
+                    .is_some_and(|record| record.detached_commands.is_none() && !record.status.is_recoverable());
+                if live_task {
+                    // The worker still owns its receiver and its permit in this
+                    // process: reattachment only clears the run-scoped
+                    // detachment marker. No second worker, no second permit.
+                    if let Some(record) = state.records.get_mut(&id) {
+                        record.detached = false;
+                        record.durable_diagnostic = None;
+                    }
+                    continue;
+                }
                 let permit = match self.current_permits().try_acquire_owned() {
                     Ok(permit) => permit,
                     // The bound is authoritative: a record that cannot acquire
@@ -2128,12 +2187,18 @@ impl DelegationManager {
                 let Some(record) = state.records.get_mut(&id) else {
                     continue;
                 };
-                let Some(commands) = record.detached_commands.take() else {
-                    // The worker still owns its receiver in this process;
-                    // reattachment only clears the run-scoped marker.
-                    record.status = DelegatedAgentStatus::Pending;
-                    record.detached = false;
-                    continue;
+                // A worker restored from the roster kept the receiver of its
+                // buffered commands. A worker that settled itself (for example
+                // by parking at the approval boundary, or a live task that
+                // already finished) no longer has one, so reattachment rebuilds
+                // the channel instead of attaching a task to a closed queue.
+                let commands = match record.detached_commands.take() {
+                    Some(commands) => commands,
+                    None => {
+                        let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+                        record.command_tx = command_tx;
+                        command_rx
+                    }
                 };
                 let session = match self.reopen_child_session(&record.session_path) {
                     Ok(session) => session,
@@ -2177,6 +2242,37 @@ impl DelegationManager {
         Ok(())
     }
 
+    /// In-process resolution of a worker's launchable interactive handle.
+    ///
+    /// Unlike [`resolve_launchable_child_session`], this knows the
+    /// process-local liveness the durable roster cannot carry, so it refuses a
+    /// session that a live worker still owns.
+    pub(crate) fn launchable_child_session(
+        &self,
+        reference: &str,
+    ) -> Result<LaunchableChildSession, DelegationError> {
+        validate_launch_reference(reference)?;
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let record = state
+            .records
+            .values()
+            .find(|record| {
+                delegated_session_reference(&record.session_path).as_deref() == Some(reference)
+            })
+            .ok_or_else(|| DelegationError::Unlaunchable("unknown worker handle".into()))?;
+        launchability(record).map_err(DelegationError::Unlaunchable)?;
+        Ok(LaunchableChildSession {
+            reference: reference.to_owned(),
+            session_path: record.session_path.clone(),
+            agent_id: record.identity.id.clone(),
+            agent_path: record.identity.path.clone(),
+            status: record.status.label().to_owned(),
+        })
+    }
+
     fn tools(self: &Arc<Self>, identity: &AgentIdentity) -> Vec<Arc<dyn Tool>> {
         CollaborationToolKind::ALL
             .into_iter()
@@ -2198,9 +2294,15 @@ impl DelegationManager {
             // Session-scoped lifetime: a new owning run reattaches the fleet
             // that survived the previous turn instead of retiring it. Live
             // workers keep running; workers reconstructed from the durable
-            // roster are resumed with an empty task queue.
+            // roster are resumed with an empty task queue. Execution capacity
+            // is *not* handed back here: a surviving worker keeps its slot, so
+            // the cap cannot drift up on reattachment.
             {
-                let state = self
+                let _journal_order = self
+                    .journal_order
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2209,6 +2311,25 @@ impl DelegationManager {
                 }
                 if state.shutting_down {
                     return Err("delegation team is shutting down".into());
+                }
+                // A previous explicit stop (owner teardown, team stop, or a
+                // dropped agent) reactivates for the next owning run so the
+                // session can never be bricked by its own stop. Retired
+                // records - shut-down workers with no live task and no
+                // resumable work - release their name and slot here; the
+                // journal keeps the shutdown evidence.
+                state.root_active = true;
+                let before = state.records.len();
+                state.records.retain(|_, record| {
+                    !matches!(record.status, DelegatedAgentStatus::Shutdown)
+                        || record.detached_commands.is_some()
+                });
+                if state.records.len() != before {
+                    state.total_agents = state
+                        .total_agents
+                        .saturating_sub(before - state.records.len())
+                        .max(1);
+                    self.persist_durable_fleet_locked(&mut state);
                 }
             }
             self.reattach_detached(owner)?;
@@ -2378,15 +2499,16 @@ impl DelegationManager {
                 ));
             }
             let child_path = format!("{}/{}", owner.path.trim_end_matches('/'), task_name);
-            if state
+            if let Some(existing) = state
                 .records
                 .values()
-                .any(|record| record.identity.path == child_path)
+                .find(|record| record.identity.path == child_path)
             {
-                return Err(format!(
-                    "task name already exists under {}: {}",
-                    owner.path, task_name
-                ));
+                // Worker names are session-scoped, not run-scoped: the name
+                // stays owned by the surviving worker's durable record, so the
+                // refusal names that worker and the tool that resumes it
+                // instead of letting a second worker shadow it.
+                return Err(existing_task_name_error(existing));
             }
             let number = state.next_agent_number;
             state.next_agent_number = state.next_agent_number.saturating_add(1);
@@ -2546,6 +2668,7 @@ impl DelegationManager {
                     deadline_at_ms,
                     turn_limit,
                     detached: false,
+                    live_task: true,
                     detached_commands: None,
                     durable_diagnostic: None,
                     mirrored_usage: Usage::default(),
@@ -2621,6 +2744,7 @@ impl DelegationManager {
             mut deadline_ms,
         } = startup;
         let session_path = session.path().to_path_buf();
+        let _liveness = WorkerLiveness::new(&self, identity.id.clone());
         let mut unopened_session = Some(session);
         let mut agent = None;
         let mut queued_tasks = match initial_task {
@@ -2661,6 +2785,13 @@ impl DelegationManager {
                 continue;
             }
 
+            if queued_tasks.is_empty() {
+                // An idle worker owns no execution slot. The fleet cap counts
+                // running work, so a worker that reattached with nothing to do
+                // releases its slot instead of parking on it; it acquires a new
+                // one through `acquire_follow_up_permit` when work arrives.
+                initial_permit.take();
+            }
             if !queued_tasks.is_empty() && !retry_undelivered_task {
                 if agent.is_none() {
                     let child_session = match unopened_session.take() {
@@ -3607,6 +3738,19 @@ impl DelegationManager {
         drop(state);
         self.changed.notify_waiters();
         self.publish_telemetry(None, None);
+    }
+
+    /// Marks a worker task dead the moment `run_worker` returns, whatever the
+    /// exit path was. A session-owned record without a live task is what a
+    /// launchable interactive handle requires.
+    fn mark_worker_stopped(&self, id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(record) = state.records.get_mut(id) {
+            record.live_task = false;
+        }
     }
 
     fn worker_is_detached(&self, id: &str) -> bool {
@@ -5557,6 +5701,230 @@ fn extension_spawn_result_value(record: &AgentRecord) -> Value {
     })
 }
 
+/// Why a session-owned worker can or cannot be opened as its own interactive
+/// session in another process.
+///
+/// The handle is the opaque, path-free `agent-session:<sha256>` reference that
+/// the extension already receives. This verdict is the host-side half: the
+/// launchable path is host-only, and nothing here carries a credential, a
+/// transcript path, or any session secret.
+fn launchability(record: &AgentRecord) -> Result<(), String> {
+    match &record.status {
+        // Unattended mutation fails closed: a worker parked on a decision it
+        // no longer has authority for must not be opened for more work.
+        DelegatedAgentStatus::AwaitingApproval { .. } => Err(
+            "worker is parked at the approval boundary; supplying new authority is required before it can be opened"
+                .to_owned(),
+        ),
+        _ => {
+            if record.live_task {
+                // One writer per session: a live worker owns this transcript in
+                // this process, so another process must not attach to it.
+                Err(
+                    "a live worker owns this session in the current process; stop or detach it first"
+                        .to_owned(),
+                )
+            } else if !record.session_path.exists() {
+                Err("the worker session file is gone".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A session-owned worker that can be handed to another process and opened as
+/// its own interactive session.
+///
+/// The caller keeps the handle string (`reference`) and never receives it back
+/// from an extension; `session_path` is host-only and must not be published to
+/// an extension, a notice, or a command line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchableChildSession {
+    /// Opaque, path-free, argv-safe handle: `agent-session:<sha256>`.
+    pub reference: String,
+    /// Host-only transcript path for the launching process.
+    pub session_path: PathBuf,
+    /// Stable worker identity for diagnostics.
+    pub agent_id: String,
+    /// Absolute delegation path of the worker.
+    pub agent_path: String,
+    /// Bounded worker state label at hand-over time.
+    pub status: String,
+}
+
+/// Strict `agent-session:<sha256>` handle validation.
+///
+/// The token is deliberately a boring, quotable, argv-safe identifier: the
+/// launcher passes it as one `argv` element and rejects shell metacharacters,
+/// and nothing in it names a path, a credential, or a session secret.
+fn validate_launch_reference(reference: &str) -> Result<(), DelegationError> {
+    let Some(digest) = reference.strip_prefix("agent-session:") else {
+        return Err(DelegationError::Unlaunchable(
+            "worker handle must be agent-session:<sha256>".into(),
+        ));
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(DelegationError::Unlaunchable(
+            "worker handle must carry exactly 64 lowercase hex digits".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves the session-owned launchable handle for one worker from the
+/// session's durable roster (`<session directory>/fleet.json`).
+///
+/// This is the host-side primitive a *separate* process needs in order to open
+/// a session-owned worker as its own interactive session: it needs no live
+/// agent, only the owning session directory. It fails closed - an unknown
+/// handle, a parked worker, or a vanished transcript is an explicit, bounded
+/// refusal, never a fabricated launch. Liveness is process-local, so a worker
+/// that is still live in another process is caught by the child session's own
+/// open-time lock rather than by this roster read.
+pub fn resolve_launchable_child_session(
+    session_directory: &Path,
+    reference: &str,
+) -> Result<LaunchableChildSession, DelegationError> {
+    validate_launch_reference(reference)?;
+    let path = session_directory.join(FLEET_ROSTER_FILE);
+    let bytes = secure_fs::read_private_file_bounded(&path, MAX_FLEET_ROSTER_BYTES).map_err(
+        |error| {
+            DelegationError::Unlaunchable(format!(
+                "no session-owned delegation roster in this session: {error}"
+            ))
+        },
+    )?;
+    let fleet: DurableFleet = serde_json::from_slice(&bytes).map_err(|error| {
+        DelegationError::Unlaunchable(format!("unreadable delegation roster: {error}"))
+    })?;
+    if fleet.version != FLEET_ROSTER_VERSION {
+        return Err(DelegationError::Unlaunchable(
+            "unsupported delegation roster version".into(),
+        ));
+    }
+    let record = fleet
+        .records
+        .into_iter()
+        .find(|record| {
+            delegated_session_reference(&record.session_path).as_deref() == Some(reference)
+        })
+        .ok_or_else(|| DelegationError::Unlaunchable("unknown worker handle".into()))?;
+    if let DelegatedAgentStatus::AwaitingApproval { .. } = record.status {
+        return Err(DelegationError::Unlaunchable(
+            "worker is parked at the approval boundary; supplying new authority is required before it can be opened"
+                .into(),
+        ));
+    }
+    if !record.session_path.exists() {
+        return Err(DelegationError::Unlaunchable(
+            "the worker session file is gone".into(),
+        ));
+    }
+    Ok(LaunchableChildSession {
+        reference: reference.to_owned(),
+        session_path: record.session_path,
+        agent_id: record.agent_id,
+        agent_path: record.agent_path,
+        status: record.status.label().to_owned(),
+    })
+}
+
+/// Opaque, session-owned delegation handle for host-side callers.
+///
+/// It owns the durable worker records of one session and resolves a worker's
+/// launchable interactive handle with the process-local liveness the durable
+/// roster cannot carry. Extensions never see this type: they receive only the
+/// opaque `agent-session:<sha256>` token plus the `launchable` /
+/// `launch_blocked` verdict on each `agent/list` row.
+#[derive(Clone)]
+pub struct SessionDelegationHandle {
+    manager: Arc<DelegationManager>,
+}
+
+impl SessionDelegationHandle {
+    /// Resolves a worker's launchable handle, failing closed on a parked
+    /// worker, a live in-process worker, or a vanished transcript.
+    pub fn launchable_child_session(
+        &self,
+        reference: &str,
+    ) -> Result<LaunchableChildSession, DelegationError> {
+        self.manager.launchable_child_session(reference)
+    }
+
+    /// The opaque handle of one worker, when it has a durable transcript.
+    pub fn reference_for_agent(&self, agent_id: &str) -> Option<String> {
+        let state = self
+            .manager
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .records
+            .get(agent_id)
+            .and_then(|record| delegated_session_reference(&record.session_path))
+    }
+
+    /// Session directory that owns the durable roster.
+    pub fn session_directory(&self) -> &Path {
+        &self.manager.config.session_directory
+    }
+}
+
+impl std::fmt::Debug for SessionDelegationHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionDelegationHandle")
+            .field("session_directory", &self.manager.config.session_directory)
+            .finish()
+    }
+}
+
+/// Bounded, actionable diagnostic for a spawn that reuses a live
+/// session-scoped worker name.
+///
+/// The name is never recycled silently: the caller is told which worker holds
+/// it, what state that worker is in, and which collaboration tool resumes or
+/// stops it.
+fn existing_task_name_error(record: &AgentRecord) -> String {
+    let name = record
+        .display_task_name
+        .as_deref()
+        .unwrap_or(record.task_name.as_str());
+    let parent = record
+        .identity
+        .path
+        .rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() {
+                ROOT_AGENT_PATH
+            } else {
+                parent
+            }
+        })
+        .unwrap_or(ROOT_AGENT_PATH);
+    let state = record.status.label();
+    let id = &record.identity.id;
+    match &record.status {
+        DelegatedAgentStatus::Detached | DelegatedAgentStatus::AwaitingApproval { .. } => format!(
+            "task name already exists under {parent}: {name} is {state} (agent {id}); its owning \
+             session reattaches it on a later turn, and a free concurrency slot is required"
+        ),
+        DelegatedAgentStatus::Pending | DelegatedAgentStatus::Running => format!(
+            "task name already exists under {parent}: {name} is {state} (agent {id}); steer it \
+             with send_message or followup_task"
+        ),
+        _ => format!(
+            "task name already exists under {parent}: {name} is {state} (agent {id}); send more \
+             work with followup_task, or stop it with interrupt_agent"
+        ),
+    }
+}
+
 /// Whether a child failure means the effect required an approval authority
 /// that was not attached to this run.
 ///
@@ -5580,6 +5948,11 @@ fn list_value_locked(state: &ManagerState) -> Value {
 }
 
 fn agent_record_value(record: &AgentRecord) -> Value {
+    // Session-owned launchable handle. The token is the same opaque,
+    // path-free, argv-safe reference the extension already receives; only the
+    // verdict travels with it, never the transcript path.
+    let blocked = launchability(record).err();
+    let handle = delegated_session_reference(&record.session_path);
     let phase = if !record.active_tools.is_empty() {
         "using_tool"
     } else {
@@ -5614,6 +5987,10 @@ fn agent_record_value(record: &AgentRecord) -> Value {
         "started_at_ms": record.started_at_ms,
         "completed_at_ms": record.completed_at_ms,
         "detached": record.detached,
+        "live_task": record.live_task,
+        "handle": handle,
+        "launchable": blocked.is_none(),
+        "launch_blocked": blocked,
         "diagnostic": record.durable_diagnostic,
         "turn_count": record.turn_count,
         "turn_limit": record.turn_limit,
@@ -6239,7 +6616,7 @@ mod tests {
     }
 
     #[test]
-    fn owning_run_restart_reactivates_root_with_fresh_execution_capacity() {
+    fn owning_run_restart_reactivates_root_without_recycling_session_capacity() {
         let directory = tempfile::tempdir().unwrap();
         let manager = writable_manager(directory.path());
         let root = manager.root_binding().identity;
@@ -6274,7 +6651,10 @@ mod tests {
 
         manager.prepare_owning_run(&root).unwrap();
         assert!(manager.list_value_for(&root).is_ok());
-        assert!(manager.current_permits().try_acquire_owned().is_ok());
+        // Session-scoped lifetime keeps the cap honest: reactivating the root
+        // never hands back execution slots a surviving worker still holds, so
+        // the bound cannot drift up across the turn boundary.
+        assert!(manager.current_permits().try_acquire_owned().is_err());
         let state = manager
             .state
             .lock()
@@ -6376,6 +6756,7 @@ mod tests {
                     deadline_at_ms: None,
                     turn_limit: None,
                     detached: false,
+                    live_task: false,
                     detached_commands: None,
                     durable_diagnostic: None,
                     mirrored_usage: Usage::default(),
@@ -6794,6 +7175,7 @@ mod tests {
                 deadline_at_ms: None,
                 turn_limit: None,
                 detached: false,
+                live_task: false,
                 detached_commands: None,
                 durable_diagnostic: None,
                 mirrored_usage: Usage::default(),
@@ -6805,6 +7187,335 @@ mod tests {
         state.total_agents += 1;
         drop(state);
         (identity, command_rx)
+    }
+
+    /// Inserts a record shaped like one reconstructed from the session-owned
+    /// durable roster: no live task in this process, a buffered command
+    /// receiver, and the detachment marker set.
+    fn insert_durable_detached_record(
+        manager: &DelegationManager,
+        id: &str,
+        path: &str,
+        session_path: PathBuf,
+        status: DelegatedAgentStatus,
+    ) {
+        let identity = AgentIdentity {
+            id: id.into(),
+            path: path.into(),
+            depth: 1,
+        };
+        let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let mut state = manager.state.lock().unwrap();
+        state.records.insert(
+            identity.id.clone(),
+            AgentRecord {
+                identity,
+                task_name: path.rsplit('/').next().unwrap_or("child").into(),
+                display_task_name: None,
+                parent_id: ROOT_AGENT_ID.into(),
+                session_path,
+                status,
+                command_tx,
+                shutdown: crate::CancellationToken::default(),
+                interrupt_requested: false,
+                pending_messages: VecDeque::new(),
+                reserved_messages: QueueUsage::default(),
+                queued_follow_ups: QueueUsage::default(),
+                mailbox: VecDeque::new(),
+                mailbox_delivery: None,
+                resource_owner: None,
+                extension_policy: None,
+                effective_tool_policy: test_effective_tool_policy(),
+                orchestration_provenance: DelegationOrchestrationProvenance::all(
+                    DelegationPolicySource::ParentInherited,
+                ),
+                extension_principal: None,
+                extension_profile: None,
+                extension_idempotency_key: None,
+                extension_fingerprint: None,
+                created_at_ms: 1,
+                started_at_ms: Some(1),
+                completed_at_ms: None,
+                turn_count: 0,
+                tool_call_count: 0,
+                active_tools: BTreeMap::new(),
+                recent_tools: VecDeque::new(),
+                usage: Usage::default(),
+                usage_uncertain: false,
+                cost: None,
+                cost_microdollars: None,
+                deadline_at_ms: None,
+                turn_limit: None,
+                detached: true,
+                live_task: false,
+                detached_commands: Some(command_rx),
+                durable_diagnostic: None,
+                mirrored_usage: Usage::default(),
+                mirrored_cost: None,
+                mirrored_turn_count: 0,
+                mirrored_tool_call_count: 0,
+            },
+        );
+        state.total_agents += 1;
+    }
+
+    #[tokio::test]
+    async fn reattachment_is_bounded_by_the_remaining_execution_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        for index in 0..4 {
+            let session_path = manager
+                .team_directory
+                .join(format!("reattach-{index}.jsonl"));
+            Session::create(&session_path).unwrap();
+            insert_durable_detached_record(
+                &manager,
+                &format!("agent-{}", index + 1),
+                &format!("/root/worker-{index}"),
+                session_path,
+                DelegatedAgentStatus::Detached,
+            );
+        }
+        assert_eq!(manager.current_permits().available_permits(), 3);
+
+        manager.prepare_owning_run(&root_identity()).unwrap();
+
+        let state = manager.state.lock().unwrap();
+        let reattached = state
+            .records
+            .values()
+            .filter(|record| !record.detached && record.status == DelegatedAgentStatus::Pending)
+            .count();
+        let still_detached = state
+            .records
+            .values()
+            .filter(|record| record.detached && record.status == DelegatedAgentStatus::Detached)
+            .count();
+        // The bound is authoritative: the excess record stays visibly detached
+        // instead of oversubscribing the fleet, and no duplicate worker is
+        // started for any record.
+        assert_eq!(reattached, 3);
+        assert_eq!(still_detached, 1);
+        assert_eq!(state.records.len(), 4);
+        assert!(state
+            .records
+            .values()
+            .all(|record| record.durable_diagnostic.is_none()));
+    }
+
+    #[tokio::test]
+    async fn reattachment_fails_closed_when_the_child_session_is_gone() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        insert_durable_detached_record(
+            &manager,
+            "agent-1",
+            "/root/ghost",
+            manager.team_directory.join("missing.jsonl"),
+            DelegatedAgentStatus::Detached,
+        );
+
+        manager.prepare_owning_run(&root_identity()).unwrap();
+
+        let state = manager.state.lock().unwrap();
+        let record = &state.records["agent-1"];
+        assert_eq!(record.status, DelegatedAgentStatus::Detached);
+        assert!(record.detached);
+        let diagnostic = record
+            .durable_diagnostic
+            .as_deref()
+            .expect("a record whose session is gone must carry a bounded diagnostic");
+        assert!(diagnostic.contains("could not be reattached"), "{diagnostic}");
+        drop(state);
+        let listed = manager.list_value_for(&root_identity()).unwrap();
+        let agent = &listed["agents"][0];
+        assert_eq!(agent["status"]["state"], "detached");
+        assert_eq!(agent["detached"], true);
+        assert!(agent["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("could not be reattached"));
+    }
+
+    #[tokio::test]
+    async fn a_session_owned_worker_exposes_a_launchable_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        // A host-owned delegated session lives in a private `team-*` directory;
+        // its opaque reference is derived from that directory and the filename.
+        let team = directory.path().join("team-launchable");
+        std::fs::create_dir(&team).unwrap();
+        let session_path = team.join("0001-worker.jsonl");
+        Session::create(&session_path).unwrap();
+        insert_durable_detached_record(
+            &manager,
+            "agent-1",
+            "/root/worker",
+            session_path.clone(),
+            DelegatedAgentStatus::Detached,
+        );
+        let reference = delegated_session_reference(&session_path).unwrap();
+        // The handle is a boring, quotable, argv-safe token: no path, no
+        // secret, no shell metacharacter.
+        assert_eq!(reference.len(), "agent-session:".len() + 64);
+        assert!(reference.starts_with("agent-session:"));
+        assert!(reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b':'));
+        assert!(!reference.contains('/'));
+
+        let handle = manager.launchable_child_session(&reference).unwrap();
+        assert_eq!(handle.reference, reference);
+        assert_eq!(handle.session_path, session_path);
+        assert_eq!(handle.agent_id, "agent-1");
+        assert_eq!(handle.agent_path, "/root/worker");
+        assert_eq!(handle.status, "detached");
+
+        // A live worker owns the transcript in this process: refuse.
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.records.get_mut("agent-1").unwrap().live_task = true;
+        }
+        let blocked = manager.launchable_child_session(&reference).unwrap_err();
+        assert!(
+            blocked.to_string().contains("live worker owns this session"),
+            "{blocked}"
+        );
+
+        // A parked worker must not be opened for unattended mutation.
+        {
+            let mut state = manager.state.lock().unwrap();
+            let record = state.records.get_mut("agent-1").unwrap();
+            record.live_task = false;
+            record.status = DelegatedAgentStatus::AwaitingApproval {
+                reason: "approval is unavailable".into(),
+            };
+        }
+        let parked = manager.launchable_child_session(&reference).unwrap_err();
+        assert!(
+            parked.to_string().contains("approval boundary"),
+            "{parked}"
+        );
+
+        // Unknown and malformed handles fail closed with bounded diagnostics.
+        let unknown = format!("agent-session:{}", "0".repeat(64));
+        assert!(manager
+            .launchable_child_session(&unknown)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown worker handle"));
+        assert!(manager
+            .launchable_child_session("agent-session:not-hex")
+            .unwrap_err()
+            .to_string()
+            .contains("64 lowercase hex"));
+        assert!(manager
+            .launchable_child_session("/root/worker")
+            .unwrap_err()
+            .to_string()
+            .contains("must be agent-session:<sha256>"));
+    }
+
+    #[tokio::test]
+    async fn the_durable_roster_resolves_a_launchable_handle_without_a_live_agent() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let team = directory.path().join("team-roster");
+        std::fs::create_dir(&team).unwrap();
+        let session_path = team.join("0001-worker.jsonl");
+        Session::create(&session_path).unwrap();
+        insert_durable_detached_record(
+            &manager,
+            "agent-1",
+            "/root/worker",
+            session_path.clone(),
+            DelegatedAgentStatus::Detached,
+        );
+        {
+            let mut state = manager.state.lock().unwrap();
+            manager.persist_durable_fleet_locked(&mut state);
+        }
+        let reference = delegated_session_reference(&session_path).unwrap();
+        let session_directory = manager.config.session_directory.clone();
+
+        // A separate process needs only the session directory and the handle.
+        let handle = resolve_launchable_child_session(&session_directory, &reference).unwrap();
+        assert_eq!(handle.session_path, session_path);
+        assert_eq!(handle.agent_id, "agent-1");
+        assert_eq!(handle.agent_path, "/root/worker");
+
+        // A parked record in the roster is refused before any launch happens.
+        {
+            let bytes = std::fs::read(session_directory.join(FLEET_ROSTER_FILE)).unwrap();
+            let parked = String::from_utf8(bytes)
+                .unwrap()
+                .replace("\"state\":\"detached\"", "\"state\":\"awaiting_approval\",\"reason\":\"approval is unavailable\"");
+            secure_fs::write_private_atomic(
+                &session_directory.join(FLEET_ROSTER_FILE),
+                parked.as_bytes(),
+                MAX_FLEET_ROSTER_BYTES,
+            )
+            .unwrap();
+        }
+        let parked = resolve_launchable_child_session(&session_directory, &reference).unwrap_err();
+        assert!(parked.to_string().contains("approval boundary"), "{parked}");
+
+        // A vanished transcript fails closed rather than fabricating a launch.
+        let missing = tempfile::tempdir().unwrap();
+        let bytes = std::fs::read(session_directory.join(FLEET_ROSTER_FILE)).unwrap();
+        let body = String::from_utf8(bytes).unwrap().replace(
+            "\"state\":\"awaiting_approval\"",
+            "\"state\":\"detached\"",
+        );
+        secure_fs::write_private_atomic(
+            &missing.path().join(FLEET_ROSTER_FILE),
+            body.as_bytes(),
+            MAX_FLEET_ROSTER_BYTES,
+        )
+        .unwrap();
+        std::fs::remove_file(&session_path).unwrap();
+        let gone =
+            resolve_launchable_child_session(missing.path(), &reference).unwrap_err();
+        assert!(gone.to_string().contains("session file is gone"), "{gone}");
+
+        // No roster at all is an explicit refusal, not an empty success.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(resolve_launchable_child_session(empty.path(), &reference)
+            .unwrap_err()
+            .to_string()
+            .contains("no session-owned delegation roster"));
+    }
+
+    #[tokio::test]
+    async fn reusing_a_session_scoped_worker_name_names_the_resume_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        insert_test_record(
+            &manager,
+            DelegatedAgentStatus::Completed {
+                output: "first run settled".into(),
+            },
+        );
+
+        let error = manager
+            .spawn(
+                &root_identity(),
+                SpawnRequest {
+                    task_name: "child".into(),
+                    display_task_name: None,
+                    message: "do it again".into(),
+                    extension_policy: None,
+                    extension_provenance: None,
+                },
+            )
+            .unwrap_err();
+
+        assert!(
+            error.contains("task name already exists under /root: child"),
+            "{error}"
+        );
+        assert!(error.contains("agent-1"), "{error}");
+        assert!(error.contains("followup_task"), "{error}");
     }
 
     #[test]
@@ -7340,6 +8051,11 @@ mod tests {
             let spec = Arc::make_mut(&mut model.spec);
             spec.id = octet_ai::ModelId("codex/gpt-6-astra".into());
             spec.capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+            spec.capabilities
+                .reasoning
+                .as_mut()
+                .expect("Astra reasoning capability")
+                .max_effort = octet_ai::ReasoningEffort::Ultra;
             let endpoint = Arc::make_mut(&mut model.endpoint);
             endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
             endpoint.auth = octet_ai::Auth::None;
@@ -7349,6 +8065,11 @@ mod tests {
                 .get_mut()
                 .unwrap()
                 .max_output_tokens = model.spec.limits.max_output_tokens;
+            // An Astra request without an explicit effort is a validated
+            // `Reasoning` rejection, so this span boundary runs at the host's
+            // Ultra tier like the wire-contract sibling test.
+            manager_mut.template.reasoning =
+                octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
             manager_mut.template.model = model;
         }
 
@@ -7623,7 +8344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_spawn_idempotency_is_pruned_at_the_next_owning_run() {
+    async fn extension_spawn_idempotency_survives_the_owning_run_without_a_duplicate_worker() {
         let directory = tempfile::tempdir().unwrap();
         let team = directory.path().join("team-idempotency-runs");
         std::fs::create_dir(&team).unwrap();
@@ -7640,20 +8361,37 @@ mod tests {
             .unwrap();
 
         manager.prepare_owning_run(&root_identity()).unwrap();
+        // The session owns the worker, so the same idempotency key re-issues
+        // the original result instead of spawning a duplicate worker.
         let second = service
             .spawn(
                 "root-owner",
                 test_extension_spawn("research", None, None, "find it", "spawn-1"),
             )
             .unwrap();
-
-        assert_ne!(first["agent_id"], second["agent_id"]);
+        assert_eq!(first["agent_id"], second["agent_id"]);
+        assert_eq!(first["agent_path"], second["agent_path"]);
         assert_eq!(
             service.list("root-owner").unwrap()["agents"]
                 .as_array()
                 .unwrap()
                 .len(),
             1
+        );
+        // A different key still spawns its own worker.
+        let other = service
+            .spawn(
+                "root-owner",
+                test_extension_spawn("research", None, None, "find it", "spawn-2"),
+            )
+            .unwrap();
+        assert_ne!(other["agent_id"], first["agent_id"]);
+        assert_eq!(
+            service.list("root-owner").unwrap()["agents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
     }
 
@@ -8582,6 +9320,7 @@ mod tests {
                     deadline_at_ms: None,
                     turn_limit: None,
                     detached: false,
+                    live_task: false,
                     detached_commands: None,
                     durable_diagnostic: None,
                     mirrored_usage: Usage::default(),

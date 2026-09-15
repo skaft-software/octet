@@ -36,7 +36,7 @@ from .model import (
     sanitize_document,
     validate_plain_text,
 )
-from .launcher import execute_plan, plan_open_all, render_outcome
+from .launcher import execute_plan, plan_open_all, render_outcome, skipped_worker_row
 from .presentation import build_snapshot, detail_body, narrow_list
 
 
@@ -850,6 +850,15 @@ class Orchestrator:
             raise SubagentError("Usage: /subagents open-all tmux|herdr")
         multiplexer = arguments[0] if arguments else None
         running = [worker for worker in workers if worker.active]
+        # Session-owned workers that are not attached to any run get no pane, and
+        # they are named in the report: opening a stale pane would target the
+        # wrong session, and silently dropping the row would hide a worker that is
+        # still alive and reattachable.
+        skipped = [
+            skipped_worker_row(worker)
+            for worker in workers
+            if worker.detached or worker.awaiting_approval
+        ]
         plan = plan_open_all(
             multiplexer=multiplexer,
             parent_session_id=owner.host_session_id,
@@ -860,6 +869,19 @@ class Orchestrator:
         execute = launcher if launcher is not None else (lambda value: execute_plan(value, workspace=owner.workspace))
         outcome = execute(plan)
         notifications: List[Dict[str, Any]] = []
+        if skipped:
+            notifications.append(
+                {
+                    "level": "info",
+                    "title": "Subagent open-all left session-owned workers unopened",
+                    "message": (
+                        "%d worker(s) are still owned by this parent session but are "
+                        "not attached to any run (or are parked at the approval "
+                        "boundary), so no pane was opened for them. Reattach with "
+                        "/subagents wait, then re-run open-all." % len(skipped)
+                    ),
+                }
+            )
         if not outcome.ok:
             notifications.append(
                 {
@@ -882,9 +904,10 @@ class Orchestrator:
                 }
             )
         return {
-            "text": render_outcome(plan, outcome),
+            "text": render_outcome(plan, outcome, skipped=skipped),
             "notifications": notifications,
             "panes": [pane.plan_row() for pane in plan.panes],
+            "skipped": skipped,
         }
 
     def status_contribution(self, context: Mapping[str, Any]) -> Optional[Dict[str, Any]]:

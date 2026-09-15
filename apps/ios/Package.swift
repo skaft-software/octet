@@ -10,12 +10,13 @@ let package = Package(
     products: [.library(name: "OctetCompanion", targets: ["OctetCompanion"])],
     // No SwiftPM dependency on `../apple-shared` (product `OctetServe`) is
     // declared: this library imports nothing from it by design — the app-owned
-    // `ServeClientBoundary` binds the transport through a closure factory — and
-    // the shared package's sources do not compile in this tree
-    // (`apps/apple-shared/Sources/OctetServe/WireEnums.swift:21` uses the
-    // `extension` keyword as an enum case). The Xcode app target still links the
-    // shared client through `project.yml`, and a future adapter re-adds the
-    // product dependency here.
+    // `ServeClientBoundary` binds the transport through a closure factory. The
+    // shared package itself now compiles (`swift build` in `apps/apple-shared`
+    // completes), but it exports wire DTOs only and still has no client surface
+    // (`ServeClient`, pairing, Keychain, replay) for this target to link. The
+    // Xcode app target links the shared client through `project.yml`, and an
+    // adapter re-adds the product dependency here once that client surface
+    // exists.
     targets: [
         .target(
             name: "OctetCompanion",

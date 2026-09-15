@@ -206,12 +206,37 @@ class LaunchOutcome:
 
 
 WORKER_PANE_BLOCKED_REASON = (
-    "agent_sessions exposes this worker session only as a path-free opaque "
-    "reference, which `octet --resume` cannot resolve (delegated child sessions "
-    "live under the private <session-dir>/.delegation/team-* directory and are "
-    "not addressable by the session store). The pane argv is built and validated "
-    "below, but nothing is launched for it: a host-side resolver that accepts an "
-    "opaque `agent-session:` reference is the missing primitive."
+    "the only handle the host publishes for a delegated child session is the "
+    "path-free opaque reference `agent-session:<sha256>` "
+    "(crates/octet-agent/src/delegation.rs `delegated_session_reference`). The "
+    "session store resolves an id only as `<session-dir>/<id>.jsonl` "
+    "(crates/octet-coding-agent/src/session_store.rs `path_by_id`), and the "
+    "delegated child transcript lives in the owner-private "
+    "`.delegation/team-*/` directory, so `octet --resume <reference>` cannot "
+    "open it. The host's only resolver for that reference hands back a "
+    "read-only, externally locked inspection session "
+    "(crates/octet-coding-agent/src/extensions/serve.rs "
+    "`driver_for_delegated_session`: `AuthorityProfile::ReadOnly`, "
+    "`SessionLiveState::Locked`), reachable inside the owning process and not a "
+    "launchable interactive session. The pane argv is still built and validated, "
+    "but nothing is launched for it: the missing primitive is a launchable "
+    "handle for a session-owned delegated child."
+)
+# A session-owned worker that is not attached to any run gets no pane: the
+# extension holds no live handle for it, and open-all never opens a stale one.
+# Both reasons name the recoverable state and the reattach affordance so the row
+# can never become a silent omission.
+DETACHED_WORKER_NOT_OPENED_REASON = (
+    "still owned by this session but detached from any host run, so its live "
+    "session is not addressable and no stale pane is opened for it. Reattach it "
+    "with /subagents wait or subagent_status, then re-run open-all; a reattached "
+    "worker is planned again."
+)
+PARKED_WORKER_NOT_OPENED_REASON = (
+    "parked by the host at the approval boundary, so no pane is opened for it: "
+    "driving a parked worker from a new pane would be unattended mutation. "
+    "Approve it in an interactive session (or stop it explicitly), then re-run "
+    "open-all."
 )
 
 
@@ -485,7 +510,10 @@ def _open_tmux_pane(pane: Pane) -> Dict[str, Any]:
 
 
 def _open_herdr_pane(pane: Pane, *, workspace: Optional[str]) -> Dict[str, Any]:
-    split = ["herdr", "pane", "split", "--current", "--direction", "down", "--no-focus"]
+    # Only the documented split form is used: the herdr skill text fetched from
+    # herdrdev/herdr uses `--direction right` (an unobserved direction value is
+    # never passed), and `--current` pins the split to the caller's own pane.
+    split = ["herdr", "pane", "split", "--current", "--direction", "right", "--no-focus"]
     if workspace:
         split += ["--cwd", workspace]
     result = _run(split)
@@ -578,14 +606,44 @@ def open_all(
     return plan, outcome
 
 
-def render_outcome(plan: LaunchPlan, outcome: LaunchOutcome) -> str:
+def skipped_worker_row(worker: Any) -> Dict[str, Any]:
+    """Describe a session-owned worker that deliberately gets no pane.
+
+    A detached worker is still alive and owned by this session, so dropping it
+    from the open-all report would be a silent omission; a worker parked at the
+    host approval boundary must never be opened as if it were live. Neither is
+    opened, and both are named with the recoverable next step.
+    """
+    state = str(getattr(worker, "state", "") or "orphaned")
+    parked = state == "awaiting_approval"
+    name = bounded_text(
+        " ".join(str(getattr(worker, "name", "worker")).split()), MAX_PANE_LABEL_BYTES
+    )
+    return {
+        "id": getattr(worker, "agent_id", None),
+        "name": name,
+        "state": state,
+        "reattachable": bool(getattr(worker, "reattachable", False)),
+        "reason": (
+            PARKED_WORKER_NOT_OPENED_REASON if parked else DETACHED_WORKER_NOT_OPENED_REASON
+        ),
+    }
+
+
+def render_outcome(
+    plan: LaunchPlan,
+    outcome: LaunchOutcome,
+    *,
+    skipped: Sequence[Mapping[str, Any]] = (),
+) -> str:
     """Operator-facing, bounded, secret-free report of what actually happened."""
     lines = [
-        "open-all %s: %d pane(s) created, %d blocked, %s"
+        "open-all %s: %d pane(s) created, %d blocked, %d not opened, %s"
         % (
             plan.multiplexer,
             len(outcome.created),
             len(outcome.blocked),
+            len(skipped),
             "clean" if outcome.ok else "stopped early",
         )
     ]
@@ -603,6 +661,15 @@ def render_outcome(plan: LaunchPlan, outcome: LaunchOutcome) -> str:
         lines.append(
             "- blocked %s pane (%s): %s"
             % (pane["role"], pane["name"], blocked["reason"] or "no reason recorded")
+        )
+    for row in skipped:
+        lines.append(
+            "- not opened %s worker (%s): %s"
+            % (
+                "parked" if row.get("state") == "awaiting_approval" else "detached",
+                row.get("name"),
+                row.get("reason") or "no reason recorded",
+            )
         )
     for notice in outcome.notices:
         lines.append(notice)

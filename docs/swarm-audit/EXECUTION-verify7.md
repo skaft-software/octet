@@ -78,3 +78,5 @@ All test names cited in docs/parity/{tools,editor,codecs,providers}.md exist exa
 - No `#[expect(dead_code)]` anywhere; the 3 `#[allow(dead_code)]` sites are the stale telemetry ones above.
 - `extensions/octet-subagents/octet_subagents/launcher.py` builds argv lists, never
   interpolates secrets, and validates shell-safe tokens; no credential reaches a display string or argv.
+
+START 2026-09-15T17:13:23Z verify8 alive
