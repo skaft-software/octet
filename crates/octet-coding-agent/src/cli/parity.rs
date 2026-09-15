@@ -8,8 +8,7 @@ use octet_ai::{Media, Modality, ModelId};
 
 use super::Cli;
 use crate::codex_context::{
-    CodexContextOverride, CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV,
-    CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW,
+    CodexContextOverride, CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW,
 };
 use crate::config::{Config, Mode, ResumeSelector};
 use crate::session_store::SessionStore;
@@ -114,13 +113,11 @@ impl ParityOptions {
     /// without a persisted config change. Only set when the flag is present; a
     /// user-provided environment value is otherwise left untouched.
     pub fn install_codex_context_env(&self) {
-        if let Some(tokens) = self.codex_context_window {
-            std::env::set_var(CODEX_CONTEXT_OVERRIDE_ENV, tokens.to_string());
-            std::env::set_var(
-                CODEX_CONTEXT_ACKNOWLEDGE_ENV,
-                if self.codex_context_window_acknowledge_cost_cliff { "1" } else { "0" },
-            );
-        }
+        // One publication path for every frontend: the TUI effort menu calls
+        // `CodexContextOverride::publish` with the same values.
+        self.codex_context_override()
+            .unwrap_or(CodexContextOverride::NONE)
+            .publish();
     }
 
     /// Apply the `--models` scope: resolve every pattern against the

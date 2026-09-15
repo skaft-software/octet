@@ -46,6 +46,8 @@
 
 - [Extension authoring](extensions.md)
 - [Extension API 0.3 reference](extensions/API-0.3-REFERENCE.md)
+- [Additive Pi parity ledger](parity/README.md) and its
+  [extension-surface detail page](parity/extensions.md)
 - [Native embedding — host protocol 1](sdk.md)
 - [Examples and their compatibility status](../examples/README.md)
 - Architecture: [model clients](design/octet-ai.md), [agent runtime](design/octet-agent.md),

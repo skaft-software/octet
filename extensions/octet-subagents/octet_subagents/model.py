@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import re
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 VERSION = "0.7.6"
@@ -56,13 +56,17 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_./:-]{1,512}$")
 # Provider and model ids as the product spells them (`provider/model`), never a
 # free-form command line. `inherit` means "the parent session's selection".
-_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$")
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:/:-]{0,127}$")
 INHERIT = "inherit"
 # The state the host produces when an owning run retires a child record before
 # the extension observes it. It means "still owned by this session, currently
 # detached from any run" -- a recoverable state, not a dead one.
 DETACHED_STATE = "orphaned"
 DETACHED_LABEL = "detached"
+# A detached worker parked at the host approval boundary: still owned by the
+# session, but it must not mutate unattended. It is rendered as an explicit
+# bounded state (never a silent stall and never a fake success).
+AWAITING_APPROVAL_STATE = "awaiting_approval"
 
 
 class SubagentError(Exception):
@@ -179,7 +183,9 @@ class SpawnRequest:
         return self.provider == INHERIT and self.model == INHERIT and self.reasoning == INHERIT
 
     @classmethod
-    def parse(cls, arguments: Mapping[str, Any]) -> "SpawnRequest":
+    def parse(
+        cls, arguments: Mapping[str, Any], *, known_models: Sequence[str] = ()
+    ) -> "SpawnRequest":
         if not isinstance(arguments, Mapping):
             raise SubagentError("subagent_spawn arguments must be an object")
         allowed = {
@@ -221,22 +227,48 @@ class SpawnRequest:
             )
 
         # Per-worker orchestration selection. Unset means "inherit the parent
-        # session's provider/model/reasoning"; anything else is validated
-        # fail-closed against bounded ids and the mirrored effort ladder, and an
-        # unknown provider, model, or level is refused rather than coerced.
+        # session's provider/model/reasoning". A selection is only accepted when
+        # this process can confirm it is configured for the calling session,
+        # because API 0.2 `agent/spawn` exposes no provider catalog and carries no
+        # per-child model field: an unverifiable provider/model is refused with a
+        # typed error instead of being silently coerced to the inherited model.
         provider = _model_id(arguments.get("provider", INHERIT), "provider")
         model = _model_id(arguments.get("model", INHERIT), "model")
-        from .reasoning import ReasoningCapability, clamp_and_describe, parse_level
+        from .reasoning import ReasoningCapability, parse_level
 
         reasoning = parse_level(arguments.get("reasoning", INHERIT))
         capability = ReasoningCapability.parse(arguments.get("reasoning_capability"))
-        # Clamping is applied lazily by `effective_reasoning` so the request and
-        # its effective selection are both visible without duplicating policy.
-        if model == INHERIT and provider != INHERIT:
+        confirmed = {
+            value
+            for value in known_models
+            if isinstance(value, str) and value and len(value.encode("utf-8")) <= 128
+        }
+        if model != INHERIT and model not in confirmed:
             raise SubagentError(
-                "provider selection requires an explicit model; pass provider and model together",
+                "model %s is not a model this session can confirm as configured; "
+                "octet's API 0.2 agent_sessions exposes no provider catalog and "
+                "carries no per-child model field, so an unverifiable selection is "
+                "refused rather than silently coerced to the inherited model"
+                % model,
                 code="unsupported_model",
             )
+        if provider != INHERIT:
+            if model == INHERIT:
+                raise SubagentError(
+                    "provider selection requires an explicit model; pass provider "
+                    "and model together",
+                    code="unsupported_model",
+                )
+            model_provider = model.split("/", 1)[0] if "/" in model else None
+            if model_provider != provider:
+                raise SubagentError(
+                    "provider %s does not match the confirmed model %s; this session "
+                    "can only confirm providers it can observe for the parent model"
+                    % (provider, model),
+                    code="unsupported_model",
+                )
+        # Clamping is applied lazily by `effective_reasoning` so the request and
+        # its effective selection are both visible without duplicating policy.
 
         tools_value = arguments.get("tools", list(CHILD_TOOLS))
         if not isinstance(tools_value, list) or not tools_value:
@@ -496,9 +528,19 @@ class Worker:
         return self.state == DETACHED_STATE
 
     @property
+    def awaiting_approval(self) -> bool:
+        """Detached at the approval boundary: visible, parked, not mutating."""
+        return self.state == AWAITING_APPROVAL_STATE
+
+    @property
     def reattachable(self) -> bool:
         """A detached worker keeps its durable session reference for reattachment."""
         return self.detached and bool(self.session)
+
+    @property
+    def reattached(self) -> bool:
+        """A session-owned worker that has been reattached at least once."""
+        return self.reattach_count > 0 and not self.detached
 
     def elapsed_ms(self, now_ms: int) -> int:
         end = self.completed_at_ms if self.completed_at_ms is not None else now_ms

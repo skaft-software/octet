@@ -29,9 +29,9 @@ use crate::app::{
     thinking_to_reasoning, App,
 };
 use crate::codex_context::{
-    resolve_codex_context_window, CodexContextClampReporter, CodexContextOverride,
-    CodexContextTier, CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGE_ENV,
-    CODEX_CONTEXT_OVERRIDE_ENV, CODEX_CONTEXT_WINDOW_CAP, CODEX_MAX_OUTPUT_TOKENS,
+    resolve_codex_context_window, CodexContextOverride, CodexContextTier,
+    CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV,
+    CODEX_MAX_OUTPUT_TOKENS,
 };
 use crate::config::{CompactionMode, Config, ResumeSelector};
 use crate::extensions::{
@@ -65,9 +65,48 @@ pub struct Bootstrap {
     /// Interactive startup can remain useful as a read-only session viewer
     /// when no configured model exists.
     modeless: std::cell::Cell<bool>,
+    /// The one Codex context note each catalog model needs, recorded while the
+    /// catalog was built. Catalog enumeration never prints; only the effective
+    /// session model's note is ever shown.
+    codex_context_notes: CodexContextNotes,
+}
+
+/// The single user-facing Codex context note for every catalog model that needs
+/// one, recorded during catalog construction.
+///
+/// Recording is not printing: the note is emitted by
+/// [`Bootstrap::codex_context_note`] for the effective session model only, at
+/// most once per session.
+#[derive(Clone, Debug, Default)]
+pub struct CodexContextNotes {
+    notes: std::collections::HashMap<ModelId, String>,
+}
+
+impl CodexContextNotes {
+    fn record(&mut self, model: ModelId, note: String) {
+        self.notes.insert(model, note);
+    }
+
+    /// The note for one model, if its window needs one. A non-Codex model has no
+    /// note, so a non-Codex session prints nothing.
+    pub fn note_for(&self, model: &ModelId) -> Option<&str> {
+        self.notes.get(model).map(String::as_str)
+    }
 }
 
 impl Bootstrap {
+    /// The single Codex context note for the effective session model, if any.
+    ///
+    /// A frontend calls this once, when the session's model is resolved. It
+    /// returns nothing for a non-Codex model, so a session on another provider
+    /// prints no Codex note at all, and it never returns a note twice for one
+    /// session because the note is looked up rather than emitted during catalog
+    /// enumeration. See [`crate::codex_context::codex_context_session_note`] for
+    /// the wording contract.
+    pub fn codex_context_note(&self, model: &ModelId) -> Option<&str> {
+        self.codex_context_notes.note_for(model)
+    }
+
     /// Starts only provider-capable API 0.3 extensions when their declarations
     /// are required to resolve an otherwise unknown initial model.
     ///
@@ -4837,27 +4876,21 @@ fn codex_context_resolve_for_registration(
     }
 }
 
-/// Report the deliberate Codex clamp once per transition, and name the
-/// above-standard-tier accounting obligation when the override raised it.
-fn codex_context_report(
+/// Record the single user-facing note one catalog model needs, if any.
+///
+/// Catalog enumeration must never print: a user running a non-Codex model would
+/// otherwise read a note about every Codex model in the catalog. The note is
+/// shown by [`Bootstrap::codex_context_note`] for the effective session model
+/// only. Above the standard tier the whole request is metered differently, which
+/// is why such a route carries a note at all.
+fn codex_context_record_note(
+    notes: &mut CodexContextNotes,
+    catalog_id: &ModelId,
     model_id: &str,
     resolution: &crate::codex_context::CodexContextWindow,
-    clamp_reporter: &mut CodexContextClampReporter,
 ) {
-    if let Some(clamp) = clamp_reporter.observe(resolution.clamp.clone()) {
-        crate::output::stderr!("{}", clamp.message());
-    }
-    if let Some(operation) = resolution.uncertain_usage_operation() {
-        // Above the standard tier the *whole* request is metered differently, so
-        // accounting must stay fail-closed for this route. That covers a granted
-        // override and the documented 372K `gpt-5.6-luna` window alike; the
-        // obligation is named once per registered model instead of leaving an
-        // exact-looking cost behind.
-        crate::output::stderr!(
-            "note: {model_id} budgets {} Codex context tokens, above the {}-token standard tier: those requests are double-priced, so their usage must be recorded as uncertain with Session::record_usage_uncertainty({operation:?})",
-            resolution.context_window,
-            CODEX_CONTEXT_WINDOW_CAP,
-        );
+    if let Some(note) = crate::codex_context::codex_context_session_note(model_id, resolution) {
+        notes.record(catalog_id.clone(), note);
     }
 }
 
@@ -4869,6 +4902,18 @@ fn register_openai_codex(
     catalog: &mut ModelCatalog,
     store: crate::auth::codex::CredentialStore,
     offline: bool,
+) -> anyhow::Result<()> {
+    let mut discarded = CodexContextNotes::default();
+    register_openai_codex_with_notes(catalog, store, offline, &mut discarded)
+}
+
+/// Register the Codex route while recording the one note each registered model
+/// needs. See [`codex_context_record_note`].
+fn register_openai_codex_with_notes(
+    catalog: &mut ModelCatalog,
+    store: crate::auth::codex::CredentialStore,
+    offline: bool,
+    notes: &mut CodexContextNotes,
 ) -> anyhow::Result<()> {
     use crate::auth::codex;
 
@@ -4962,7 +5007,6 @@ fn register_openai_codex(
 
     let user_override = codex_context_override_from_env()?;
     let tier = codex_context_tier(initial_claims.plan.as_ref());
-    let mut clamp_reporter = CodexContextClampReporter::default();
 
     for model in models {
         // Astra is always namespaced so an OAuth selection cannot be confused
@@ -4976,7 +5020,9 @@ fn register_openai_codex(
             };
         let limits = {
             let resolution = codex_context_resolve_for_registration(&model, tier, user_override);
-            codex_context_report(&model.id, &resolution, &mut clamp_reporter);
+            // Recording is not printing: the note is shown once, for the
+            // effective session model only (see `codex_context_note`).
+            codex_context_record_note(notes, &catalog_id, &model.id, &resolution);
             ModelLimits {
                 context_window: resolution.context_window,
                 max_output_tokens: resolution.max_output_tokens,
@@ -5182,10 +5228,23 @@ pub fn model_catalog() -> anyhow::Result<ModelCatalog> {
 }
 
 pub fn model_catalog_with_offline(offline: bool) -> anyhow::Result<ModelCatalog> {
+    Ok(model_catalog_with_offline_and_codex_notes(offline)?.0)
+}
+
+/// Build the runtime catalog and the Codex context notes recorded for it.
+///
+/// Recording happens here because the deliberate cap, the entitlement ceiling
+/// and the explicit override are all resolved while Codex models are registered.
+/// Nothing is printed: frontends ask [`Bootstrap::codex_context_note`] for the
+/// effective session model's single note instead.
+pub fn model_catalog_with_offline_and_codex_notes(
+    offline: bool,
+) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
     let mut catalog = base_model_catalog(offline)?;
-    register_codex_catalog(&mut catalog, offline);
+    let mut notes = CodexContextNotes::default();
+    register_codex_catalog(&mut catalog, offline, &mut notes);
     register_copilot_catalog(&mut catalog, offline);
-    Ok(catalog)
+    Ok((catalog, notes))
 }
 
 /// Rebuild the canonical catalog against one explicit existing custom store.
@@ -5196,12 +5255,17 @@ pub(crate) fn model_catalog_with_setup_store(
     offline: bool,
 ) -> anyhow::Result<ModelCatalog> {
     let mut catalog = base_model_catalog_with_custom_store(offline, Some(custom_store))?;
-    register_codex_catalog(&mut catalog, offline);
+    let mut notes = CodexContextNotes::default();
+    register_codex_catalog(&mut catalog, offline, &mut notes);
     register_copilot_catalog(&mut catalog, offline);
     Ok(catalog)
 }
 
-fn register_codex_catalog(catalog: &mut ModelCatalog, offline: bool) {
+fn register_codex_catalog(
+    catalog: &mut ModelCatalog,
+    offline: bool,
+    notes: &mut CodexContextNotes,
+) {
     // Unit tests use explicit temporary credential stores and must never inspect
     // the developer's ambient HOME. Runtime offline mode still registers a
     // locally authenticated Codex endpoint, but never discovers or refreshes
@@ -5209,7 +5273,7 @@ fn register_codex_catalog(catalog: &mut ModelCatalog, offline: bool) {
     if !cfg!(test) {
         let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
         // Non-fatal: a stale or malformed OAuth file must never block octet startup.
-        if let Err(error) = register_openai_codex(catalog, store, offline) {
+        if let Err(error) = register_openai_codex_with_notes(catalog, store, offline, notes) {
             crate::output::stderr!("warning: OpenAI Codex models unavailable: {error}");
         }
     }
@@ -5236,7 +5300,7 @@ pub fn model_catalog_without_codex() -> anyhow::Result<ModelCatalog> {
 
 /// Build bootstrap state from resolved configuration.
 pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
-    let catalog = model_catalog_with_offline(config.offline)?;
+    let (catalog, codex_context_notes) = model_catalog_with_offline_and_codex_notes(config.offline)?;
     let sessions = SessionStore::new(&config.session_dir, &config.workspace);
     // Record the workspace path so cross-workspace browsing can name each
     // session's home. Non-fatal: pickers fall back to directory names.
@@ -5253,6 +5317,7 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         prestarted_extensions: RefCell::new(None),
         prepared_session: RefCell::new(None),
         modeless: std::cell::Cell::new(false),
+        codex_context_notes,
     })
 }
 
@@ -5613,6 +5678,13 @@ pub async fn resolve_launch_interactive(
         None if boot.is_modeless() => ReasoningConfig::Off,
         None => default_reasoning_for_model(&catalog.resolve(&model)?),
     };
+    // At most one Codex context note per session, for the effective model only.
+    // The interactive shell owns the transcript, so the note goes there instead
+    // of to stderr.
+    if let Some(note) = boot.codex_context_note(&model) {
+        shell.notice(note.to_owned());
+        shell.render();
+    }
     Ok(LaunchSelection {
         model,
         session,
@@ -5697,6 +5769,10 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
         Some(reasoning) => reasoning,
         None => default_reasoning_for_model(&catalog.resolve(&model)?),
     };
+    // At most one Codex context note per session, for the effective model only.
+    if let Some(note) = boot.codex_context_note(&model) {
+        crate::output::stderr!("{note}");
+    }
     Ok(LaunchSelection {
         model,
         session,
@@ -5970,6 +6046,7 @@ pub(crate) fn build_app_with_runtime_manager(
         prestarted_extensions,
         prepared_session,
         modeless: _,
+        codex_context_notes: _,
     } = boot;
     let mut system = system;
     let mut prestarted_extensions = prestarted_extensions.into_inner();
@@ -6507,6 +6584,185 @@ mod reasoning_ingress_review_tests {
                 .source,
             Source::Unknown
         );
+    }
+}
+
+#[cfg(test)]
+mod codex_context_note_regression_tests {
+    use super::tests::codex_discovered_model;
+    use super::*;
+    use crate::codex_context::{codex_context_session_note, CODEX_CONTEXT_WINDOW_CAP};
+
+    /// A synthetic, non-localhost subscription credential (the shape
+    /// `crate::auth::codex` accepts) so registration produces the full fallback
+    /// Codex inventory without any network access.
+    fn write_codex_credential(path: &std::path::Path, plan: &str) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_test",
+                "chatgpt_plan_type": plan,
+                "localhost": false
+            }
+        });
+        let access = format!(
+            "h.{}.s",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+        );
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "tokens": {
+                "access_token": access,
+                "refresh_token": "refresh",
+                "account_id": "acct_test"
+            },
+            "expires_at": u64::MAX
+        }))
+        .unwrap();
+        octet_agent::secure_fs::write_private_atomic(path, &bytes, 1024 * 1024).unwrap();
+    }
+
+    fn registered_notes(plan: &str) -> (ModelCatalog, CodexContextNotes) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("codex.json");
+        write_codex_credential(&path, plan);
+        let store = crate::auth::codex::CredentialStore::new(&path);
+        let mut catalog = base_model_catalog(true).unwrap();
+        let mut notes = CodexContextNotes::default();
+        register_openai_codex_with_notes(&mut catalog, store, true, &mut notes).unwrap();
+        (catalog, notes)
+    }
+
+    fn catalog_id(catalog: &ModelCatalog, model_id: &str) -> ModelId {
+        // The same namespacing rule the registration loop applies.
+        if model_id == "gpt-6-astra" || catalog.resolve(&ModelId(model_id.to_owned())).is_ok() {
+            ModelId(format!("codex/{model_id}"))
+        } else {
+            ModelId(model_id.to_owned())
+        }
+    }
+
+    /// Catalog enumeration must never print. It records at most one note for the
+    /// models whose effective window needs one, and nothing for a route whose
+    /// window is the deliberate cap itself.
+    #[test]
+    fn registration_records_one_note_per_clamped_model_and_none_for_an_unclamped_route() {
+        let (catalog, notes) = registered_notes("plus");
+        assert!(
+            !crate::auth::codex::MODELS.is_empty(),
+            "the fallback Codex inventory is registered"
+        );
+
+        let mut clamped = 0;
+        let mut unclamped = 0;
+        for model_id in crate::auth::codex::MODELS {
+            let id = catalog_id(&catalog, model_id);
+            let model = catalog.resolve(&id).unwrap();
+            let effective = model.spec.limits.context_window;
+            let note = notes.note_for(&id);
+            if effective == CODEX_CONTEXT_WINDOW_CAP && !model_id.starts_with("gpt-5.6-luna") {
+                // `gpt-5.5`/`gpt-5.4-mini` advertise the cap itself; gpt-5.6-*
+                // advertise 372K and are therefore reduced.
+                if crate::codex_context::entitled_max_context_window(model_id)
+                    <= CODEX_CONTEXT_WINDOW_CAP
+                {
+                    assert_eq!(note, None, "{model_id} is not reduced and needs no note");
+                    unclamped += 1;
+                } else {
+                    assert!(note.is_some(), "{model_id} is reduced and needs a note");
+                    clamped += 1;
+                }
+            } else if model_id == &"gpt-5.6-luna" {
+                assert_eq!(effective, crate::codex_context::CODEX_5_6_CONTEXT_WINDOW);
+                assert!(note.is_some(), "luna is above the standard tier");
+                clamped += 1;
+            }
+        }
+        assert!(clamped > 0 && unclamped > 0, "both branches are covered");
+
+        // Every recorded note is one bounded, plain-language string per model.
+        for model_id in crate::auth::codex::MODELS {
+            let id = catalog_id(&catalog, model_id);
+            if let Some(note) = notes.note_for(&id) {
+                assert_eq!(notes.note_for(&id), Some(note), "one note per model");
+                assert!(note.starts_with("note: Codex model"), "{note}");
+                assert!(!note.contains("Session::"), "{note}");
+                assert!(!note.contains("record_usage_uncertainty"), "{note}");
+                assert!(
+                    !note.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
+                    "{note}"
+                );
+            }
+        }
+    }
+
+    /// A session whose effective model is not a Codex route prints nothing, even
+    /// though the catalog is full of Codex models.
+    #[test]
+    fn a_non_codex_effective_model_has_no_note_while_the_catalog_has_codex_models() {
+        let (catalog, notes) = registered_notes("plus");
+        let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
+        assert!(
+            catalog
+                .models()
+                .any(|model| model.endpoint == codex_endpoint),
+            "the catalog carries Codex models"
+        );
+
+        let mut non_codex = catalog
+            .models()
+            .filter(|model| model.endpoint != codex_endpoint)
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        non_codex.sort_by(|left, right| left.0.cmp(&right.0));
+        assert!(!non_codex.is_empty(), "the catalog carries other providers");
+        for id in &non_codex {
+            assert_eq!(
+                notes.note_for(id),
+                None,
+                "{} is not a Codex route and must print no Codex note",
+                id.0
+            );
+        }
+
+        // `Bootstrap::codex_context_note` is exactly this lookup, so the
+        // effective-model boundary returns one note for a reduced Codex route
+        // and nothing for any other model. The process-boundary test in
+        // `tests/parity_cli.rs` asserts the same through the real CLI.
+        let effective = catalog_id(&catalog, "gpt-5.6-sol");
+        let note = notes
+            .note_for(&effective)
+            .expect("a reduced Codex model has one note")
+            .to_owned();
+        assert_eq!(notes.note_for(&effective), Some(note.as_str()));
+    }
+
+    /// The note the effective model needs is produced from the same resolution
+    /// every route in the catalog is recorded from.
+    #[test]
+    fn the_recorded_note_matches_the_effective_resolution() {
+        let luna = codex_discovered_model(
+            "gpt-5.6-luna",
+            crate::codex_context::CODEX_5_6_CONTEXT_WINDOW,
+            crate::codex_context::CODEX_5_6_CONTEXT_WINDOW,
+            128_000,
+        );
+        let resolution = codex_context_resolve_for_registration(
+            &luna,
+            CodexContextTier::Default,
+            CodexContextOverride::NONE,
+        );
+        let note = codex_context_session_note("gpt-5.6-luna", &resolution).unwrap();
+        assert!(note.contains("effective 372K"), "{note}");
+        let mut notes = CodexContextNotes::default();
+        codex_context_record_note(
+            &mut notes,
+            &ModelId("gpt-5.6-luna".to_owned()),
+            "gpt-5.6-luna",
+            &resolution,
+        );
+        assert_eq!(notes.note_for(&ModelId("gpt-5.6-luna".to_owned())), Some(note.as_str()));
     }
 }
 

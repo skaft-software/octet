@@ -988,39 +988,150 @@ where
 }
 
 /// Ask the user to select a capability-supported thinking level.
+///
+/// On a Codex route the effort menu also carries one trailing
+/// `Codex context window…` row. It is appended after the effort levels so every
+/// level keeps its existing index, and it is never a level: choosing it opens the
+/// read-only Codex context-window surface.
 pub async fn thinking_picker(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     levels: &[ThinkingLevel],
+    codex_context: Option<&crate::commands::CodexContextSurface>,
 ) -> anyhow::Result<Option<ThinkingLevel>> {
     let mut items: Vec<String> = levels.iter().map(|l| l.label().into()).collect();
-    let (_, current) = shell.selected_identity();
-    let initial = mark_current_choice(
-        &mut items,
-        levels.iter().position(|level| level.label() == current),
-    );
-    let action_levels = levels.to_vec();
-    let Some(index) = pick_list(
+    if let Some(surface) = codex_context {
+        items.push(codex_context_menu_row(surface));
+    }
+    loop {
+        let mut items = items.clone();
+        let (_, current) = shell.selected_identity();
+        let initial = mark_current_choice(
+            &mut items,
+            levels.iter().position(|level| level.label() == current),
+        );
+        let action_levels = levels.to_vec();
+        let Some(index) = pick_list(
+            shell,
+            input,
+            OrdinarySurfaceMetadata::with_purpose(
+                "Select thinking level",
+                "Choose effort for subsequent prompts and the startup default",
+            ),
+            items,
+            vec![None; levels.len() + usize::from(codex_context.is_some())],
+            initial,
+            PanelAction::SelectThinking(action_levels),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        let Some(selected) = levels.get(index).copied() else {
+            // The trailing Codex context-window row: report the facts and the
+            // fail-closed raise path, then return to the effort list.
+            if let Some(surface) = codex_context {
+                codex_context_menu(shell, input, surface).await?;
+                continue;
+            }
+            return Ok(None);
+        };
+        if let Err(e) = crate::cli::persist_reasoning(selected.label()) {
+            shell.error(format!("failed to save thinking preference: {e}"));
+        }
+        return Ok(Some(selected));
+    }
+}
+
+/// One-line Codex context-window row for the effort menu.
+pub(crate) fn codex_context_menu_row(
+    surface: &crate::commands::CodexContextSurface,
+) -> String {
+    format!(
+        "Codex context window… (currently {} tokens{})",
+        surface.effective_window(),
+        if surface.has_uncertain_usage() {
+            ", cost/usage UNCERTAIN"
+        } else {
+            ""
+        }
+    )
+}
+
+/// Present the read-only Codex context-window facts and, when the plan is
+/// entitled, one explicit raise target.
+///
+/// Raising is deliberately a two-step, fail-closed interaction: the
+/// acknowledgement wording must be accepted before the request is validated,
+/// and a refused request names the exact reason and changes nothing.
+pub(crate) async fn codex_context_menu<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    surface: &crate::commands::CodexContextSurface,
+) -> anyhow::Result<()>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let facts = surface.summary_lines();
+    let target = surface.raise_target();
+    let mut items: Vec<String> = vec![format!(
+        "Keep the deliberate {} window",
+        surface.effective_window()
+    )];
+    if let Some(target) = target {
+        items.push(format!(
+            "Acknowledge and raise to {target} tokens (double-priced; websocket risk)"
+        ));
+    }
+    let descriptions: Vec<Option<String>> = items
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            (index == 1 && target.is_some())
+                .then(|| crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING.to_owned())
+                .or_else(|| (index == 0).then(|| "no change".to_owned()))
+                .or_else(|| Some(facts.join(" · ")))
+        })
+        .collect();
+    let purpose = facts.join(" · ");
+    let Some(index) = pick_list_with_preview(
         shell,
         input,
-        OrdinarySurfaceMetadata::with_purpose(
-            "Select thinking level",
-            "Choose effort for subsequent prompts and the startup default",
-        ),
+        OrdinarySurfaceMetadata::with_purpose("Codex context window", purpose),
         items,
-        vec![None; levels.len()],
-        initial,
-        PanelAction::SelectThinking(action_levels),
+        descriptions,
+        0,
+        PanelAction::ReadOnlyDocument,
+        |_, _| {},
     )
     .await?
     else {
-        return Ok(None);
+        return Ok(());
     };
-    let selected = levels[index];
-    if let Err(e) = crate::cli::persist_reasoning(selected.label()) {
-        shell.error(format!("failed to save thinking preference: {e}"));
+    let Some(target) = target else {
+        return Ok(());
+    };
+    if index != 1 {
+        return Ok(());
     }
-    Ok(Some(selected))
+    // The acknowledgement stage names both consequences before the raise is
+    // validated; the raise itself still fails closed on any refused gate.
+    shell.notice(format!(
+        "{} Set acknowledged for the launch boundary.",
+        crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING
+    ));
+    match surface.raise(target, true) {
+        Ok(window) => shell.notice(format!(
+            "Codex context window raise to {window} tokens accepted: {}",
+            surface.raise_instruction(target)
+        )),
+        Err(reason) => shell.error(format!(
+            "Codex context window unchanged at {} tokens: {reason}",
+            surface.effective_window()
+        )),
+    }
+    shell.render();
+    Ok(())
 }
 
 /// Ask the user to approve a typed tool request. Escape and input

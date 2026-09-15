@@ -188,3 +188,5 @@ START 2026-09-15T15:43:44Z editor5 alive
   (`\!` fell through to "unsupported"); `\det\!\left(...\right)` now renders.
 
 START 2026-09-15T16:28:34Z editor6 alive
+
+START 2026-09-15T16:50:13Z editor7 alive

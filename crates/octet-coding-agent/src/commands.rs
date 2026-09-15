@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::app::{reasoning_label, App, Reconfig};
+use crate::codex_context::CodexContextTier;
 use crate::compaction::{context_window, estimate_next_request_tokens};
 use crate::config::CompactionMode;
 use crate::presentation::{format_token_rate, ModelDisplayMetadata};
@@ -332,8 +333,206 @@ pub fn help_text(workspace: &Path, topic: Option<&str>) -> String {
 /// so a route that declares the Codex profile is admitted and every other route
 /// is rejected explicitly instead of being silently ignored.
 pub fn codex_fast_tier_endpoint(model: &Model) -> bool {
+    codex_responses_endpoint(model)
+}
+
+/// Whether the active endpoint declares the Codex Responses route.
+///
+/// `/fast` and the context-window surface are Codex-route capabilities, so both
+/// gate on the declared protocol and endpoint runtime profile rather than on a
+/// provider name. Widening this is an endpoint-declaration change.
+pub fn codex_responses_endpoint(model: &Model) -> bool {
     model.spec.protocol == Protocol::OpenAiResponses
         && model.endpoint.runtime.responses_profile == ResponsesRuntimeProfile::Codex
+}
+
+/// Read-only Codex context-window facts for one Codex route, plus the
+/// deliberately fail-closed raise path.
+///
+/// The deliberate 272K working cap is a maintainer decision, not a defect: it
+/// is reported as a clamp together with its reason rather than hidden. Above
+/// 272K the whole request is priced differently, so the surface names the
+/// uncertainty operation instead of rendering an exact-looking figure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexContextSurface {
+    model_id: String,
+    /// Window the live session actually budgets against.
+    effective_window: u64,
+    /// Window the plan selects before octet's deliberate cap.
+    advertised_window: u64,
+    /// Largest window the model's entitlement allows an override to request.
+    entitled_max_window: u64,
+    /// Whether the account's plan carries the Pro/ProLite entitlement.
+    entitled: bool,
+}
+
+impl CodexContextSurface {
+    /// Capture the surface for a Codex route, or `None` for every other route.
+    ///
+    /// `entitled` mirrors `ChatGptPlan::uses_max_context_window`; the caller
+    /// reads it from the subscription credential and defaults to `false` when
+    /// it cannot be established, so an unknown plan never grants a raise.
+    pub fn capture(model: &Model, entitled: bool) -> Option<Self> {
+        if !codex_responses_endpoint(model) {
+            return None;
+        }
+        let model_id = model.spec.id.0.clone();
+        let (fallback_default, entitled_max_window) =
+            crate::codex_context::entitled_context_windows(&model_id);
+        let advertised_window = if CodexContextTier::from_plan_entitlement(entitled)
+            == CodexContextTier::Extended
+        {
+            fallback_default.max(entitled_max_window)
+        } else {
+            fallback_default
+        };
+        Some(Self {
+            model_id,
+            effective_window: model.spec.limits.context_window,
+            advertised_window,
+            entitled_max_window,
+            entitled,
+        })
+    }
+
+    /// Model this surface describes.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Window the live session budgets against.
+    pub fn effective_window(&self) -> u64 {
+        self.effective_window
+    }
+
+    /// Whether the account's plan carries the Pro/ProLite entitlement.
+    pub fn entitled(&self) -> bool {
+        self.entitled
+    }
+
+    /// The deliberate reduction of the advertised window, when the cap (rather
+    /// than the plan's own default) is what narrowed it.
+    pub fn clamp(&self) -> Option<crate::codex_context::CodexContextClamp> {
+        let working = crate::codex_context::working_context_window(&self.model_id);
+        (self.effective_window == working && self.advertised_window > working).then(|| {
+            crate::codex_context::CodexContextClamp {
+                model_id: self.model_id.clone(),
+                advertised_context_window: self.advertised_window,
+                effective_context_window: self.effective_window,
+            }
+        })
+    }
+
+    /// `true` when the effective window is above the standard 272K tier, where
+    /// the whole request is double-priced and cost/usage cannot be claimed
+    /// exactly.
+    pub fn has_uncertain_usage(&self) -> bool {
+        self.effective_window > crate::codex_context::CODEX_CONTEXT_WINDOW_CAP
+    }
+
+    /// The `Session::record_usage_uncertainty` operation to record for this
+    /// route, when its accounting is uncertain.
+    pub fn uncertain_usage_operation(&self) -> Option<&'static str> {
+        self.has_uncertain_usage()
+            .then_some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
+    }
+
+    /// The largest window this route may be raised to, or `None` when the plan
+    /// carries no entitlement for a window above the deliberate cap.
+    pub fn raise_target(&self) -> Option<u64> {
+        (self.entitled
+            && self.entitled_max_window
+                > crate::codex_context::working_context_window(&self.model_id))
+        .then_some(self.entitled_max_window)
+    }
+
+    /// Bounded, truthful facts for the effort/thinking menu.
+    ///
+    /// Cost is never rendered as an exact figure above the standard tier.
+    pub fn summary_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "{} context window: {} tokens ({})",
+            self.model_id,
+            self.effective_window,
+            if self.effective_window > crate::codex_context::CODEX_CONTEXT_WINDOW_CAP {
+                "above the 272K standard tier: cost and usage are UNCERTAIN"
+            } else {
+                "standard 272K tier"
+            },
+        )];
+        if let Some(operation) = self.uncertain_usage_operation() {
+            lines.push(format!(
+                "cost and usage are UNCERTAIN for this route; record them as uncertain with Session::record_usage_uncertainty({operation:?}) instead of an exact figure"
+            ));
+        }
+        match self.clamp() {
+            Some(clamp) => lines.push(clamp.message()),
+            None if self.advertised_window > self.effective_window => lines.push(format!(
+                "{} advertises {} tokens; this route budgets {}",
+                self.model_id, self.advertised_window, self.effective_window
+            )),
+            None => lines.push(format!(
+                "{} is budgeted at {} tokens, the deliberate {} token Codex working window",
+                self.model_id,
+                self.effective_window,
+                crate::codex_context::working_context_window(&self.model_id)
+            )),
+        }
+        match self.raise_target() {
+            Some(target) => lines.push(format!(
+                "raise to {target} tokens: {}",
+                self.raise_instruction(target)
+            )),
+            None => lines.push(self.raise_blocked_reason()),
+        }
+        lines
+    }
+
+    /// Why no raise is offered for this route.
+    pub fn raise_blocked_reason(&self) -> String {
+        let working = crate::codex_context::working_context_window(&self.model_id);
+        if self.entitled_max_window <= working {
+            format!(
+                "no raise is available for {}: the deliberate {} window is already this model's {} token entitlement ceiling",
+                self.model_id, working, self.entitled_max_window
+            )
+        } else {
+            format!(
+                "raising above the deliberate {} token window requires a Codex Pro or ProLite plan",
+                working
+            )
+        }
+    }
+
+    /// Validate one raise request through the shared Codex context-window
+    /// policy. Fail closed: an unacknowledged or above-entitlement request is
+    /// refused and the deliberate cap stays in force.
+    pub fn raise(&self, requested: u64, acknowledged: bool) -> Result<u64, String> {
+        let (fallback_default, fallback_max) =
+            crate::codex_context::entitled_context_windows(&self.model_id);
+        crate::codex_context::resolve_codex_context_window(
+            &self.model_id,
+            CodexContextTier::from_plan_entitlement(self.entitled),
+            fallback_default,
+            fallback_max,
+            None,
+            crate::codex_context::CodexContextOverride::raising(requested, acknowledged),
+        )
+        .map(|resolved| resolved.context_window)
+        .map_err(|error| error.to_string())
+    }
+
+    /// The exact launch settings that actually apply a raise.
+    ///
+    /// The Codex context window is resolved once at launch from the process
+    /// environment, so no in-session selection can change the live catalog.
+    pub fn raise_instruction(&self, requested: u64) -> String {
+        format!(
+            "launch with `--codex-context-window {requested} --codex-context-window-acknowledge-cost-cliff`, or set {}=1 and {}={requested} (takes effect on the next launch)",
+            crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGE_ENV,
+            crate::codex_context::CODEX_CONTEXT_OVERRIDE_ENV,
+        )
+    }
 }
 
 /// Model label used when reporting a rejected `/fast`.
@@ -1346,5 +1545,94 @@ mod tests {
             status.contains(&expected_skills),
             "missing {expected_skills:?} in {status}"
         );
+    }
+
+    /// A Codex-declared route with an explicit effective window, built on the
+    /// existing bootstrap fixture so no second catalog is invented.
+    fn codex_route(model_id: &str, context_window: u64) -> octet_ai::Model {
+        let (_directory, app) = app_for_status();
+        let mut model = app.model.clone();
+        std::sync::Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        std::sync::Arc::make_mut(&mut model.spec).id = octet_ai::ModelId(model_id.into());
+        std::sync::Arc::make_mut(&mut model.spec).limits.context_window = context_window;
+        std::sync::Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Codex;
+        model
+    }
+
+    #[test]
+    fn codex_context_surface_is_absent_for_every_other_route() {
+        let (_directory, app) = app_for_status();
+        assert_eq!(
+            CodexContextSurface::capture(&app.model, true),
+            None,
+            "a non-Codex route must not offer a Codex context-window surface"
+        );
+    }
+
+    #[test]
+    fn codex_context_surface_reports_the_deliberate_cap_and_why() {
+        // astra advertises 872K, which the deliberate 272K cap reduces.
+        let surface = CodexContextSurface::capture(&codex_route("gpt-6-astra", 272_000), true)
+            .expect("Codex route");
+        assert_eq!(surface.effective_window(), 272_000);
+        assert!(!surface.has_uncertain_usage());
+        let clamp = surface.clamp().expect("the deliberate cap must be reported");
+        assert_eq!(clamp.advertised_context_window, 872_000);
+        assert_eq!(clamp.effective_context_window, 272_000);
+        let message = clamp.message();
+        assert!(message.contains("double-priced"), "{message}");
+        assert!(message.contains("websocket"), "{message}");
+        let summary = surface.summary_lines().join("\n");
+        assert!(summary.contains("272000"), "{summary}");
+        assert!(summary.contains("872000"), "{summary}");
+    }
+
+    #[test]
+    fn above_the_standard_tier_cost_is_uncertain_never_an_exact_figure() {
+        // `gpt-5.6-luna` is the documented 372K family.
+        let surface = CodexContextSurface::capture(&codex_route("gpt-5.6-luna", 372_000), true)
+            .expect("Codex route");
+        assert!(surface.has_uncertain_usage());
+        assert_eq!(
+            surface.uncertain_usage_operation(),
+            Some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
+        );
+        let summary = surface.summary_lines().join("\n");
+        assert!(summary.contains("UNCERTAIN"), "{summary}");
+        assert!(summary.contains("record_usage_uncertainty"), "{summary}");
+        assert!(
+            !summary.contains('$'),
+            "no exact-looking cost figure may be rendered above the standard tier: {summary}"
+        );
+        assert!(
+            summary.contains(&crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION.to_string()),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_raise_fails_closed_without_the_entitlement_or_the_acknowledgement() {
+        let unentitled = CodexContextSurface::capture(&codex_route("gpt-6-astra", 272_000), false)
+            .expect("Codex route");
+        assert_eq!(unentitled.raise_target(), None);
+        let refused = unentitled.raise(872_000, true).unwrap_err();
+        assert!(refused.contains("Pro or ProLite"), "{refused}");
+        assert!(
+            unentitled.summary_lines().join("\n").contains("Pro or ProLite"),
+            "the unentitled surface must say what a raise needs"
+        );
+
+        let entitled = CodexContextSurface::capture(&codex_route("gpt-6-astra", 272_000), true)
+            .expect("Codex route");
+        assert_eq!(entitled.raise_target(), Some(872_000));
+        let unacknowledged = entitled.raise(872_000, false).unwrap_err();
+        assert!(unacknowledged.contains("double-priced"), "{unacknowledged}");
+        assert!(unacknowledged.contains("websocket"), "{unacknowledged}");
+        assert_eq!(entitled.raise(872_000, true), Ok(872_000));
+        // Above the model's entitlement the request is refused outright.
+        let above = entitled.raise(4_000_000, true).unwrap_err();
+        assert!(above.contains("872000"), "{above}");
+        assert!(entitled.raise_instruction(872_000).contains("--codex-context-window 872000"));
     }
 }

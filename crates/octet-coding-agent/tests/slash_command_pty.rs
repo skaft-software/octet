@@ -465,6 +465,51 @@ fn real_octet_slash_cost_renders_while_a_response_is_streaming() {
     octet.shutdown();
 }
 
+/// `/context` takes the other live-inspection route: the report is built from
+/// the run's own `ContextSnapshot` rather than from the session store, so a
+/// queued-to-idle implementation would not render it either.
+#[test]
+fn real_octet_slash_context_renders_while_a_response_is_streaming() {
+    let (api, mut octet) = streaming_octet();
+    octet.pty.write_input(b"/context\r");
+    octet.pty.wait_for(b"Estimated next request");
+
+    assert!(
+        !contains_bytes(&octet.pty.output, TAIL_MARKER),
+        "context rendered only after the response finished; transcript: {}",
+        visible_bytes(&octet.pty.output)
+    );
+    assert!(!api.completed.load(Ordering::SeqCst));
+
+    api.release();
+    octet.pty.write_input(b"\r");
+    octet.pty.wait_for(TAIL_MARKER);
+    octet.shutdown();
+}
+
+/// The effort picker is opened inline by the active-run dispatcher, not queued
+/// to the idle boundary with the setting change it produces.
+#[test]
+fn real_octet_slash_thinking_opens_the_effort_menu_while_a_response_is_streaming() {
+    let (api, mut octet) = streaming_octet();
+    octet.pty.write_input(b"/thinking\r");
+    octet.pty.wait_for(b"Select thinking level");
+
+    assert!(
+        !contains_bytes(&octet.pty.output, TAIL_MARKER),
+        "the effort menu opened only after the response finished; transcript: {}",
+        visible_bytes(&octet.pty.output)
+    );
+    assert!(!api.completed.load(Ordering::SeqCst));
+
+    // Escape cancels the picker without changing the preference, then the
+    // withheld response tail settles the still-active run.
+    octet.pty.write_input(b"\x1b");
+    api.release();
+    octet.pty.wait_for(TAIL_MARKER);
+    octet.shutdown();
+}
+
 #[test]
 fn real_octet_slash_model_opens_the_picker_while_a_response_is_streaming() {
     let (api, mut octet) = streaming_octet();

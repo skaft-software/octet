@@ -1681,6 +1681,96 @@ async fn stream_http(
     }
 }
 
+/// Resumes a retained Responses generation after a WebSocket drop.
+///
+/// Reads the Responses retrieve endpoint
+/// (`GET <responses>/{id}?stream=true&starting_after=N`) and hands the remaining
+/// raw events to the WebSocket actor, which forwards only the ones the consumer
+/// has not seen. This is the transport the provider documents for continuing an
+/// in-flight response, and it is only reachable when the request asked the
+/// provider to store the response ([`crate::responses_ws::body_requests_storage`]).
+struct ResponsesResume {
+    http: reqwest::Client,
+    endpoint: url::Url,
+    headers: http::HeaderMap,
+}
+
+impl ResponsesResume {
+    /// Boxes this reader into the actor's resumer hook.
+    fn resumer(self: Arc<Self>) -> crate::responses_ws::ResponseResumer {
+        Arc::new(move |response_id: String, starting_after: u64| {
+            let this = Arc::clone(&self);
+            Box::pin(async move { this.open(&response_id, starting_after).await })
+                as crate::responses_ws::ResumeFuture
+        })
+    }
+
+    /// Opens one resumed read and streams decoded events to the actor.
+    async fn open(
+        &self,
+        response_id: &str,
+        starting_after: u64,
+    ) -> Result<mpsc::Receiver<Result<serde_json::Value, AiError>>, AiError> {
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut()
+            .map_err(|_| {
+                AiError::Config(crate::error::ConfigError::Parse(
+                    "Responses resume endpoint is a base URL".to_owned(),
+                ))
+            })?
+            .pop_if_empty()
+            .push(response_id);
+        url.query_pairs_mut()
+            .append_pair("stream", "true")
+            .append_pair("starting_after", &starting_after.to_string());
+        let response = self
+            .http
+            .get(url)
+            .headers(self.headers.clone())
+            .send()
+            .await
+            .map_err(|error| {
+                AiError::Transport(TransportError {
+                    phase: TransportPhase::ResponseHeaders,
+                    timeout: error.is_timeout(),
+                    message: format!("Responses resume request: {error}"),
+                })
+            })?;
+        if !response.status().is_success() {
+            return Err(AiError::Transport(TransportError {
+                phase: TransportPhase::ResponseHeaders,
+                timeout: false,
+                message: format!(
+                    "Responses resume rejected with status {}",
+                    response.status()
+                ),
+            }));
+        }
+        let (sender, receiver) = mpsc::channel(16);
+        let mut stream = response.bytes_stream();
+        tokio::spawn(async move {
+            let mut decoder = crate::protocol::sse::SseDecoder::new();
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else {
+                    return;
+                };
+                let Ok(events) = decoder.push(&chunk) else {
+                    return;
+                };
+                for event in events {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+                        continue;
+                    };
+                    if sender.send(Ok(value)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(receiver)
+    }
+}
+
 /// Decode a cached Responses WebSocket using the same protocol builder as the
 /// ordinary SSE path. The wire event shape is JSON rather than `data:` framed
 /// SSE, so each message is wrapped in the codec's private event view.
@@ -2219,6 +2309,17 @@ impl AiClient {
             if let Ok(body) =
                 serde_json::from_slice::<serde_json::Value>(&fallback_request.parts.body)
             {
+                // A retained response can be resumed by cursor after a drop; a
+                // non-retained one (octet's durable-replay `store: false`) has
+                // nothing to resume, so the actor fails closed instead.
+                let resumer = crate::responses_ws::body_requests_storage(&body).then(|| {
+                    Arc::new(ResponsesResume {
+                        http: self.http.clone(),
+                        endpoint: fallback_request.parts.url.clone(),
+                        headers: fallback_request.headers.clone(),
+                    })
+                    .resumer()
+                });
                 self.mark_request_dispatch();
                 let result = self
                     .responses_ws
@@ -2229,6 +2330,7 @@ impl AiClient {
                         body,
                         ResponsesWsLiveness::for_response_idle(self.stream_idle_timeout),
                         model.endpoint.timeout,
+                        resumer,
                     )
                     .await;
                 match result {
@@ -2559,6 +2661,7 @@ mod tests {
                     serde_json::json!({}),
                     ResponsesWsLiveness::for_response_idle(Duration::from_secs(5)),
                     Duration::from_secs(5),
+                    None,
                 )
                 .await
                 .unwrap_err();

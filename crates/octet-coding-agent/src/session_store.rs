@@ -1401,6 +1401,14 @@ pub struct EphemeralAccountingSummary {
     pub total_cost_microdollars: u64,
     /// Whether any recorded run had unknown usage.
     pub has_uncertain_usage: bool,
+    /// Provider usage records kept across every ephemeral run.
+    pub usage_records: usize,
+    /// Input tokens across every kept usage record.
+    pub input_tokens: u64,
+    /// Output tokens across every kept usage record.
+    pub output_tokens: u64,
+    /// Unknown-usage exposure records kept across every ephemeral run.
+    pub uncertainty_records: usize,
 }
 
 struct EphemeralRun {
@@ -1756,6 +1764,13 @@ impl SessionStore {
                 .total_cost_microdollars
                 .saturating_add(record.session_cost_microdollars);
             summary.has_uncertain_usage |= record.has_uncertain_usage;
+            summary.usage_records += record.usage_records.len();
+            summary.uncertainty_records += record.usage_uncertainty_records.len();
+            for usage in &record.usage_records {
+                summary.input_tokens = summary.input_tokens.saturating_add(usage.usage.input_tokens);
+                summary.output_tokens =
+                    summary.output_tokens.saturating_add(usage.usage.output_tokens);
+            }
         }
         Ok(summary)
     }
@@ -2578,6 +2593,107 @@ fn staged_deletion_files(directory: &Path, id: &str) -> anyhow::Result<Vec<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One transcript worth of usage plus an unknown-usage exposure, appended
+    /// through the session's own durable path.
+    fn write_ephemeral_transcript(path: &Path, uncertain: bool) -> PathBuf {
+        let mut session = Session::create(path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("ephemeral prompt".into())],
+            })))
+            .unwrap();
+        session.append(EntryValue::Message(Message::Assistant(
+            octet_ai::AssistantMessage {
+                content: vec![octet_ai::AssistantPart::Text("ephemeral answer".into())],
+                model: ModelId("custom/model".into()),
+                protocol: Protocol::OpenAiChat,
+            },
+        )))
+        .unwrap();
+        session
+            .record_terminal_gate_usage(
+                EndpointId("custom".into()),
+                ModelId("probe".into()),
+                octet_ai::Usage {
+                    input_tokens: 40,
+                    output_tokens: 10,
+                    total_tokens: 50,
+                    ..octet_ai::Usage::default()
+                },
+                None,
+                Some(true),
+            )
+            .unwrap();
+        if uncertain {
+            // The operation id the Codex above-272K policy exports.
+            session
+                .record_usage_uncertainty(
+                    EndpointId("custom".into()),
+                    ModelId("probe".into()),
+                    crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION,
+                )
+                .unwrap();
+        }
+        drop(session);
+        path.to_path_buf()
+    }
+
+    #[test]
+    fn ephemeral_accounting_keeps_usage_and_uncertainty_without_the_transcript() {
+        let transcript_root = tempfile::tempdir().unwrap();
+        let accounting_root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(accounting_root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+
+        let transcript = transcript_root
+            .path()
+            .join(workspace_key(workspace.path()))
+            .join("ephemeral.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        write_ephemeral_transcript(&transcript, true);
+
+        let record = store.record_ephemeral_accounting(&transcript).unwrap();
+        assert_eq!(record.usage_records.len(), 1);
+        assert_eq!(record.usage_records[0].usage.input_tokens, 40);
+        assert_eq!(record.usage_uncertainty_records.len(), 1);
+        assert_eq!(
+            record.usage_uncertainty_records[0].operation,
+            crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
+        );
+        assert!(record.has_uncertain_usage, "unknown usage must survive");
+
+        // The conversation itself is never copied into the durable ledger.
+        let ledger = store
+            .dir()
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        let bytes = std::fs::read_to_string(&ledger).unwrap();
+        assert!(!bytes.contains("ephemeral prompt"), "{bytes}");
+        assert!(!bytes.contains("ephemeral answer"), "{bytes}");
+
+        // A second run accumulates, and uncertainty stays fail-closed across the
+        // whole workspace ledger.
+        let clean = transcript_root
+            .path()
+            .join(workspace_key(workspace.path()))
+            .join("ephemeral-two.jsonl");
+        write_ephemeral_transcript(&clean, false);
+        let second = store.record_ephemeral_accounting(&clean).unwrap();
+        assert!(!second.has_uncertain_usage);
+
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(summary.runs, 2);
+        assert!(summary.has_uncertain_usage, "one uncertain run keeps the total uncertain");
+
+        // The transcript can now be discarded: accounting still answers.
+        std::fs::remove_file(&transcript).unwrap();
+        std::fs::remove_file(&clean).unwrap();
+        let after = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(after.runs, 2);
+        assert!(after.has_uncertain_usage);
+    }
 
     #[test]
     fn per_workspace_dirs_are_stable_and_distinct() {

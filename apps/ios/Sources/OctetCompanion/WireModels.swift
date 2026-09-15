@@ -176,21 +176,21 @@ public struct WireSessionItem: Codable, Equatable, Sendable {
             return TranscriptEntry(
                 id: id,
                 kind: .user,
-                text: SafeText.value(data["text"]?.stringValue, limit: 64_000),
+                text: SafeText.value(data["text"]?.stringValue, limit: 64_000) ?? "",
                 isProvisional: provisional
             )
         case "assistantMessage":
             return TranscriptEntry(
                 id: id,
                 kind: .assistant,
-                text: SafeText.value(data["text"]?.stringValue, limit: 128_000),
+                text: SafeText.value(data["text"]?.stringValue, limit: 128_000) ?? "",
                 isProvisional: provisional
             )
         case "reasoning":
             return TranscriptEntry(
                 id: id,
                 kind: .reasoning,
-                text: SafeText.value(data["text"]?.stringValue, limit: 64_000),
+                text: SafeText.value(data["text"]?.stringValue, limit: 64_000) ?? "",
                 isProvisional: provisional
             )
         case "toolCall":

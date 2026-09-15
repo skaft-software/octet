@@ -396,7 +396,8 @@ class RuntimeProtocolTests(unittest.TestCase):
         )
         response = self.running.writer.wait_for(lambda message: message.get("id") == 41)
         self.assertTrue(response["result"]["is_error"])
-        self.assertEqual(response["result"]["metadata"]["code"], "orphaned")
+        # Detached, not dead: the stable error code names the recoverable state.
+        self.assertEqual(response["result"]["metadata"]["code"], "detached")
         self.assertEqual(self.responder.steers, [])
         self.assertEqual(self.responder.follow_ups, [])
 
@@ -655,7 +656,8 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.running.writer.wait_for(
             lambda message: message.get("method") == "presentation/update"
             and any(
-                node.get("state") == "unavailable"
+                node.get("state") == "degraded"
+                and str(node.get("secondary", "")).startswith("detached")
                 for node in message.get("params", {})
                 .get("snapshot", {})
                 .get("collection", {})

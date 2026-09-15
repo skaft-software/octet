@@ -203,6 +203,45 @@ impl Fixture {
         }
     }
 
+    /// Write a synthetic, non-localhost OpenAI Codex subscription credential
+    /// into the isolated HOME so the catalog really carries Codex models. No
+    /// network access is involved: the credential only unlocks the checked-in
+    /// fallback inventory while `--offline` is in force.
+    fn write_codex_credential(&self, plan: &str) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_fixture",
+                "chatgpt_plan_type": plan,
+                "localhost": false
+            }
+        });
+        let access = format!(
+            "h.{}.s",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+        );
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "tokens": {
+                "access_token": access,
+                "refresh_token": "refresh",
+                "account_id": "acct_fixture"
+            },
+            "expires_at": u64::MAX
+        }))
+        .unwrap();
+        let path = self.home.join(".octet/credentials/codex.json");
+        std::fs::write(&path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_octet"));
         command
@@ -441,16 +480,163 @@ fn session_id_creates_the_exact_session_and_name_trims_or_rejects_empty() {
     );
 }
 
-/// 5.4 — `--no-session` must fail closed rather than drop durable usage and
-/// uncertainty accounting.
+/// Every file named `name` under the isolated session root.
+fn files_named(fixture: &Fixture, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![fixture.sessions.clone()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().and_then(|value| value.to_str()) == Some(name) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Every JSONL transcript under the isolated session root, excluding the
+/// conversation-free ephemeral accounting ledger.
+fn session_transcripts(fixture: &Fixture) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![fixture.sessions.clone()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path.file_name().and_then(|value| value.to_str())
+                    != Some("ephemeral-sessions.jsonl")
+            {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// 5.4 — `--no-session` keeps the workspace free of transcripts while durable
+/// usage, cost and uncertainty accounting survive the run.
 #[test]
-fn no_session_fails_closed_because_accounting_shares_the_session_ledger() {
+fn no_session_discards_the_transcript_but_keeps_durable_accounting() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let run = fixture.run(&["--model", "custom/probe", "--no-session", "--print", "hello"]);
+    assert_success(&run);
+    assert!(
+        stdout_of(&run).contains(ASSISTANT_TEXT),
+        "the ephemeral run still answered: {}",
+        stdout_of(&run)
+    );
+
+    // The conversation is gone: no transcript anywhere in the session root.
+    let transcripts = session_transcripts(&fixture);
+    assert!(
+        transcripts.is_empty(),
+        "an ephemeral run must not persist a transcript: {transcripts:?}"
+    );
+
+    // ... but the accounting ledger kept the provider usage.
+    let ledger = files_named(&fixture, "ephemeral-sessions.jsonl");
+    assert_eq!(ledger.len(), 1, "one workspace accounting ledger: {ledger:?}");
+    let lines = std::fs::read_to_string(&ledger[0]).unwrap();
+    assert_eq!(lines.lines().count(), 1, "{lines}");
+    let record: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+    assert_eq!(
+        record["usage_records"].as_array().map(Vec::len),
+        Some(1),
+        "provider usage survives the discarded transcript: {record}"
+    );
+    assert_eq!(record["has_uncertain_usage"], serde_json::json!(false));
+
+    // The same accounting is readable through the CLI, and it reports no
+    // transcripts for the workspace.
+    let listed = fixture.run(&["sessions", "accounting"]);
+    assert_success(&listed);
+    let report = stdout_of(&listed);
+    assert!(report.contains("Runs: 1"), "{report}");
+    assert!(report.contains("Usage: 1 record(s)"), "{report}");
+    assert!(report.contains("Uncertainty: none recorded"), "{report}");
+
+    let sessions = fixture.run(&["sessions", "list"]);
+    assert_success(&sessions);
+    assert!(
+        stdout_of(&sessions).contains("No sessions"),
+        "the ephemeral session is not listed: {}",
+        stdout_of(&sessions)
+    );
+}
+
+/// 5.4 — `--no-session` is refused where it cannot be honoured, and a run that
+/// never started records no accounting.
+#[test]
+fn no_session_fails_closed_for_an_interactive_frontend_and_records_nothing() {
     let fixture = Fixture::new(None);
-    let output = fixture.run(&["--no-session", "--print", "hello"]);
-    assert!(!output.status.success(), "--no-session must not silently continue");
-    let stderr = stderr_of(&output);
-    assert!(stderr.contains("--no-session is unavailable"), "diagnostic: {stderr}");
-    assert!(stderr.contains("accounting"), "diagnostic names the missing primitive: {stderr}");
+    let interactive = fixture.run(&["--no-session"]);
+    assert!(!interactive.status.success(), "a TUI run cannot be ephemeral");
+    let stderr = stderr_of(&interactive);
+    assert!(
+        stderr.contains("--no-session requires a headless frontend"),
+        "diagnostic: {stderr}"
+    );
+
+    let named = fixture.run(&["--no-session", "--print", "--name", "ephemeral", "hello"]);
+    assert!(!named.status.success(), "an ephemeral run cannot name a session");
+    assert!(
+        stderr_of(&named).contains("--no-session cannot name a session"),
+        "diagnostic: {}",
+        stderr_of(&named)
+    );
+
+    let accounting = fixture.run(&["sessions", "accounting"]);
+    assert_success(&accounting);
+    assert!(
+        stdout_of(&accounting).contains("No ephemeral runs recorded"),
+        "nothing was recorded: {}",
+        stdout_of(&accounting)
+    );
+}
+
+/// The Codex context note never fires for a non-Codex session, even when the
+/// catalog is full of Codex models, and it is not re-emitted per turn.
+#[test]
+fn codex_context_notes_are_not_emitted_for_a_non_codex_session_or_per_turn() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    fixture.write_codex_credential("plus");
+
+    // Precondition: the catalog really does carry Codex models.
+    let listed = fixture.run(&["--list-models", "gpt-5.6"]);
+    assert_success(&listed);
+    assert!(
+        stdout_of(&listed).contains("gpt-5.6-sol"),
+        "the fixture HOME must register the Codex inventory: {}",
+        stdout_of(&listed)
+    );
+
+    // Two turns in one session on a non-Codex effective model.
+    let run = fixture.run(&[
+        "--model",
+        "custom/probe",
+        "--print",
+        "first turn",
+        "second turn",
+    ]);
+    assert_success(&run);
+    let stderr = stderr_of(&run);
+    assert!(
+        !stderr.contains("Codex model"),
+        "a non-Codex session must print no Codex note: {stderr}"
+    );
+    assert!(!stderr.contains("context window — advertised"), "{stderr}");
+    assert!(!stderr.contains("is budgeted at"), "{stderr}");
+    let events = api.chat_requests().len();
+    assert_eq!(events, 2, "both turns really ran: {events}");
 }
 
 /// 5.9 — `sessions search` uses the disposable entry index incrementally (a

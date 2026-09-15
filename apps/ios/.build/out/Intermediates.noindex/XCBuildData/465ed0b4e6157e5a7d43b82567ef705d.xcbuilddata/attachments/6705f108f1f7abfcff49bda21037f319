@@ -1,0 +1,59 @@
+{
+  "" : {
+    "diagnostics" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/OctetServe-primary.dia",
+    "emit-module-dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/OctetServe-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/OctetServe-primary-emit-module.dia",
+    "pch" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/OctetServe-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/OctetServe-primary.swiftdeps"
+  },
+  "/Users/achumukundan/github/skaft-software/octet/apps/apple-shared/Sources/OctetServe/Identifiers.swift" : {
+    "const-values" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers.swiftconstvalues",
+    "dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers.d",
+    "diagnostics" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers.dia",
+    "index-unit-output-path" : "/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers.o",
+    "llvm-bc" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers.bc",
+    "object" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers.o",
+    "swift-dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers.swiftdeps",
+    "swiftmodule" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/Identifiers~partial.swiftmodule"
+  },
+  "/Users/achumukundan/github/skaft-software/octet/apps/apple-shared/Sources/OctetServe/JSON.swift" : {
+    "const-values" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON.swiftconstvalues",
+    "dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON.d",
+    "diagnostics" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON.dia",
+    "index-unit-output-path" : "/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON.o",
+    "llvm-bc" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON.bc",
+    "object" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON.o",
+    "swift-dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON.swiftdeps",
+    "swiftmodule" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/JSON~partial.swiftmodule"
+  },
+  "/Users/achumukundan/github/skaft-software/octet/apps/apple-shared/Sources/OctetServe/RuntimeModels.swift" : {
+    "const-values" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels.swiftconstvalues",
+    "dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels.d",
+    "diagnostics" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels.dia",
+    "index-unit-output-path" : "/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels.o",
+    "llvm-bc" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels.bc",
+    "object" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels.o",
+    "swift-dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels.swiftdeps",
+    "swiftmodule" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/RuntimeModels~partial.swiftmodule"
+  },
+  "/Users/achumukundan/github/skaft-software/octet/apps/apple-shared/Sources/OctetServe/WireEnums.swift" : {
+    "const-values" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums.swiftconstvalues",
+    "dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums.d",
+    "diagnostics" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums.dia",
+    "index-unit-output-path" : "/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums.o",
+    "llvm-bc" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums.bc",
+    "object" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums.o",
+    "swift-dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums.swiftdeps",
+    "swiftmodule" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireEnums~partial.swiftmodule"
+  },
+  "/Users/achumukundan/github/skaft-software/octet/apps/apple-shared/Sources/OctetServe/WireModels.swift" : {
+    "const-values" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels.swiftconstvalues",
+    "dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels.d",
+    "diagnostics" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels.dia",
+    "index-unit-output-path" : "/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels.o",
+    "llvm-bc" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels.bc",
+    "object" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels.o",
+    "swift-dependencies" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels.swiftdeps",
+    "swiftmodule" : "/Users/achumukundan/github/skaft-software/octet/apps/ios/.build/out/Intermediates.noindex/OctetServe.build/Debug/OctetServe-t.build/Objects-normal/arm64/WireModels~partial.swiftmodule"
+  }
+}

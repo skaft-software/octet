@@ -24,15 +24,19 @@ House rules implemented here, in order of severity:
    the run and reports exactly what exists, without destroying anything and
    without leaving orphaned panes behind. The command is re-runnable.
 
-`herdr` (verified 2026-09-15: `herdrdev/herdr`, "the runtime your coding agents
-live on", Rust terminal multiplexer, 38k stars, active) exposes panes through
-its CLI: `herdr pane split …` creates a pane and returns
-`.result.pane.pane_id`, and `herdr pane run <pane_id> <command>` submits a
-command *string* to that pane's shell. Because herdr has no argv-list pane
-executor, the string form is only ever assembled from tokens that already
-passed `_SAFE_TOKEN_RE` -- a token with any shell metacharacter is rejected
-before the string exists. herdr also documents a hard guardrail for agents:
-never drive a herdr session you do not own, i.e. require `HERDR_ENV=1`.
+`herdr` is real and verified against its own documentation (fetched 2026-09-15):
+`herdrdev/herdr` ("Terminal workspace manager for AI coding agents", https://herdr.dev,
+https://herdr.dev/docs) drives panes through its CLI -- `herdr pane split --current
+--direction right --cwd "$PWD" --no-focus` creates a sibling pane and returns it as
+`.result.pane.pane_id`; `herdr pane run <pane-id> "<command>"` atomically sends a
+command *string* plus Enter (https://raw.githubusercontent.com/herdrdev/herdr/master/skills/herdr/SKILL.md).
+Because herdr has no argv-list pane executor the string form is only ever assembled
+from tokens that already passed `_SAFE_TOKEN_RE` -- a token with any shell
+metacharacter is rejected before the string exists. herdr documents a hard guardrail
+for agents: control commands require `HERDR_ENV=1`, i.e. this process must already be
+inside a Herdr-managed pane ("Herdr blocks nested launches by design",
+https://herdr.dev/agent-guide.md), so open-all refuses to drive a herdr session it
+does not own.
 """
 
 from __future__ import annotations
@@ -389,7 +393,7 @@ def plan_open_all(
             first=True,
         )
     ]
-    for index, worker in enumerate(running):
+    for worker in running:
         panes.append(
             resolve_worker_pane(
                 worker,
@@ -398,7 +402,11 @@ def plan_open_all(
                 workspace=workspace,
                 inside=inside,
                 session_name=session_name,
-                first=index == 0 and not inside,
+                # The parent pane owns session creation (when the operator is not
+                # already inside the multiplexer); worker panes always add a
+                # window to that session, never a second session with the same
+                # name.
+                first=False,
             )
         )
     return LaunchPlan(
@@ -477,7 +485,7 @@ def _open_tmux_pane(pane: Pane) -> Dict[str, Any]:
 
 
 def _open_herdr_pane(pane: Pane, *, workspace: Optional[str]) -> Dict[str, Any]:
-    split = ["herdr", "pane", "split", "--direction", "down", "--no-focus"]
+    split = ["herdr", "pane", "split", "--current", "--direction", "down", "--no-focus"]
     if workspace:
         split += ["--cwd", workspace]
     result = _run(split)

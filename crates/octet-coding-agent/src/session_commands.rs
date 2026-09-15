@@ -66,6 +66,12 @@ pub enum SessionCommand {
     Delete { id: String },
     /// Validate a session and repair only an interrupted final append.
     Repair { id: String },
+    /// Report durable accounting for ephemeral (`--no-session`) runs.
+    ///
+    /// An ephemeral run discards its transcript but must never lose usage,
+    /// cost or unknown-usage accounting, so that accounting lives in a
+    /// conversation-free ledger next to the workspace's sessions.
+    Accounting,
 }
 
 pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
@@ -93,7 +99,51 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
         ),
         SessionCommand::Delete { id } => delete(&store, &id),
         SessionCommand::Repair { id } => repair(&store, &id),
+        SessionCommand::Accounting => accounting(&store),
     }
+}
+
+/// Print the workspace's durable ephemeral accounting.
+///
+/// The transcript of an ephemeral run is gone by design; this is the surviving
+/// record of what it used and cost. Uncertainty is fail-closed: while any kept
+/// record is uncertain, the totals are reported as a known subtotal.
+fn accounting(store: &SessionStore) -> anyhow::Result<()> {
+    let summary = store.ephemeral_accounting_summary()?;
+    let ledger = store
+        .dir()
+        .join(".accounting")
+        .join("ephemeral-sessions.jsonl");
+    crate::output::stdout_line(format!(
+        "Ephemeral accounting (transcripts discarded, usage retained): {}",
+        ledger.display()
+    ));
+    if summary.runs == 0 {
+        crate::output::stdout_line("No ephemeral runs recorded for this workspace.".to_owned());
+        return Ok(());
+    }
+    crate::output::stdout_line(format!("Runs: {}", summary.runs));
+    let dollars = summary.total_cost_microdollars as f64 / 1_000_000.0;
+    crate::output::stdout_line(format!(
+        "Recorded cost: ${dollars:.4}{}",
+        if summary.has_uncertain_usage { " (known subtotal)" } else { "" }
+    ));
+    crate::output::stdout_line(format!(
+        "Usage: {} record(s), {} input / {} output tokens",
+        summary.usage_records, summary.input_tokens, summary.output_tokens
+    ));
+    crate::output::stdout_line(format!(
+        "Uncertainty: {}",
+        if summary.has_uncertain_usage {
+            format!(
+                "{} unknown-usage record(s); cost totals are a known subtotal",
+                summary.uncertainty_records
+            )
+        } else {
+            "none recorded".to_owned()
+        }
+    ));
+    Ok(())
 }
 
 fn list(store: &SessionStore, query: Option<&str>) -> anyhow::Result<()> {

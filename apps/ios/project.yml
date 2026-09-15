@@ -19,7 +19,7 @@ targets:
       - path: Resources
     dependencies:
       - package: apple-shared
-        product: OctetServeClient
+        product: OctetServe
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.octet.companion
