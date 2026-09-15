@@ -930,7 +930,7 @@ async fn text_image_and_audio_reads_retain_identity_in_ordered_slots() {
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
-    let second = serde_json::Value::from_slice(&requests[1].body).unwrap();
+    let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
     let messages = second["messages"].as_array().unwrap();
     let result_ids: Vec<_> = messages
         .iter()
