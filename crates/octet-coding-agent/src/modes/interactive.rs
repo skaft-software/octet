@@ -472,6 +472,109 @@ where
     }
 }
 
+/// Durable goal state a live run can still reach.
+///
+/// `Run` owns `&mut Agent` for the whole turn, so the frontend cannot lend it
+/// `&App` and cannot call the idle goal dispatcher. These are exactly the
+/// application fields the goal command touches: the shared durable store, the
+/// session key that store is addressed by, and the driver, whose state is
+/// already `Arc`-shared with `app.goal_driver`, so a command applied mid-run is
+/// the same command the idle boundary would have applied.
+#[derive(Clone)]
+pub(crate) struct GoalAccess {
+    store: Arc<octet_agent::DurableGoalStore>,
+    driver: octet_agent::GoalDriver,
+    session_id: String,
+}
+
+/// A live run that cannot address the durable goal at all.
+///
+/// `/goal` under an active run fails closed with this reason: it is rendered to
+/// the user, never queued to the next idle boundary, and never a silent no-op.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ActiveGoalError {
+    /// The session carries no durable goal identity, so neither a read nor a
+    /// mutation can be addressed. Bootstrap requires one, so this means the run
+    /// cannot reconstruct the key it would have to mutate.
+    #[error("the session has no durable goal identity, so the goal store cannot be addressed")]
+    UnaddressableSession,
+}
+
+impl GoalAccess {
+    /// Address the durable goal of an application whose `Agent` is not borrowed.
+    fn from_app(app: &App) -> Result<Self, ActiveGoalError> {
+        Self::from_parts(
+            app.goal_store.clone(),
+            app.goal_driver.clone(),
+            app.goal_session_id.clone(),
+        )
+    }
+
+    fn from_parts(
+        store: Arc<octet_agent::DurableGoalStore>,
+        driver: octet_agent::GoalDriver,
+        session_id: String,
+    ) -> Result<Self, ActiveGoalError> {
+        if session_id.is_empty() {
+            return Err(ActiveGoalError::UnaddressableSession);
+        }
+        Ok(Self {
+            store,
+            driver,
+            session_id,
+        })
+    }
+
+    fn status_text(&self) -> anyhow::Result<String> {
+        let goal = self.store.get(&self.session_id)?;
+        let Some(goal) = goal else {
+            return Ok("No goal is configured for this session.".to_owned());
+        };
+        let remaining = goal
+            .turn_budget
+            .map(|budget| {
+                format!(
+                    " · {} turn{} remaining",
+                    budget.saturating_sub(goal.turns_used),
+                    if budget.saturating_sub(goal.turns_used) == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )
+            })
+            .unwrap_or_default();
+        Ok(format!(
+            "{} goal: {}{}",
+            goal_status_label(goal.status),
+            goal.objective,
+            remaining
+        ))
+    }
+
+    fn arm_deadline(&self) -> anyhow::Result<Option<Instant>> {
+        match self
+            .driver
+            .turn_settled(GoalTurnSource::User, "", false)?
+        {
+            GoalDecision::Wait { delay, .. } => Ok(Some(Instant::now() + delay)),
+            _ => Ok(None),
+        }
+    }
+
+    fn recovered_deadline(&self) -> anyhow::Result<Option<Instant>> {
+        if self
+            .store
+            .get(&self.session_id)?
+            .is_some_and(|goal| goal.status == GoalStatus::Active)
+        {
+            self.arm_deadline()
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 fn goal_status_label(status: GoalStatus) -> &'static str {
     match status {
         GoalStatus::Active => "Active",
@@ -483,57 +586,18 @@ fn goal_status_label(status: GoalStatus) -> &'static str {
     }
 }
 
-fn goal_status_text(app: &App) -> anyhow::Result<String> {
-    let goal = app.goal_store.get(&app.goal_session_id)?;
-    let Some(goal) = goal else {
-        return Ok("No goal is configured for this session.".to_owned());
-    };
-    let remaining = goal
-        .turn_budget
-        .map(|budget| {
-            format!(
-                " · {} turn{} remaining",
-                budget.saturating_sub(goal.turns_used),
-                if budget.saturating_sub(goal.turns_used) == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            )
-        })
-        .unwrap_or_default();
-    Ok(format!(
-        "{} goal: {}{}",
-        goal_status_label(goal.status),
-        goal.objective,
-        remaining
-    ))
-}
-
-fn arm_goal_deadline(app: &App) -> anyhow::Result<Option<Instant>> {
-    match app
-        .goal_driver
-        .turn_settled(GoalTurnSource::User, "", false)?
-    {
-        GoalDecision::Wait { delay, .. } => Ok(Some(Instant::now() + delay)),
-        _ => Ok(None),
-    }
-}
-
 fn recovered_goal_deadline(app: &App) -> anyhow::Result<Option<Instant>> {
-    if app
-        .goal_store
-        .get(&app.goal_session_id)?
-        .is_some_and(|goal| goal.status == GoalStatus::Active)
-    {
-        arm_goal_deadline(app)
-    } else {
-        Ok(None)
-    }
+    GoalAccess::from_app(app)?.recovered_deadline()
 }
 
+/// Apply `/goal` now, against durable state, wherever the command was typed.
+///
+/// The same producer serves the idle dispatcher and a live run: `/goal` is
+/// never queued to the next idle boundary, so a mid-run objective, pause,
+/// resume, or clear mutates the store at that instant and leaves the driver
+/// armed exactly as an idle command would.
 fn apply_goal_command(
-    app: &App,
+    access: &GoalAccess,
     shell: &mut InteractiveShell,
     command: commands::GoalCommand,
     goal_deadline: &mut Option<Instant>,
@@ -547,7 +611,7 @@ fn apply_goal_command(
             "Goal commands\n\n/goal <objective>\n/goal status\n/goal pause\n/goal resume\n/goal clear"
                 .to_owned(),
         ),
-        commands::GoalCommand::Status => match goal_status_text(app) {
+        commands::GoalCommand::Status => match access.status_text() {
             Ok(status) => shell.show_report_text(
                 "Goal status",
                 "Review the current session goal",
@@ -555,28 +619,27 @@ fn apply_goal_command(
             ),
             Err(error) => shell.error(format!("unable to read goal: {error}")),
         },
-        commands::GoalCommand::Set(objective) => match app
-            .goal_store
-            .set(&app.goal_session_id, &objective, None)
-        {
-            Ok(goal) => {
-                app.goal_driver.user_spoke();
-                *goal_deadline = arm_goal_deadline(app)?;
-                shell.notice(format!(
-                    "goal set · {} goal: {}",
-                    goal_status_label(goal.status), goal.objective
-                ));
+        commands::GoalCommand::Set(objective) => {
+            match access.store.set(&access.session_id, &objective, None) {
+                Ok(goal) => {
+                    access.driver.user_spoke();
+                    *goal_deadline = access.arm_deadline()?;
+                    shell.notice(format!(
+                        "goal set · {} goal: {}",
+                        goal_status_label(goal.status), goal.objective
+                    ));
+                }
+                Err(error) => shell.error(format!("unable to set goal: {error}")),
             }
-            Err(error) => shell.error(format!("unable to set goal: {error}")),
-        },
+        }
         commands::GoalCommand::Pause => {
-            match app
-                .goal_store
-                .apply(&app.goal_session_id, DurableGoalAction::Pause)
+            match access
+                .store
+                .apply(&access.session_id, DurableGoalAction::Pause)
             {
                 Ok(Some(goal)) => {
                     *goal_deadline = None;
-                    app.goal_driver.user_spoke();
+                    access.driver.user_spoke();
                     shell.notice(format!("goal paused · {}", goal.objective));
                 }
                 Ok(None) => shell.error("no goal is configured for this session".to_owned()),
@@ -584,13 +647,13 @@ fn apply_goal_command(
             }
         }
         commands::GoalCommand::Resume => {
-            match app
-                .goal_store
-                .apply(&app.goal_session_id, DurableGoalAction::Resume)
+            match access
+                .store
+                .apply(&access.session_id, DurableGoalAction::Resume)
             {
                 Ok(Some(goal)) => {
-                    app.goal_driver.user_spoke();
-                    *goal_deadline = arm_goal_deadline(app)?;
+                    access.driver.user_spoke();
+                    *goal_deadline = access.arm_deadline()?;
                     shell.notice(format!("goal resumed · {}", goal.objective));
                 }
                 Ok(None) => shell.error("no goal is configured for this session".to_owned()),
@@ -598,13 +661,13 @@ fn apply_goal_command(
             }
         }
         commands::GoalCommand::Clear => {
-            match app
-                .goal_store
-                .apply(&app.goal_session_id, DurableGoalAction::Clear)
+            match access
+                .store
+                .apply(&access.session_id, DurableGoalAction::Clear)
             {
                 Ok(None) => {
                     *goal_deadline = None;
-                    app.goal_driver.user_spoke();
+                    access.driver.user_spoke();
                     shell.notice("goal cleared");
                 }
                 Ok(Some(_)) => unreachable!("clearing a goal returns no state"),
@@ -679,7 +742,12 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
         Command::Tree => PendingIdleAction::ShowTree,
         Command::Checkout(id) => PendingIdleAction::CheckoutEntry(id),
         Command::Skills(sub) => PendingIdleAction::Skills(sub),
-        Command::Goal(goal) => PendingIdleAction::Goal(goal),
+        // `/goal` is applied the instant it is submitted, mid-run or idle. It
+        // has no queued form: queueing it is exactly the reported defect, so an
+        // attempt to queue one fails closed instead of deferring the command.
+        Command::Goal(_) => anyhow::bail!(
+            "`/goal` is applied immediately and is never queued as an idle action"
+        ),
         other => anyhow::bail!("{other:?} cannot be queued as an idle action"),
     };
     push_pending_action(queue, action);
@@ -1242,6 +1310,10 @@ fn observe_extension_terminal_event(
 /// appearance probe. Ctrl-C becomes the same coordinated SIGINT shutdown used
 /// by the signal thread; Ctrl-D records a close request and lets the owned
 /// operation settle before its caller exits.
+///
+/// An empty `label` is the silent startup form: nothing is rendered for the
+/// phase, while cancellation and shutdown diagnostics still name the operation
+/// as `startup` (see [`run_blocking_startup_lifecycle`]).
 async fn await_lifecycle<F, T, S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -1254,6 +1326,9 @@ where
 {
     let mut operation = Box::pin(operation);
     let mut input_open = true;
+    // Display text is empty for silent startup phases; diagnostics still need a
+    // name so a cancelled or signalled wait remains attributable.
+    let operation_name = if label.is_empty() { "startup" } else { label };
     shell.set_run_label(label);
     shell.render();
 
@@ -1264,7 +1339,7 @@ where
                 shell.set_run_label("shutting down…");
                 shell.render();
                 let _ = tokio::time::timeout(LIFECYCLE_SHUTDOWN_GRACE, &mut operation).await;
-                anyhow::bail!("shutdown signal {signal} received during {label}");
+                anyhow::bail!("shutdown signal {signal} received during {operation_name}");
             }
             result = &mut operation => {
                 shell.set_run_label("idle");
@@ -1276,7 +1351,7 @@ where
                     shell.set_run_label("shutting down…");
                     shell.render();
                     let _ = tokio::time::timeout(LIFECYCLE_SHUTDOWN_GRACE, &mut operation).await;
-                    anyhow::bail!("Ctrl-C cancelled {label}");
+                    anyhow::bail!("Ctrl-C cancelled {operation_name}");
                 }
                 Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
                     shell.request_close();
@@ -1336,6 +1411,41 @@ where
     await_lifecycle(shell, input, label, async move {
         task.await
             .map_err(|error| anyhow::anyhow!("{label} worker failed: {error}"))?
+    })
+    .await
+}
+
+/// Diagnostic names for silent startup work. They never render: the startup
+/// screen stays blank until one ready frame, and a name appears only in a
+/// worker-failure, cancellation, or shutdown diagnostic.
+const STARTUP_MODELS_OPERATION: &str = "model discovery";
+const STARTUP_APP_OPERATION: &str = "startup build";
+const STARTUP_SESSION_OPERATION: &str = "session open";
+
+/// Run one bounded startup phase with no status text and a typeable composer.
+///
+/// Startup shows nothing: no phase label, no progress notice. Keystrokes are
+/// still accepted and buffered into the draft from the first frame, and the
+/// phase durations stay attributable off-screen through
+/// `OCTET_STARTUP_TRACE=1` (`crate::app::bootstrap::startup_phase`).
+pub(crate) async fn run_blocking_startup_lifecycle<T, W, S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    operation: &'static str,
+    work: W,
+) -> anyhow::Result<T>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    T: Send + 'static,
+    W: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let task = tokio::task::spawn_blocking(work);
+    await_lifecycle(shell, input, "", async move {
+        task.await
+            .map_err(|error| anyhow::anyhow!("{operation} worker failed: {error}"))?
+            // Nothing rendered, so the operation name is the only attribution a
+            // failed startup phase carries.
+            .map_err(|error| anyhow::anyhow!("{operation} failed: {error}"))
     })
     .await
 }
@@ -1591,6 +1701,12 @@ pub struct ActiveRunInspection {
     catalog: octet_ai::ModelCatalog,
     sessions: crate::session_store::SessionStore,
     subagents_available: bool,
+    /// Durable goal state, or the typed reason the run cannot address it.
+    ///
+    /// Captured like every other fact here; the goal store and the driver hold
+    /// no borrow of the application, so `/goal` mutates durable state mid-run
+    /// instead of being deferred to the next idle boundary.
+    goal: Result<GoalAccess, ActiveGoalError>,
 }
 
 impl ActiveRunInspection {
@@ -1604,6 +1720,7 @@ impl ActiveRunInspection {
             catalog: app.catalog.clone(),
             sessions: app.sessions.clone(),
             subagents_available: app.subagents_available(),
+            goal: GoalAccess::from_app(app),
         }
     }
 
@@ -1614,6 +1731,11 @@ impl ActiveRunInspection {
     /// Re-read the live session without repairing, truncating, or appending.
     fn read_only_session(&self) -> anyhow::Result<Session> {
         Ok(Session::open_read_only(&self.session_path)?)
+    }
+
+    /// The durable goal of this run, or the typed reason it is unaddressable.
+    fn goal_access(&self) -> Result<&GoalAccess, &ActiveGoalError> {
+        self.goal.as_ref()
     }
 }
 
@@ -1722,6 +1844,7 @@ async fn handle_active_command<S, F>(
     inspection: &ActiveRunInspection,
     extensions: &mut crate::extensions::ExecutableExtensions,
     context: &octet_agent::ContextSnapshot,
+    goal_deadline: &mut Option<Instant>,
     open_delegated: F,
     input: &mut S,
     queue: &mut VecDeque<PendingIdleAction>,
@@ -1887,6 +2010,20 @@ where
             push_pending_action(queue, PendingIdleAction::Extensions(sub));
         }
         Command::Fast(requested) => apply_fast_command(shell, &inspection.model, requested),
+        Command::Goal(goal) => match inspection.goal_access() {
+            // Applied now, against the same durable store and driver the idle
+            // dispatcher uses. The run in progress is untouched: it is not
+            // restarted, and the armed deadline is recomputed from the settled
+            // turn exactly as it is for an idle `/goal`.
+            Ok(access) => {
+                if let Err(error) = apply_goal_command(access, shell, goal, goal_deadline) {
+                    shell.error(format!("/goal failed: {error:#}"));
+                }
+            }
+            // Fail closed. The typed reason is rendered; the command is never
+            // queued and never a silent no-op.
+            Err(error) => shell.error(format!("/goal failed: {error}")),
+        },
         Command::Model(None) => {
             // The picker owns input while it is open, so it runs inline and the
             // chosen model is applied by the idle transition that already owns
@@ -1978,6 +2115,7 @@ pub async fn drive_active_run<S>(
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     made_tool_call: &mut bool,
     inspection: &ActiveRunInspection,
+    goal_deadline: &mut Option<Instant>,
 ) -> anyhow::Result<HostRunOutcome>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -2282,6 +2420,7 @@ where
                             inspection,
                             executable_extensions,
                             &context,
+                            goal_deadline,
                             |principal: &str, reference: &str| {
                                 run.open_delegated_session_reference(principal, reference)
                             },
@@ -4365,7 +4504,12 @@ async fn apply_pending_actions(
                 }
             }
             PendingIdleAction::Goal(command) => {
-                apply_goal_command(&app, shell, command, goal_deadline)?;
+                apply_goal_command(
+                    &GoalAccess::from_app(&app)?,
+                    shell,
+                    command,
+                    goal_deadline,
+                )?;
             }
             PendingIdleAction::Extensions(sub) => {
                 // Reuse the idle dispatcher verbatim so the menu, reload, and
@@ -4939,7 +5083,12 @@ async fn run_idle_command(
             execute_skills_command(&mut app, shell, sub).await?;
         }
         Command::Goal(goal) => {
-            apply_goal_command(&app, shell, goal, goal_deadline)?;
+            apply_goal_command(
+                &GoalAccess::from_app(&app)?,
+                shell,
+                goal,
+                goal_deadline,
+            )?;
         }
         Command::Unknown(text) => {
             let (extension_name, extension_arguments) = split_prompt_invocation(&text)
@@ -5498,9 +5647,12 @@ async fn run_interactive_without_model(
     let workspace = boot.config.workspace.clone();
     let mut prepared = boot.take_prepared_session();
     let selection = launch.session;
-    let session = run_blocking_lifecycle(shell, input, "opening session…", move || {
-        crate::app::bootstrap::open_launch_session(&mut prepared, selection)
-    })
+    let session = run_blocking_startup_lifecycle(
+        shell,
+        input,
+        STARTUP_SESSION_OPERATION,
+        move || crate::app::bootstrap::open_launch_session(&mut prepared, selection),
+    )
     .await?;
 
     let resume_command = resume_command_for_session(&session, &boot.config);
@@ -5510,7 +5662,6 @@ async fn run_interactive_without_model(
     shell.set_input_modalities(octet_ai::ModalitySet::none());
     shell.set_session_telemetry(&session, None);
     shell.hydrate(&session)?;
-    shell.finish_startup();
     shell.notice(
         "No configured model. Use /login, /model, or /reload to configure one; prompts are disabled until then.",
     );
@@ -5525,6 +5676,11 @@ async fn run_interactive_without_model(
     {
         shell.show_changelog();
     }
+    // The same single ready frame as the model path: onboarding text and the
+    // optional changelog surface arrive with readiness, never as a partial
+    // paint before it.
+    crate::app::bootstrap::startup_phase("frame.ready");
+    shell.finish_startup();
     shell.render();
 
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
@@ -6193,11 +6349,15 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
     // Cold/expired model inventories can require network discovery. Give the
     // terminal an input owner before that work, just as for session/extension
     // startup below. Editing is live; submission still waits for full startup.
-    let mut boot =
-        run_blocking_lifecycle(&mut shell, &mut input, "discovering models…", move || {
-            crate::app::bootstrap::bootstrap(config)
-        })
-        .await?;
+    // Startup renders nothing: the phase is named only in diagnostics, and its
+    // duration stays attributable through `OCTET_STARTUP_TRACE=1`.
+    let mut boot = run_blocking_startup_lifecycle(
+        &mut shell,
+        &mut input,
+        STARTUP_MODELS_OPERATION,
+        move || crate::app::bootstrap::bootstrap(config),
+    )
+    .await?;
     if shell.close_requested() {
         shell.leave();
         return Ok(());
@@ -6242,10 +6402,10 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
             Err(error) => Err(error),
         };
     }
-    let mut app = run_blocking_lifecycle(
+    let mut app = run_blocking_startup_lifecycle(
         &mut shell,
         &mut input,
-        "starting extensions…",
+        STARTUP_APP_OPERATION,
         move || {
             let system = compose_instructions(&boot.config)?;
             build_app(boot, launch, system)
@@ -6263,13 +6423,20 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
         }
         startup_prompt = Some(rendered.text);
     }
+    // One atomic ready frame. History, identity, status, extension UI and the
+    // startup prompt are all installed before `finish_startup` opens the
+    // branded surface, so the terminal never sees an incremental
+    // partial-then-corrected paint. Hydration cost stays attributable
+    // off-screen through `OCTET_STARTUP_TRACE=1`.
+    crate::app::bootstrap::startup_phase("history.hydrate");
     shell.hydrate(app.agent.session())?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
     request_extension_ui(&mut shell, &mut app);
-    shell.finish_startup();
     let mut startup_input = prepare_startup_input(&app, &mut shell, startup_prompt);
+    crate::app::bootstrap::startup_phase("frame.ready");
+    shell.finish_startup();
     shell.render();
 
     let mut pending_actions = VecDeque::new();
@@ -6816,6 +6983,7 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                     &mut app.executable_extensions,
                     &mut made_tool_call,
                     &inspection,
+                    &mut goal_deadline,
                 )
                 .await?;
                 drop(run);
@@ -7515,6 +7683,60 @@ mod tests {
         assert_eq!(shell.pending(), "draft during wait");
         assert_ne!(shell.verbose_tools(), was_verbose);
         assert!(!shell.close_requested());
+    }
+
+    #[tokio::test]
+    async fn silent_startup_lifecycle_keeps_typed_input_and_names_the_phase_off_screen() {
+        use crossterm::event::KeyEvent;
+
+        // Typing before readiness is buffered into the draft, exactly as the
+        // labeled wait does; nothing renders a phase label.
+        let events = [
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Paste(" draft during startup".into())),
+        ];
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let mut done_tx = Some(done_tx);
+        let source = tokio_stream::iter(events).chain(futures_util::stream::poll_fn(move |_| {
+            if let Some(done_tx) = done_tx.take() {
+                let _ = done_tx.send(());
+            }
+            std::task::Poll::Ready(None)
+        }));
+        let mut input = EventStream::from_stream(source);
+        let mut shell = InteractiveShell::test_shell();
+        let result = run_blocking_startup_lifecycle(
+            &mut shell,
+            &mut input,
+            STARTUP_APP_OPERATION,
+            move || {
+                done_rx.recv()?;
+                Ok(7)
+            },
+        )
+        .await
+        .expect("the silent startup phase completes");
+        assert_eq!(result, 7);
+        assert_eq!(shell.pending(), "x draft during startup");
+
+        // A failed silent phase stays attributable without rendering: the
+        // operation name is carried by the diagnostic alone.
+        let mut input = EventStream::from_stream(tokio_stream::iter(
+            Vec::<std::io::Result<Event>>::new(),
+        ));
+        let error =
+            run_blocking_startup_lifecycle(&mut shell, &mut input, STARTUP_MODELS_OPERATION, || -> anyhow::Result<()> {
+                anyhow::bail!("catalog unavailable")
+            })
+            .await
+            .expect_err("the failed startup phase surfaces");
+        assert_eq!(
+            error.to_string(),
+            "model discovery failed: catalog unavailable"
+        );
     }
 
     #[tokio::test]
@@ -8255,7 +8477,12 @@ mod tests {
     /// Inspection facts for tests that drive `drive_active_run` directly. The
     /// paths do not exist: only the mechanics tests use this, and none of them
     /// issue an inspection command.
-    fn test_run_inspection() -> &'static ActiveRunInspection {        static INSPECTION: std::sync::OnceLock<ActiveRunInspection> = std::sync::OnceLock::new();
+    ///
+    /// The durable goal is deliberately unaddressable here, so this fixture is
+    /// also the fail-closed case: a mechanics test that issued `/goal` would
+    /// have to observe the typed error rather than a silent no-op.
+    fn test_run_inspection() -> &'static ActiveRunInspection {
+        static INSPECTION: std::sync::OnceLock<ActiveRunInspection> = std::sync::OnceLock::new();
         INSPECTION.get_or_init(|| {
             let missing = PathBuf::from("/nonexistent/octet-run-inspection");
             ActiveRunInspection {
@@ -8266,6 +8493,7 @@ mod tests {
                 catalog: octet_ai::ModelCatalog::default(),
                 sessions: crate::session_store::SessionStore::new(&missing, &missing),
                 subagents_available: false,
+                goal: Err(ActiveGoalError::UnaddressableSession),
             }
         })
     }
@@ -8293,7 +8521,22 @@ mod tests {
             catalog: octet_ai::ModelCatalog::default(),
             sessions: crate::session_store::SessionStore::new(dir, dir),
             subagents_available: false,
+            goal: Err(ActiveGoalError::UnaddressableSession),
         }
+    }
+
+    /// A run inspection whose durable goal is addressable, exactly as `App`
+    /// addresses it: the same store, the same driver state, the same session
+    /// key. The caller keeps its own store handle to read the mutation back.
+    fn test_run_inspection_with_goal(
+        dir: &Path,
+        store: Arc<octet_agent::DurableGoalStore>,
+        driver: octet_agent::GoalDriver,
+        session_id: &str,
+    ) -> ActiveRunInspection {
+        let mut inspection = test_run_inspection_with_session(dir);
+        inspection.goal = GoalAccess::from_parts(store, driver, session_id.to_owned());
+        inspection
     }
 
     /// Drive one active-run slash command with the minimum test scaffolding.
@@ -8302,8 +8545,22 @@ mod tests {
         command: Command,
         inspection: &ActiveRunInspection,
     ) -> (VecDeque<PendingIdleAction>, bool) {
+        let (queue, quit_requested, _) =
+            run_active_command_observing_deadline(shell, command, inspection).await;
+        (queue, quit_requested)
+    }
+
+    /// [`run_active_command`] plus the goal deadline the command armed or
+    /// cleared, so a mid-run `/goal` is provably applied to the same driver
+    /// state an idle `/goal` reaches.
+    async fn run_active_command_observing_deadline(
+        shell: &mut InteractiveShell,
+        command: Command,
+        inspection: &ActiveRunInspection,
+    ) -> (VecDeque<PendingIdleAction>, bool, Option<Instant>) {
         let mut queue = VecDeque::new();
         let mut quit_requested = false;
+        let mut goal_deadline = None;
         let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
         let mut extensions = crate::extensions::ExecutableExtensions::default();
         let context = octet_agent::ContextSnapshot::default();
@@ -8313,6 +8570,7 @@ mod tests {
             inspection,
             &mut extensions,
             &context,
+            &mut goal_deadline,
             |_, _| Ok(None),
             &mut input,
             &mut queue,
@@ -8320,7 +8578,7 @@ mod tests {
         )
         .await
         .expect("active command");
-        (queue, quit_requested)
+        (queue, quit_requested, goal_deadline)
     }
 
     async fn scripted_agent_with_delay(
@@ -8702,10 +8960,11 @@ mod tests {
             let stimulus = held_api_input(started, sender, handled_rx, release, outcome, 80);
             tokio::pin!(stimulus);
             let ended = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut goal_deadline = None;
                 tokio::select! {
                     result = drive_active_run(&mut run, &control, &mut shell, &mut input,
                         &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call,
-                        test_run_inspection()) => result.unwrap(),
+                        test_run_inspection(), &mut goal_deadline) => result.unwrap(),
                     _ = &mut stimulus => unreachable!(),
                 }
             }).await.expect("held model request must settle");
@@ -8759,6 +9018,7 @@ mod tests {
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let mut goal_deadline = None;
         let ended = tokio::time::timeout(
             Duration::from_secs(1),
             drive_active_run(
@@ -8773,7 +9033,7 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
-                test_run_inspection(),
+                test_run_inspection(), &mut goal_deadline,
             ),
         )
         .await
@@ -8846,6 +9106,7 @@ mod tests {
             let control = run.control();
             let mut ticker = tokio::time::interval(Duration::from_millis(16));
             let mut quit = false;
+            let mut goal_deadline = None;
             let ended = tokio::time::timeout(
                 Duration::from_secs(2),
                 drive_active_run(
@@ -8860,7 +9121,7 @@ mod tests {
                     None,
                     &mut crate::extensions::ExecutableExtensions::default(),
                     &mut false,
-                    test_run_inspection(),
+                    test_run_inspection(), &mut goal_deadline,
                 ),
             )
             .await
@@ -8919,6 +9180,7 @@ mod tests {
         let mut quit = false;
         let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
 
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -8931,7 +9193,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(),
+            test_run_inspection(), &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -9091,6 +9353,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = tokio::time::timeout(
             Duration::from_secs(5),
             drive_active_run(
@@ -9105,7 +9368,7 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
-                test_run_inspection(),
+                test_run_inspection(), &mut goal_deadline,
             ),
         )
         .await
@@ -9175,6 +9438,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -9187,7 +9451,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(),
+            test_run_inspection(), &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -9277,6 +9541,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -9289,7 +9554,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(),
+            test_run_inspection(), &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -9345,6 +9610,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -9357,7 +9623,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(),
+            test_run_inspection(), &mut goal_deadline,
         )
         .await
         .unwrap();

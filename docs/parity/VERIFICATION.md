@@ -1,5 +1,464 @@
 # Independent verification of the Pi-parity pass
 
+> **Pass 3 (this section) is the current truth.** Pass 3 was taken on
+> 2026-09-15 from 18:29Z by verifier `verify12b`, at *committed* HEAD
+> `df2e8980` with the **working tree dirty**. Every claim below states whether
+> it was checked against the **worktree** (what a PR would ship) or against
+> **committed HEAD** — the commit predates most of this wave, so a claim about
+> "HEAD" is very often *not* a claim about this tree. Pass 2 sent below is kept
+> verbatim; where Pass 3 re-ran or overturns a Pass-2 item the disposition is
+> stated in the Pass-3 text.
+
+## Pass 3 — overall status (verify12b, 18:29Z+, dirty worktree on `df2e8980`)
+
+Tool surface, LaTeX/Mermaid oracles and the fence consumer are **verified good**.
+The `/fast` headline in `docs/parity/providers.md` is now **honest** (it was
+rewritten by another worker during this wave); the intervening code still shows
+that **no live run selects a service tier** and `/fast` is inert. Two TUI items
+in the wave are **landed in the worktree but not in the file the claim names**,
+one (`/goal` mid-run) is **not landed at all**, and the predecessor's single RED
+(`rich_fences`) is now **green** — see the verdict table.
+
+> Status of this section: written incrementally, section by section, while the
+> test battery still ran. Any row marked PENDING below was re-checked at the
+> end; rows that remain PENDING are named in "what I could not verify".
+
+## Pass 3 — verdict table
+
+Everything was observed by me on this host. "WT" = working tree (dirty);
+"HEAD" = committed `df2e8980` content read from the file as it exists on disk
+(which is WT unless the file is in `git status`).
+
+| # | Area | Claim under test | Observation | Command run | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| P1 | Tool surface (WT) | Exactly the maintainer's narrow set, `rg` by default | `CoreTools::register` has 6 `host.tool(...)` calls: ReadTool, EditTool, WriteTool, BashTool, SearchTool, and PowerShellTool gated `#[cfg(windows)]`. Nothing else registered. Not re-added under another name: the only `impl Tool for` in `crates/octet-agent/src/tools/` are `ReadTool EditTool WriteTool BashTool SearchTool PowerShellTool` plus the internal `CheckpointedBashTool` and `SessionShellTool` (not new model-visible names). | `rg -n "host\.tool\(" crates/octet-agent/src/tools/mod.rs`; `rg -n "impl Tool for" crates/octet-agent/src/tools/` | VERIFIED |
+| P2 | Tool surface (WT) | `ls.rs`/`find.rs`/`grep.rs` deleted | Directory listing is `bash.rs deferred.rs durability.rs edit.rs mod.rs powershell.rs read.rs search.rs shell_environment.rs summarization.rs write.rs` — no `ls.rs`, `find.rs`, `grep.rs` | `ls crates/octet-agent/src/tools/` | VERIFIED |
+| P3 | Tool surface (WT) | No dangling `LsTool`/`FindTool`/`GrepTool` reference | Zero hits outside prose in `docs/swarm-audit/EXECUTION-*.md` (4 files) and this file itself. `rg -n "LsTool\|FindTool\|GrepTool" crates/ scripts/ Cargo.toml` → **no output**. (Pass 2's own table printed mangled output because it used `rg -rn`, where `-r` is the *replace* flag, not "recursive"; the conclusion was right, the command was malformed.) | `rg -n "LsTool\|FindTool\|GrepTool" --glob '!docs/**'` | VERIFIED |
+| P4 | Tool surface (WT) | `search` still shells out to ripgrep | `SearchTool::execute` → `self.execute_with_program(args, ctx, Path::new("rg"))` (`search.rs:225`); the binary is invoked by argv, no shell string | `rg -n 'Path::new\("rg"\)' crates/octet-agent/src/tools/search.rs` | VERIFIED |
+| P5 | Fence consumer (WT) | LaTeX/Mermaid fences have a UI consumer and an unknown fence stays literal | `rich_text/markdown.rs` `render_diagram_fence` dispatches latex/mermaid/graph/flowchart; `tests/rich_fences.rs` now has **10** tests and I ran them: `test result: ok. 10 passed; 0 failed` — including `unknown_fences_are_never_reinterpreted`, `unsupported_bodies_degrade_to_the_original_source`, `oversized_and_unterminated_fences_stay_literal`. Pass 2's RED (`streaming_keeps_failed_diagram_fences_as_source`, 9/1) is **fixed in the worktree**. | `cargo test -p sexy-tui-rs --test latex_render --test mermaid_render --test rich_fences` | VERIFIED (WT) |
+| P6 | LaTeX oracle (WT) | `--test latex_render` = 17 | `17 passed; 0 failed` (my own run, 18:29Z) | same command | VERIFIED |
+| P7 | Mermaid oracle (WT) | `--test mermaid_render` = 11 | `11 passed; 0 failed` (my own run) | same command | VERIFIED |
+| P8 | `/goal` mid-run (`interactive.rs`) | The reported bug (goal queued, applied only at the idle boundary) is fixed | **NOT fixed in the worktree.** `Command::Goal(goal) => PendingIdleAction::Goal(goal)` is still in `queue_command` (`interactive.rs:682`), the active-run dispatcher still falls through `command => match queue_command(command, queue)` with "command queued for the next idle boundary" (`:1959`), and the action is still applied only in the idle loop (`:4409`). `/goal` is **not** in the active-run arms (the arms immediately above handle `Changelog`, `Fast`, `Extensions`, `Model`, `Thinking`, …). | `rg -n "queue_command\|Command::Goal" crates/octet-coding-agent/src/modes/interactive.rs`; `sed -n '1955,1962p;4405,4412p'` | CONTRADICTED (not landed) |
+| P9 | Footer/telemetry cost (`tui13b`) | Plain dollar estimate, no `subtotal`/`+`/`~` | **Half landed.** The telemetry panel (`tui/view/status_telemetry.rs`, dirty, +311 lines) renders `Turn cost $0.078900` / `Session cost $2.410000` via `status_dollars`, with tests `cost_lines_are_plain_dollars_even_when_usage_is_uncertain` and `honest_absence_cost_paths_survive_plain_dollar_rendering`. But the **composer footer is untouched** and still prints `format!("subtotal {} + ?", format_microdollars(cost))` at `tui/composer_surface.rs:804` (`composer_surface.rs` is not in `git status`). Pass 2's U2 was right about the composer and missed the landed panel. | `rg -n "subtotal" crates/octet-coding-agent/src/tui/`; `sed -n '28,82p' crates/octet-coding-agent/src/tui/view/status_telemetry.rs` | PARTIAL / CONTRADICTED as stated |
+| P10 | Subagents activity (`tui14b`) | Settles into transcript, not replayed on every prompt | **Worktree only.** `settled_subagent_workers` (`tui/view.rs:1661`), `subagent_worker_ids` (`:832`), the settle/ignore path (`:2199-2251`), the deliberate non-clear (`:3415`) and the clear on session replacement (`:6534`), plus test `a_settled_subagent_roster_never_replays_under_a_later_prompt` (`tui/view/tests.rs:10748`). Code present; **test result pending** in my run at the time of writing. | `rg -n "settled_subagent_workers" crates/octet-coding-agent/src/tui/view.rs` | PARTIAL (code VERIFIED, green run PENDING) |
+| P11 | Shimmer (`tui12b/13b`) | Model-adaptive, no rainbow outside max/ultra, real rest gap | `activity_shimmer_palette` derives both colours from the theme's model identity (`tui/view/reasoning_render.rs:474`); the rainbow strength is produced only by `status_rainbow_strength_at` (`tui/view.rs:1798`) and the test at `reasoning_render.rs:1459-1470` asserts it is 0 for every level except `max`/`ultra` (and 0 at zero elapsed even for `max`); `ACTIVITY_SWEEP_REST_FRAMES = 2` (`:52`) with a test asserting `rest_frames >= ACTIVITY_SWEEP_REST_FRAMES` (`:1633`) | `rg -n "ACTIVITY_SWEEP_REST_FRAMES\|status_rainbow_strength_at" crates/octet-coding-agent/src/tui/view{,/reasoning_render}.rs` | VERIFIED (code + test present; green run below) |
+
+## Pass 3 — test surface (my own runs) and the live compile blocker
+
+| Command (all mine, dirty worktree) | Observed | Verdict |
+| --- | --- | --- |
+| `cargo test -p sexy-tui-rs --test latex_render --test mermaid_render --test rich_fences` (18:29:49Z) | `latex_render 17 passed`, `mermaid_render 11 passed`, `rich_fences 10 passed`; 0 failed | VERIFIED |
+| `cargo test -p octet-ai --no-fail-fast` (18:31Z) | **13/13 targets ok**: 366, 5, 3, 18, 1, 38, 3, 2, 16, 4, 1, 1 + 1 doc-test; 0 failures, no hang. Whole command 41s. | VERIFIED |
+| `cargo test -p octet-ai --lib -- --exact responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded` (18:31Z) | `ok. 1 passed … finished in 1.76s` — the test that previously **hung** still terminates | VERIFIED |
+| `cargo test -p octet-coding-agent --lib` (18:32:12Z) | **`error: could not compile octet-agent (lib) due to 5 previous errors`** — see below. Nothing ran. | BLOCKED |
+| `cargo test -p octet-agent …` (18:30:26Z start, killed by worker exit) | no result captured | NOT RUN |
+
+### Pass 3 blocker B1 — `octet-agent` lib had 5 compile errors at 18:32Z
+
+```
+error[E0603]: module `bash` is private
+  --> crates/octet-agent/src/agent.rs:70:19   (use crate::tools::bash::{ … }; tools/mod.rs:24 `mod bash;`)
+error[E0603]: module `bash` is private     --> crates/octet-agent/src/agent.rs:70:19
+error[E0603]: module `bash` is private     --> crates/octet-agent/src/agent.rs:70:19
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+  --> crates/octet-agent/src/agent.rs:4443:13
+error[E0308]: mismatched types   --> crates/octet-agent/src/agent.rs:4450:22
+error: could not compile `octet-agent` (lib) due to 5 previous errors
+```
+
+`crates/octet-agent/src/agent.rs` was modified at 18:31:56Z, 16 seconds before
+this observation, and is `+684` lines in the worktree, so the most likely
+reading is a **mid-edit snapshot** rather than a defect that would ship. It is
+still recorded because it directly contradicts the pass-2 claim "`cargo check
+--workspace --all-targets`: 0 errors (18:21Z)" and because *no* `octet-agent` or
+`octet-coding-agent` test can run while it holds. Re-checked later in this pass;
+the outcome is recorded in "what I could not verify" below.
+
+### Pass 3 startup-latency measurement (re-measured, 18:31Z)
+
+| Binary | plain | `AWS_EC2_METADATA_DISABLED=true` |
+| --- | --- | --- |
+| `~/.local/bin/octet` (24,143,088 B, sha256 `96b138b0…`, Sep 12 14:54) | 1.753s / 1.800s | 0.029s / 0.029s |
+| `target/debug/octet` (143,888,360 B, sha256 `df552ab6…`, Sep 15 14:17) | 0.446s / 0.446s | 0.032s / 0.033s |
+
+Both print `octet 0.7.6`. Both files are **byte-identical to the bytes pass 2
+measured** (same sizes, same sha256) — no rebuild happened between the two
+passes, so the artifact is still older than the fix. `strings -a … | grep -c
+OCTET_AWS_METADATA_CREDENTIALS` → installed **0**, checkout **1**: the
+investigation's warning stands, the version string is not proof of identity.
+Conclusion unchanged from pass 2: the AWS metadata penalty is real and large
+(~1.7s here) in the shipped binary, the checkout artifact still pays ~0.42s, and
+**the fixed behaviour is not demonstrated by any binary on this disk**.
+
+The mechanism is re-verified in the worktree: `MAX_AWS_METADATA_BYTES = 64*1024`
+(`providers/auth.rs:262`), `AWS_METADATA_TIMEOUT = 1s` (`:263`),
+`enum AwsMetadataActivation` (`:671`), `fn aws_metadata_activation_from`
+(`:716`), `fn aws_metadata_activation_inputs` (`:781`, with the injectable
+`aws_metadata_activation_inputs_with` at `:789`). The acceptance tests count
+requests with `Arc<AtomicUsize>` (`:1238, :1404, :1457-1458, :1584, :1636,
+:1810, :1840`) and do not assert milliseconds; `unrelated_provider_launch_makes_zero_aws_metadata_requests` (`:1447`),
+`disabled_activation_opens_no_connection_to_a_live_metadata_endpoint` (`:1490`),
+`opt_in_activation_resolves_and_signs_with_live_metadata_credentials` (`:1539`),
+`static_keys_and_a_plain_profile_never_activate_the_metadata_probe` (`:1610`),
+`indicated_metadata_probe_prefers_the_container_uri` (`:1836`),
+`an_unavailable_metadata_endpoint_costs_one_bounded_request` (`:1895`),
+`aws_metadata_service_endpoint_override_is_validated_fail_closed` (`:1906`).
+The cross-process Codex refresh lock is bounded by
+`REFRESH_LOCK_WAIT = 3s` (`auth/codex/store.rs:25`), consumed by
+`run_route_readiness` under `CODEX_READINESS_ENVELOPE = 10s`
+(`app/bootstrap.rs:5063`); the contended-lock tests are
+`refresh_lock_waits_on_the_private_credential_directory` (`store.rs:669`, which
+*does* use 50ms/1s wall-clock probes for the contended case) and
+`a_contended_refresh_lock_fails_closed_and_leaves_no_phantom_holder`
+(`:1037`). "A fresh valid Codex cache triggers zero inventory discovery" is the
+committed `offline_codex_registration_uses_cached_inventory_without_dynamic_capabilities`
+(`app/bootstrap/tests.rs:1281`) — **code read only; its result is inside the
+blocked `octet-coding-agent --lib` run**.
+
+
+## Pass 2 — overall status at HEAD `df2e8980` (historical)
+
+> **Pass 2 was the then-current truth.** It was taken at HEAD
+> `df2e8980` on 2026-09-15 (UTC times in the text). Everything from here down to
+> `## Pass 1 record (HEAD 7be2dc96, retained for history)` is this verifier's
+> own pass-2 run. The material under that heading is the earlier pass, kept
+> verbatim; where it is now stale it is annotated in the pass-2 dispositions.
+
+## Pass 2 — overall status at HEAD `df2e8980`
+
+- Branch `vibe/pi-parity-roadmap-df5a7e80`, base `df5a7e80` (v0.7.6).
+  Working tree dirty with other workers mid-edit for the whole pass
+  (`crates/octet-coding-agent/src/providers/auth.rs`, `tui/view.rs`,
+  `tui/view/reasoning_render.rs`, `crates/sexy-tui-rs/src/rich_text/latex/mod.rs`).
+  Every claim below is stamped with the time it was observed; a file being
+  edited by another worker is stated as such rather than treated as settled.
+- `cargo check --workspace --all-targets --locked`: **0 errors** (observed 18:21Z,
+  `Finished` in 3.46s; 89 `is never used` warnings).
+- `cargo test -p octet-ai --no-fail-fast`: **all 13 targets green, no hang**
+  (366 lib + 5/3/18/1/38/3/2/16/4/1/1/1; the previously hanging
+  `responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded` now
+  completes in 1.76s).  The pass-1 C7/C8 blockers are resolved.
+- `sexy-tui-rs`: `latex_render` **17 passed**, `mermaid_render` **11 passed**.
+- The tool surface is exactly the maintainer's four tools plus `search`
+  (`read edit write bash search`), `ls`/`find`/`grep` are gone with no dangling
+  reference, and the fence consumer for LaTeX/Mermaid has landed.
+- **The one live contradiction is the `/fast` headline in
+  `docs/parity/providers.md:40`** (C10 below): the octet-agent plumbing is real
+  and tested, but the user-facing command still refuses to act and nothing in
+  `octet-coding-agent` calls the new setter. Two further documents
+  (`CHANGELOG.md`, `modes/interactive.rs` doc comment) describe the *pre-fix*
+  state and are now stale in the opposite direction.
+
+## Pass 2 — verdict table
+
+All commands were run by this verifier on this host. "UTC" is the observation
+time. Commands were run with `--locked` unless stated.
+
+| # | Area | Claim under test | Observation | Command run | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| T1 | Tool surface | Registered `CoreTools` surface is exactly the maintainer's narrow set | `host.tool(ReadTool)`, `EditTool`, `WriteTool`, `BashTool`, `SearchTool`, and `PowerShellTool` behind `#[cfg(windows)]` — 6 call sites, nothing else | `rg -n "host\.tool\(" crates/octet-agent/src/tools/mod.rs` | VERIFIED |
+| T2 | Tool surface | `ls.rs`/`find.rs`/`grep.rs` are deleted | `ls crates/octet-agent/src/tools/` = `bash.rs deferred.rs durability.rs edit.rs mod.rs powershell.rs read.rs search.rs shell_environment.rs summarization.rs write.rs` | `ls crates/octet-agent/src/tools/` | VERIFIED |
+| T3 | Tool surface | No dangling reference to the removed tools | `rg -n "LsTool\|FindTool\|GrepTool"` matches **only prose inside `docs/swarm-audit/EXECUTION-*.md`**; zero hits in any `.rs`, `.md` product doc, or build file | `rg -n "LsTool\|FindTool\|GrepTool"` | VERIFIED |
+| T4 | Tool surface | `search` still shells out to ripgrep | `SearchTool::execute` → `self.execute_with_program(args, ctx, Path::new("rg"))`; failure text "search is unavailable: ripgrep (rg) was not found on PATH" | `rg -n "execute_with_program" crates/octet-agent/src/tools/search.rs` | VERIFIED |
+| T5 | Tool surface | No equivalent tool re-added under another name | The only `impl Tool` in `crates/octet-agent/src/tools/*` are `ReadTool`, `EditTool`, `WriteTool`, `BashTool`, `CheckpointedBashTool`, `SearchTool`, `PowerShellTool`, `SessionShellTool`; `CheckpointedBashTool`/`SessionShellTool` are internal wrappers used by the product, not new model-visible names. `SUPPORTED_TOOL_NAMES` = read, search, edit, write, bash, search_skills, load_skill, read_skill_resource (the last three are legacy skill tools, not registered by default — test `legacy_skill_tools_are_not_registered_by_default`) | `rg -n "impl Tool for" crates/octet-agent/src/tools/`; `sed -n '118,130p' crates/octet-coding-agent/src/config.rs` | VERIFIED |
+| T6 | Tool surface / product default | Model-visible default is the four tools, `search` opt-in | `ToolPolicy::default()` filters `search` out of `SUPPORTED_TOOL_NAMES` ("bash already provides faster, composable discovery through rg/find/ls"), and `tool_schema_reserve_is_positive_and_deterministic` asserts the product surface is `["read","edit","write","bash"]` while `CoreTools` alone is `["read","edit","write","bash","search"]` | `sed -n '145,155p' crates/octet-coding-agent/src/config.rs`; `sed -n '3160,3170p' crates/octet-coding-agent/src/app/bootstrap/tests.rs` | VERIFIED |
+| T7 | `#175` `/fast` | Codex `service_tier` is plumbed into the live run path | `durable_responses_options`/`native_responses_options`/`responses_prewarm_request` all take `requested_service_tier` and apply `with_service_tier`; `Agent::set_service_tier` is the setter; `resolve_service_tier` gates on `protocol == OpenAiResponses && responses_profile.accepts_service_tier()` (`types.rs:218` = `matches!(self, Self::Codex)`) and fails closed with `UnsupportedError::ServiceTier` | `rg -n service_tier crates/octet-agent/src/agent.rs`; `sed -n '3689,3770p' crates/octet-agent/src/agent.rs` | VERIFIED |
+| T8 | `#175` `/fast` | "`/fast` reaches the wire" (`docs/parity/providers.md:40`) | **False for the product.** No file in `octet-coding-agent` calls `set_service_tier` (only `agent_run.rs` tests do), and `apply_fast_command` (`modes/interactive.rs:1539-1565`) still hard-errors: "`/fast on` not applied: this build's Codex request path does not send a service tier yet". The same doc's own body admits "`apply_fast_command` … still prints its `inert` message until its owner switches it to the new setter" | `rg -n "set_service_tier" crates/`; `sed -n '1538,1566p' crates/octet-coding-agent/src/modes/interactive.rs` | CONTRADICTED |
+| T9 | `#175` ledger label | providers.md calls `service_tier` "row 1a.1" | `docs/parity/README.md:56` row 1a.1 is the provider-declarations row (baseten/qwen/zai); README contains no `service_tier`/`/fast` row at all, so the cross-reference points at an unrelated row | `rg -n "service_tier" docs/parity/README.md`; `sed -n '56p' docs/parity/README.md` | CONTRADICTED (label only) |
+| L1 | Startup latency | The AWS metadata activation rule exists and is a pure function | `pub(crate) fn aws_metadata_activation_from(&AwsMetadataActivationInputs) -> AwsMetadataActivation` — all inputs are pre-read plain data (`ec2_metadata_disabled`, container URIs, endpoint/mode, product opt-in, profile `credential_source`/endpoint); `Disabled` returns before any client is built | `sed -n '518,660p' crates/octet-coding-agent/src/providers/auth.rs` | VERIFIED |
+| L2 | Startup latency | Acceptance tests use request counters, not millisecond thresholds | `unrelated_provider_launch_makes_zero_aws_metadata_requests` (`auth.rs:1326`) and `indicated_metadata_probe_*` (`:1498`, `:1529`) count with `Arc<AtomicUsize>` (`:1336-1337`, `:1504`, `:1533`); `an_unavailable_metadata_endpoint_costs_one_bounded_request` (`:1587`) asserts a *count*. No `Instant`/`Duration` assertion in the metadata tests | `rg -n "AtomicUsize" crates/octet-coding-agent/src/providers/auth.rs`; `sed -n '1326,1370p' crates/octet-coding-agent/src/providers/auth.rs` | VERIFIED |
+| L3 | Startup latency | Bedrock-with-metadata intent still works | An indicated environment still probes (container URI preferred, then EC2 IMDS) and the probe is bounded to the documented requests; `AWS_EC2_METADATA_DISABLED=true` and unknown values stay closed; `OCTET_AWS_METADATA_CREDENTIALS` is the explicit opt-in | `sed -n '510,540p'`, `:618,675`, `:1464,1540` `crates/octet-coding-agent/src/providers/auth.rs` | VERIFIED |
+| X1 | LaTeX oracle | `--test latex_render` = 17 | `running 17 tests` / `test result: ok. 17 passed; 0 failed` in 0.01s | `cargo test --locked -p sexy-tui-rs --test latex_render` | VERIFIED |
+| X2 | Mermaid oracle | `--test mermaid_render` = 11 | `running 11 tests` / `test result: ok. 11 passed; 0 failed` | `cargo test --locked -p sexy-tui-rs --test mermaid_render` | VERIFIED |
+| X3 | Mermaid doc | Does not overclaim | `docs/parity/editor.md:213-236` explicitly lists `BT`/`RL` (rejected), `subgraph`/`end`/`direction`, `&` node lists, `A -- text --> B`, HTML entities (emitted literally) and shape outlines as unsupported/not modelled | `sed -n '196,260p' docs/parity/editor.md` | VERIFIED |
+| X4 | Fence consumer | "No consumer is wired yet" (`editor.md` 2c.4; pass-1 §5) | **Stale.** `rich_text/markdown.rs:36-63` `render_diagram_fence` dispatches `latex`/`mermaid`/`graph`/`flowchart` fences; `markdown::parse` is re-exported as `parse_markdown` (`lib.rs:42`) and used by the TUI transcript (`crates/octet-coding-agent/src/tui/view/assistant_block.rs:7`, `StreamingMarkdown`); `tests/rich_fences.rs` (8 tests) pins that an unknown fence stays a plain code block (`unknown_fences_are_never_reinterpreted`) and that oversized/unterminated/unsupported fences stay literal | `rg -n "render_diagram_fence" crates/sexy-tui-rs/src/rich_text/markdown.rs`; `rg -n "parse_markdown" crates/octet-coding-agent/src/tui/view/assistant_block.rs` | CONTRADICTED (doc under-claims) |
+
+## Pass 2 — contradictions (each side quoted)
+
+**C10 — `providers.md:40` "`/fast` reaches the wire" vs. the command's own code.**
+Header: "`## Codex service_tier (row 1a.1 — landed end-to-end; /fast reaches the wire)`",
+body: "``/fast`` (roadmap #175) is **live on a Codex route**".
+Against HEAD, `crates/octet-coding-agent/src/modes/interactive.rs:1551-1565`:
+
+```
+    let detail = concat!(
+        "this build's Codex request path does not send a service tier yet, so ",
+        "nothing changed on the wire; `/fast` stays inert until the request ",
+        "builder supports it"
+    );
+    match requested {
+        Some(true) => shell.error(format!("`/fast on` not applied: {detail}")),
+```
+
+and `rg -n set_service_tier crates/` finds **no** non-test caller outside
+`crates/octet-agent/src/agent.rs` itself. So: the *primitive* is landed and
+proven on the wire (the T7 evidence is real — the agent test captures
+`"service_tier":"priority"` in the request body), but the *user-visible*
+command still does nothing, and `providers.md` says both things in one section.
+The honest sentence is the one already in `providers.md` itself ("that is the
+one remaining step, and it is a UI edge, not a request-path gap"); the headline
+must not survive into the PR body as-is.
+
+**C11 — two documents still describe the pre-fix state (now under-claiming).**
+`CHANGELOG.md` `[Unreleased]`, Providers section: "(*The `/fast` command remains
+inert: the live-run `ResponsesOptions` builders do not yet set a tier.*)" — the
+builders **do** set a tier at HEAD (`agent.rs:3710-3712`, `:3761-3763`); what is
+missing is a caller. Same staleness in the `apply_fast_command` doc comment
+(`modes/interactive.rs:1534-1538`): "The remaining missing primitive is the
+caller: every live run's `ResponsesOptions` is built … without a tier". Direction
+of error is *under*-claiming (harmless to users, wrong for a PR body).
+
+**C12 — `editor.md` 2c.4 "No consumer is wired yet" is superseded.**
+`docs/parity/editor.md:227-229`: "**No consumer is wired yet**
+(`crates/octet-coding-agent` has no `rich_text::mermaid` call site)." True as
+literally written (no direct call site) but false as a statement about the
+product: the shared fence dispatcher in the same crate
+(`rich_text/markdown.rs:36`) is reached from the TUI transcript through
+`sexy_tui_rs::parse_markdown` → `StreamingMarkdown`
+(`tui/view/assistant_block.rs:7,132`). `tests/rich_fences.rs` is the consumer's
+behavioural test, including the unknown-fence fallback the pass-1 note asked
+for. The Mermaid row's own "Not modelled" list is accurate and stays.
+
+## Pass 2 — additional verdicts (latency, oracle, TUI, ledger)
+
+| # | Area | Claim under test | Observation | Command run | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| L4 | Startup latency | The ~1s AWS metadata penalty is real on this host | The **installed** 0.7.6 binary: 1.051s / 1.422s plain, 0.022s / 0.024s with `AWS_EC2_METADATA_DISABLED=true` (interleaved, same minute) | `octet doctor` timed with `python3 time.time()` around `subprocess.run` | VERIFIED (penalty exists) |
+| L5 | Startup latency | The built checkout artifact no longer pays it | `target/debug/octet` (built 14:17, **predates** the 18:10 latency worker, dirty `providers/auth.rs`) still takes 0.549s / 0.500s plain vs 0.044s / 0.026s suppressed. Either the artifact is stale relative to the working tree or the fix is partial; the honest statement is that **the fixed behaviour is not demonstrated by the artifact on disk** | same measurement, both binaries interleaved | UNVERIFIED (needs a fresh `cargo build -p octet-coding-agent` on a frozen tree) |
+| L6 | Startup latency | Binary identity: same version string ≠ same source | Installed `~/.local/bin/octet` 24,143,088 B (Sep 12 14:54, sha256 `96b138b0…`) and `target/debug/octet` 143,888,360 B (Sep 15 14:17, sha256 `df552ab6…`) **both print `octet 0.7.6`**. The installed build contains **0** occurrences of `OCTET_AWS_METADATA_CREDENTIALS`; the checkout build contains 1 | `octet --version`, `shasum -a 256`, `strings -a … \| grep -c OCTET_AWS_METADATA_CREDENTIALS` | VERIFIED (the investigation's warning is correct) |
+| L7 | Startup latency | Env var spelling used in evidence | The binary reads `AWS_EC2_METADATA_DISABLED`. `AWS_EC2_METADATA_DISABLE=true` (the spelling in the investigation summary) changes **nothing**: 3 runs stayed at 1.01s, whereas the correct spelling drops to 0.022s | interleaved timing of both spellings | CONTRADICTED (evidence used a variable the binary ignores) |
+| O1 | LaTeX oracle | "oracle-swept (1061 cases, 0 divergences), 407 goldens" | I re-ran the upstream oracle myself: (a) over the exact 407 `TABLE_GOLDENS` inputs from the committed test file → **0 divergences** against the committed goldens, which `cargo test --test latex_render` (17/17 green) ties to the port; (b) over `cases_gap.json` (1061 cases) → fresh oracle output **byte-identical** to the stored `expected_gap.json`, and 0 divergences against the port's captured output | `node --experimental-strip-types /tmp/ed8/oracle.ts <cases> <out>` (Node v26.7.0) + a parser for the port's `#CASE n some LEN` capture | VERIFIED (see caveat in the text) |
+| U1 | Shimmer (tui12/13) | Model-adaptive shimmer, no rainbow outside max/ultra, real rest gap | `activity_shimmer_palette` derives both colours from `theme.model_rgb(model_lab)` and the ramp rotates only the model's own hue/saturation (neutral models stay neutral); `status_rainbow_strength_at` (`view.rs:1249`) returns 0 unless the reasoning level is `max`/`ultra` **and** elapsed < 2s, and the rainbow branch is unreachable for any other level; `ACTIVITY_SWEEP_REST_FRAMES = 2` with `activity_cycle` guaranteeing the first/last frame at rest colours and a test asserting `rest_frames >= ACTIVITY_SWEEP_REST_FRAMES` | `sed` on `tui/view/reasoning_render.rs:470-583`, `tui/view.rs:1247-1260`; tests `model_and_rainbow_shimmers_are_foreground_only`, `neutral_model_identities_shimmer_without_any_hue`, `max_and_ultra_working_rainbow_fades_for_two_seconds_only`, `shimmer_reaches_every_grapheme_and_loops_at_the_label_width` | VERIFIED (code + tests present; see note on in-flight edits) |
+| U2 | Footer cost (tui13) | Plain dollar estimate, no `subtotal`/`+`/`~` | **Not landed.** `tui/composer_surface.rs:804` still renders `format!("subtotal {} + ?", format_microdollars(cost))` on the `usage_uncertain` path, and `composer_surface.rs` is *not* among the modified files | `rg -n "subtotal" crates/octet-coding-agent/src/tui/composer_surface.rs` | CONTRADICTED (unimplemented as of 18:2xZ) |
+| U3 | Startup screen (tui14) | No phase/notice text; composer typeable before readiness | The startup phase trace is off by default and stderr-only (`app/bootstrap.rs:5299-5331`, env-gated); `startup_readiness_tests.rs` pins that the input owner paints and resizes before branding (`startup_input_owners_render_and_resize_without_releasing_branding`, `startup_lifecycle_waits_paint_the_draft_without_provisional_model_chrome`) | `rg` over `tui/view/startup_readiness_tests.rs`, `app/bootstrap.rs` | VERIFIED at HEAD for the composer; no *new* tui14 edit is present in the working tree |
+| U4 | Subagents activity (tui14) | Settles into the transcript, does not replay on a new prompt | Present in the **working tree only** (`view.rs` dirty): `settled_subagent_workers` (`view.rs:1112`), `subagent_worker_ids` (`:832`), the ignore-settled-snapshot path (`:1650-1702`), the deliberate non-clear at `:2866` and the clear on session replacement (`:5985`), plus tests `a_settled_subagent_roster_never_replays_under_a_later_prompt` (`view/tests.rs:10748`) and `live_workers_for_the_current_turn_still_open_a_block` (`:10869`); the dirty `shell_chrome.rs` diff deletes the duplicated chrome strip. Green run **not observed** by me (the file was mid-edit and the target was still building) | `rg -n "settled_subagent_workers\|subagent_worker_ids" crates/octet-coding-agent/src/tui/view.rs`; `git diff -- crates/octet-coding-agent/src/tui/view/shell_chrome.rs` | UNVERIFIED (code present, test result not obtained) |
+| C13 | `CHANGELOG.md` known gaps | "the `octet-ai` test suite is **red and partly non-terminating** at this checkpoint" | False at HEAD: 13/13 targets green and the previously hanging test finishes in 1.76s | `cargo test -p octet-ai --no-fail-fast`; `--lib -- --exact responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded` | CONTRADICTED (stale gap) |
+| C14 | `README.md` row 3.5 | "Landed; boundaries wired, behavioral test pending" | Under-claim: the boundary tests exist and `docs/parity/telemetry.md:80-97` now lists them by file:line (`agent_run.rs:9411`, `:9513`, `:9598`, `telemetry_conformance.rs:113`, `delegation.rs:8027`) | `rg -n "fn typed_spans_" crates/octet-agent/` | CONTRADICTED (stale, under-claiming) |
+
+### Startup-latency measurement detail (L4–L7)
+
+Raw numbers, alternating the two binaries in the same minute (18:33Z):
+
+```
+r0 installed ~/.local/bin/octet plain          1.051s
+r0 installed ~/.local/bin/octet DISABLED=true  0.022s
+r0 checkout target/debug/octet  plain          0.549s
+r0 checkout target/debug/octet  DISABLED=true  0.044s
+r1 installed ~/.local/bin/octet plain          1.422s
+r1 installed ~/.local/bin/octet DISABLED=true  0.024s
+r1 checkout target/debug/octet  plain          0.500s
+r1 checkout target/debug/octet  DISABLED=true  0.026s
+```
+
+`DISABLED=true` is `AWS_EC2_METADATA_DISABLED=true`. No `AWS_*` variable is set
+in this shell and `~/.aws` does not exist, so the new activation rule should
+classify this host as `Unindicated → Disabled` and never build a client. The
+installed (pre-fix) binary shows the penalty plainly; the checkout artifact
+halves it rather than removing it, and that artifact is older than the work it
+is supposed to contain. **Do not claim the latency fix is verified end-to-end
+until a binary built from the frozen tree is measured.** What *is* verified is
+the mechanism (L1–L3: pure rule, counter-based tests, indicated environments
+still probe) — subject to the tests actually running, which is recorded in the
+test-surface section below.
+
+### Oracle detail (O1)
+
+The pass-1 concern about a committed 398 KB oracle is resolved (the `_*.rs`
+harnesses are untracked and `.gitignore`d), but that left the "1061 cases,
+0 divergences" claim resting on a worker receipt. I re-derived it:
+
+- `TABLE_GOLDENS` in `crates/sexy-tui-rs/tests/latex_render.rs` has exactly
+  **407** entries; I extracted them, ran the real upstream `latex.ts`
+  (`/tmp/ed8/oracle.ts`, Node v26.7.0) over them in inline mode, and compared to
+  the committed expected glyphs: **`total=407 divergences=0`**. Since
+  `every_symbol_table_entry_renders_its_reference_glyph` asserts
+  `render_latex(x, default) == golden` and that test passes (17/17), the oracle
+  and the port agree on this corpus.
+- `/tmp/ed11/cases_gap.json` holds **1061** cases; my fresh oracle run is
+  **byte-identical** to the stored `expected_gap.json`, and when compared against
+  the port's captured `#CASE n …` output it reports **`total=1061 divergences=0`**.
+- Caveat, stated plainly: for the 1061-case sweep the *port* side is the
+  worker's captured output file (`/tmp/ed11/rust_gap.txt`), not a run I made.
+  The oracle side is mine, byte-for-byte. The 407-case corpus is fully
+  independent on both sides.
+
+## Pass 2 — test surface (my own runs)
+
+| Command | Observed | Verdict |
+| --- | --- | --- |
+| `cargo check --workspace --all-targets --locked` (18:21Z) | `Finished` 3.46s, 0 `error` lines, 89 `is never used` warnings | VERIFIED |
+| `cargo test -p octet-ai --no-fail-fast` (18:22Z) | 13/13 targets ok: 366, 5, 3, 18, 1, 38, 3, 2, 16, 4, 1, 1, 1; 0 failures | VERIFIED |
+| `cargo test -p octet-ai --lib -- --exact responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded` (18:22Z) | `ok. 1 passed … finished in 1.76s` (this is the test that previously **hung**) | VERIFIED (no hang) |
+| `cargo test -p sexy-tui-rs --test latex_render` (18:22Z) | `ok. 17 passed` | VERIFIED |
+| `cargo test -p sexy-tui-rs --test mermaid_render` (18:22Z) | `ok. 11 passed` | VERIFIED |
+| `cargo test -p sexy-tui-rs --no-fail-fast` (18:22–18:24Z) | lib `190 passed`; 16 targets ok; **`rich_fences` FAILED 9 passed / 1 failed** | RED (one test; see below) |
+| `cargo test -p octet-agent --test parity_tools --test telemetry_conformance --test delegation --no-fail-fast` (18:24Z) | 11 / 17 / 9 passed, 0 failed (target order as invoked) | VERIFIED |
+| `cargo test -p octet-coding-agent --test codex_context_window --test slash_command_pty --test activity_wait_pty --test setup_cli_acceptance --test setup_tui_acceptance --no-fail-fast` | *still running when this section was written* | PENDING |
+| `cargo test -p octet-coding-agent --lib --no-fail-fast` | *still running* | PENDING |
+| `cargo test -p octet-agent --test agent_run` / `-p octet-agent` | *still running* | PENDING |
+
+**The only RED this pass is inside an in-flight edit.**
+`test streaming_keeps_failed_diagram_fences_as_source ... FAILED`
+(`crates/sexy-tui-rs/tests/rich_fences.rs:242`: "raw body visible while the
+fence is open"). Two facts pin the attribution: HEAD's copy of the file has
+**8** tests and all 8 pass in this run; the working tree has **10**, and the two
+added by the in-flight edit are `renders_that_produce_nothing_keep_the_original_source`
+(passes) and `streaming_keeps_failed_diagram_fences_as_source` (fails). So the
+committed fence consumer is green and the editor worker's new streaming case is
+red at 18:24Z. `git status` shows `rich_fences.rs`, `markdown.rs` and
+`latex/mod.rs` all dirty, so this is a mid-edit observation, not a HEAD verdict.
+
+## Pass 2 — the 88 ledger rows: which states I can defend
+
+`docs/parity/README.md` has exactly **88** rows (26 plain `Landed`, 8
+`Verified`, 14 `Unverified`, 14 `Pending`, and the qualified remainder). I did
+not re-derive all 88; I checked the rows whose state is cheap to falsify and the
+rows this wave changed. Below, "defended" means I looked at the code the row
+names.
+
+**States I checked and can defend**
+
+- `4.1`/`4.2`/`4.3` "Withdrawn by maintainer decision" — correct; the modules
+  are gone, the guard test exists, and `tools.md` states plainly what is *not*
+  covered (`ls`-style bounds, filename-only discovery). This is the honest
+  direction of error.
+- `2c.3` "Landed; oracle-swept (1061 cases, 0 divergences), 407 goldens" —
+  defended (O1): 407 goldens counted, both sweeps reproduced on the oracle side,
+  17/17 tests green.
+- `2c.4` "Landed; bounded self-captured subset, unsupported syntax fails closed"
+  — defended (X2/X3), with the one doc correction C12.
+- `4.7`–`4.14` "Landed … tool layer, consumer pending" — the qualified wording
+  matches the tree; their consumers genuinely do not exist yet.
+- `5.4` "Blocked; needs accounting-only session backend" and `1a.2` "Blocked;
+  release-blocking primitive" — the strongest kind of ledger entry (blocked with
+  a named primitive).
+- `2a.*`, `2c.1`, `2c.2`, `2c.5`, `2d.*` "Unverified"/"Pending" — honestly marked.
+
+**States I cannot defend (flag these before the PR body quotes them)**
+
+| Row | Ledger state | What the code shows |
+| --- | --- | --- |
+| `1b.1` | `Landed` | The row requires per-request `apiKey`, `fetch`, `onPayload`, `onResponse`, `transformHeaders`, `metadata`. `providers.md:120-135` itself says this is "**partial, declared plumbing**" and that the transformer/payload seam "is **reported, not changed**". `crates/octet-ai/src/client.rs` contains no `transform_headers`/`on_payload` seam at all. |
+| `1b.2` | `Landed` | `ModelPreset::sampling_params` and `ModelPreset::headers` are declared in `crates/octet-ai/src/declarations/mod.rs`, but `rg -n sampling_params crates/` returns **zero references outside that file** — no codec or client merges them into a request. `providers.md` says "merge wiring is reported, not changed". |
+| `1b.5` | `Landed` | Same shape: `providers.md` says the codec that emits `chat_template_args`/`priority`/`max_output_tokens`/`thinking_token_budget` is unwired, "emission wiring is reported, not changed". |
+| `2b.1` | `Landed` | "Namespaced configurable JSON keybindings, conflicts, platform defaults" is a *module*: `KeybindingsManager` exists (`tui/keymap/keybindings.rs:187`) but `rg -n KeybindingsManager crates/` finds **no production instantiation** — the only outside reference is the doc comment at `tui/view/input_overlays.rs:503-509`, which carries the code's own admission: "TODO(resolved-binding): the translator still hardcodes `KeyCode::Up + KeyModifiers::ALT` … Until both exist". A user's keybinding file is never read by the running shell. |
+| `3.5` | `Landed; boundaries wired, behavioral test pending` | Under-claims: the boundary tests exist (`telemetry.md:88-97` lists five by file:line) and they pass in this pass. |
+| `1c.2` | `Landed; unsupported claim removed` | Defensible only through the row's "or removal" branch; `CHANGELOG.md`'s Known gaps still lists "the deferred additional-tools/tool-search emit paths" as pending. Quote the removal, not the capability. |
+
+Rows I did **not** re-check (no state change suggested, but the PR body should
+not present them as pass-2 verified): `1a.1`, `1b.3`, `1b.4`, `1b.6`, `1c.1`,
+`1c.3`–`1c.10`, `1d.1`–`1d.3`, `1e.1`–`1e.3`, `2b.2`–`2b.6`, `3.1`–`3.4`,
+`3.6`, `4.4`–`4.6`, `4.9`, `5.1`–`5.3`, `5.5`–`5.11`, `6.1`–`6.5`. Two of them
+were spot-checked positively: `3.6` (`cache_write_1h` is real in
+`octet-ai/src/pricing.rs:29-139`) and `4.4` (the bash tool's spill file and
+`full_output_path` exist in `octet-agent/src/tools/bash.rs:986-1012`).
+
+## Pass 2 — failure modes hunted
+
+- **Claimed pass with no observable evidence.** The one that matters:
+  `docs/parity/providers.md:40` (C10). Two lesser ones are stale in the
+  *under*-claiming direction (C11, C12) and one is a stale "Known gap" (C13).
+- **"Landed" primitive with no consumer.** Three of them, all in the ledger's
+  `Landed` column: `ModelPreset::sampling_params`/`headers` (zero references
+  outside `declarations/mod.rs`), the `KeybindingsManager` keybinding layer, and
+  — in the working tree only — the subagent settle path (U4, consumer exists but
+  unverified). `tools.md` documents its own subset honestly; the other two are
+  not documented as tool-layer-only.
+- **`todo!()` / `unimplemented!()` / stub bodies.** Clear in Rust:
+  `rg -n "todo!\(|unimplemented!\(" --type rust crates/` → **0 matches**, and
+  there are no `FIXME:`/`TODO:` markers in the four crates' sources except the
+  deliberate `TODO(resolved-binding)` prose in
+  `crates/octet-coding-agent/src/tui/view/input_overlays.rs:501` (which is the
+  admission quoted in the table above).
+- **Live/external verification never run.** No pass-2 document claims a tmux,
+  herdr, Windows, macOS GUI or Xcode run; `tools.md` and `extensions.md` mark
+  those as unqualified. The LaTeX differential-oracle claim *is* external
+  (`latex.ts` under Node) and I re-ran it myself (O1), so it moves from
+  "claimed" to "reproduced".
+- **Secrets / session ids in argv or display strings.** No new leak found in the
+  changed files: `providers/auth.rs` reads credentials from env/profile/IMDS into
+  typed structs and never formats them into output; the Codex resolver asserts
+  (`auth/codex/resolver.rs:381`) that a token never appears in an error's `Debug`
+  or `Display`; the subagent launcher was verified in pass 1 (list argv,
+  `shell=False`, `_SAFE_TOKEN_RE`).
+- **A wrong `Landed` is worse than `Unverified`.** All of the above are
+  `Landed`-column problems, not `Unverified` ones.
+
+## Pass 2 — disposition of every pass-1 finding
+
+| Pass-1 item | State at `df2e8980` |
+| --- | --- |
+| C1 telemetry.md under-claims row 3.5 | **RESOLVED.** `docs/parity/telemetry.md:77` now heads "3.5 Span boundaries — landed" and lists the five boundary tests by file:line. The under-claim moved into `README.md` row 3.5 (C14). |
+| C2 providers.md over-claims `/fast` | **SUPERSEDED by C10.** The blocker it named (the `ResponsesOptions` builders) is genuinely gone; a different, user-facing gap remains. |
+| C3 editor.md 2c.3/2c.4 "Blocked" | **RESOLVED.** Both sections now read "Landed" with the bounded-subset wording. |
+| C4 398 KB oracle committed | **RESOLVED.** The five `_*.rs` harnesses are untracked (`git status --porcelain crates/sexy-tui-rs/tests/` is clean, `.gitignore` covers `/crates/sexy-tui-rs/tests/_*.rs`). |
+| C5 CHANGELOG empty | **RESOLVED.** `[Unreleased]` now carries the parity sections; the *Known gaps* paragraph inside it is stale (C13). |
+| C6 subagents fail-closed policy | **RESOLVED** (pass 1's own re-run) and unchanged. |
+| C7 `octet-ai` lib red + infinite hang | **RESOLVED — my own run.** 13/13 targets green; the previously hanging test completes in 1.76s. |
+| C8 `client_stream.rs` 6 failures | **RESOLVED — my own run.** 38 passed, 0 failed. |
+| C9 `octet-coding-agent --lib` red (10 → 7 failures) | **RE-RUN in this pass; result in the test-surface table above.** Two of the seven were in files no worker touched (`tui/pickers.rs`, `modes/interactive.rs`), so this is the row to watch. |
+| F1 `apps/web` flaky under load | **NOT RE-RUN** (no Node/vitest run in this pass) — still an unverified flake claim. |
+| F2 `entry_index_revision` dead primitive | **STILL TRUE.** `session_store.rs:1791` remains the only reference (`rg -c entry_index_revision` → 1 occurrence in the whole crate). |
+| F3 112 `is never used` warnings / undocumented primitives | **PARTIALLY TRUE.** My `cargo check` emits **89** `is never used` + 4 `is never read` warnings (157 warnings total, 0 errors). The undocumented-consumer class now has a second confirmed member (row 2b.1 keybindings). |
+| F4 `todo!()`/`unimplemented!()`/`#[expect(dead_code)]` | **CLEAR — re-verified**, 0 matches. |
+| F5 three redundant `#[allow(dead_code)]` | **RESOLVED.** None remain in `telemetry/schema.rs` or `telemetry/spans.rs`. |
+| F6 secrets in argv/display strings | **CLEAR** (pass 1) and no new leak in the changed files. |
+| F7 overclaimed live/external verification | **CLEAR**, and the one external claim (the Node oracle) is now independently reproduced (O1). |
+| F8 doc bullets claiming capability the code lacks | **WORSE, in the ledger.** Rows 1b.1/1b.2/1b.5/2b.1 are `Landed` for behaviour whose own detail doc says the wiring is "reported, not changed"; the previous extensions.md numeric slip is unchanged (`extensions.md:30` "13 + 5 tests" still not reproducible from the file, 13 `#[test]`). |
+
+## Pass 2 — what I could not verify
+
+- **`cargo test -p octet-coding-agent --lib` at HEAD.** The target was still
+  compiling when I wrote this; the working tree was dirty in four files
+  (`providers/auth.rs`, `tui/view.rs`, `tui/view/reasoning_render.rs`,
+  `rich_text/latex/mod.rs`) and other workers were running their own
+  coding-agent builds, so the lock queue was the constraint. Needed: the same
+  command on a frozen commit with the tree quiet. **This is the one surface that
+  must be green before the PR is cut** — pass 1 saw it red twice.
+- **Fixed startup latency, end to end.** Needs a binary built from the frozen
+  tree (L5).
+- **The 1061-case Rust side of the LaTeX oracle.** The oracle side is mine and
+  byte-identical; the port side is a captured file the worker produced (O1).
+- **`apps/web` `npm test` and `python3 -m pytest` suites** — not re-run this
+  pass; pass-1 results stand (2 load-induced vitest timeouts, one proven
+  environmental `ygg_extension` failure).
+- **Windows, macOS GUI, tmux/herdr, Xcode build/sign** — unchanged and
+  unavailable; no document claims otherwise.
+- **`cargo test -p octet-agent --test agent_run` at HEAD** — this is one of the
+  targets still queued; pass 1 saw one failure and one >5-minute test.
+
+## Pass 2 — remaining primitives for blocked/qualified rows
+
+Unchanged in substance from pass 1 except where noted; each is a code-level
+gap, not a restatement of "pending".
+
+1. **`/fast` (roadmap #175): one call site.** `apply_fast_command`
+   (`crates/octet-coding-agent/src/modes/interactive.rs:1539`) must call
+   `Agent::set_service_tier` instead of printing the inert message, and the
+   session should persist the tier (`providers.md` "Gap 2"). Everything on the
+   `octet-agent` side now exists and is tested.
+2. **Row `1b.1`/`1b.2`/`1b.5` consumers.** A per-request
+   transformer/payload seam in `crates/octet-ai/src/client.rs`, and the codec
+   merge of `ModelPreset::sampling_params`/`headers` and the
+   chat-template/thinking-budget fields into the request body. Until then those
+   rows must not read `Landed` in a PR body.
+3. **Row `2b.1` consumer.** A shell-owned `KeybindingsManager` whose `matches`
+   replaces the hardcoded `alt+up` arm in `tui/keymap.rs` and whose
+   `get_keys("app.message.dequeue")` feeds the queued-follow-up hint.
+4. **Row `3.5`/`C14`:** correct the ledger state (tests exist and pass).
+5. **`/fast` headline + `CHANGELOG.md` Known gaps + `editor.md` 2c.4 "no
+   consumer"** — three docs to correct (C10/C11/C12/C13).
+6. **Codex websocket resumption in live runs** (`body_requests_storage` never
+   set by the agent builders), per-request transport selection (`1c.6`), the
+   proxy seam (`1b.3`, `client.rs:1891`), and `client_stream` reconciliation —
+   carried over from pass 1; `client_stream` itself is now green.
+7. **Tool-layer primitives with no consumer** (rows 4.8, 4.10, 4.11, 4.13,
+   4.14): each needs its consumer, exactly as `docs/parity/tools.md` records.
+8. **`entry_index_revision` (`session_store.rs:1791`)** — either wire it or
+   delete it; it is dead at HEAD.
+
+## Pass 1 record (HEAD 7be2dc96, retained for history)
+
 Adversarial verification pass, written by a verifier that did not author any of the
 rows it checks. It re-runs the commands rather than trusting the evidence files.
 Where this document disagrees with a detail document or an

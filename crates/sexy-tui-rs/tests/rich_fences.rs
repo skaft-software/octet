@@ -12,7 +12,9 @@
 
 use sexy_tui_rs::rich_text::markdown;
 use sexy_tui_rs::rich_text::stream::{StreamingMarkdown, StreamingRenderCache};
-use sexy_tui_rs::{Block, RichRenderer};
+use sexy_tui_rs::{
+    Block, ColorDepth, RenderOptions, RichRenderer, TerminalCapabilities, Theme,
+};
 
 fn code_block(source: &str) -> sexy_tui_rs::rich_text::CodeBlock {
     let document = markdown::parse(source);
@@ -119,6 +121,41 @@ fn unsupported_bodies_degrade_to_the_original_source() {
 }
 
 #[test]
+fn renders_that_produce_nothing_keep_the_original_source() {
+    // A renderer can succeed and still emit nothing: an empty expression, `{}`,
+    // a header-only graph. That is a failed render — the fence must show its
+    // original source byte-for-byte, exactly like the same body in a plain
+    // code fence, never an empty block.
+    for (language, body) in [
+        ("latex", ""),
+        ("latex", "\n"),
+        ("latex", "   \n"),
+        ("latex", "{}\n"),
+        ("mermaid", ""),
+        ("mermaid", "graph LR\n"),
+        ("mermaid", "flowchart TD\n"),
+    ] {
+        let source = format!("```{language}\n{body}```\n");
+        let plain = format!("```rust\n{body}```\n");
+        let code = code_block(&source);
+        assert_eq!(
+            code.code,
+            code_block(&plain).code,
+            "degraded body for {source:?}"
+        );
+        assert_eq!(code.language.as_deref(), Some(language), "{source:?}");
+    }
+
+    // The empty source stays visible through the real renderer too.
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse("```latex\n{}\n```\n"), 80)
+        .plain_text();
+    assert!(rendered.contains("{}"), "{rendered}");
+    assert!(!rendered.contains('│'), "{rendered}");
+    assert!(!rendered.contains('┌'), "{rendered}");
+}
+
+#[test]
 fn oversized_and_unterminated_fences_stay_literal() {
     let huge = "\\frac{a}{b}".repeat(2_000); // > MAX_DIAGRAM_FENCE_BYTES
     let source = fence("latex", huge.trim_end());
@@ -186,4 +223,185 @@ fn streaming_publishes_the_diagram_only_when_the_fence_closes() {
         .expect("diagram row survives later input");
     assert_eq!(after[diagram_row - 1], "  ┌───────┐    ┌──────┐");
     assert_eq!(after[diagram_row + 1], "  └───────┘    └──────┘");
+}
+
+/// Every info string outside the four supported names must reach the *same*
+/// plain code block as a `text` fence carrying the same body — byte for byte,
+/// with the language preserved as provenance. That is the observable proof that
+/// the body was never handed to either diagram renderer.
+#[test]
+fn unknown_and_alias_fences_never_reach_a_diagram_renderer() {
+    // Bodies chosen so a mistaken dispatch would visibly change the text.
+    let latex_body = "\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}";
+    let mermaid_body = "graph LR\n  A[One] --> B[Two]";
+    for language in [
+        "rust",
+        "text",
+        "plaintext",
+        "tex",        // a common LaTeX alias, deliberately not dispatched
+        "math",
+        "latexish",
+        "la",
+        "asciimath",
+        "diagram",
+        "mermaids",
+        "graphtd",
+        "graphviz",
+        "dot",
+        "plantuml",
+        "unlabeled",
+    ] {
+        for body in [latex_body, mermaid_body] {
+            let got = code_block(&format!("```{language}\n{body}\n```\n"));
+            let plain = code_block(&format!("```text\n{body}\n```\n"));
+            assert_eq!(got.code, plain.code, "{language}/{body:?}");
+            assert_eq!(got.language.as_deref(), Some(language), "{language}");
+        }
+    }
+    // A fence with no info string is not a diagram either: the body is the same
+    // bytes a `text` fence produces, only without a language label.
+    let bare = code_block("```\n\\frac{1}{2}\n```\n");
+    assert_eq!(bare.code, code_block("```text\n\\frac{1}{2}\n```\n").code);
+    assert_eq!(bare.language, None);
+    // Case folding applies to the supported names only (`LaTeX` dispatches,
+    // `latexish` above does not), and a one-line info string leaves an empty
+    // body that renders to nothing and stays empty.
+    let upper = "```LaTeX\nx = \\frac{1}{2}\n```\n";
+    assert_eq!(markdown::parse(upper).plain_text(), "    1\nx = ─\n    2\n");
+    assert_eq!(code_block("```latex\tx = 1\n```\n").code, "");
+}
+
+/// `$$…$$` and `\[…\]` are **not** wired to the LaTeX renderer: the parser does
+/// not enable math events (`Event::DisplayMath`/`InlineMath` are unreachable),
+/// so math-looking prose stays literal text and never becomes box drawing.
+#[test]
+fn math_is_not_dispatched_to_the_latex_renderer() {
+    for source in [
+        "$$\n\\frac{1}{2}\n$$\n",
+        "$$\\frac{1}{2}$$\n",
+        "\\[\n\\frac{1}{2}\n\\]\n",
+        "The value is $\\frac{1}{2}$ here.\n",
+        "Costs $5 and $10 total.\n",
+    ] {
+        let rendered = RichRenderer::plain()
+            .render(&markdown::parse(source), 80)
+            .plain_text();
+        assert!(!rendered.contains('⎛'), "{source:?} -> {rendered}");
+        assert!(!rendered.contains('│'), "{source:?} -> {rendered}");
+        assert!(!rendered.contains('─'), "{source:?} -> {rendered}");
+    }
+    // The literal text survives, and no block is lost.
+    let bracket = RichRenderer::plain()
+        .render(&markdown::parse("\\[\n\\frac{1}{2}\n\\]\n"), 80)
+        .plain_text();
+    assert!(bracket.contains("\\frac{1}{2}"), "{bracket}");
+    let display = RichRenderer::plain()
+        .render(&markdown::parse("$$\n\\frac{1}{2}\n$$\n"), 80)
+        .plain_text();
+    assert!(display.contains("$$"), "{display}");
+    assert!(display.contains("\\frac{1}{2}"), "{display}");
+}
+
+/// CRLF sources and `~~~` fences reach the same dispatcher (the fence marker
+/// check accepts both, and the body is trimmed for LaTeX).
+#[test]
+fn crlf_and_tilde_fences_dispatch_the_same_way() {
+    let crlf_latex = markdown::parse("```latex\r\nx = \\frac{-b}{2a}\r\n```\r\n");
+    assert_eq!(crlf_latex.plain_text(), "    -b\nx = ──\n    2a\n");
+    let crlf_mermaid = markdown::parse("```mermaid\r\ngraph LR\r\n  A[One] --> B[Two]\r\n```\r\n");
+    assert_eq!(
+        crlf_mermaid.plain_text(),
+        "┌─────┐    ┌─────┐\n│ One ├───▶│ Two │\n└─────┘    └─────┘\n"
+    );
+    let tilde = markdown::parse("~~~latex\nx = \\frac{1}{2}\n~~~\n");
+    assert_eq!(tilde.plain_text(), "    1\nx = ─\n    2\n");
+}
+
+/// A rendered diagram is glyph art, not source code: no grammar may style it.
+/// Only the language label is dimmed; every glyph row is a single unstyled run,
+/// which is what keeps one colour per grapheme (and no background fills).
+#[test]
+fn a_rendered_diagram_is_never_syntax_styled() {
+    let capabilities =
+        TerminalCapabilities::interactive(ColorDepth::TrueColor, true);
+    let renderer = RichRenderer::new(
+        Theme::with_capabilities(capabilities),
+        capabilities,
+        RenderOptions {
+            syntax_highlighting: true,
+            code_borders: true,
+            ..RenderOptions::default()
+        },
+    );
+    let rendered = renderer.render(&markdown::parse(&fence("latex", "\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}")), 80);
+    let rows: Vec<&str> = rendered
+        .lines
+        .iter()
+        .map(|line| line.styled.as_str())
+        .filter(|line| line.contains('⎛') || line.contains('⎝'))
+        .collect();
+    assert_eq!(rows.len(), 2, "{:?}", rendered.plain_text());
+    for row in rows {
+        assert!(
+            !row.contains('\u{1b}'),
+            "diagram row carries styling: {row:?}"
+        );
+    }
+    assert_eq!(
+        rendered.plain_text(),
+        "┌─ latex ────┐\n│  ⎛ 1 │ 2 ⎞ │\n│  ⎝ 3 │ 4 ⎠ │\n└────────────┘"
+    );
+}
+
+/// The opener itself can arrive in pieces. No dispatch may happen before the
+/// info string *and* the closing fence are present.
+#[test]
+fn streaming_never_dispatches_before_the_fence_is_complete() {
+    for chunks in [
+        &["```late", "x\nx = \\frac{1}{2}\n```\n"][..],
+        &["``", "`mermaid\ngraph LR\n  A[One] --> B[Two]\n", "```\n"][..],
+        &["```graph", " TD\n  A[One] --> B[Two]\n```\n"][..],
+    ] {
+        let renderer = RichRenderer::plain();
+        let mut stream = StreamingMarkdown::new();
+        let mut cache = StreamingRenderCache::default();
+        let last = chunks.len() - 1;
+        for (index, chunk) in chunks.iter().enumerate() {
+            stream.push_str(chunk);
+            let lines = cache.render_lines(&stream, &renderer, 80, false).join("\n");
+            let glyphs = ["⎛", "┌", "─", "▶"].iter().any(|glyph| lines.contains(glyph));
+            assert_eq!(glyphs, index == last, "chunks={chunks:?} at {index}:\n{lines}");
+        }
+    }
+}
+
+/// A diagram fence that fails closed streams its raw source and keeps it after
+/// the close: no partial diagram while open, no empty block afterwards, and the
+/// committed rows do not move on the next chunk.
+#[test]
+fn streaming_keeps_failed_diagram_fences_as_source() {
+    let renderer = RichRenderer::plain();
+    let mut stream = StreamingMarkdown::new();
+    let mut cache = StreamingRenderCache::default();
+
+    let mut saw_source = false;
+    for chunk in ["```latex\n", "\\cfrac{1}", "{x}\n"] {
+        stream.push_str(chunk);
+        let lines = cache.render_lines(&stream, &renderer, 80, false).join("\n");
+        assert!(!lines.contains('⎛'), "no partial render while open:\n{lines}");
+        saw_source |= lines.contains("\\cfrac");
+    }
+    assert!(saw_source, "raw body visible while the fence is open");
+
+    stream.push_str("```\n");
+    let closed = cache.render_lines(&stream, &renderer, 80, false);
+    let text = closed.join("\n");
+    assert!(text.contains("\\cfrac{1}{x}"), "source survives the close:\n{text}");
+    assert!(!text.contains('⎛'), "no diagram for a failed render:\n{text}");
+    assert_eq!(closed, cache.render_lines(&stream, &renderer, 80, false));
+
+    stream.push_str("\ntrailing prose\n");
+    let after = cache.render_lines(&stream, &renderer, 80, false).join("\n");
+    assert!(after.contains("\\cfrac{1}{x}"), "{after}");
+    assert!(after.contains("trailing prose"), "{after}");
 }

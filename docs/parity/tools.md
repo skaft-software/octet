@@ -48,7 +48,7 @@ consumer that still has to be wired in "Recorded gaps" below.
 | 4.10 | Unanimous finalized-result batch termination | Landed end-to-end | `ToolOutput::requesting_termination`/`terminates_run` + `batch_requests_termination` in `src/tool.rs`; consumer in the run loop (`src/agent.rs`: per-batch `termination_requests` recorded at the commit path, checked after the abort gate and before `needs_continuation`). Tests: `batch_termination_requires_unanimous_finalized_results` (tool layer) and `unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not` (`tests/agent_run.rs`: unanimous batch -> 1 model request with durable results; one dissenting sibling -> 2 requests with both results carried forward) |
 | 4.11 | Durable invocation memos through replay until outcome known | Landed (tool layer) | `src/tools/durability.rs`; `invocation_memos_survive_replay_until_the_outcome_is_known` |
 | 4.12 | Deferred provider suspend/resume/handles/poll permits | Landed (tool layer) | `src/tools/deferred.rs`; `deferred_suspension_requires_a_valid_handle_and_rejects_every_mismatch`, `deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or_foreign_handles` |
-| 4.13 | Tool `promptSnippet`/`promptGuidelines` | Landed (tool layer) | `Tool::prompt_snippet`/`prompt_guidelines` + `collect_tool_prompt_contributions`; `tool_prompt_contributions_match_pi_snippets_and_guidelines`. Prompt consumer pending |
+| 4.13 | Tool `promptSnippet`/`promptGuidelines` | Landed end-to-end | `Tool::prompt_snippet`/`prompt_guidelines` + `collect_tool_prompt_contributions`; consumer in the run path (`src/agent.rs`: `Agent::set_tool_prompt_section_enabled` -> `model_visible_system` -> the run-local system prompt, also used by `request_context_estimate`/`request_context_breakdown`). Opt-in so an unopted host keeps a byte-identical prompt; bounded to 8 KiB/tool cap on a character boundary. Tests: `tool_prompt_contributions_match_pi_snippets_and_guidelines` (tool layer), `tool_prompt_section_renders_snippets_and_guidelines_and_skips_silent_tools`, `tool_prompt_section_is_bounded_on_a_character_boundary` (unit), `tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools` (`tests/agent_run.rs`, real HTTP+SSE request body). Gap: `SearchTool` declares no snippet yet |
 | 4.14 | Summarization retry distinct from compaction failure | Landed (tool layer) | `src/tools/summarization.rs`; `summarization_retries_are_distinct_from_compaction_failures_without_duplicate_durable_state` |
 
 ## Contract notes for the landed rows
@@ -179,9 +179,15 @@ search engine. Nothing in this section claims `search` covers what it does not.
 These are consumers that live outside this worker's exclusive paths; each is a
 one-line wiring change, not a missing primitive.
 
-1. **4.13 prompt assembly.** The model-visible tool section is assembled by the
-   coding product (`crates/octet-coding-agent`), which does not yet call
-   `collect_tool_prompt_contributions`.
+1. **4.13 prompt assembly — closed in the agent; one tool gap remains.** The
+   agent now renders the section itself (`Agent::set_tool_prompt_section_enabled`,
+   opt-in), so the primitive has a live consumer that does not depend on the
+   coding product. Remaining gap: `crates/octet-agent/src/tools/search.rs`
+   (`SearchTool`) declares no `prompt_snippet`/`prompt_guidelines`, so a
+   rendered section omits `search` while the tool stays registered and callable.
+   One-line fix in that owned file: add
+   `fn prompt_snippet(&self) -> Option<&str> { Some("Search file contents with ripgrep (rg)") }`
+   (plus guidelines if desired).
 2. **4.8 live consumer.** No built-in tool publishes a replaceable preview
    snapshot through the coalescer yet; the live tool panel is fed by
    append-only progress chunks, which must stay verbatim.

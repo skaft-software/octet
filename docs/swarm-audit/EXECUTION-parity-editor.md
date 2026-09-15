@@ -747,3 +747,77 @@ strings are asserted in the committed goldens):
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.82s, EXIT=0
 
 START 2026-09-15T18:10:41Z editor11 alive (followup: fence wiring)
+
+START 2026-09-15T18:21:36Z editor12 alive
+
+## editor12: fence-dispatch consumer audit + empty-render fix (2026-09-15T18:4x Z)
+
+ADOPT (never revert): predecessor's uncommitted `rich_text/latex/mod.rs` doc note was
+kept and its broken intra-doc link fixed (`super::MAX_DIAGRAM_FENCE_BYTES` ->
+`super::markdown::MAX_DIAGRAM_FENCE_BYTES`; the const lives in `markdown`, not
+`rich_text`).
+
+STATE FOUND: the fence consumer was already committed at HEAD in
+`crates/sexy-tui-rs/src/rich_text/markdown.rs` (`render_diagram_fence`, called from
+`Frame::Code` close for completed fences only) plus tracked goldens
+`crates/sexy-tui-rs/tests/rich_fences.rs`. The parent brief ("no consumer") was stale;
+wave-10 df2e8980 predates this session by ~3 minutes.
+
+$ cargo test -p sexy-tui-rs --test _ed12_edges -- --nocapture   (/tmp/ed12/edges_before.log)
+Found a real gap: a fence whose renderer SUCCEEDS but emits nothing collapses the block.
+    latex "" / "\n" / "   \n" / "{}"    -> code "\n"        (source lost / empty block)
+    mermaid "graph LR\n" (header only)  -> code "\n"        (source lost / empty block)
+
+FIX `markdown.rs::render_diagram_fence`: after the match, `if rendered.trim().is_empty() {
+return None; }` — an empty render is a failed render, so the original bounded source stays
+in the plain code block. Module docs + `Frame::Code` comment updated to say so.
+
+TESTS `rich_fences.rs`: +`renders_that_produce_nothing_keep_the_original_source` (7 bodies,
+each compared byte-for-byte against the same body in a `rust` fence) and
++`streaming_keeps_failed_diagram_fences_as_source` (failed fence streams raw source, no
+partial diagram, stable rows after the close).
+
+$ cargo test -p sexy-tui-rs --test rich_fences                            (/tmp/ed12/rich_fences.log)
+running 10 tests ... test result: ok. 10 passed; 0 failed
+(was 8; +2 regression tests; existing latex/mermaid/streaming goldens all still pass)
+
+CHANGELOG-ready: "Rich markdown: a fenced `latex`/`mermaid`/`graph`/`flowchart` block that
+renders to nothing (empty expression, `{}`, header-only graph) now keeps its original source
+instead of collapsing into an empty code block."
+
+## editor12 verification runs (2026-09-15T18:28:09Z)
+
+Files changed (all in exclusive paths):
+- crates/sexy-tui-rs/src/rich_text/markdown.rs  (empty-render guard + docs)
+- crates/sexy-tui-rs/tests/rich_fences.rs       (+2 tests, now 10)
+- crates/sexy-tui-rs/src/rich_text/latex/mod.rs (adopted predecessor doc note, fixed intra-doc link)
+- docs/parity/editor.md                          ($2c.4 "No consumer is wired yet" replaced with the landed consumer)
+
+$ cargo test -p sexy-tui-rs --test latex_render --test mermaid_render   (/tmp/ed12/renderers.log)
+running 17 tests -> test result: ok. 17 passed; 0 failed
+running 11 tests -> test result: ok. 11 passed; 0 failed
+
+$ cargo test -p sexy-tui-rs                                            (/tmp/ed12/crate_test.log)
+lib 190 passed; _ed11_fence_probe 1; _ed11_probe 1; _ed11_stream_probe 1;
+_ed12_edges 3; _latex_debug 1; _latex_diff 1; _latex_probe 1; _latex_stress 5;
+_mermaid_debug 1; images_current 6; latex_render 17; mermaid_render 11;
+pi_tui_render 27; rich_fences 10; rich_rendering 4; doc-tests 1.
+0 failed anywhere (0 lines matching "test result: FAILED").
+
+$ cargo check -p sexy-tui-rs --all-targets --locked                      (/tmp/ed12/crate_check.log)
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.17s  => GREEN
+
+$ cargo check --workspace --all-targets --locked                        (/tmp/ed12/workspace_check.log)
+RED: 4 errors, all in crates/octet-coding-agent/src/app/bootstrap.rs
+(let chains "only allowed in Rust 2024" x3 at :5611/:5612/:5884, E0027 missing
+field `readiness` at :6667). bootstrap.rs is dirty from concurrent tui13/tui14
+edits outside this worker's paths; NOT touched here. sexy-tui-rs itself checks
+and tests green.
+
+CHANGELOG-ready: "Rich markdown fences: ```latex```/```mermaid```/
+```graph```/```flowchart``` blocks that render to nothing (empty
+expression, `{}`, header-only graph) now keep their original source instead of
+collapsing into an empty code block; the `docs/parity/editor.md` 2c.4 consumer
+note is updated to match the landed fence dispatch."
+
+START 2026-09-15T18:29:32Z editor12b alive

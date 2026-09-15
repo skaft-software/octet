@@ -37,26 +37,42 @@ route/discovery/credential declaration is landed; the static catalog needs a
 models.dev generation pass. Deterministic checks here do not qualify live
 provider availability.
 
-## Codex `service_tier` (row 1a.1 — landed end-to-end; `/fast` reaches the wire)
+## Codex `service_tier` (row 1a.1 — codec + agent-side plumbing landed; no command selects a tier yet)
 
-Headline status (verified against this tree, agent11, after
-`agent10: service_tier plumbed into the live run path`): the agent-side caller
-landed, so `/fast` now changes the request instead of reporting a dependency. The
-independent verifier's C2 row (`docs/parity/VERIFICATION.md:471`) described an
-earlier revision; both the earlier over-claim and the later "NOT yet unblocked"
-heading are superseded by this one.
+Headline status (re-verified against this tree by worker `ai12b`, HEAD `df2e8980`
+plus the in-flight wave edits): the codec field **and** the agent-side caller are
+landed, but the user-facing `/fast` command still does not call the setter, so
+**no live run selects a tier today**. The request path is complete; the missing
+half is one UI call site (owned by `modes/interactive.rs`, not by the
+codec/agent rows). The independent verifier's C2 row
+(`docs/parity/VERIFICATION.md:319`, superseded by C10; raw finding at `:482`)
+and the earlier "landed, unblocks roadmap #175 `/fast`" headline both described
+earlier revisions.
 
-`/fast` (roadmap #175) is **live on a Codex route**: `Agent::set_service_tier`
-(`crates/octet-agent/src/agent.rs`) selects the tier, and both live-run
-`ResponsesOptions` builders (`durable_responses_options`,
-`native_responses_options`) — plus `responses_prewarm_request` — emit it. The
-field is sent only where the route declares the capability; every other route
-fails closed with the codec's typed `UnsupportedError::ServiceTier` rather than
-silently dropping a billing-changing control.
-`apply_fast_command` (`crates/octet-coding-agent/src/modes/interactive.rs`) still
-prints its "inert" message until its owner switches it to the new setter (see the
-consumer contract in `../swarm-audit/EXECUTION-agent3.md`): that is the one
-remaining step, and it is a UI edge, not a request-path gap.
+What the agent side does (`crates/octet-agent/src/agent.rs`, 34 `service_tier`
+references, re-counted): it keeps the selection in the `service_tier` field
+(`:727`) and exposes `Agent::set_service_tier` (`:6493`) with the
+`Agent::service_tier` accessor (`:6500`). A requested tier is validated by
+`resolve_service_tier` (`:3786`), which fails closed with the codec's typed
+`octet_ai::UnsupportedError::ServiceTier` unless
+`model.spec.protocol == Protocol::OpenAiResponses` **and**
+`model.endpoint.runtime.responses_profile.accepts_service_tier()` — a declared
+capability, never a provider name. Both live-run `ResponsesOptions` builders
+(`durable_responses_options` `:3750`, `native_responses_options` `:3801`) call
+`ResponsesOptions::with_service_tier` (`crates/octet-ai/src/responses.rs:362`)
+when a tier is selected, and `responses_prewarm_request` (`:5768`) reuses those
+same builders, so the WebSocket pre-warm carries the identical tier. Every other
+route fails closed rather than silently dropping a billing-changing control.
+
+What is still missing for `/fast` to reach the wire: `apply_fast_command`
+(`crates/octet-coding-agent/src/modes/interactive.rs:1644`) still reports "this
+build's Codex request path does not send a service tier yet" and never calls
+`Agent::set_service_tier` — `rg -n set_service_tier crates/` shows only the
+definition plus the agent's own tests
+(`crates/octet-agent/tests/agent_run.rs:9718`, `:9741`, `:9754`). Until that call
+site lands, `/fast on` changes nothing on the wire; the accurate status is
+"agent API ready, UI consumer pending". See the consumer contract in
+`../swarm-audit/EXECUTION-agent3.md` (tui11's row).
 
 Upstream anchors: `packages/ai/src/api/openai-responses.ts:105`, `:321`
 (`params.service_tier = options.serviceTier`), `:362-389`

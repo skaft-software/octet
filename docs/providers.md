@@ -131,18 +131,33 @@ environment indicates them, and the first matching indication wins:
 1. `AWS_EC2_METADATA_DISABLED=false` — the standard AWS switch, explicitly off.
 2. `OCTET_AWS_METADATA_CREDENTIALS=1` — octet's explicit opt-in, for an instance
    whose configuration carries no other marker. (`0`, `false`, `no` or `off`
-   keep it disabled.)
+   keep it disabled. An unrecognized value stays closed: unknown state never
+   probes.)
 3. `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `AWS_CONTAINER_CREDENTIALS_FULL_URI`
    — set by ECS/EKS-style platforms.
-4. `AWS_METADATA_SERVICE_ENDPOINT` / `AWS_METADATA_SERVICE_ENDPOINT_MODE` — the
-   host pinned the IMDS endpoint.
+4. `AWS_EC2_METADATA_SERVICE_ENDPOINT` / `_MODE` — the standard AWS names — or
+   octet's earlier `AWS_METADATA_SERVICE_ENDPOINT` / `_MODE` alias: the host
+   pinned the IMDS endpoint.
 5. The effective `AWS_PROFILE` declares
-   `credential_source = Ec2InstanceMetadata`/`EcsContainer` (or
-   `ec2_metadata_service_endpoint`).
+   `credential_source = Ec2InstanceMetadata`/`EcsContainer`, or pins IMDS with
+   `ec2_metadata_service_endpoint`.
+6. The local DMI/SMBIOS markers (`/sys/class/dmi/id/{sys_vendor,board_vendor,
+   product_name,bios_vendor}`) name `Amazon EC2`: a bare EC2 instance with an
+   instance profile and no other marker. This is a bounded local file read, not
+   a metadata request, so it costs a laptop nothing (the files are absent or name
+   another hypervisor) and it keeps genuine instance-profile users working
+   without an opt-in.
 
-Anything else — including a profile that merely exists, `AWS_PROFILE` alone, or
-`AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` presence — keeps the metadata
-sources disabled, and an unrecognized `AWS_EC2_METADATA_DISABLED` value stays
+The probe target follows the same order — `AWS_EC2_METADATA_SERVICE_ENDPOINT`,
+then `AWS_METADATA_SERVICE_ENDPOINT`, then the profile's
+`ec2_metadata_service_endpoint` — and every candidate is validated fail-closed
+(plain HTTP is accepted only for loopback or link-local hosts) before a request
+is made.
+
+Anything else — including a profile that merely exists, `AWS_PROFILE` alone,
+`AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` presence, or a DMI vendor that
+names another hypervisor — keeps the metadata sources disabled, and an
+unrecognized `AWS_EC2_METADATA_DISABLED` value stays
 disabled rather than probing on a typo. Static environment keys and profile keys
 are unaffected: they are local reads and are always consulted first.
 

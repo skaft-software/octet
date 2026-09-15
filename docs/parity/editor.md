@@ -222,9 +222,62 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
 - Not modelled: shape outlines (diamonds/stadiums render as boxes), link stroke
   styling, subgraphs, `BT`/`RL`, HTML-entity decoding in labels (emitted
   literally), upstream's style-span/warning channels, and the "unrendered
-  diagram" fallback text — the embedding component owns them and should map
-  `Err` onto that fallback. **No consumer is wired yet**
-  (`crates/octet-coding-agent` has no `rich_text::mermaid` call site).
+  diagram" fallback text — the fence consumer below keeps the original source
+  for every `Err`.
+- Consumer — Landed (supersedes the earlier "no consumer is wired yet" note):
+  `rich_text::markdown::parse` renders a *completed* fenced block whose info
+  string explicitly names `latex`, `mermaid`, `graph`, or `flowchart`
+  (`markdown.rs::render_diagram_fence`, called from `Frame::Code` only when
+  `fence_is_closed`; `graph TD`/`flowchart LR` carry their header in the info
+  string). Every other info string, any body over `MAX_DIAGRAM_FENCE_BYTES`
+  (16 KiB), a typed renderer error, an empty render, and an unterminated fence
+  keep the original bounded source as a plain `CodeBlock` — never an empty
+  block and never a reinterpretation of a non-diagram fence. While a fence is
+  open the streaming layer shows the raw growing body
+  (`stream.rs::stabilize`) and publishes the diagram once, when the closing
+  fence arrives; later chunks do not move the committed rows. The opener may
+  itself arrive in pieces — a `<3`-backtick or partial info string is withheld
+  or shown raw and never dispatches early. `$$…$$` /
+  `\[…\]` math is **not** wired: the parser does not enable math events, so
+  `$…$` stays literal text (`Costs $5 and $10 total.` is untouched, and
+  `Event::DisplayMath`/`InlineMath` in `markdown.rs` are unreachable arms).
+  Non-dispatch is asserted byte-for-byte: 15 unknown/alias info strings (`tex`,
+  `math`, `latexish`, `dot`, `graphviz`, `plantuml`, …) and a bare fence produce
+  exactly the block a `text` fence produces with the same body, for both a
+  LaTeX-shaped and a Mermaid-shaped body. The `latex`/`mermaid` label survives on
+  the block as provenance, so the rendered art is labelled and copy-text returns
+  the drawn diagram, not the source. Verified styling: with
+  `syntax_highlighting: true` and truecolor on, the glyph rows carry **no** ANSI
+  escapes (only the language label is dimmed), so the one-colour-per-grapheme /
+  no-background-fill invariants hold for rendered art. Fence-layer tests:
+  `crates/sexy-tui-rs/tests/rich_fences.rs`, 15 tests. Run:
+  `cargo test -p sexy-tui-rs --test rich_fences` =>
+  `test result: ok. 15 passed; 0 failed` (LaTeX/Mermaid box-drawing goldens
+  through the fence, `graph`/`flowchart` info-string headers, unknown-fence
+  non-reinterpretation and byte-for-byte non-dispatch, unsupported/oversized/
+  unterminated degradation, CRLF and `~~~` fences, blockquote nesting,
+  empty-render degradation, math-not-dispatched, syntax-styling invariance, and
+  three streaming tests: diagram published only at the closing fence with stable
+  committed rows, a failed fence that streams its raw source and stays literal
+  after the close, and an info string split across chunks that never dispatches
+  early).
+  Observed:
+
+      ```latex\n\begin{pmatrix}1&2\\3&4\end{pmatrix}\n``` =>
+      ⎛ 1 │ 2 ⎞
+      ⎝ 3 │ 4 ⎠
+      ```mermaid\ngraph LR\n  A[Start] --> B[Done]\n``` =>
+      ┌───────┐    ┌──────┐
+      │ Start ├───▶│ Done │
+      └───────┘    └──────┘
+      ```rust\n\\frac{1}{2}\n``` =>
+      \frac{1}{2}            (unknown fence: plain code block)
+      ```tex\n\\frac{1}{2}\n``` =>
+      \frac{1}{2}            (a LaTeX alias, still not dispatched)
+      $$\\frac{1}{2}$$ => $$ \frac{1}{2} $$  (math is not a fence, stays literal)
+      ```latex\n\\cfrac{1}{x}\n``` =>
+      \cfrac{1}{x}           (unsupported: original source)
+      ```latex\n{}\n``` => {} (empty render: original source, not empty block)
 - Tests: `crates/sexy-tui-rs/tests/mermaid_render.rs`, 11 tests. Run:
   `cargo test -p sexy-tui-rs --test mermaid_render` =>
   `test result: ok. 11 passed; 0 failed` (29 supported goldens including the

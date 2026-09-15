@@ -60,9 +60,15 @@ use crate::telemetry::{
     spans::{SpanGuard, TelemetryContext},
 };
 use crate::tool::{
-    batch_requests_termination, content_hash, CancellationToken, ReplaySafety, Tool,
-    ToolConcurrency, ToolContext, ToolError, ToolOutput, ToolOutputContentPart, ToolOutputDetails,
-    ToolOutputMediaKind, ToolProgress, ToolProgressSink, PROGRESS_CHANNEL_CAPACITY,
+    batch_requests_termination, collect_tool_prompt_contributions, content_hash,
+    AdaptivePreviewCoalescer, CancellationToken, OutputStream, PartialOutputCheckpointSink,
+    PreviewPublication, ReplaySafety, Tool, ToolConcurrency, ToolContext, ToolError, ToolOutput,
+    ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
+    ToolProgressDecoration, ToolProgressSink, ToolPromptContribution, PROGRESS_CHANNEL_CAPACITY,
+};
+#[cfg(any(unix, windows))]
+use crate::tools::{
+    BashCheckpointPublisher, BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES,
 };
 
 /// Errors surfaced by [`Agent`] APIs.
@@ -461,6 +467,43 @@ fn redact_common_secret_patterns(value: &str) -> String {
     output
 }
 
+/// Renders the model-visible "available tools" section for `tools`.
+///
+/// Returns `None` when no registered tool contributes a snippet: an empty
+/// section would only enlarge the prompt. Entries follow registration order and
+/// carriage is normalized, so the same registration always renders the same
+/// bytes (a provider prefix must not churn between turns). The result is
+/// bounded by [`MAX_TOOL_PROMPT_SECTION_BYTES`] on a character boundary.
+fn render_tool_prompt_section<'a>(
+    tools: impl IntoIterator<Item = &'a dyn Tool>,
+) -> Option<String> {
+    let contributions =
+        collect_tool_prompt_contributions(tools.into_iter().take(MAX_TOOL_PROMPT_SECTION_TOOLS));
+    if contributions.is_empty() {
+        return None;
+    }
+    let mut section = String::from("Available tools:");
+    for contribution in contributions {
+        section.push_str("\n- ");
+        section.push_str(contribution.name.trim());
+        section.push_str(": ");
+        section.push_str(contribution.snippet.trim());
+        for guideline in contribution.guidelines {
+            section.push_str("\n  - ");
+            section.push_str(guideline.trim());
+        }
+    }
+    if section.len() > MAX_TOOL_PROMPT_SECTION_BYTES {
+        let mut end = MAX_TOOL_PROMPT_SECTION_BYTES.saturating_sub('…'.len_utf8());
+        while end > 0 && !section.is_char_boundary(end) {
+            end -= 1;
+        }
+        section.truncate(end);
+        section.push('…');
+    }
+    Some(section)
+}
+
 fn truncate_public_diagnostic(diagnostic: &mut String) {
     truncate_public_diagnostic_to(diagnostic, MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES)
 }
@@ -686,6 +729,16 @@ pub struct Agent {
     service_tier: Option<ServiceTier>,
     /// Stable semantic source key persisted with user-submitted prompts.
     prompt_model_source: Option<String>,
+    /// Opt-in model-visible tool section rendered from the registered tools'
+    /// prompt contributions. Off by default so every existing host keeps a
+    /// byte-identical system prompt; set through
+    /// [`Agent::set_tool_prompt_section_enabled`].
+    tool_prompt_section: bool,
+    /// Opt-in durable partial-output checkpoints for one tool's live calls (row
+    /// 4.7). Off by default; set through
+    /// [`Agent::enable_partial_output_checkpoints`].
+    #[cfg(any(unix, windows))]
+    partial_output_checkpoints: Option<PartialOutputCheckpointConfig>,
     prompt_color: Option<String>,
     /// One-shot user-visible text for the next prompt. Model-only context is
     /// persisted in the message body for exact replay instead.
@@ -1035,6 +1088,13 @@ const PERSISTENCE_METADATA_HOOK_BUDGET: Duration = Duration::from_millis(200);
 /// visible, cancellable replacement attempts give the connection time to
 /// recover without charging usage or consuming an autonomous model turn.
 const MAX_NETWORK_RETRIES: usize = 5;
+/// UTF-8 byte budget for the opt-in model-visible "available tools" section
+/// rendered from the registered tools' `promptSnippet`/`promptGuidelines`
+/// contributions. A section that would exceed it is truncated on a character
+/// boundary, so no registered tool can enlarge a system prompt without bound.
+const MAX_TOOL_PROMPT_SECTION_BYTES: usize = 8 * 1024;
+/// Maximum number of tools rendered into that section, in registration order.
+const MAX_TOOL_PROMPT_SECTION_TOOLS: usize = 64;
 const TERMINAL_GATE_SYSTEM: &str = r#"You gate control flow for a coding agent. Output R when the candidate is a valid response to return to the user now: a substantiated completion, an answer or plan based on supplied text or general knowledge, a necessary clarification, an honest blocker or uncertainty, or a justified refusal. Output C when autonomous work should continue: promised next action, unsupported claim about current state, or requested repository or external action not substantiated by relevant successful action evidence. Do not treat an irrelevant or failed action as evidence. Respect explicit requests not to use tools or to guess. Output exactly R or C."#;
 const TERMINAL_GATE_CORRECTION: &str = "The candidate response was not returnable: requested current-state or action work is not supported by relevant successful tool evidence. Continue the work using the available tools; do not repeat the rejected candidate.";
 const TERMINAL_GATE_ATTEMPTS: usize = 2;
@@ -4101,6 +4161,315 @@ async fn next_delegation_snapshot(
     receiver.borrow_and_update().clone()
 }
 
+/// Bounded pacing for the live panel's *replaceable* publications (row 4.8).
+///
+/// The panel feed is `ToolProgress`: append-only `Output`/`Status` chunks are
+/// load-bearing (dropping one breaks the `complete_<stream>=true` contract) and
+/// stay verbatim, while a [`ToolProgressDecoration`] replaces the previous
+/// annotation, so an intermediate one carries nothing the latest does not.
+/// This is the run-path consumer of [`AdaptivePreviewCoalescer`]:
+///
+/// * the first decoration of a call is published immediately,
+/// * later ones are paced to the coalescer's interval/rate policy and collapsed
+///   to the latest state,
+/// * [`LivePreviewPacer::settle`] forces the held state at the call's terminal
+///   boundary, so a finished call can never leave the panel on stale state.
+struct LivePreviewPacer {
+    coalescer: AdaptivePreviewCoalescer,
+    pending: Option<ToolProgressDecoration>,
+    published: u64,
+    coalesced: u64,
+}
+
+impl LivePreviewPacer {
+    fn new() -> Self {
+        Self {
+            coalescer: AdaptivePreviewCoalescer::new(),
+            pending: None,
+            published: 0,
+            coalesced: 0,
+        }
+    }
+
+    /// Routes one replaceable update, returning the publication to forward now.
+    fn observe(
+        &mut self,
+        decoration: ToolProgressDecoration,
+        now: std::time::Instant,
+    ) -> Option<ToolProgressDecoration> {
+        let encoded_bytes =
+            decoration.label().len() + decoration.detail().map_or(0, str::len);
+        match self.coalescer.record(encoded_bytes, now) {
+            PreviewPublication::Immediate => {
+                self.pending = None;
+                self.published = self.published.saturating_add(1);
+                Some(decoration)
+            }
+            PreviewPublication::Scheduled(_) => {
+                if self.pending.replace(decoration).is_some() {
+                    self.coalesced = self.coalesced.saturating_add(1);
+                }
+                None
+            }
+        }
+    }
+
+    /// The instant at which held state becomes publishable, if any is held.
+    fn flush_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        self.pending.as_ref()?;
+        self.coalescer
+            .deadline_in(now)
+            .map(|remaining| now + remaining)
+    }
+
+    /// Publishes held state if its pace deadline has passed.
+    fn take_due(&mut self, now: std::time::Instant) -> Option<ToolProgressDecoration> {
+        self.coalescer.take_due(now)?;
+        self.published = self.published.saturating_add(1);
+        self.pending.take()
+    }
+
+    /// Publishes held state unconditionally (completion, error, cancellation).
+    fn settle(&mut self, now: std::time::Instant) -> Option<ToolProgressDecoration> {
+        let pending = self.pending.take()?;
+        self.coalescer.force(now, 0);
+        self.published = self.published.saturating_add(1);
+        Some(pending)
+    }
+
+    /// Decorations published and intermediate states collapsed away.
+    fn stats(&self) -> (u64, u64) {
+        (self.published, self.coalesced)
+    }
+}
+
+/// Routes one accepted progress item to the live panel.
+///
+/// Replaceable decorations go through `pacer`; every append-only flavor is
+/// forwarded unchanged.
+fn forward_tool_progress(
+    progress: ToolProgress,
+    pacer: &mut LivePreviewPacer,
+    now: std::time::Instant,
+) -> Option<ToolProgress> {
+    match progress {
+        ToolProgress::Decoration(decoration) => pacer
+            .observe(decoration, now)
+            .map(ToolProgress::Decoration),
+        verbatim => Some(verbatim),
+    }
+}
+
+/// Opt-in durable partial-output checkpointing for one tool's live calls (row
+/// 4.7).
+///
+/// The host names the tool, supplies the durable replacement sink, and chooses
+/// the cadence; the run path owns publishing. A name that matches no registered
+/// tool costs checkpoints and nothing else — it can never change a result.
+#[cfg(any(unix, windows))]
+#[derive(Clone)]
+struct PartialOutputCheckpointConfig {
+    tool: String,
+    sink: Arc<dyn PartialOutputCheckpointSink>,
+    interval: Duration,
+    totals: Arc<PartialOutputCheckpointTotals>,
+}
+
+/// Observable counters for the run path's checkpoint publications.
+///
+/// `published` is the number of snapshots the sink accepted, `paced` the
+/// observations the publisher collapsed away (interval or duplicate), and
+/// `failures` the storage faults. A failure is bookkeeping only: it never
+/// changes a tool result, and it never becomes durable state.
+#[cfg(any(unix, windows))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PartialOutputCheckpointStats {
+    /// Bounded snapshots handed to the sink.
+    pub published: u64,
+    /// Observations suppressed by the interval or by duplicate suppression.
+    pub paced: u64,
+    /// Sink refusals (storage faults).
+    pub failures: u64,
+}
+
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+struct PartialOutputCheckpointTotals {
+    published: AtomicU64,
+    paced: AtomicU64,
+    failures: AtomicU64,
+}
+
+#[cfg(any(unix, windows))]
+impl PartialOutputCheckpointTotals {
+    fn stats(&self) -> PartialOutputCheckpointStats {
+        PartialOutputCheckpointStats {
+            published: self.published.load(Ordering::Relaxed),
+            paced: self.paced.load(Ordering::Relaxed),
+            failures: self.failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Run-path consumer of [`BashCheckpointPublisher`] for one live invocation.
+///
+/// Pi's durability contract makes the *harness* replace
+/// `pendingToolOutput(operationId, invocationId)` while a call is live, and the
+/// tool own the cadence and the "this update is a complete bounded snapshot"
+/// claim. The cadence, the byte bound and duplicate suppression here are exactly
+/// the publisher's; the durable replacement is the host's
+/// [`PartialOutputCheckpointSink`]. The values live only as long as the call
+/// does, so a settled invocation has nothing left to republish, and only
+/// bounded state is retained: at most [`BASH_CHECKPOINT_MAX_BYTES`] per stream,
+/// which is also the cap applied to the published snapshot.
+#[cfg(any(unix, windows))]
+struct LivePartialOutput {
+    sink: Arc<dyn PartialOutputCheckpointSink>,
+    publisher: BashCheckpointPublisher,
+    streams: [PartialStream; 2],
+    totals: Arc<PartialOutputCheckpointTotals>,
+}
+
+/// Bytes of one stream the run-path tracker retains.
+///
+/// Half of the published cap minus a header reserve, so the rendered snapshot
+/// (both stream headers plus both retained tails) always fits
+/// [`BASH_CHECKPOINT_MAX_BYTES`] with its `stdout: N bytes seen` header intact
+/// even after the publisher's final bounding fence.
+#[cfg(any(unix, windows))]
+const PARTIAL_STREAM_CAP: usize = BASH_CHECKPOINT_MAX_BYTES / 2 - PARTIAL_HEADER_RESERVE;
+/// Per-stream budget reserved for the snapshot header.
+#[cfg(any(unix, windows))]
+const PARTIAL_HEADER_RESERVE: usize = 512;
+
+/// Bounded, newest-bytes-retaining accumulation of one stream.
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+struct PartialStream {
+    seen: u64,
+    tail: Vec<u8>,
+    elided: bool,
+}
+
+#[cfg(any(unix, windows))]
+impl PartialStream {
+    /// Appends live bytes, keeping at most [`PARTIAL_STREAM_CAP`] of the newest
+    /// output on a UTF-8 boundary.
+    fn push(&mut self, bytes: &[u8]) {
+        self.seen = self.seen.saturating_add(bytes.len() as u64);
+        self.tail.extend_from_slice(bytes);
+        if self.tail.len() <= PARTIAL_STREAM_CAP {
+            return;
+        }
+        self.elided = true;
+        let mut start = self.tail.len() - PARTIAL_STREAM_CAP;
+        while start < self.tail.len() && !is_utf8_boundary(&self.tail, start) {
+            start += 1;
+        }
+        self.tail.drain(..start);
+    }
+
+    fn render(&self, name: &str) -> String {
+        if self.seen == 0 {
+            return format!("{name}: 0 bytes seen");
+        }
+        let text = String::from_utf8_lossy(&self.tail);
+        let text = text.trim_end_matches('\n');
+        let elided = if self.elided {
+            " (earlier bytes elided)"
+        } else {
+            ""
+        };
+        format!(
+            "{name}: {} bytes seen{elided}, showing the newest {} bytes\n{}",
+            self.seen,
+            self.tail.len(),
+            text
+        )
+    }
+}
+
+/// Whether `index` starts a UTF-8 code point.
+#[cfg(any(unix, windows))]
+fn is_utf8_boundary(bytes: &[u8], index: usize) -> bool {
+    index >= bytes.len() || (bytes[index] & 0xC0) != 0x80
+}
+
+/// Renders the complete replaceable snapshot for one invocation.
+///
+/// It shares the tool layer's `"{stream}: {n} bytes seen"` header so recovery
+/// reads one shape from either mechanism, keeps the newest bytes of each stream
+/// on a code-point boundary, and deliberately never emits
+/// `complete_<stream>=true`: a checkpoint must not be readable as proof that the
+/// command finished.
+#[cfg(any(unix, windows))]
+fn render_partial_output(streams: &[PartialStream; 2]) -> String {
+    format!(
+        "{}\n{}",
+        streams[0].render("stdout"),
+        streams[1].render("stderr")
+    )
+}
+
+#[cfg(any(unix, windows))]
+impl LivePartialOutput {
+    /// Creates the tracker for `call` when the host's opt-in names that tool.
+    fn for_call(config: &PartialOutputCheckpointConfig, call: &str) -> Option<Self> {
+        (config.tool == call).then(|| Self {
+            sink: Arc::clone(&config.sink),
+            publisher: BashCheckpointPublisher::new(config.interval),
+            streams: [PartialStream::default(), PartialStream::default()],
+            totals: Arc::clone(&config.totals),
+        })
+    }
+
+    /// Records one drained progress item, publishing only replaceable,
+    /// bounded, complete output snapshots.
+    fn observe_progress(&mut self, progress: &ToolProgress, now: std::time::Instant) {
+        if let ToolProgress::Output { stream, bytes } = progress {
+            self.observe_output(*stream, bytes, now);
+        }
+    }
+
+    /// Records live output and publishes the snapshot the publisher admits.
+    ///
+    /// Returns the published snapshot for observability/tests. A sink refusal is
+    /// counted and dropped: the command's own result is unaffected.
+    fn observe_output(
+        &mut self,
+        stream: OutputStream,
+        bytes: &[u8],
+        now: std::time::Instant,
+    ) -> Option<String> {
+        let slot = match stream {
+            OutputStream::Stdout => &mut self.streams[0],
+            OutputStream::Stderr => &mut self.streams[1],
+        };
+        slot.push(bytes);
+        if !self.publisher.is_due(now) {
+            self.publisher.note_before_interval();
+            self.totals.paced.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let snapshot = BashCheckpointPublisher::bound_snapshot(&render_partial_output(&self.streams));
+        let Some(published) = self.publisher.observe(&snapshot, now) else {
+            self.totals.paced.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        match self.sink.checkpoint_partial_output(&published) {
+            Ok(()) => {
+                self.totals.published.fetch_add(1, Ordering::Relaxed);
+                Some(published)
+            }
+            Err(_) => {
+                self.publisher.note_failure();
+                self.totals.failures.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+}
+
 /// Result of applying one drained tool-progress item to the run.
 enum ProgressSettlement {
     /// Cancellation took precedence before the item was accepted; semantic
@@ -5366,6 +5735,9 @@ impl Agent {
             max_output_tokens,
             service_tier: None,
             prompt_model_source: None,
+            tool_prompt_section: false,
+            #[cfg(any(unix, windows))]
+            partial_output_checkpoints: None,
             prompt_color: None,
             prompt_display_text: None,
             max_session_tokens: None,
@@ -5933,7 +6305,7 @@ impl Agent {
     /// as autonomous capacity checks, without mutating the session.
     pub fn request_context_estimate(&self) -> Result<RequestContextEstimate, SessionError> {
         let messages = self.session.context_ref()?;
-        let system = self.system.clone();
+        let system = self.model_visible_system(true);
         let tools = self.extensions.tool_definitions();
         Ok(reconcile_context_estimate(
             &self.session,
@@ -5947,7 +6319,7 @@ impl Agent {
     /// Build the detailed, provider-reconciled context categories on demand.
     pub fn request_context_breakdown(&self) -> Result<ContextBreakdown, SessionError> {
         let messages = self.session.context_ref()?;
-        let system = self.system.clone();
+        let system = self.model_visible_system(true);
         let tools = self.extensions.tool_definitions();
         Ok(context_breakdown(
             &self.session,
@@ -6139,6 +6511,122 @@ impl Agent {
     /// Returns the selected provider service tier, if any.
     pub fn service_tier(&self) -> Option<ServiceTier> {
         self.service_tier
+    }
+
+    /// Enables durable partial-output checkpoints for live calls of `tool`.
+    ///
+    /// Row 4.7's harness half: while an invocation of the named tool is live, the
+    /// run path republishes a bounded, complete, replaceable snapshot of the
+    /// output it has streamed so far to `sink`, at `interval` cadence
+    /// ([`BashCheckpointPublisher`] policy: first observation immediate, at most
+    /// one publication per interval, identical snapshots suppressed, snapshot
+    /// capped at [`BASH_CHECKPOINT_MAX_BYTES`] with the newest bytes kept on a
+    /// code-point boundary). The name is matched exactly against the executing
+    /// tool's name; an unmatched name costs checkpoints and nothing else.
+    ///
+    /// A checkpoint is auxiliary observation data: it is never persisted in the
+    /// session log, never becomes a tool result, never reaches the model, and
+    /// never claims the command finished (no `complete_<stream>=true`). Nothing
+    /// is published before the call starts or after its result is committed, so a
+    /// settled invocation is never republished as progress. A host that instead
+    /// constructs its own checkpointing tool (for example
+    /// [`CheckpointedBashTool`](crate::tools::bash::CheckpointedBashTool))
+    /// should not also enable this, so no invocation is published twice.
+    ///
+    /// Disabled by default: an unopted host keeps byte-identical tool output and
+    /// no extra durable writes.
+    #[cfg(any(unix, windows))]
+    pub fn enable_partial_output_checkpoints(
+        &mut self,
+        tool: impl Into<String>,
+        sink: Arc<dyn PartialOutputCheckpointSink>,
+        interval: Duration,
+    ) {
+        self.partial_output_checkpoints = Some(PartialOutputCheckpointConfig {
+            tool: tool.into(),
+            sink,
+            interval,
+            totals: Arc::new(PartialOutputCheckpointTotals::default()),
+        });
+    }
+
+    /// Enables checkpoints for `tool` at Pi's bash cadence.
+    #[cfg(any(unix, windows))]
+    pub fn enable_default_partial_output_checkpoints(
+        &mut self,
+        tool: impl Into<String>,
+        sink: Arc<dyn PartialOutputCheckpointSink>,
+    ) {
+        self.enable_partial_output_checkpoints(tool, sink, BASH_CHECKPOINT_INTERVAL);
+    }
+
+    /// Disables partial-output checkpoints and drops their counters.
+    #[cfg(any(unix, windows))]
+    pub fn disable_partial_output_checkpoints(&mut self) {
+        self.partial_output_checkpoints = None;
+    }
+
+    /// Publication counters of the enabled checkpoint consumer, if any.
+    #[cfg(any(unix, windows))]
+    pub fn partial_output_checkpoint_stats(&self) -> Option<PartialOutputCheckpointStats> {
+        self.partial_output_checkpoints
+            .as_ref()
+            .map(|config| config.totals.stats())
+    }
+
+    /// Enables or disables the model-visible "available tools" section.
+    ///
+    /// The section is rendered from [`collect_tool_prompt_contributions`] over
+    /// the tools that are registered when a run starts, so the snippet and
+    /// guidelines a host reads are exactly the ones the executing tool
+    /// declares. It is appended to the run's system prompt before the first
+    /// request and stays fixed for that run — the provider prefix never changes
+    /// mid-run — and is bounded in bytes and in tool count, so no registration
+    /// can widen a prompt without limit.
+    ///
+    /// Disabled by default: a host that owns its own prompt assembly keeps a
+    /// byte-identical system prompt until it opts in. A run that exposes no
+    /// tools (for example [`Agent::prompt_without_tools`]) never carries the
+    /// section, so a tool-free run cannot advertise tools. An answer-only turn
+    /// inside a tool-bearing run withholds the tool schemas from that request
+    /// while the run prefix stays stable; that is the same contract a host
+    /// system prompt that names its tools already has.
+    pub fn set_tool_prompt_section_enabled(&mut self, enabled: bool) {
+        self.tool_prompt_section = enabled;
+    }
+
+    /// Whether the model-visible tool section is enabled.
+    pub fn tool_prompt_section_enabled(&self) -> bool {
+        self.tool_prompt_section
+    }
+
+    /// Prompt contributions of the currently registered tools, in wire order.
+    ///
+    /// Presentation only: it is the same collection the run uses to build the
+    /// opt-in model-visible tool section, exposed so a host can render its own
+    /// prompt from the tools that will actually execute.
+    pub fn tool_prompt_contributions(&self) -> Vec<ToolPromptContribution> {
+        let (_, tools) = self.extensions.tool_snapshot();
+        collect_tool_prompt_contributions(tools.iter().map(|tool| tool.as_ref()))
+    }
+
+    /// The system prompt this agent's next model request begins from.
+    ///
+    /// When the tool section is enabled and `tools_enabled` holds, the
+    /// registered tools' bounded snippet/guideline section is appended. The
+    /// result is deterministic for a given registration and system prompt, and
+    /// is what both the live run and the idle context estimates report.
+    fn model_visible_system(&self, tools_enabled: bool) -> String {
+        if !self.tool_prompt_section || !tools_enabled {
+            return self.system.clone();
+        }
+        let (_, tools) = self.extensions.tool_snapshot();
+        let section = render_tool_prompt_section(tools.iter().map(|tool| tool.as_ref()));
+        match section {
+            None => self.system.clone(),
+            Some(section) if self.system.is_empty() => section,
+            Some(section) => format!("{}\n\n{section}", self.system),
+        }
     }
 
     /// Replaces the durable active session at an idle boundary.
@@ -6406,7 +6894,7 @@ impl Agent {
             .compaction_model
             .clone()
             .unwrap_or_else(|| model.clone());
-        let system = self.system.clone();
+        let system = self.model_visible_system(tools_enabled);
         let sandbox = self.sandbox.clone();
         let extension_host = self.extensions.clone();
         let (initial_tool_revision, initial_tools) = extension_host.tool_snapshot();
@@ -6454,6 +6942,11 @@ impl Agent {
         let max_network_wait = self.max_network_wait;
         let owner_tool_images_enabled = self.owner_tool_images_enabled;
         let stream_delegation = self.delegation.clone();
+        // Row 4.7: the host's opt-in, captured before the session borrow, so the
+        // run can publish live partial-output checkpoints without touching the
+        // session log.
+        #[cfg(any(unix, windows))]
+        let partial_output_checkpoints = self.partial_output_checkpoints.clone();
         let run_delegation = self.delegation.clone();
         let mut delegation_telemetry = self
             .delegation
@@ -8080,6 +8573,18 @@ impl Agent {
                         let started_at = Arc::new(AtomicU64::new(u64::MAX));
                         let started_at_marker = Arc::clone(&started_at);
                         let policy_decision_slot = Arc::new(Mutex::new(None));
+                        // Row 4.8: the live panel's replaceable publications are
+                        // paced for the whole call, and forced at its terminal
+                        // boundary so a finished call never leaves stale state.
+                        let mut live_preview = LivePreviewPacer::new();
+                        // Row 4.7: the harness half of durable partial-output
+                        // checkpoints. The tracker is created per invocation and
+                        // dropped with the call, so a settled call has nothing
+                        // left to republish.
+                        #[cfg(any(unix, windows))]
+                        let mut live_partial_output = partial_output_checkpoints
+                            .as_ref()
+                            .and_then(|config| LivePartialOutput::for_call(config, &call.name));
                         let result: Result<ToolOutput, ToolError> = if answer_only {
                             Err(ToolError::new(format!(
                                 "tool call `{}` was not executed: the user requested an immediate final answer without tools",
@@ -8218,6 +8723,12 @@ impl Agent {
                                 // Cancellation drops the pinned future, which
                                 // kills any child process tree it spawned.
                                 let outcome = loop {
+                                    // Row 4.8's trailing timer: one deadline,
+                                    // recomputed per wake, that publishes the
+                                    // held replaceable state exactly once.
+                                    let flush_at = live_preview
+                                        .flush_deadline(std::time::Instant::now())
+                                        .map(tokio::time::Instant::from_std);
                                     tokio::select! {
                                         biased;
                                         _ = abort.wait() => break None,
@@ -8249,12 +8760,32 @@ impl Agent {
                                                     ProgressSettlement::Cancelled => break None,
                                                     ProgressSettlement::Settled => {}
                                                     ProgressSettlement::Emit(p) => {
-                                                        let ev = AgentEvent::ToolProgress {
-                                                            id: call.id.clone(),
-                                                            progress: p,
-                                                        };
-                                                        notify_observers(&observers, &ev);
-                                                        yield ev;
+                                                        // Row 4.7: publish the
+                                                        // bounded live snapshot
+                                                        // before the panel sees
+                                                        // the chunk, so durability
+                                                        // never lags the panel.
+                                                        #[cfg(any(unix, windows))]
+                                                        if let Some(checkpoints) =
+                                                            live_partial_output.as_mut()
+                                                        {
+                                                            checkpoints.observe_progress(
+                                                                &p,
+                                                                std::time::Instant::now(),
+                                                            );
+                                                        }
+                                                        if let Some(progress) = forward_tool_progress(
+                                                            p,
+                                                            &mut live_preview,
+                                                            std::time::Instant::now(),
+                                                        ) {
+                                                            let ev = AgentEvent::ToolProgress {
+                                                                id: call.id.clone(),
+                                                                progress,
+                                                            };
+                                                            notify_observers(&observers, &ev);
+                                                            yield ev;
+                                                        }
                                                     }
                                                 }
                                             }
@@ -8279,6 +8810,24 @@ impl Agent {
                                                 None => delegation_telemetry = None,
                                             }
                                         },
+                                        _ = tokio::time::sleep_until(
+                                            flush_at.unwrap_or_else(tokio::time::Instant::now)
+                                        ), if flush_at.is_some() => {
+                                            // Publish the collapsed latest
+                                            // replaceable state once its pace
+                                            // deadline passed. Nothing else is
+                                            // ever held back.
+                                            if let Some(decoration) = live_preview
+                                                .take_due(std::time::Instant::now())
+                                            {
+                                                let ev = AgentEvent::ToolProgress {
+                                                    id: call.id.clone(),
+                                                    progress: ToolProgress::Decoration(decoration),
+                                                };
+                                                notify_observers(&observers, &ev);
+                                                yield ev;
+                                            }
+                                        },
                                     }
                                 };
                                 let result = match outcome {
@@ -8292,6 +8841,19 @@ impl Agent {
                                         Err(cancelled_tool_error())
                                     }
                                 };
+                                // Terminal boundary: the call is over, so the
+                                // panel gets the collapsed latest decoration
+                                // now, whatever the pace deadline says.
+                                if let Some(decoration) =
+                                    live_preview.settle(std::time::Instant::now())
+                                {
+                                    let ev = AgentEvent::ToolProgress {
+                                        id: call.id.clone(),
+                                        progress: ToolProgress::Decoration(decoration),
+                                    };
+                                    notify_observers(&observers, &ev);
+                                    yield ev;
+                                }
                                 if effect_committed.load(Ordering::Acquire) {
                                     let (output, is_error) = match &result {
                                         Ok(output) => (output.text.as_str(), output.is_error()),
@@ -8430,19 +8992,36 @@ impl Agent {
                     resolve_tool_delivery_after_persistence(&result, sandbox.max_output_bytes);
 
                     // ── Drain accepted progress before ToolFinished ───────
+                    let mut drain_preview = LivePreviewPacer::new();
                     while let Ok(p) = progress_rx.try_recv() {
                         match settle_tool_progress(p, cancellation_won, session) {
                             ProgressSettlement::Cancelled => continue,
                             ProgressSettlement::Settled => {}
                             ProgressSettlement::Emit(p) => {
-                                let ev = AgentEvent::ToolProgress {
-                                    id: call.id.clone(),
-                                    progress: p,
-                                };
-                                notify_observers(&observers, &ev);
-                                yield ev;
+                                if let Some(progress) = forward_tool_progress(
+                                    p,
+                                    &mut drain_preview,
+                                    std::time::Instant::now(),
+                                ) {
+                                    let ev = AgentEvent::ToolProgress {
+                                        id: call.id.clone(),
+                                        progress,
+                                    };
+                                    notify_observers(&observers, &ev);
+                                    yield ev;
+                                }
                             }
                         }
+                    }
+                    // The call is over: whatever replaceable state the drain
+                    // collapsed reaches the panel before ToolFinished.
+                    if let Some(decoration) = drain_preview.settle(std::time::Instant::now()) {
+                        let ev = AgentEvent::ToolProgress {
+                            id: call.id.clone(),
+                            progress: ToolProgress::Decoration(decoration),
+                        };
+                        notify_observers(&observers, &ev);
+                        yield ev;
                     }
                     // Report dropped progress if any.
                     let (dropped_bytes, dropped_events) = progress_sink.take_dropped();
@@ -8711,6 +9290,87 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PromptTool {
+        name: &'static str,
+        snippet: Option<String>,
+        guidelines: &'static [&'static str],
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for PromptTool {
+        fn definition(&self) -> ToolDef {
+            ToolDef {
+                name: self.name.to_owned(),
+                description: format!("{} tool", self.name),
+                parameters: serde_json::json!({"type": "object"}),
+                constrained_sampling: None,
+            }
+        }
+
+        fn prompt_snippet(&self) -> Option<&str> {
+            self.snippet.as_deref()
+        }
+
+        fn prompt_guidelines(&self) -> &[&str] {
+            self.guidelines
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new("executed"))
+        }
+    }
+
+    #[test]
+    fn tool_prompt_section_renders_snippets_and_guidelines_and_skips_silent_tools() {
+        let listed = PromptTool {
+            name: "listed",
+            snippet: Some("run the thing".to_owned()),
+            guidelines: &["prefer flags", "report failures"],
+        };
+        let silent = PromptTool {
+            name: "silent",
+            snippet: None,
+            guidelines: &["never rendered"],
+        };
+        let section = render_tool_prompt_section([&listed as &dyn Tool, &silent as &dyn Tool])
+            .expect("one contributing tool renders a section");
+        assert_eq!(
+            section,
+            "Available tools:\n- listed: run the thing\n  - prefer flags\n  - report failures"
+        );
+        // A registration that contributes nothing must not enlarge a prompt.
+        assert!(render_tool_prompt_section([&silent as &dyn Tool]).is_none());
+        assert!(render_tool_prompt_section(Vec::<&dyn Tool>::new()).is_none());
+    }
+
+    #[test]
+    fn tool_prompt_section_is_bounded_on_a_character_boundary() {
+        let oversized = "é".repeat(MAX_TOOL_PROMPT_SECTION_BYTES);
+        let huge = PromptTool {
+            name: "huge",
+            snippet: Some(oversized),
+            guidelines: &[],
+        };
+        let section = render_tool_prompt_section([&huge as &dyn Tool]).unwrap();
+        assert!(
+            section.len() <= MAX_TOOL_PROMPT_SECTION_BYTES,
+            "the section must respect its byte budget: {}",
+            section.len()
+        );
+        assert!(section.ends_with('…'), "truncation is marked: {:?}", &section[section.len().saturating_sub(8)..]);
+        assert!(
+            section.is_char_boundary(section.len()),
+            "a truncated section stays valid UTF-8"
+        );
+        // Truncation happens past the header and first entry, so the model still
+        // sees which tool the elided detail belongs to.
+        assert!(section.starts_with("Available tools:\n- huge: é"));
+    }
 
     #[test]
     fn prepared_turn_rejects_stale_durable_head_system_and_tool_generation() {
@@ -9953,6 +10613,166 @@ mod tests {
         assert_eq!(options.previous_response_id, None);
         assert!(!options.store);
         assert_eq!(options.context_management, None);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[derive(Default)]
+    struct RecordingCheckpointSink {
+        snapshots: Mutex<Vec<String>>,
+        refuse: bool,
+    }
+
+    #[cfg(any(unix, windows))]
+    impl RecordingCheckpointSink {
+        fn snapshots(&self) -> Vec<String> {
+            self.snapshots.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    impl PartialOutputCheckpointSink for RecordingCheckpointSink {
+        fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
+            if self.refuse {
+                return Err(ToolError::new("storage fault"));
+            }
+            self.snapshots.lock().unwrap().push(snapshot.to_owned());
+            Ok(())
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    fn checkpoint_config(
+        sink: Arc<RecordingCheckpointSink>,
+    ) -> (PartialOutputCheckpointConfig, Arc<PartialOutputCheckpointTotals>) {
+        let totals = Arc::new(PartialOutputCheckpointTotals::default());
+        (
+            PartialOutputCheckpointConfig {
+                tool: "bash".to_owned(),
+                sink,
+                interval: BASH_CHECKPOINT_INTERVAL,
+                totals: Arc::clone(&totals),
+            },
+            totals,
+        )
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn partial_output_checkpoints_pace_bound_and_never_claim_completion() {
+        let sink = Arc::new(RecordingCheckpointSink::default());
+        let (config, totals) = checkpoint_config(Arc::clone(&sink));
+        let start = std::time::Instant::now();
+        let mut live = LivePartialOutput::for_call(&config, "bash").expect("the opt-in names bash");
+
+        // The opt-in is per tool: another tool's calls are not published.
+        assert!(LivePartialOutput::for_call(&config, "search").is_none());
+
+        // First observation publishes immediately.
+        let first = live
+            .observe_output(OutputStream::Stdout, b"alpha\n", start)
+            .expect("first observation publishes");
+        assert!(first.contains("stdout: 6 bytes seen"), "{first}");
+        assert!(first.contains("alpha"), "{first}");
+
+        // Before the interval: paced away, counted, never published.
+        assert!(
+            live.observe_output(
+                OutputStream::Stdout,
+                b"beta\n",
+                start + Duration::from_millis(1)
+            )
+            .is_none()
+        );
+        assert_eq!(sink.snapshots().len(), 1, "one publication so far");
+        assert_eq!(totals.stats().paced, 1);
+
+        // Past the interval a changed snapshot publishes again, and an unchanged
+        // one is duplicate-suppressed instead of re-published.
+        let second = live
+            .observe_output(
+                OutputStream::Stdout,
+                b"gamma\n",
+                start + BASH_CHECKPOINT_INTERVAL,
+            )
+            .expect("interval elapsed with new output");
+        assert!(second.contains("alpha\nbeta\ngamma"), "{second}");
+        assert!(live
+            .observe_output(
+                OutputStream::Stderr,
+                b"",
+                start + BASH_CHECKPOINT_INTERVAL * 2
+            )
+            .is_none());
+        assert_eq!(sink.snapshots().len(), 2);
+
+        // Non-output progress is not checkpointed at all.
+        live.observe_progress(
+            &ToolProgress::Status("still running".into()),
+            start + BASH_CHECKPOINT_INTERVAL * 3,
+        );
+        assert_eq!(sink.snapshots().len(), 2);
+
+        // A large burst keeps the newest bytes under the row's 50 KiB bound, keeps
+        // its header, and stays a checkpoint: no publication may claim the
+        // command finished.
+        let burst_bytes = 4 * BASH_CHECKPOINT_MAX_BYTES;
+        let mut burst = std::iter::repeat(b'x').take(burst_bytes).collect::<Vec<u8>>();
+        burst.extend_from_slice(b"NEWEST-MARKER");
+        let bounded = live
+            .observe_output(
+                OutputStream::Stdout,
+                &burst,
+                start + BASH_CHECKPOINT_INTERVAL * 4,
+            )
+            .expect("a changed snapshot publishes");
+        assert!(
+            bounded.len() <= BASH_CHECKPOINT_MAX_BYTES,
+            "snapshot is bounded: {} bytes",
+            bounded.len()
+        );
+        assert!(
+            bounded.contains(&format!(
+                "stdout: {} bytes seen (earlier bytes elided)",
+                6 + 5 + 6 + burst_bytes as u64 + 13
+            )),
+            "the header survives bounding: {}",
+            &bounded[..bounded.len().min(200)]
+        );
+        assert!(
+            bounded.ends_with("NEWEST-MARKER"),
+            "the newest bytes are the ones kept"
+        );
+        let stats = totals.stats();
+        assert_eq!(stats.published, 3);
+        assert!(stats.failures == 0);
+        for snapshot in sink.snapshots() {
+            assert!(
+                !snapshot.contains("complete_stdout=true")
+                    && !snapshot.contains("complete_stderr=true"),
+                "a checkpoint never claims completion: {snapshot}"
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_refused_checkpoint_is_counted_and_never_becomes_a_tool_result() {
+        let sink = Arc::new(RecordingCheckpointSink {
+            snapshots: Mutex::new(Vec::new()),
+            refuse: true,
+        });
+        let (config, totals) = checkpoint_config(Arc::clone(&sink));
+        let start = std::time::Instant::now();
+        let mut live = LivePartialOutput::for_call(&config, "bash").unwrap();
+
+        assert!(
+            live.observe_output(OutputStream::Stdout, b"alpha\n", start)
+                .is_none(),
+            "a storage fault is not a publication"
+        );
+        assert_eq!(totals.stats().failures, 1);
+        assert_eq!(totals.stats().published, 0);
+        assert!(sink.snapshots().is_empty());
     }
 
     #[test]
