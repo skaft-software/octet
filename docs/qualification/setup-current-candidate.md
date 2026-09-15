@@ -35,8 +35,11 @@ The dedicated `crates/octet-coding-agent/tests/setup_tui_acceptance.rs` fixture
 uses isolated HOME/workspace/session directories, a VT100 parser, private
 loopback-only HTTP, and no live model or auth flow. The fixture now bounds each
 PTY read poll and retained transcript, bounds server reads/writes and wake-up,
-and kills/reaps the PTY process group on timeout or drop. These are fixture
-boundaries; no production source or scrolling code was changed.
+checks the stop flag before processing its teardown wake-up, and kills/reaps
+the PTY process group on timeout or drop with a direct-child fallback. The setup
+CLI dispatch also isolates its synchronous provider setup from Tokio. These are
+fixture and dispatch boundaries; no production TUI lifecycle or scrolling code
+was changed.
 
 | Journey | Evidence in the dedicated test | Current qualification state |
 | --- | --- | --- |
