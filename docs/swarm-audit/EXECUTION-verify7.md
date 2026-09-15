@@ -80,3 +80,29 @@ All test names cited in docs/parity/{tools,editor,codecs,providers}.md exist exa
   interpolates secrets, and validates shell-safe tokens; no credential reaches a display string or argv.
 
 START 2026-09-15T17:13:23Z verify8 alive
+
+## verify8 independent pass — 2026-09-15 13:13-13:43 EDT (HEAD 9c43111d -> 7be2dc96)
+Full adversarial report: `docs/parity/VERIFICATION.md` (created by verify8; it did
+not exist before — the predecessor's report was only this file).
+Key results (all from verify8's own runs; PYTHON/JS suites + Rust targets):
+- `cargo check --workspace --all-targets --locked` EXIT=0 (13:13); tree did not
+  compile ~13:45 (in-flight worker edit, E0596 responses_ws.rs:1032).
+- `cargo test -p octet-ai`: RED at 13:35 (lib 4 failed + 1 hang) -> GREEN at 13:42
+  (all 13 targets, lib 351 passed). Fixed mid-pass by the owner.
+- `cargo test -p sexy-tui-rs --no-fail-fast`: green (190 lib + all integration).
+- `cargo test -p octet-agent --test parity_tools|telemetry_conformance|read_concurrency_current`:
+  23/9/5 passed. `agent_run`: `websocket_connection_limit_is_retried_by_agent` FAILED.
+- `cargo test -p octet-coding-agent`: 5 named targets green (14/7/2/6/4);
+  **`--lib` RED: 1361 passed, 7 failed** (2 in unmodified files, deterministic).
+- Python: subagents 76 passed (contradiction from verify7 FIXED); sdk/python 1 failed
+  = environmental (`sdk/python/ygg_extension/` holds only a stale `__pycache__`,
+  so Python treats it as a namespace package; proven by an isolated copy that passes);
+  computer-use 93 OK; scripts 42+10 OK; imports aider 8 / cline 11 / pi 4.
+- apps/web `npm test` 2 failed / 297 passed (5000ms timeouts under load); the 2 pass
+  in isolation (5 passed, 3.14s); `tsc -b` EXIT=0.
+- Doc contradictions remaining: telemetry.md:76 (under-claims 3.5), providers.md:40
+  (`/fast` still inert), editor.md:125-141 (2c.3/2c.4 stale), extensions.md:30 count.
+- Fixed mid-pass: CHANGELOG.md (+143), `_latex_*.rs` now gitignored/staged-deleted.
+- New: redundant `#[allow(dead_code)]` x3 added by this work (telemetry schema.rs:156,
+  :261, spans.rs:244); `session_store.rs:1602 entry_index_revision` is new dead code.
+END verify8 13:43 EDT

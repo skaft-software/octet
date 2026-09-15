@@ -536,6 +536,9 @@ fn text_request() -> Request {
 enum WebSocketBehavior {
     Complete,
     CloseBeforeEvents,
+    /// The first accepted generation goes half-open before any output; every
+    /// later connection completes normally.
+    StallFirstThenComplete,
     DropAfterOutput,
     CloseAfterOutput,
     InvalidTextAfterOutput,
@@ -681,6 +684,22 @@ async fn handle_test_responses_connection(
 
         match behavior {
             WebSocketBehavior::CloseBeforeEvents => return Ok(()),
+            // `requests` already holds this connection's generation frame, so a
+            // count of one means this is the first attempt.
+            WebSocketBehavior::StallFirstThenComplete if requests.lock().await.len() == 1 => {
+                socket
+                    .send(WebSocketMessage::Text(
+                        serde_json::json!({
+                            "type": "response.created",
+                            "response": {"id": "resp-stalled"}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await?;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                return Ok(());
+            }
             WebSocketBehavior::Stall => {
                 // A genuinely half-open peer: it accepts `response.create`,
                 // sends the lifecycle prelude, and then holds the connection
@@ -725,6 +744,7 @@ async fn handle_test_responses_connection(
                 return Ok(());
             }
             WebSocketBehavior::Complete
+            | WebSocketBehavior::StallFirstThenComplete
             | WebSocketBehavior::DropAfterOutput
             | WebSocketBehavior::CloseAfterOutput
             | WebSocketBehavior::InvalidTextAfterOutput
@@ -1472,6 +1492,57 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1]["transport"], "http");
+}
+
+#[tokio::test]
+async fn responses_websocket_heartbeat_failure_resumes_on_a_fresh_socket() {
+    // The maintainer's long-session case: the provider accepts the generation
+    // and then the socket goes half-open before any output. The transport must
+    // reconnect within its bounded budget and let the replacement connection
+    // finish the turn: no lost turn, one lifecycle prelude, and every delta
+    // exactly once.
+    let server = TestResponsesServer::start(
+        WebSocketBehavior::StallFirstThenComplete,
+        fallback_responses_body(),
+    )
+    .await;
+    let model = websocket_test_model(&server.base_url);
+    let mut stream = AiClient::new()
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(30))
+        .with_initial_stream_timeout(Duration::from_secs(10))
+        .stream(
+            &model,
+            responses_request(vec![user_message("resume")], Some("session-resume")),
+        )
+        .await
+        .unwrap();
+    let mut text = String::new();
+    let mut started = 0;
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            StreamEvent::Started { .. } => started += 1,
+            StreamEvent::TextDelta { delta, .. } => text.push_str(&delta),
+            StreamEvent::Finished(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "websocket", "no duplicated or gapped delta");
+    assert_eq!(
+        started, 1,
+        "the abandoned attempt's lifecycle prelude must not be duplicated"
+    );
+    // The provider saw the initial generation plus exactly one replay.
+    let generation_frames: Vec<_> = server
+        .requests()
+        .await
+        .into_iter()
+        .filter(|request| request.get("transport").is_none())
+        .collect();
+    assert_eq!(
+        generation_frames.len(),
+        2,
+        "a heartbeat failure recovers with one bounded reconnect: {generation_frames:?}"
+    );
 }
 
 #[tokio::test]

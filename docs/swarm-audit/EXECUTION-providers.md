@@ -327,3 +327,159 @@ START 2026-09-15T16:28:32Z ai6 alive
 START 2026-09-15T16:50:13Z ai7 alive
 
 START 2026-09-15T17:13:25Z ai8 alive
+
+## ai8 (2026-09-15T17:1x-18:xxZ): TASK 1 — Codex websocket drop-protection made real (P0)
+
+### Finding 1 — the row's code was already at HEAD, but `octet-ai` was RED and HANGING
+`responses_ws.rs` already contained reconnect/resume/heartbeat code at HEAD
+`9c43111d` (the parent's brief described the PRE-wave-6 file: `heartbeat_timeout`
+at :65/:775/:798/:930). Reproduced at HEAD with my own runs:
+- `cargo test -p octet-ai --lib` -> `FAILED. 4 failed` and
+  `responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded` printing
+  "has been running for over 60 seconds" and NEVER terminating (killed manually).
+- `cargo test -p octet-ai` stopped at the lib target, so the wave-6/7 regression
+  in `crates/octet-ai/tests/client_stream.rs` (6 failures) was INVISIBLE to the
+  verifier. All 6 exist unchanged at base `df5a7e80`
+  (`git diff df5a7e80 HEAD -- crates/octet-ai/tests/client_stream.rs` is empty).
+
+### Base comparison — evidence for "was it regressed?"
+Base source `git show df5a7e80:crates/octet-ai/src/responses_ws.rs`:
+- `failed_terminals_retire_before_publication_for_text_and_binary`: base ran
+  `alive.store(false); disable_key(&state,..).await;` BEFORE
+  `command.reply.send(Ok(value))` for every `connection_refresh` event (:850-860),
+  which is exactly what the test asserts -> it PASSED at base. This branch
+  published the provider failure first (the `Forwarded` outcome) -> **REGRESSED**.
+  Fixed by handing the event back unpublished and retiring in `run_connection`
+  before sending it (base ordering restored).
+- `fatal_events_retire_before_publishing_with_a_contended_pool`: base published
+  `heartbeat_timeout(..)` = `Transport{phase: Body, timeout: true}` (or
+  `Decode`), so `matches!(error, Transport|Decode)` held, and retirement happened
+  before publication -> it PASSED at base. The retire-before-publish property was
+  NOT regressed by this branch (the `Fatal` arm still retires first); only the
+  error CLASS changed, because this row deliberately replaces the replayable body
+  timeout with `StreamProtocolError::ResponseNotResumable`. Expectation updated
+  per injected failure (malformed frame -> `Decode`; detected drop after visible
+  output -> typed non-resumable with `visible_output: true`).
+- `client_stream.rs`: all 6 failures come from deliberate row changes, not from an
+  accidental regression: the row added (a) bounded retry of a dropped socket
+  before any output, (b) retry of provider-declared connection refreshes/stale
+  cursors, (c) the typed non-resumable terminal, (d) buffering of the lifecycle
+  prelude so a retry cannot publish an abandoned attempt's prelude twice.
+
+### Code changes (`crates/octet-ai/src/responses_ws.rs`, my path)
+1. `AttemptOutcome::Forwarded`/`GenerationEnd::Forwarded` now CARRY the provider
+   event instead of publishing it inside the pump; `run_connection` retires the
+   socket and fences the pool key BEFORE the event reaches the consumer (base
+   invariant `failed_terminals_retire_before_publication_*`).
+2. New `flush_pre_output`: this attempt's buffered `response.created`/
+   `in_progress` prelude is flushed (i) when a provider failure terminal ends the
+   attempt, and (ii) when the bounded budget is exhausted / resumption is
+   impossible and the pump returns a typed `Fatal`. A consumer that never gets
+   output still sees `Started`/`first_body_seen` (pre-row contract), while a
+   RETRY still rebuilds the prelude so nothing is published twice.
+3. `pump_generation` takes the prelude buffer from `run_generation` (cleared per
+   attempt); decode `Fatal` also flushes it.
+4. Hang fix (`reconnect_attempts_and_total_wait_are_bounded`): the fixture
+   scripted `MAX+2 = 5` connections but the transport uses exactly
+   `MAX+1 = 4` (1 accepted + one replay per attempt), so the scripted server
+   blocked forever on a 5th `accept` that never came. Script count corrected and
+   every scripted-server join is now bounded (`finish_scripted_server`), so a
+   future mismatch is a loud failure, never a hang.
+5. `a_drop_before_output_reconnects_and_resumes_with_each_delta_once`: the
+   replacement script now emits its own `response.in_progress`; the test asserts
+   the abandoned attempt's prelude is NOT duplicated (created==1, in_progress==1)
+   and that the replacement's prelude IS delivered. (The old expectation was
+   unreachable: attempt 2's script never sent `in_progress`.)
+6. `a_mid_stream_drop_resumes_from_the_cursor_with_each_delta_once`: the
+   `assert!(connection.alive)` expectation was wrong — after a cursor resume the
+   socket that dropped mid-generation is gone, and the actor correctly retires it
+   instead of advertising a dead socket as reusable. Replaced with the invariant
+   that matters plus a NEW pool-level follow-up: the key is not disabled, the
+   dead session is removed, and the next turn on that key dials a fresh session
+   and completes.
+
+### Behaviour change (user-visible; must appear in the PR body)
+"a heartbeat/transport failure is terminal and must not auto-replay" was REPLACED
+by "a heartbeat/transport failure before any consumer-visible output reconnects
+within a bounded budget (`MAX_SOCKET_RECONNECT_ATTEMPTS = 3`,
+`RECONNECT_TOTAL_BUDGET = 6s`, backoff 250ms->2s) and replays the full local
+body; a drop after output is resumed from the `(response_id, sequence_number)`
+cursor; the turn is terminal ONLY when the budget is exhausted or resumption is
+impossible, and then it fails closed with the typed
+`StreamProtocolError::ResponseNotResumable` (never a fabricated success)".
+Provider-declared rejections (`websocket_connection_limit_reached`,
+`previous_response_not_found`) are retried on a fresh socket, matching upstream
+`openai-codex-responses.ts:337-344`; the provider code survives in the bounded
+error `detail`.
+
+### Tests updated (client_stream.rs, my path) — each documents old vs new contract
+- `responses_websocket_failure_after_send_is_terminal`: now asserts the typed
+  non-resumable error with `attempts == 3` and exactly `1 + 3` provider
+  generation frames (the bound is observable end to end), no HTTP transport call.
+- `responses_websocket_connection_limit_retires_socket_and_falls_back`: keeps
+  `Started`/`first_body_seen`, asserts the bounded retry (`1 + 3`), asserts the
+  provider code survives in the typed error's `detail`, keeps the HTTP fallback.
+- `responses_websocket_failed_output_next_explicit_request_uses_full_http_replay`:
+  a post-output drop with no retained response is now the typed non-resumable
+  error instead of a replay-safe `TransportPhase::Body` timeout.
+- `responses_websocket_heartbeat_timeout_after_created_is_terminal` and
+  `..._heartbeat_failure_is_terminal_and_next_request_falls_back`: rewritten for
+  the new contract (bounded recovery, `attempts == 3`, heartbeat cause in the
+  detail, `1 + 3` frames, `Started` delivered by the final flush, HTTP fallback
+  for the caller's next request).
+- `responses_websocket_pongs_do_not_extend_response_idle_timeout`: keeps its
+  purpose (control Pongs must not extend model progress) and now states plainly
+  that the buffered prelude is never delivered when the consumer's own bound
+  expires first (`!first_body_seen`, `last_event_ms == None`).
+- NEW `responses_websocket_heartbeat_failure_resumes_on_a_fresh_socket` (parent
+  request): a genuinely HALF-OPEN first connection (`WebSocketBehavior::Stall`
+  now holds the socket open without reading probes instead of closing after
+  500ms) followed by a healthy replacement connection -> the turn RESUMES:
+  `text == "websocket"`, `Started` exactly once, one bounded reconnect, 2 frames.
+- Lib test `an_unrecoverable_mid_stream_drop_yields_the_typed_error_with_a_bounded_retry`
+  already pins the terminal-on-budget-exhaustion case (3 bounded resume attempts).
+
+### Store root cause (recorded, NOT changed — cross-boundary)
+`client.rs` installs a `ResponseResumer` only when `body_requests_storage(&body)`
+is true, i.e. the request asked the provider to retain the response. Every live
+Codex request is built by `ResponsesOptions::full_replay(...)`
+`store: false` in `crates/octet-agent/src/agent.rs`
+(`durable_responses_options:3672-3679`, `native_responses_options:3685-3698`), so
+a POST-OUTPUT drop still fails closed with `ResponseNotResumable` instead of
+resuming. Pre-output reconnect (the maintainer's long-first-token case) is
+unaffected. Missing primitive: those agent-side builders must opt into
+`store: true` (upstream Codex's retained session) on a `WebSocketPreferred` Codex
+endpoint, or the codec must be told by declaration data. `agent.rs` is another
+worker's file. Documented in `docs/parity/codecs.md` §1c.6.
+
+### Observed results (my runs)
+- `cargo test -p octet-ai --lib --locked` -> `ok. 351 passed; 0 failed; 0 ignored`
+  (was `FAILED. 4 failed` + one hang before this change).
+- `cargo test -p octet-ai --lib --locked -- --exact
+  responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded --nocapture`
+  -> `ok. 1 passed; ... finished in 1.79s` (previously >50 min, never terminated).
+- `cargo test -p octet-ai --locked` (whole package, 13 targets) -> `EXIT=0`:
+  lib 351, bedrock_current 5, client_batch 3, client_compact 18, client_complete
+  1, client_stream 38, coverage_manifest 3, google_current 2, mistral_current 16,
+  provider_discovery 4, public_api 1, smoke 1, doc-tests 1 — every target
+  `0 failed`, no hang.
+- `rustfmt --edition 2021 --check crates/octet-ai/src/responses_ws.rs`: my added
+  code is clean; the 22 remaining hunks are pre-existing (wave-6/7 code and older
+  tests) and were left alone (no workspace-wide rustfmt, per the brief).
+
+### Doc correction (parent/V2 request)
+`docs/parity/providers.md` no longer headlines Codex `service_tier` as unblocking
+`/fast`: the section is now "field landed; `/fast` NOT yet unblocked", states that
+no live run selects a tier, and names the exact missing primitive (the agent-side
+`ResponsesOptions` builders) as Gap 1, with the pricing multiplier as Gap 2.
+
+### CHANGELOG-ready bullet
+"Codex Responses websockets no longer kill a turn on a drop: a bounded-backoff
+reconnect (3 attempts, 6s ceiling, 250ms->2s backoff) replays the full local body
+when nothing visible was published, a mid-stream drop is resumed from the
+`(response_id, sequence_number)` cursor so every delta arrives exactly once, and
+the turn fails closed with a typed `ResponseNotResumable` error when resumption is
+impossible or the budget is spent — a provider failure still retires and fences
+the pooled session before the consumer can observe it."
+
+ai8: TASK 1 landed; octet-ai fully green (13 targets) with no hang.

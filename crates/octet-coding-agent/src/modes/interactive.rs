@@ -1538,19 +1538,19 @@ async fn logout_custom(
 /// nothing on the wire and must not claim otherwise.
 fn apply_fast_command(shell: &mut InteractiveShell, model: &Model, requested: Option<bool>) {
     if !commands::codex_fast_tier_endpoint(model) {
+        // Plain user language: the declared protocol and endpoint profile are
+        // engineering detail recorded in this function's doc comment, never
+        // rendered as internal enum names or module paths in the message.
         shell.error(format!(
-            "`/fast` requires a Codex Responses endpoint; {} declares {:?} with the {:?} responses profile",
+            "`/fast` is only available on Codex Responses routes; {} is not one, so the switch is not offered and nothing changed",
             commands::model_route_label(model),
-            model.spec.protocol,
-            model.endpoint.runtime.responses_profile,
         ));
         return;
     }
     let detail = concat!(
-        "the Codex `service_tier` field exists in octet-ai, but the live request ",
-        "path never sets `ResponsesOptions::service_tier` ",
-        "(missing primitive: the `ResponsesOptions` builders in ",
-        "crates/octet-agent/src/agent.rs), so nothing changed on the wire"
+        "this build's Codex request path does not send a service tier yet, so ",
+        "nothing changed on the wire; `/fast` stays inert until the request ",
+        "builder supports it"
     );
     match requested {
         Some(true) => shell.error(format!("`/fast on` not applied: {detail}")),
@@ -7918,20 +7918,27 @@ mod tests {
         apply_fast_command(&mut shell, &codex, Some(true));
         let on = shell.debug_error().expect("`/fast on` must report a state");
         assert!(on.contains("not applied"), "{on}");
-        assert!(on.contains("service_tier"), "{on}");
-        assert!(on.contains("octet-agent"), "{on}");
+        assert!(on.contains("nothing changed on the wire"), "{on}");
+        // User-facing prose never names internal APIs, modules, or enum
+        // variants. The engineering detail lives in the doc comment above.
+        for leak in ["::", "service_tier", "octet-agent", "agent.rs", "Response"] {
+            assert!(!on.contains(leak), "internal name {leak:?} leaked: {on}");
+        }
 
         apply_fast_command(&mut shell, &codex, None);
         let status = shell.debug_error().expect("`/fast` must report a state");
         assert!(status.contains("inert"), "{status}");
         assert!(status.contains("nothing changed on the wire"), "{status}");
+        assert!(!status.contains("::"), "{status}");
 
-        // A non-Codex route is refused with its declared protocol and profile.
+        // A non-Codex route is refused in plain language for the route it is.
         let anthropic = scripted_model("http://127.0.0.1:1");
         apply_fast_command(&mut shell, &anthropic, Some(true));
         let rejected = shell.debug_error().expect("rejection must report a state");
-        assert!(rejected.contains("AnthropicMessages"), "{rejected}");
-        assert!(rejected.contains("Default"), "{rejected}");
+        assert!(rejected.contains("only available on Codex Responses routes"), "{rejected}");
+        for leak in ["::", "AnthropicMessages", "Default"] {
+            assert!(!rejected.contains(leak), "internal name {leak:?} leaked: {rejected}");
+        }
     }
 
     #[tokio::test]
@@ -8214,10 +8221,10 @@ mod tests {
         let row = pickers::codex_context_menu_row(&surface);
         assert!(row.contains("272000"), "{row}");
         let lines = surface.summary_lines().join("\n");
-        assert!(lines.contains("272000"), "{lines}");
+        assert!(lines.contains("272K"), "{lines}");
         assert!(
-            lines.contains("Codex"),
-            "the surface must name the Codex working window it reports: {lines}"
+            lines.contains("effective 272K"),
+            "the surface must label the effective window it reports: {lines}"
         );
 
         // An above-standard-tier route renders its accounting as uncertain and
@@ -8229,7 +8236,12 @@ mod tests {
         assert!(pickers::codex_context_menu_row(&uncertain).contains("UNCERTAIN"));
         let lines = uncertain.summary_lines().join("\n");
         assert!(lines.contains("UNCERTAIN"), "{lines}");
-        assert!(lines.contains(octet_ai_operation_name()), "{lines}");
+        assert!(lines.contains("double-priced"), "{lines}");
+        assert!(
+            !lines.contains(octet_ai_operation_name()),
+            "the internal operation id must never be rendered: {lines}"
+        );
+        assert!(!lines.contains("::"), "{lines}");
         assert!(
             !lines.contains('$'),
             "no exact-looking figure may be rendered above the standard tier: {lines}"

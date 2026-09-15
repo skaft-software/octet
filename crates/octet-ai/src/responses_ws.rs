@@ -912,15 +912,7 @@ async fn publish_event(
             pre_output.push(value);
             return true;
         }
-        if !flush_pre_output(
-            reply,
-            pre_output,
-            pre_output_bytes,
-            visible,
-            progress,
-        )
-        .await
-        {
+        if !flush_pre_output(reply, pre_output, pre_output_bytes, visible, progress).await {
             return false;
         }
     }

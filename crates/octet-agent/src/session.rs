@@ -5,7 +5,14 @@
 //! store trait or conversation manager. Only semantic boundaries are
 //! persisted (complete user messages, complete assistant messages, individual
 //! tool results, config markers, compaction records); streaming deltas never
-//! touch disk.
+//! enter the session log.
+//!
+//! The one exception is a **separate, bounded sidecar**: while an assistant
+//! attempt streams, [`Session::begin_assistant_frame_journal`] records
+//! [`octet_ai::AssistantMessageFrame`]s to an owner-only file beside the
+//! session so a killed process can republish partial progress through
+//! [`Session::take_partial_assistant`]. The journal is never a session record,
+//! never provider-visible context, and is removed at terminal settlement.
 //!
 //! # Crash semantics
 //!
@@ -30,7 +37,7 @@ use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use octet_ai::{
@@ -2886,6 +2893,203 @@ impl Session {
     }
 }
 
+/// Maximum bytes retained in one durable partial-assistant frame journal.
+///
+/// The journal is a bounded, disposable recovery aid: once the bound is
+/// reached the prefix already written is kept and later frames are dropped, so
+/// a crash mid-stream can never leave an unbounded file behind.
+pub const MAX_PARTIAL_FRAME_JOURNAL_BYTES: usize = 1024 * 1024;
+
+/// Maximum frames retained in one durable partial-assistant frame journal.
+pub const MAX_PARTIAL_FRAME_JOURNAL_FRAMES: usize = 8192;
+
+/// Durable, bounded journal of [`octet_ai::AssistantMessageFrame`]s for one
+/// in-flight assistant attempt.
+///
+/// Frame deltas are *not* session entries: they never enter provider-visible
+/// context and never affect usage, cost, or uncertainty accounting. A journal
+/// is an owner-only sidecar file beside the session log that exists only while
+/// an attempt is streaming. It is removed at terminal settlement, so a
+/// completed turn is never replayed as partial progress.
+///
+/// Writes are deliberately not `fsync`ed: the journal must survive a killed
+/// *process* (the bytes are already in the kernel), not power loss, because it
+/// is discarded the moment the authoritative assistant entry is durably
+/// appended. The sidecar is never parsed as a session record.
+pub struct AssistantFrameJournal {
+    path: PathBuf,
+    file: File,
+    bytes: usize,
+    frames: usize,
+    bounded: bool,
+    settled: bool,
+}
+
+impl AssistantFrameJournal {
+    /// Records one frame unless the journal's bounds are already reached.
+    ///
+    /// A bounded journal keeps its existing prefix and silently drops later
+    /// frames: a recovery aid must never fail or destabilize the provider
+    /// stream it observes.
+    pub fn append(&mut self, frame: &octet_ai::AssistantMessageFrame) -> Result<(), SessionError> {
+        if self.settled || self.bounded {
+            return Ok(());
+        }
+        let mut line = serde_json::to_vec(frame)
+            .map_err(|error| SessionError::Serde(error.to_string()))?;
+        line.push(b'\n');
+        if self.frames >= MAX_PARTIAL_FRAME_JOURNAL_FRAMES
+            || self.bytes.saturating_add(line.len()) > MAX_PARTIAL_FRAME_JOURNAL_BYTES
+        {
+            self.bounded = true;
+            return Ok(());
+        }
+        self.file.write_all(&line)?;
+        self.bytes += line.len();
+        self.frames += 1;
+        Ok(())
+    }
+
+    /// Removes the journal after terminal settlement.
+    ///
+    /// Called once an attempt reaches its terminal event, so the sequence of
+    /// partial frames is never mistaken for an in-flight turn on the next
+    /// start. Idempotent.
+    pub fn settle(&mut self) {
+        if self.settled {
+            return;
+        }
+        self.settled = true;
+        let _ = self.file.sync_data();
+        let _ = std::fs::remove_file(&self.path);
+    }
+
+    /// Durable sidecar path of this journal.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Bytes written so far.
+    pub fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Frames written so far.
+    pub fn retained_frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Whether the journal stopped accepting frames at its bound.
+    pub fn is_bounded(&self) -> bool {
+        self.bounded
+    }
+}
+
+impl Session {
+    /// Durable sidecar path used for partial-assistant recovery.
+    ///
+    /// Kept beside the session so a journal and the log it belongs to move
+    /// together. It is never a session record and is never replayed as one.
+    fn partial_assistant_frames_path(&self) -> PathBuf {
+        let name = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "session".to_string());
+        let mut path = self.path.clone();
+        path.set_file_name(format!("{name}.partial-assistant-frames"));
+        path
+    }
+
+    /// Opens a fresh durable journal for one in-flight assistant attempt.
+    ///
+    /// Any earlier journal is truncated: only one attempt streams at a time,
+    /// and a stale partial from a previous crashed process is consumed through
+    /// [`Self::take_partial_assistant`] before a new attempt begins. The file
+    /// is created owner-only next to the session log.
+    pub fn begin_assistant_frame_journal(&mut self) -> Result<AssistantFrameJournal, SessionError> {
+        let path = self.partial_assistant_frames_path();
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        Ok(AssistantFrameJournal {
+            path,
+            file,
+            bytes: 0,
+            frames: 0,
+            bounded: false,
+            settled: false,
+        })
+    }
+
+    /// Consumes any partial assistant turn left by a killed stream.
+    ///
+    /// Reduces the durable frame prefix into an [`octet_ai::AssistantMessage`]
+    /// (partial text/reasoning content only — a partial tool call is not a
+    /// result and never becomes one), then removes the journal so a partial is
+    /// published exactly once. `Ok(None)` means the last attempt settled
+    /// terminally (or never started), so there is no progress to republish.
+    pub fn take_partial_assistant(
+        &mut self,
+    ) -> Result<Option<octet_ai::AssistantMessage>, SessionError> {
+        let path = self.partial_assistant_frames_path();
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let frames = read_partial_assistant_frames(file)?;
+        // The journal is consumed whether or not the prefix reduces: a
+        // structurally invalid prefix must not be republished on every start.
+        let _ = std::fs::remove_file(&path);
+        if frames.is_empty() {
+            return Ok(None);
+        }
+        octet_ai::reduce_assistant_message_frames(&frames)
+            .map_err(|error| SessionError::Serde(error.to_string()))
+    }
+}
+
+/// Reads a partial-assistant frame journal, keeping the valid prefix.
+///
+/// A torn final line is the expected crash shape; it is dropped rather than
+/// treated as corruption. An oversized file is rejected instead of read.
+fn read_partial_assistant_frames(
+    file: File,
+) -> Result<Vec<octet_ai::AssistantMessageFrame>, SessionError> {
+    let mut reader = BufReader::new(file);
+    let mut frames = Vec::new();
+    let mut line = String::new();
+    let mut total = 0usize;
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read);
+        if total > MAX_PARTIAL_FRAME_JOURNAL_BYTES {
+            return Err(SessionError::Limit(
+                "partial assistant frame journal exceeded its bound".to_string(),
+            ));
+        }
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<octet_ai::AssistantMessageFrame>(trimmed) {
+            Ok(frame) => frames.push(frame),
+            Err(_) => break,
+        }
+    }
+    Ok(frames)
+}
+
 /// Active skills resolved for a given leaf entry along its branch ancestry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActiveSkillState {
@@ -5212,5 +5416,146 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn frame_stream(prefix: &str) -> Vec<octet_ai::AssistantMessageFrame> {
+        use octet_ai::AssistantMessageFrame as Frame;
+        use octet_ai::StreamEvent;
+        let mut encoder = octet_ai::AssistantMessageFrameEncoder::new(
+            ModelId("frame-model".to_string()),
+            Protocol::AnthropicMessages,
+        );
+        let events = [
+            StreamEvent::Started {
+                response_id: Some("resp-1".to_string()),
+            },
+            StreamEvent::TextStart { index: 0 },
+            StreamEvent::TextDelta {
+                index: 0,
+                delta: prefix.to_string(),
+            },
+        ];
+        let mut frames = Vec::new();
+        for event in &events {
+            if let Some(frame) = encoder.encode(event).unwrap() {
+                frames.push(frame);
+            }
+        }
+        // A terminal event contributes no frame.
+        assert!(encoder
+            .encode(&StreamEvent::Finished(octet_ai::Response {
+                message: AssistantMessage {
+                    content: vec![AssistantPart::Text(prefix.to_string())],
+                    model: ModelId("frame-model".to_string()),
+                    protocol: Protocol::AnthropicMessages,
+                },
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                cost: None,
+                response_id: Some("resp-1".to_string()),
+                responses_output: None,
+                diagnostics: Vec::new(),
+            }))
+            .unwrap()
+            .is_none());
+        let Frame::Start { .. } = &frames[0] else {
+            panic!("first frame is the stream start");
+        };
+        frames
+    }
+
+    #[test]
+    fn partial_assistant_frames_survive_reopen_and_republish_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let journal_path = {
+            let mut session = Session::create(&path).unwrap();
+            session.append(user("hi")).unwrap();
+            let mut journal = session.begin_assistant_frame_journal().unwrap();
+            for frame in frame_stream("partial progress") {
+                journal.append(&frame).unwrap();
+            }
+            let journal_path = journal.path().to_path_buf();
+            assert!(journal_path.is_file());
+            assert!(journal.retained_frames() > 0);
+            // Dropping the session (process kill) leaves the journal behind.
+            journal_path
+        };
+
+        // Restart: a fresh handle sees the partial exactly once.
+        let mut reopened = Session::open(&path).unwrap();
+        let partial = reopened.take_partial_assistant().unwrap().unwrap();
+        assert_eq!(partial.model, ModelId("frame-model".to_string()));
+        assert_eq!(partial.protocol, Protocol::AnthropicMessages);
+        match partial.content.as_slice() {
+            [AssistantPart::Text(text)] => assert_eq!(text, "partial progress"),
+            other => panic!("unexpected partial content: {other:?}"),
+        }
+        // Republish is exactly once and removes the sidecar.
+        assert!(reopened.take_partial_assistant().unwrap().is_none());
+        assert!(!journal_path.exists());
+        // The partial never entered the session log or its context.
+        assert!(reopened
+            .context()
+            .unwrap()
+            .iter()
+            .all(|message| !matches!(message, Message::Assistant(_))));
+    }
+
+    #[test]
+    fn settled_assistant_frames_are_not_republished_as_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let journal_path = {
+            let mut session = Session::create(&path).unwrap();
+            let mut journal = session.begin_assistant_frame_journal().unwrap();
+            for frame in frame_stream("complete turn") {
+                journal.append(&frame).unwrap();
+            }
+            let journal_path = journal.path().to_path_buf();
+            // Terminal settlement removes the partial.
+            journal.settle();
+            assert!(!journal_path.exists());
+            journal_path
+        };
+
+        let mut reopened = Session::open(&path).unwrap();
+        assert!(reopened.take_partial_assistant().unwrap().is_none());
+        assert!(!journal_path.exists());
+    }
+
+    #[test]
+    fn partial_frame_journal_is_bounded_and_does_not_grow_without_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let mut journal = session.begin_assistant_frame_journal().unwrap();
+        let mut frame = octet_ai::AssistantMessageFrame::TextDelta {
+            index: 0,
+            delta: "x".repeat(MAX_PARTIAL_FRAME_JOURNAL_BYTES / 4 + 1),
+        };
+        let mut accepted = 0usize;
+        for _ in 0..64 {
+            journal.append(&frame).unwrap();
+            accepted += 1;
+        }
+        assert!(journal.is_bounded(), "journal must stop at its byte bound");
+        assert!(
+            journal.retained_bytes() <= MAX_PARTIAL_FRAME_JOURNAL_BYTES,
+            "retained journal bytes stay bounded"
+        );
+        let bytes_before = journal.retained_bytes();
+        frame = octet_ai::AssistantMessageFrame::TextDelta {
+            index: 0,
+            delta: "y".to_string(),
+        };
+        journal.append(&frame).unwrap();
+        assert_eq!(journal.retained_bytes(), bytes_before);
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        assert!(accepted > 1);
+        assert!(
+            std::fs::metadata(&path).unwrap().len() as usize <= MAX_PARTIAL_FRAME_JOURNAL_BYTES
+        );
     }
 }

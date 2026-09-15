@@ -38,10 +38,6 @@ Native SwiftUI companion for an authoritative Serve host. This target is deliber
 - Passive notifications contain only a session/event route. Clicking one revalidates authority and cursor state before opening a session.
 - SwiftUI accessibility labels, keyboard commands, focus-safe background updates, and native menu/window behavior.
 
-## Dependency contract
-
-`Package.swift` expects the sibling package at `apps/apple-shared` (the app path is `apps/macos`, so the relative package path is `../apple-shared`) and its `OctetServeClient` product. The required public API is recorded in the private macOS handoff artifact and must be kept compatible by the shared package; no HTTP, WebSocket, QR, TLS, or credential implementation belongs in this target.
-
 ## Source-only packaging tools
 
 The scripts under `scripts/` are authored but intentionally not run in this source-only delivery:

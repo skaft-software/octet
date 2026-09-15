@@ -32,6 +32,15 @@ const MAX_SESSION_TAG_CHARS: usize = 48;
 /// Marker file recording the canonical workspace path in a workspace
 /// directory. Plain text (one path); older binaries ignore it.
 const WORKSPACE_MARKER: &str = ".workspace";
+/// Private delegation directory this workspace's session store owns, beside the
+/// transcripts. The owning session lays out `<session-dir>/.delegation/team-*/`
+/// and its durable roster there (`DelegationConfig::new(session_parent.join(".delegation"))`).
+const DELEGATION_DIRECTORY: &str = ".delegation";
+/// Host-published opaque handle prefix for one session-owned delegated child
+/// (`octet_agent::delegated_session_reference`). The token is path-free and
+/// argv-safe: the launcher passes `octet --resume <handle>` as separate argv
+/// elements.
+const DELEGATED_SESSION_HANDLE_PREFIX: &str = "agent-session:";
 
 /// Filesystem-backed sessions scoped to one canonical workspace.
 #[derive(Clone, Debug)]
@@ -773,6 +782,186 @@ fn session_id_is_valid(id: &str) -> bool {
         (components.next(), components.next()),
         (Some(Component::Normal(component)), None) if component == id
     )
+}
+
+/// Bounded, typed refusal for a session-owned worker handle that cannot be
+/// opened as an interactive session.
+///
+/// Every variant is a deliberate fail-closed verdict, so an unlaunchable worker
+/// is never silently resolved to a different session (the parent, a stale
+/// transcript) and never panics. The rendered reason is fixed text: it carries
+/// no transcript path, no roster path, no credential, and no session secret,
+/// and never echoes the caller-supplied handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DelegatedHandleRefusal {
+    /// The handle is not `agent-session:` plus exactly 64 lowercase hex digits.
+    /// Rejected before any filesystem work, so a shell metacharacter, a control
+    /// byte, or a path traversal can never reach a path join.
+    MalformedHandle,
+    /// This session has no readable, supported, owned delegation roster, so no
+    /// worker handle can be resolved from it.
+    RosterUnavailable,
+    /// The roster of this session does not know this handle.
+    UnknownWorker,
+    /// The worker is parked at the approval boundary (`awaiting_approval`).
+    /// Opening it elsewhere would be unattended mutation.
+    ParkedAtApprovalBoundary,
+    /// The roster still records a live worker (`pending`/`running`) that owns
+    /// this transcript in the owning process.
+    LiveInOwningProcess {
+        /// Bounded roster state label (`pending` or `running`).
+        status: &'static str,
+    },
+    /// The roster knows the worker but its transcript is gone.
+    VanishedTranscript,
+    /// The roster resolved to a transcript outside this store's private
+    /// delegation directory: refused as a path escape.
+    OutsideDelegationDirectory,
+}
+
+impl DelegatedHandleRefusal {
+    /// Stable, bounded, machine-readable code for frontends and diagnostics.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::MalformedHandle => "malformed_worker_handle",
+            Self::RosterUnavailable => "delegation_roster_unavailable",
+            Self::UnknownWorker => "unknown_worker_handle",
+            Self::ParkedAtApprovalBoundary => "worker_awaiting_approval",
+            Self::LiveInOwningProcess { .. } => "worker_live_in_owning_process",
+            Self::VanishedTranscript => "worker_transcript_missing",
+            Self::OutsideDelegationDirectory => "worker_handle_outside_delegation",
+        }
+    }
+}
+
+impl std::fmt::Display for DelegatedHandleRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedHandle => formatter.write_str(
+                "not a launchable worker handle: expected `agent-session:` followed by exactly 64 lowercase hex digits, with no shell metacharacter, control byte, or path component",
+            ),
+            Self::RosterUnavailable => formatter.write_str(
+                "this session has no readable session-owned delegation roster, so the worker handle cannot be resolved; a handle is launchable only from the session store that owns it",
+            ),
+            Self::UnknownWorker => formatter.write_str(
+                "the session-owned delegation roster of this session does not know this worker handle",
+            ),
+            Self::ParkedAtApprovalBoundary => formatter.write_str(
+                "the worker is parked at the approval boundary (awaiting_approval), so opening it would be unattended mutation; approve or stop it in an interactive session first",
+            ),
+            Self::LiveInOwningProcess { status } => write!(
+                formatter,
+                "the roster still records a live worker (state `{status}`) that owns this transcript in the owning process; stop or detach it before opening the session elsewhere, because one session has one writer",
+            ),
+            Self::VanishedTranscript => formatter.write_str(
+                "the worker is in the session-owned roster but its transcript is gone, so there is nothing to open",
+            ),
+            Self::OutsideDelegationDirectory => formatter.write_str(
+                "the worker handle resolved outside this session store's private delegation directory, so it was refused as a path escape",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DelegatedHandleRefusal {}
+
+/// Strict `agent-session:<sha256>` shape check, run before any filesystem work.
+///
+/// One argv element, no shell metacharacter, no control byte, no path
+/// separator, no traversal: exactly the boring identifier the host publishes.
+fn delegated_handle_digest(handle: &str) -> Option<&str> {
+    let digest = handle.strip_prefix(DELEGATED_SESSION_HANDLE_PREFIX)?;
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(digest)
+}
+
+/// The bounded roster state label of a worker that still owns its transcript in
+/// the owning process, matching `DelegatedAgentStatus::label` for the two live
+/// states. Liveness itself is process-local and cannot cross the roster, so a
+/// live record is the fail-closed signal available to a separate process.
+fn live_worker_state(status: &str) -> Option<&'static str> {
+    match status {
+        "pending" => Some("pending"),
+        "running" => Some("running"),
+        _ => None,
+    }
+}
+
+/// Classify the host resolver's refusal into this store's typed, bounded
+/// verdict.
+///
+/// The resolver's messages are fixed, but two of them interpolate an I/O or
+/// JSON error that can name a private path. Only recognized bounded verdicts are
+/// relayed; every unrecognized one (and every non-`Unlaunchable` variant) fails
+/// closed as [`DelegatedHandleRefusal::RosterUnavailable`], so no dynamic text
+/// can reach the error and no path, credential, or secret can leak into it.
+fn classify_delegated_handle_error(
+    error: &octet_agent::delegation::DelegationError,
+) -> DelegatedHandleRefusal {
+    let octet_agent::delegation::DelegationError::Unlaunchable(reason) = error else {
+        return DelegatedHandleRefusal::RosterUnavailable;
+    };
+    let reason = reason.as_str();
+    if reason.starts_with("worker handle must") {
+        DelegatedHandleRefusal::MalformedHandle
+    } else if reason.starts_with("worker is parked at the approval boundary") {
+        DelegatedHandleRefusal::ParkedAtApprovalBoundary
+    } else if reason.starts_with("the worker session file is gone") {
+        DelegatedHandleRefusal::VanishedTranscript
+    } else if reason.starts_with("unknown worker handle") {
+        DelegatedHandleRefusal::UnknownWorker
+    } else {
+        DelegatedHandleRefusal::RosterUnavailable
+    }
+}
+
+/// Confine a roster-resolved child transcript to this store's private
+/// delegation directory.
+///
+/// The handle is derived from the opaquely random team directory name plus the
+/// host-generated child filename, so a forged or copied roster entry can name
+/// the same pair somewhere else and hashes to the same handle. The resolved path
+/// is therefore re-checked here: it must be `<delegation>/team-*/<child>.jsonl`,
+/// with no `..` component, no symlinked team directory, and no non-regular final
+/// entry. Anything else fails closed as a path escape.
+fn confine_delegated_session_path(
+    delegation_directory: &Path,
+    path: &Path,
+) -> Result<(), DelegatedHandleRefusal> {
+    let relative = path
+        .strip_prefix(delegation_directory)
+        .map_err(|_| DelegatedHandleRefusal::OutsideDelegationDirectory)?;
+    let mut components = relative.components();
+    let (team, child) = match (components.next(), components.next(), components.next()) {
+        (Some(Component::Normal(team)), Some(Component::Normal(child)), None) => (team, child),
+        _ => return Err(DelegatedHandleRefusal::OutsideDelegationDirectory),
+    };
+    let team_name = team
+        .to_str()
+        .ok_or(DelegatedHandleRefusal::OutsideDelegationDirectory)?;
+    let child_name = child
+        .to_str()
+        .ok_or(DelegatedHandleRefusal::OutsideDelegationDirectory)?;
+    if !team_name.starts_with("team-") || !child_name.ends_with(".jsonl") {
+        return Err(DelegatedHandleRefusal::OutsideDelegationDirectory);
+    }
+    let team_path = delegation_directory.join(team);
+    let Ok(team_metadata) = team_path.symlink_metadata() else {
+        return Err(DelegatedHandleRefusal::VanishedTranscript);
+    };
+    if team_metadata.file_type().is_symlink() || !team_metadata.file_type().is_dir() {
+        return Err(DelegatedHandleRefusal::OutsideDelegationDirectory);
+    }
+    let Ok(child_metadata) = path.symlink_metadata() else {
+        return Err(DelegatedHandleRefusal::VanishedTranscript);
+    };
+    if child_metadata.file_type().is_symlink() || !child_metadata.file_type().is_file() {
+        return Err(DelegatedHandleRefusal::OutsideDelegationDirectory);
+    }
+    Ok(())
 }
 
 fn sanitize_session_name(name: &str) -> anyhow::Result<Option<String>> {
@@ -2252,11 +2441,57 @@ impl SessionStore {
     }
 
     /// Resolve a filename stem without enumerating or parsing unrelated sessions.
+    ///
+    /// A session-owned worker handle (`agent-session:<sha256>`) is resolved
+    /// through this session's durable delegation roster instead of a flat
+    /// `<session-dir>/<id>.jsonl` join, so `octet --resume <handle>` can open a
+    /// detached delegated child as its own interactive session. Every
+    /// non-launchable handle fails closed with a typed, bounded
+    /// [`DelegatedHandleRefusal`]; an ordinary session id keeps exactly its
+    /// previous resolution path.
     pub fn path_by_id(&self, id: &str) -> anyhow::Result<PathBuf> {
+        if id.starts_with(DELEGATED_SESSION_HANDLE_PREFIX) {
+            return self.path_for_delegated_handle(id);
+        }
         if !self.session_file_exists(id)? {
             anyhow::bail!("session {id:?} was not found");
         }
         Ok(self.dir.join(format!("{id}.jsonl")))
+    }
+
+    /// Resolve one launchable session-owned worker handle to its transcript.
+    ///
+    /// The handle is the only reference an extension ever receives for a
+    /// session-owned delegated child (`octet_agent::delegated_session_reference`),
+    /// and it is deliberately path-free, argv-safe, and credential-free. It is
+    /// resolved through `octet_agent::delegation::resolve_launchable_child_session`,
+    /// which needs no live agent:
+    ///
+    /// 1. the token is validated *before any filesystem work*, so a shell
+    ///    metacharacter, a control byte, or a path component can never reach a
+    ///    path join;
+    /// 2. the owning session's durable roster is read, and a parked
+    ///    (`awaiting_approval`) worker, an unknown handle, a missing roster, and
+    ///    a vanished transcript each refuse with their own bounded reason;
+    /// 3. a worker the roster still records as live (`pending`/`running`) is
+    ///    refused here too: process-local liveness cannot be read from the
+    ///    roster, but a live record means another process owns this transcript,
+    ///    and one session has one writer;
+    /// 4. the resolved path is confined to this store's private delegation
+    ///    directory, so a forged roster entry cannot escape it.
+    pub fn path_for_delegated_handle(&self, handle: &str) -> anyhow::Result<PathBuf> {
+        if delegated_handle_digest(handle).is_none() {
+            return Err(DelegatedHandleRefusal::MalformedHandle.into());
+        }
+        let delegation_directory = self.dir.join(DELEGATION_DIRECTORY);
+        let resolved =
+            octet_agent::delegation::resolve_launchable_child_session(&delegation_directory, handle)
+                .map_err(|error| anyhow::Error::from(classify_delegated_handle_error(&error)))?;
+        if let Some(status) = live_worker_state(&resolved.status) {
+            return Err(DelegatedHandleRefusal::LiveInOwningProcess { status }.into());
+        }
+        confine_delegated_session_path(&delegation_directory, &resolved.session_path)?;
+        Ok(resolved.session_path)
     }
 
     fn metadata_dir(&self) -> PathBuf {

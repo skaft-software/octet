@@ -112,21 +112,36 @@ host-published handle is the opaque, one-way `agent-session:<sha256>` reference,
 which names a transcript inside the owner-private delegation directory. The
 session store resolves an id only as `<session-dir>/<id>.jsonl`
 (`crates/octet-coding-agent/src/session_store.rs` `path_by_id`), so
-`octet --resume <reference>` cannot open it; and the host's only resolver for
-that reference (`crates/octet-coding-agent/src/extensions/serve.rs`
+`octet --resume <reference>` cannot open it; and the resolver inside the owning
+process (`crates/octet-coding-agent/src/extensions/serve.rs`
 `driver_for_delegated_session`) hands back a **read-only, locked inspection**
 session reachable inside the owning process, not a launchable interactive one.
-So the worker argv is still planned and validated, but no resume is fabricated
-for it: the pane is reported **blocked**, naming the exact missing primitive — a
-launchable handle for a session-owned delegated child, the same primitive
-session-scoped reattachment supplies. The normal read-only parent-controlled mode
-is unaffected.
+
+The host half of that primitive has landed:
+`octet_agent::resolve_launchable_child_session(session_directory, reference)`
+resolves the opaque handle from the session-owned durable roster with no live
+agent, `Agent::session_delegation()` does the same in-process with the
+process-local liveness the roster cannot carry, and every `agent/list` row
+carries the token plus `launchable` / `launch_blocked` (a live in-process
+worker, a worker parked at the approval boundary, and a vanished transcript all
+fail closed with a bounded reason). The remaining primitive is CLI-side wiring:
+`path_by_id` must accept the reference and hand the resolved host-only child
+path to the launcher. Until that lands the pane is reported **blocked**,
+naming that exact missing wiring, rather than fabricating a resume. The normal
+read-only parent-controlled mode is unaffected.
 
 ## Session-scoped delegation
 
-A worker is not a detached OS process. The host owns each child through the run
-that spawned it and retires the child record when that run ends, so a fan-out
-that spans more than one turn needs a session-scoped lifetime.
+A worker is not a detached OS process. Its record is owned by the **session**,
+not by the run that spawned it: the end of the owning run (including an aborted
+or dropped turn) records an explicit `run_detached` boundary and leaves the
+worker discoverable, while only an explicit stop, owner teardown, or team
+shutdown retires it. The durable roster (`fleet.json` in the delegation session
+directory) carries each worker's id, name, task, child-session reference,
+status, and consumed budget, so the owning session can reattach it on a later
+turn and a restarted process can reconstruct it as `detached` instead of losing
+it silently. Execution caps do not drift up across that boundary: reattachment
+takes a slot per record and leaves the excess visibly detached.
 
 The extension models the gap as **detached, not dead**:
 
