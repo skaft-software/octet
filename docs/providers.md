@@ -249,6 +249,27 @@ there is no parallel native root collaboration tool surface. See
 [legacy Pro configuration](configuration.md#compatibility-inputs),
 [context budgeting](context.md), and [reasoning display](terminal.md#reasoning-and-progress).
 
+### Defaults (unreleased)
+
+In this checkout, a new CLI session with no reasoning preference uses the selected
+model's advertised default, including an advertised Off. Without a default, a
+known reasoning contract uses its first supported enabled choice; no usable
+contract leaves octet's selection Off without guessing a reasoning parameter.
+The same defaults appear in Serve's model catalog. This fixes startup overriding
+model defaults with Off; it is **not included in published 0.7.6**.
+
+An explicit CLI, environment, or configuration choice still wins over the model
+default. Resume keeps the saved choice (including Off), unless `--reasoning`
+overrides it. Existing saved Off values are not automatically reinterpreted as
+unset. In interactive octet, submit `/thinking on` or another supported level to
+change and persist that session's selection; inspect `/status` afterward.
+
+A custom `none/default` contract's On leaves the reasoning control absent so the
+server uses its default; always-on models also receive no control parameter.
+Unknown metadata and a lack of displayed reasoning do **not** establish that the
+server has disabled thinking. Reasoning can increase latency and token usage;
+use `--reasoning off` when the model supports it to opt out.
+
 ## Protocols and transport
 
 | Protocol | Streaming | Tools | Reasoning | Images | Structured output |

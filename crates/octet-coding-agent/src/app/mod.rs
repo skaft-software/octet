@@ -159,6 +159,20 @@ fn effort_level(effort: ReasoningEffort) -> ThinkingLevel {
     }
 }
 
+/// Use the selected endpoint's default only when no user/session preference exists.
+/// Without an advertised default, use the capability's first enabled choice;
+/// absent reasoning metadata stays Off. Callers still normalize the
+/// selection and enforce runtime gates (including Ultra's subagents requirement).
+pub fn default_reasoning_for_model(model: &Model) -> ReasoningConfig {
+    model
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .and_then(|capability| capability.default_selection())
+        .unwrap_or(ReasoningConfig::Off)
+}
+
 /// Normalize a CLI/config reasoning selection against the resolved model.
 pub fn normalize_reasoning_for_model(
     reasoning: &ReasoningConfig,
@@ -723,6 +737,76 @@ mod tests {
             min_effort: ReasoningEffort::Minimal,
             max_effort,
         }))
+    }
+
+    #[test]
+    fn model_defaults_preserve_exact_choices_and_runtime_gates() {
+        for (default, expected) in [
+            (Some("high"), ReasoningConfig::Effort(ReasoningEffort::High)),
+            (Some("none"), ReasoningConfig::Off),
+            (None, ReasoningConfig::Effort(ReasoningEffort::Low)),
+            (Some("ultra"), ReasoningConfig::Effort(ReasoningEffort::Max)),
+        ] {
+            let mut model = effort_model(ReasoningEffort::Ultra);
+            let spec = Arc::make_mut(&mut model.spec);
+            spec.capabilities.agent_delegation = Some(AgentDelegation::V2);
+            spec.capabilities.reasoning.as_mut().unwrap().options =
+                Some(octet_ai::types::ReasoningOptions {
+                    values: ["none", "low", "high", "max", "ultra"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                    default: default.map(str::to_owned),
+                });
+            let requested = default_reasoning_for_model(&model);
+            let (effective, mode, _) = normalize_reasoning_selection_for_model_with_subagents(
+                &requested,
+                ReasoningMode::Standard,
+                &model,
+                false,
+            )
+            .unwrap();
+            assert_eq!(effective, expected, "default={default:?}");
+            assert_eq!(mode, ReasoningMode::Standard);
+            assert!(model
+                .spec
+                .capabilities
+                .reasoning
+                .as_ref()
+                .unwrap()
+                .supports(&effective));
+        }
+        assert_eq!(
+            default_reasoning_for_model(&model_with(None)),
+            ReasoningConfig::Off
+        );
+    }
+
+    #[test]
+    fn model_default_effort_maps_to_the_advertised_token_budget() {
+        let model = model_with(Some(ReasoningCapability {
+            options: Some(octet_ai::types::ReasoningOptions {
+                values: vec!["none".into(), "low".into(), "high".into()],
+                default: Some("high".into()),
+            }),
+            control: ReasoningControl::TokenBudget,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: Some(ReasoningEffortBudgets {
+                minimal: 1024,
+                low: 2048,
+                medium: 4096,
+                high: 8192,
+                xhigh: 16384,
+                max: 32768,
+            }),
+            openai_chat_mode: OpenAiChatReasoningMode::Standard,
+            min_effort: ReasoningEffort::Low,
+            max_effort: ReasoningEffort::High,
+        }));
+        assert_eq!(
+            normalize_reasoning_for_model(&default_reasoning_for_model(&model), &model).unwrap(),
+            ReasoningConfig::Budget(8192),
+        );
     }
 
     #[test]

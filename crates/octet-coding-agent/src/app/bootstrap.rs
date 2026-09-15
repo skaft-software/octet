@@ -24,8 +24,9 @@ use octet_ai::{
 use sha2::{Digest as _, Sha256};
 
 use crate::app::{
-    level_from_reasoning, model_supports_ultra, normalize_reasoning_for_model,
-    normalize_reasoning_selection_for_model_with_subagents, thinking_to_reasoning, App,
+    default_reasoning_for_model, level_from_reasoning, model_supports_ultra,
+    normalize_reasoning_for_model, normalize_reasoning_selection_for_model_with_subagents,
+    thinking_to_reasoning, App,
 };
 use crate::config::{CompactionMode, Config, ResumeSelector};
 use crate::extensions::{
@@ -83,11 +84,16 @@ impl Bootstrap {
         let session = Session::create(temporary.path().join("provider-bootstrap.jsonl"))
             .context("could not create temporary extension-provider bootstrap session")?;
         let model = extension_provider_bootstrap_model(&self.catalog);
+        let reasoning = self
+            .config
+            .reasoning
+            .clone()
+            .unwrap_or_else(|| default_reasoning_for_model(&model));
         let (host, mut extensions) = configured_extensions_with_runtime_manager(
             &config,
             &session,
             &model,
-            &self.config.reasoning,
+            &reasoning,
             &self.sessions,
             None,
             self.provider_runtime.clone(),
@@ -5120,15 +5126,17 @@ fn append_config_if_changed(
     Ok(())
 }
 
+/// Invocation/session preferences, before model-specific defaults are resolved.
+struct LaunchConfiguration {
+    model: Option<ModelId>,
+    reasoning: Option<ReasoningConfig>,
+    reasoning_mode: ReasoningMode,
+}
+
 fn launch_configuration_parts(
     config: &Config,
     session: &SessionSelection,
-) -> anyhow::Result<(
-    Option<Session>,
-    Option<ModelId>,
-    ReasoningConfig,
-    ReasoningMode,
-)> {
+) -> anyhow::Result<(Option<Session>, LaunchConfiguration)> {
     let prepared = match session {
         SessionSelection::OpenExisting(path) => {
             let descriptor_path = descriptor_session_path(path)?;
@@ -5150,9 +5158,7 @@ fn launch_configuration_parts(
     let reasoning = if config.reasoning_explicit {
         config.reasoning.clone()
     } else {
-        persisted
-            .reasoning
-            .unwrap_or_else(|| config.reasoning.clone())
+        persisted.reasoning.or_else(|| config.reasoning.clone())
     };
     let reasoning_mode = if config.reasoning_mode_explicit {
         config.reasoning_mode
@@ -5164,7 +5170,14 @@ fn launch_configuration_parts(
     } else {
         persisted.reasoning_mode.unwrap_or(config.reasoning_mode)
     };
-    Ok((prepared, model, reasoning, reasoning_mode))
+    Ok((
+        prepared,
+        LaunchConfiguration {
+            model,
+            reasoning,
+            reasoning_mode,
+        },
+    ))
 }
 
 fn should_pick_interactive_model(
@@ -5188,11 +5201,10 @@ fn should_pick_interactive_model(
 fn launch_configuration(
     boot: &Bootstrap,
     session: &SessionSelection,
-) -> anyhow::Result<(Option<ModelId>, ReasoningConfig, ReasoningMode)> {
-    let (prepared, model, reasoning, reasoning_mode) =
-        launch_configuration_parts(&boot.config, session)?;
+) -> anyhow::Result<LaunchConfiguration> {
+    let (prepared, configuration) = launch_configuration_parts(&boot.config, session)?;
     *boot.prepared_session.borrow_mut() = prepared;
-    Ok((model, reasoning, reasoning_mode))
+    Ok(configuration)
 }
 
 fn resolve_fork_source_path(
@@ -5327,11 +5339,17 @@ pub async fn resolve_launch_interactive(
     };
     let config = boot.config.clone();
     let selected_session = session.clone();
-    let (prepared, model, reasoning, reasoning_mode) =
-        run_blocking_lifecycle(shell, input, "replaying session…", move || {
-            launch_configuration_parts(&config, &selected_session)
-        })
-        .await?;
+    let (
+        prepared,
+        LaunchConfiguration {
+            model,
+            reasoning,
+            reasoning_mode,
+        },
+    ) = run_blocking_lifecycle(shell, input, "replaying session…", move || {
+        launch_configuration_parts(&config, &selected_session)
+    })
+    .await?;
     *boot.prepared_session.borrow_mut() = prepared;
     // Provider declarations are only needed before launch when no static model
     // can satisfy the restored/explicit selection. Do not start ordinary
@@ -5361,6 +5379,11 @@ pub async fn resolve_launch_interactive(
             None => model_picker(shell, input, &catalog).await?,
         }
     };
+    let reasoning = match reasoning {
+        Some(reasoning) => reasoning,
+        None if boot.is_modeless() => ReasoningConfig::Off,
+        None => default_reasoning_for_model(&catalog.resolve(&model)?),
+    };
     Ok(LaunchSelection {
         model,
         session,
@@ -5389,7 +5412,11 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
             anyhow::bail!("--resume needs a session id in print mode")
         }
     };
-    let (model, reasoning, reasoning_mode) = launch_configuration(boot, &session)?;
+    let LaunchConfiguration {
+        model,
+        reasoning,
+        reasoning_mode,
+    } = launch_configuration(boot, &session)?;
     let catalog = if model
         .as_ref()
         .is_some_and(|model| boot.catalog.resolve(model).is_err())
@@ -5437,6 +5464,10 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
         );
     }
 
+    let reasoning = match reasoning {
+        Some(reasoning) => reasoning,
+        None => default_reasoning_for_model(&catalog.resolve(&model)?),
+    };
     Ok(LaunchSelection {
         model,
         session,
@@ -5783,7 +5814,7 @@ pub(crate) fn build_app_with_runtime_manager(
         crate::output::stderr!("warning: {diagnostic}");
     }
     config.model = Some(model.spec.id.clone());
-    config.reasoning = reasoning.clone();
+    config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
     append_config_if_changed(&mut session, &model.spec.id, &reasoning, reasoning_mode)?;
     validate_explicit_tool_policy(
@@ -6029,7 +6060,7 @@ pub fn rebuild_app(
         crate::output::stderr!("warning: {diagnostic}");
     }
     config.model = Some(model.spec.id.clone());
-    config.reasoning = reasoning.clone();
+    config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
     append_config_if_changed(&mut session, &model.spec.id, &reasoning, reasoning_mode)?;
     validate_explicit_tool_policy(

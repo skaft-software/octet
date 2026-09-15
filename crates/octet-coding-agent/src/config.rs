@@ -403,7 +403,9 @@ pub struct Config {
     /// True when `model` came from an explicit command-line override rather
     /// than defaults that a resumed session may supersede.
     pub model_explicit: bool,
-    pub reasoning: ReasoningConfig,
+    /// Unset until a user preference or the selected model supplies a value.
+    /// `Some(Off)` is a deliberate preference, not the absence of one.
+    pub reasoning: Option<ReasoningConfig>,
     /// True when `reasoning` came from an explicit command-line override.
     pub reasoning_explicit: bool,
     /// Standard or Pro execution, selected independently from reasoning effort.
