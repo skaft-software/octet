@@ -158,6 +158,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(cli::TopLevelCommand::Catalog { command }) = top_level_command.clone() {
         return cli::catalog_publish::run(command, &config);
     }
+    if let Some(cli::TopLevelCommand::Eval { command }) = top_level_command.clone() {
+        // The harness owns its own isolated runs; it needs no configured model
+        // and never contacts a live provider.
+        return cli::eval::run(command, &config.invocation_cwd);
+    }
     if let Some(cli::TopLevelCommand::Setup { options }) = top_level_command.clone() {
         // Provider setup owns a synchronous HTTP client and its runtime. Keep that
         // boundary off the Tokio executor so reqwest::blocking cannot construct or

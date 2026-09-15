@@ -94,6 +94,79 @@ pub(crate) type ResponsesSocket = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+/// One in-flight generation's consumer-visible cursor: the provider response id
+/// and the highest event `sequence_number` already forwarded downstream.
+///
+/// A drop after output is only recoverable when the provider still retains the
+/// generation, so the cursor is exactly what the Responses retrieve endpoint
+/// needs (`starting_after`) to hand back the events the consumer has not seen.
+#[derive(Clone, Default)]
+pub(crate) struct GenerationProgress {
+    response_id: Option<String>,
+    last_sequence: Option<u64>,
+}
+
+impl GenerationProgress {
+    /// Advances the cursor with one forwarded event. The first response id wins
+    /// (a later event cannot re-identify the generation) and the sequence is a
+    /// running maximum.
+    fn observe(&mut self, value: &Value) {
+        if self.response_id.is_none() {
+            self.response_id = value
+                .get("response")
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+                .or_else(|| value.get("response_id").and_then(Value::as_str))
+                .map(str::to_owned);
+        }
+        if let Some(sequence) = value.get("sequence_number").and_then(Value::as_u64) {
+            self.last_sequence = Some(match self.last_sequence {
+                Some(current) => current.max(sequence),
+                None => sequence,
+            });
+        }
+    }
+
+    /// Carries a later attempt's cursor forward without ever moving backwards.
+    fn absorb(&mut self, later: &GenerationProgress) {
+        if self.response_id.is_none() {
+            self.response_id = later.response_id.clone();
+        }
+        if let Some(sequence) = later.last_sequence {
+            self.last_sequence = Some(match self.last_sequence {
+                Some(current) => current.max(sequence),
+                None => sequence,
+            });
+        }
+    }
+}
+
+/// Future that opens a resumed read of one retained generation.
+pub(crate) type ResumeFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<mpsc::Receiver<Result<Value, AiError>>, AiError>>
+            + Send,
+    >,
+>;
+
+/// Opens the remaining events of an in-flight generation from a cursor.
+///
+/// The production implementation reads the Responses retrieve endpoint
+/// (`GET /responses/{id}?stream=true&starting_after=N`) through the client's
+/// HTTP transport. Tests substitute a scripted resumer so a mid-stream drop can
+/// be driven deterministically.
+pub(crate) type ResponseResumer = Arc<dyn Fn(String, u64) -> ResumeFuture + Send + Sync>;
+
+/// Whether the request asked the provider to retain the generated response.
+///
+/// Resumption is only possible when the provider still holds the generation.
+/// octet's durable-replay callers send `store: false`, in which case no
+/// server-side response exists and a resume attempt is skipped in favour of the
+/// typed non-resumable failure.
+pub(crate) fn body_requests_storage(body: &Value) -> bool {
+    body.get("store") == Some(&Value::Bool(true))
+}
+
 fn production_dialer() -> SocketDialer<ResponsesSocket> {
     Arc::new(|url: Url, headers: http::HeaderMap| {
         Box::pin(async move {
@@ -318,6 +391,11 @@ struct RequestCommand {
     /// stays borrowable across reconnect attempts.
     started: Option<oneshot::Sender<Result<(), String>>>,
     liveness: ResponsesWsLiveness,
+    /// Opens a resumed read of a retained in-flight generation. Present only
+    /// when the request asked the provider to store the response (see
+    /// [`body_requests_storage`]); otherwise a post-output drop has nothing to
+    /// resume and fails closed with the typed non-resumable error.
+    resumer: Option<ResponseResumer>,
 }
 
 #[derive(Clone)]
@@ -494,6 +572,7 @@ impl ResponsesWsPool {
         body: Value,
         liveness: ResponsesWsLiveness,
         startup_timeout: Duration,
+        resumer: Option<ResponseResumer>,
     ) -> Result<mpsc::Receiver<Result<Value, AiError>>, AiError> {
         let deadline = tokio::time::Instant::now() + startup_timeout;
         // Only this future owns connection establishment; no generation command
@@ -514,7 +593,7 @@ impl ResponsesWsPool {
         // without letting that outer timer misclassify a handshake timeout.
         tokio::time::timeout_at(
             deadline,
-            self.send_request(key, connection, url, headers, body, liveness),
+            self.send_request(key, connection, url, headers, body, liveness, resumer),
         )
         .await
         .map_err(|_| {
@@ -535,6 +614,7 @@ impl ResponsesWsPool {
         headers: http::HeaderMap,
         body: Value,
         liveness: ResponsesWsLiveness,
+        resumer: Option<ResponseResumer>,
     ) -> Result<mpsc::Receiver<Result<Value, AiError>>, AiError> {
         let (reply, events) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let (started, started_result) = oneshot::channel();
@@ -545,6 +625,7 @@ impl ResponsesWsPool {
             reply,
             started: Some(started),
             liveness,
+            resumer,
         };
         if connection.sender.send(command).await.is_err() {
             connection.alive.store(false, Ordering::Release);
@@ -602,7 +683,7 @@ impl ResponsesWsPool {
         object.insert("generate".to_owned(), Value::Bool(false));
         let deadline = tokio::time::Instant::now() + startup_timeout;
         let mut events = self
-            .request(Some(key), url, headers, body, liveness, startup_timeout)
+            .request(Some(key), url, headers, body, liveness, startup_timeout, None)
             .await?;
         tokio::time::timeout_at(deadline, async {
             while let Some(event) = events.recv().await {
@@ -738,18 +819,28 @@ enum AttemptOutcome {
     Completed,
     /// A provider failure event was already forwarded to the consumer.
     Forwarded,
-    /// The socket or heartbeat died, or the provider rejected the connection
-    /// before any consumer-visible output. `visible` records whether output was
-    /// already forwarded, which is exactly what decides between a bounded
-    /// reconnect and a typed non-resumable failure.
-    Interrupted { detail: String, visible: bool },
+    /// The socket or heartbeat died, or the provider rejected the connection.
+    /// `visible` records whether output was already forwarded, and `progress`
+    /// carries the consumer's response cursor. Together they decide between a
+    /// bounded reconnect (before output), a bounded cursor resume (after output,
+    /// when the provider retains the generation), and a typed non-resumable
+    /// failure.
+    Interrupted {
+        detail: String,
+        visible: bool,
+        progress: GenerationProgress,
+    },
     /// A protocol/decode failure: the stream is poisoned.
     Fatal { error: AiError },
     /// The consumer dropped the request.
     Abandoned,
 }
 
-fn interrupted(detail: impl Into<String>, visible: bool) -> AttemptOutcome {
+fn interrupted(
+    detail: impl Into<String>,
+    visible: bool,
+    progress: &GenerationProgress,
+) -> AttemptOutcome {
     let mut detail = detail.into();
     // Bounded, credential-free diagnostic: the provider text is already
     // truncated at the request boundary, and this keeps one failure from
@@ -761,7 +852,11 @@ fn interrupted(detail: impl Into<String>, visible: bool) -> AttemptOutcome {
         }
         detail.truncate(end);
     }
-    AttemptOutcome::Interrupted { detail, visible }
+    AttemptOutcome::Interrupted {
+        detail,
+        visible,
+        progress: progress.clone(),
+    }
 }
 
 /// Publishes one provider event.
@@ -769,11 +864,13 @@ fn interrupted(detail: impl Into<String>, visible: bool) -> AttemptOutcome {
 /// Pre-output lifecycle events are buffered until the first output-bearing
 /// event arrives, so an abandoned attempt's prefix is never duplicated by a
 /// retry. Returns `false` when the consumer is gone.
+#[allow(clippy::too_many_arguments)]
 async fn publish_event(
     reply: &mpsc::Sender<Result<Value, AiError>>,
     pre_output: &mut Vec<Value>,
     pre_output_bytes: &mut usize,
     visible: &mut bool,
+    progress: &mut GenerationProgress,
     value: Value,
 ) -> bool {
     if !*visible {
@@ -791,12 +888,14 @@ async fn publish_event(
         }
         *visible = true;
         for buffered in pre_output.drain(..) {
+            progress.observe(&buffered);
             if reply.send(Ok(buffered)).await.is_err() {
                 return false;
             }
         }
         *pre_output_bytes = 0;
     }
+    progress.observe(&value);
     reply.send(Ok(value)).await.is_ok()
 }
 
@@ -811,6 +910,7 @@ async fn handle_provider_event(
     pre_output: &mut Vec<Value>,
     pre_output_bytes: &mut usize,
     visible: &mut bool,
+    progress: &mut GenerationProgress,
 ) -> Option<AttemptOutcome> {
     let is_terminal = terminal_kind(&value).is_some();
     let connection_refresh = connection_refresh_error(&value) || failed_terminal(&value);
@@ -827,12 +927,22 @@ async fn handle_provider_event(
                 issue_code(&value).unwrap_or_else(|| "unspecified code".to_owned())
             ),
             false,
+            progress,
         ));
     }
     if is_terminal {
         update_continuation(&command.body, &value, continuation);
     }
-    if !publish_event(&command.reply, pre_output, pre_output_bytes, visible, value).await {
+    if !publish_event(
+        &command.reply,
+        pre_output,
+        pre_output_bytes,
+        visible,
+        progress,
+        value,
+    )
+    .await
+    {
         return Some(AttemptOutcome::Abandoned);
     }
     if connection_refresh {
@@ -859,6 +969,7 @@ where
     let mut pre_output: Vec<Value> = Vec::new();
     let mut pre_output_bytes = 0_usize;
     let mut visible = false;
+    let mut progress = GenerationProgress::default();
     // Heartbeats prove only that the transport path still carries control
     // frames. They are intentionally kept out of `reply`, so the client
     // continues to apply its independent model-response idle deadline.
@@ -881,6 +992,7 @@ where
                 return interrupted(
                     "Responses WebSocket heartbeat acknowledgement timed out; network path may have been lost",
                     visible,
+                    &progress,
                 );
             }
             _ = &mut heartbeat, if expected_pong.is_none() => {
@@ -898,6 +1010,7 @@ where
                     return interrupted(
                         "Responses WebSocket heartbeat probe failed; network path may have been lost",
                         visible,
+                        &progress,
                     );
                 }
                 expected_pong = Some(payload);
@@ -909,12 +1022,20 @@ where
             message = socket.next() => message,
         };
         let Some(message) = message else {
-            return interrupted("Responses WebSocket ended before completion", visible);
+            return interrupted(
+                "Responses WebSocket ended before completion",
+                visible,
+                &progress,
+            );
         };
         let message = match message {
             Ok(message) => message,
             Err(error) => {
-                return interrupted(format!("Responses WebSocket read: {error}"), visible);
+                return interrupted(
+                    format!("Responses WebSocket read: {error}"),
+                    visible,
+                    &progress,
+                );
             }
         };
         match message {
@@ -936,6 +1057,7 @@ where
                     &mut pre_output,
                     &mut pre_output_bytes,
                     &mut visible,
+                    &mut progress,
                 )
                 .await
                 {
@@ -960,6 +1082,7 @@ where
                     &mut pre_output,
                     &mut pre_output_bytes,
                     &mut visible,
+                    &mut progress,
                 )
                 .await
                 {
@@ -979,11 +1102,16 @@ where
                     return interrupted(
                         "Responses WebSocket control response failed; network path may have been lost",
                         visible,
+                        &progress,
                     );
                 }
             }
             Message::Close(_) => {
-                return interrupted("Responses WebSocket closed before completion", visible);
+                return interrupted(
+                    "Responses WebSocket closed before completion",
+                    visible,
+                    &progress,
+                );
             }
             Message::Pong(payload) => {
                 if expected_pong
@@ -1001,14 +1129,20 @@ where
     }
 }
 
-/// Runs one generation to completion, reconnecting a dropped socket while no
-/// consumer-visible output has been forwarded.
+/// Runs one generation to completion, recovering a dropped socket.
 ///
-/// A reconnect always replays the full local body: the cached
-/// `previous_response_id` cursor is connection-scoped and its socket is gone, so
-/// reusing it would be a guess. Once output is visible the turn fails closed
-/// with a typed non-resumable error instead, because replaying could duplicate
-/// already-emitted output and provider work.
+/// A drop before any consumer-visible output replays the full local body on a
+/// fresh socket: the cached `previous_response_id` cursor belonged to the dead
+/// connection, and nothing visible was published, so the replay cannot
+/// duplicate output or provider work.
+///
+/// A drop after output is resumed instead of failing the turn when the provider
+/// retains the generation: the consumer's sequence cursor lets the retrieve
+/// endpoint hand back exactly the events nobody has seen, so every delta is
+/// delivered once. Both recoveries share one bounded attempt budget and one
+/// bounded total wait; when neither is possible the turn fails closed with the
+/// typed [`crate::error::StreamProtocolError::ResponseNotResumable`] error
+/// rather than replaying output or fabricating a terminal.
 async fn run_generation<S>(
     socket: &mut S,
     command: &RequestCommand,
@@ -1021,46 +1155,88 @@ where
         + futures_util::Sink<Message, Error = tungstenite::Error>
         + Unpin,
 {
+    let resumer = command.resumer.as_ref();
     let mut attempts = 0_u32;
     let reconnect_started = tokio::time::Instant::now();
+    let mut cursor = GenerationProgress::default();
+    // Once output is visible a fresh socket cannot be replayed without
+    // duplicating it, so every later attempt must be a cursor resume.
+    let mut resuming = false;
     loop {
-        match pump_generation(socket, command, continuation).await {
+        let outcome = if resuming {
+            let (Some(resumer), Some(response_id), Some(last_sequence)) =
+                (resumer, cursor.response_id.clone(), cursor.last_sequence)
+            else {
+                return GenerationEnd::Fatal {
+                    error: not_resumable(attempts, true, "no resumable cursor"),
+                };
+            };
+            match resumer(response_id, last_sequence).await {
+                Ok(mut resumed) => pump_resumed(&mut resumed, command, last_sequence).await,
+                // The attempt budget, not the resume error, bounds this loop:
+                // an unresumable route still terminates with the typed
+                // non-resumable error after the bounded attempts.
+                Err(error) => interrupted(
+                    format!("Responses resume attempt failed: {error}"),
+                    true,
+                    &cursor,
+                ),
+            }
+        } else {
+            pump_generation(socket, command, continuation).await
+        };
+        match outcome {
             AttemptOutcome::Completed => return GenerationEnd::Completed,
             AttemptOutcome::Forwarded => return GenerationEnd::Forwarded,
             AttemptOutcome::Abandoned => return GenerationEnd::Abandoned,
             AttemptOutcome::Fatal { error } => return GenerationEnd::Fatal { error },
-            AttemptOutcome::Interrupted { detail, visible } => {
-                if visible || attempts >= MAX_SOCKET_RECONNECT_ATTEMPTS {
+            AttemptOutcome::Interrupted {
+                detail,
+                visible,
+                progress,
+            } => {
+                cursor.absorb(&progress);
+                if visible {
+                    resuming = true;
+                }
+                let elapsed = reconnect_started.elapsed();
+                if attempts >= MAX_SOCKET_RECONNECT_ATTEMPTS || elapsed >= RECONNECT_TOTAL_BUDGET {
                     return GenerationEnd::Fatal {
                         error: not_resumable(attempts, visible, &detail),
                     };
                 }
-                let Some(replay_frame) = replay_frame else {
+                if visible {
+                    // A resume needs a retained generation and a cursor; without
+                    // either there is nothing to resume.
+                    if resumer.is_none()
+                        || cursor.response_id.is_none()
+                        || cursor.last_sequence.is_none()
+                    {
+                        return GenerationEnd::Fatal {
+                            error: not_resumable(attempts, true, &detail),
+                        };
+                    }
+                } else if replay_frame.is_none() {
                     // Without a replayable body a reconnect cannot restart the
                     // generation at all, so fail closed instead of guessing.
                     return GenerationEnd::Fatal {
                         error: not_resumable(attempts, false, &detail),
                     };
-                };
-                let elapsed = reconnect_started.elapsed();
-                if elapsed >= RECONNECT_TOTAL_BUDGET {
-                    return GenerationEnd::Fatal {
-                        error: not_resumable(
-                            attempts,
-                            false,
-                            &format!("reconnect budget exhausted after {detail}"),
-                        ),
-                    };
                 }
                 attempts += 1;
-                // A fresh socket cannot use the dead connection's cursor.
-                *continuation = None;
                 let delay = reconnect_delay(attempts).min(RECONNECT_TOTAL_BUDGET - elapsed);
                 tokio::select! {
                     biased;
                     _ = command.reply.closed() => return GenerationEnd::Abandoned,
                     _ = tokio::time::sleep(delay) => {}
                 }
+                if visible {
+                    // The next loop iteration dials the resume cursor; no socket
+                    // handshake is involved.
+                    continue;
+                }
+                // A fresh socket cannot use the dead connection's cursor.
+                *continuation = None;
                 match dialer(command.url.clone(), command.headers.clone()).await {
                     Ok(reconnected) => *socket = reconnected,
                     // The attempt budget, not the dial error, bounds this loop:
@@ -1070,12 +1246,67 @@ where
                 let resend = tokio::select! {
                     biased;
                     _ = command.reply.closed() => return GenerationEnd::Abandoned,
-                    result = socket.send(Message::Text(replay_frame.to_owned().into())) => result,
+                    result = socket.send(Message::Text(replay_frame.unwrap_or_default().to_owned().into())) => result,
                 };
                 if resend.is_err() {
                     continue;
                 }
             }
+        }
+    }
+}
+
+/// Pumps the remaining events of a resumed generation into the consumer.
+///
+/// Anything at or before the cursor is dropped even though the provider resumes
+/// after it: a re-sent event must never duplicate consumer-visible output, so
+/// the resume is exactly-once even if the provider replays the boundary.
+async fn pump_resumed(
+    resumed: &mut mpsc::Receiver<Result<Value, AiError>>,
+    command: &RequestCommand,
+    starting_after: u64,
+) -> AttemptOutcome {
+    let mut visible = true;
+    let mut progress = GenerationProgress::default();
+    let mut continuation = None;
+    let mut pre_output: Vec<Value> = Vec::new();
+    let mut pre_output_bytes = 0_usize;
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = command.reply.closed() => return AttemptOutcome::Abandoned,
+            next = resumed.recv() => next,
+        };
+        let Some(next) = next else {
+            return interrupted(
+                "Responses WebSocket resume ended before completion",
+                visible,
+                &progress,
+            );
+        };
+        let value = match next {
+            Ok(value) => value,
+            Err(error) => return AttemptOutcome::Fatal { error },
+        };
+        if value
+            .get("sequence_number")
+            .and_then(Value::as_u64)
+            .is_some_and(|sequence| sequence <= starting_after)
+        {
+            continue;
+        }
+        if let Some(outcome) = handle_provider_event(
+            value,
+            command,
+            &mut continuation,
+            &mut pre_output,
+            &mut pre_output_bytes,
+            &mut visible,
+            &mut progress,
+        )
+        .await
+        {
+            return outcome;
         }
     }
 }
@@ -1505,6 +1736,7 @@ mod tests {
                     serde_json::json!({"model": "gpt", "input": []}),
                     ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
                     Duration::from_secs(2),
+                    None,
                 )
                 .await
             }
@@ -1552,6 +1784,7 @@ mod tests {
                 serde_json::json!({"model": "gpt", "input": []}),
                 ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
                 Duration::from_millis(20),
+                None,
             )
             .await
             .expect_err("unacknowledged request must reach its startup deadline");
@@ -1679,6 +1912,7 @@ mod tests {
                 reply,
                 started: Some(started),
                 liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                resumer: None,
             })
             .await
             .unwrap();
@@ -1737,6 +1971,7 @@ mod tests {
                 reply,
                 started: Some(started),
                 liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                resumer: None,
             })
             .await
             .unwrap();
@@ -1807,6 +2042,7 @@ mod tests {
                     reply,
                     started: Some(started),
                     liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                    resumer: None,
                 })
                 .await
                 .unwrap();
@@ -1894,6 +2130,7 @@ mod tests {
                         reply,
                         started: Some(started),
                         liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+                        resumer: None,
                     })
                     .await
                     .unwrap();
@@ -2081,6 +2318,17 @@ mod tests {
         key_url: Url,
         liveness: ResponsesWsLiveness,
     ) -> (Vec<Value>, Option<AiError>) {
+        drive_command_with_resumer(connection, key_url, liveness, None).await
+    }
+
+    /// As [`drive_command`], with an injected resume source for the post-output
+    /// drop path.
+    async fn drive_command_with_resumer(
+        connection: &Connection,
+        key_url: Url,
+        liveness: ResponsesWsLiveness,
+        resumer: Option<ResponseResumer>,
+    ) -> (Vec<Value>, Option<AiError>) {
         let (reply, mut events) = mpsc::channel(16);
         let (started, started_rx) = oneshot::channel();
         connection
@@ -2092,6 +2340,7 @@ mod tests {
                 reply,
                 started: Some(started),
                 liveness,
+                resumer,
             })
             .await
             .unwrap();
@@ -2316,6 +2565,246 @@ mod tests {
         }
         assert!(!connection.alive.load(Ordering::Acquire));
         assert!(state.lock().await.disabled.contains("visible"));
+
+        drop(connection);
+        let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
+        server.await.unwrap();
+    }
+
+    /// A resumer that records every `(response_id, starting_after)` and serves
+    /// one scripted result per call. A missing entry fails like an unreachable
+    /// retrieve endpoint.
+    fn scripted_resumer(
+        script: Vec<Option<Vec<Value>>>,
+    ) -> (ResponseResumer, Arc<Mutex<Vec<(String, u64)>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let script = Arc::new(script);
+        let index = Arc::new(Mutex::new(0_usize));
+        let resumer: ResponseResumer = Arc::new(move |response_id, starting_after| {
+            let recorded = Arc::clone(&recorded);
+            let script = Arc::clone(&script);
+            let index = Arc::clone(&index);
+            Box::pin(async move {
+                recorded.lock().await.push((response_id, starting_after));
+                let position = {
+                    let mut index = index.lock().await;
+                    let position = *index;
+                    *index += 1;
+                    position
+                };
+                match script.get(position) {
+                    Some(Some(events)) => {
+                        let (sender, receiver) = mpsc::channel(32);
+                        for event in events.clone() {
+                            let _ = sender.send(Ok(event)).await;
+                        }
+                        Ok(receiver)
+                    }
+                    _ => Err(transport_error(
+                        TransportPhase::Connect,
+                        "scripted resume failure",
+                    )),
+                }
+            }) as ResumeFuture
+        });
+        (resumer, calls)
+    }
+
+    fn scripted_stream_that_drops_after(delta: &str) -> ServerScript {
+        let delta = delta.to_owned();
+        Arc::new(move |mut socket: ServerSocket| -> BoxFuture<'static, ()> {
+            let delta = delta.clone();
+            Box::pin(async move {
+                let _ = next_generation_frame(&mut socket).await;
+                socket
+                    .send(text_frame(serde_json::json!({
+                        "type": "response.created", "sequence_number": 0,
+                        "response": {"id": "resp_1"}
+                    })))
+                    .await
+                    .unwrap();
+                socket
+                    .send(text_frame(serde_json::json!({
+                        "type": "response.output_text.delta", "sequence_number": 1,
+                        "delta": delta
+                    })))
+                    .await
+                    .unwrap();
+                // Unclean mid-stream drop: the socket that owns the in-flight
+                // response is gone while the provider keeps generating.
+                drop(socket);
+            })
+        })
+    }
+
+    #[test]
+    fn only_a_stored_request_is_a_resume_candidate() {
+        assert!(body_requests_storage(&json!({"store": true})));
+        assert!(!body_requests_storage(&json!({"store": false})));
+        assert!(!body_requests_storage(&json!({"model": "gpt"})));
+    }
+
+    #[tokio::test]
+    async fn a_mid_stream_drop_resumes_from_the_cursor_with_each_delta_once() {
+        let (address, server) =
+            scripted_server(vec![scripted_stream_that_drops_after("Hello ")]).await;
+        let (dialer, reconnect_attempts) = counting_dialer(address);
+        let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
+        let state = Arc::new(Mutex::new(PoolState::default()));
+        let (connection, actor) = spawn_test_actor(
+            initial,
+            &state,
+            "resume-mid",
+            Duration::from_secs(60),
+            dialer,
+        )
+        .await;
+
+        // The provider retained the generation, so the resumed read replays the
+        // boundary event the consumer already saw plus the unseen remainder.
+        let (resumer, calls) = scripted_resumer(vec![Some(vec![
+            json!({"type": "response.output_text.delta", "sequence_number": 1, "delta": "Hello "}),
+            json!({"type": "response.output_text.delta", "sequence_number": 2, "delta": "world"}),
+            json!({"type": "response.completed", "sequence_number": 3,
+                   "response": {"id": "resp_1", "output": []}}),
+        ])]);
+
+        let (events, error) = drive_command_with_resumer(
+            &connection,
+            Url::parse(&format!("ws://{address}/")).unwrap(),
+            liveness(),
+            Some(resumer),
+        )
+        .await;
+
+        assert!(
+            error.is_none(),
+            "a resumable mid-stream drop must not surface: {error:?}"
+        );
+        assert_eq!(
+            deltas(&events),
+            vec![json!("Hello "), json!("world")],
+            "no duplicated or gapped delta: {events:?}"
+        );
+        assert_eq!(count_of(&events, "response.created"), 1);
+        assert_eq!(count_of(&events, "response.completed"), 1);
+        assert_eq!(
+            reconnect_attempts.load(Ordering::SeqCst),
+            0,
+            "a cursor resume is not a socket redial"
+        );
+        assert_eq!(*calls.lock().await, vec![("resp_1".to_owned(), 1)]);
+        assert!(connection.alive.load(Ordering::Acquire));
+        assert!(!state.lock().await.disabled.contains("resume-mid"));
+
+        drop(connection);
+        let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_resume_that_drops_again_continues_from_the_advanced_cursor() {
+        let (address, server) =
+            scripted_server(vec![scripted_stream_that_drops_after("Hello ")]).await;
+        let (dialer, _reconnect_attempts) = counting_dialer(address);
+        let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
+        let state = Arc::new(Mutex::new(PoolState::default()));
+        let (connection, actor) = spawn_test_actor(
+            initial,
+            &state,
+            "resume-twice",
+            Duration::from_secs(60),
+            dialer,
+        )
+        .await;
+
+        let (resumer, calls) = scripted_resumer(vec![
+            Some(vec![
+                json!({"type": "response.output_text.delta", "sequence_number": 1, "delta": "Hello "}),
+                json!({"type": "response.output_text.delta", "sequence_number": 2, "delta": "world"}),
+            ]),
+            Some(vec![
+                json!({"type": "response.output_text.delta", "sequence_number": 2, "delta": "world"}),
+                json!({"type": "response.output_text.delta", "sequence_number": 3, "delta": "!"}),
+                json!({"type": "response.completed", "sequence_number": 4,
+                       "response": {"id": "resp_1", "output": []}}),
+            ]),
+        ]);
+
+        let (events, error) = drive_command_with_resumer(
+            &connection,
+            Url::parse(&format!("ws://{address}/")).unwrap(),
+            liveness(),
+            Some(resumer),
+        )
+        .await;
+
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(
+            deltas(&events),
+            vec![json!("Hello "), json!("world"), json!("!")],
+            "each delta exactly once across two resumed reads: {events:?}"
+        );
+        assert_eq!(
+            *calls.lock().await,
+            vec![("resp_1".to_owned(), 1), ("resp_1".to_owned(), 2)],
+            "the second resume continues from the advanced cursor"
+        );
+
+        drop(connection);
+        let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unrecoverable_mid_stream_drop_yields_the_typed_error_with_a_bounded_retry() {
+        let (address, server) =
+            scripted_server(vec![scripted_stream_that_drops_after("partial")]).await;
+        let (dialer, _reconnect_attempts) = counting_dialer(address);
+        let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
+        let state = Arc::new(Mutex::new(PoolState::default()));
+        let (connection, actor) = spawn_test_actor(
+            initial,
+            &state,
+            "resume-unrecoverable",
+            Duration::from_secs(60),
+            dialer,
+        )
+        .await;
+
+        // Every resume attempt fails, so the retry budget bounds the loop and
+        // the turn fails closed instead of silently disappearing.
+        let (resumer, calls) = scripted_resumer(Vec::new());
+
+        let (events, error) = drive_command_with_resumer(
+            &connection,
+            Url::parse(&format!("ws://{address}/")).unwrap(),
+            liveness(),
+            Some(resumer),
+        )
+        .await;
+
+        assert_eq!(deltas(&events), vec![json!("partial")]);
+        assert_eq!(
+            calls.lock().await.len(),
+            MAX_SOCKET_RECONNECT_ATTEMPTS as usize,
+            "the resume retry count is bounded"
+        );
+        match error.expect("an unrecoverable drop must fail closed") {
+            AiError::StreamProtocol(crate::error::StreamProtocolError::ResponseNotResumable {
+                attempts,
+                visible_output,
+                detail,
+            }) => {
+                assert_eq!(attempts, MAX_SOCKET_RECONNECT_ATTEMPTS);
+                assert!(visible_output);
+                assert!(detail.contains("resume"), "{detail}");
+            }
+            other => panic!("expected a typed non-resumable error, got {other:?}"),
+        }
+        assert!(!connection.alive.load(Ordering::Acquire));
+        assert!(state.lock().await.disabled.contains("resume-unrecoverable"));
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;

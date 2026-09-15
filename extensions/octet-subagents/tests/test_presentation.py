@@ -113,7 +113,7 @@ class PresentationTests(unittest.TestCase):
             "stopped": "stopped",
             "timed_out": "failed",
             "cancelled": "cancelled",
-            "orphaned": "unavailable",
+            "orphaned": "degraded",
             "restarted": "degraded",
         }
         for index, (state, generic) in enumerate(expected.items(), 1):

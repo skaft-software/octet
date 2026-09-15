@@ -139,3 +139,222 @@ START 2026-09-15T15:43:50Z ext5 alive
   No live native run was performed and none is claimed.
 
 ## ext6 — START 2026-09-15T16:28:37Z ext6 alive
+
+START 2026-09-15T16:50:13Z ext7 alive
+
+## ext7 — Roadmap #221 native iOS Serve companion (apps/ios)
+
+- Shape at HEAD (28c09976): the package did not build at all.
+  `swift build` (baseline, before any edit) -> `error: 'ios': invalid custom path
+  'Tests/OctetCompanionTests' for target 'OctetCompanionTests'`; after creating the
+  directory the compiler surfaced three independent pre-existing source defects that
+  prove no build/test was ever run for this target:
+  1. `Sources/OctetCompanion/CommandEncoding.swift:406` — `private static func nowMs()`
+     used as the default value of `public` `issuedAtMs` parameters
+     (`static method 'nowMs()' is private and cannot be referenced from a default argument value`, 5 call sites).
+  2. `Sources/OctetCompanion/CommandEncoding.swift:51` — the `KeyedEncodingContainer`
+     helper called the `mutating` `encode(_:forKey:)` from a non-`mutating` method.
+  3. `Sources/OctetCompanion/WireModels.swift:179/186/193` — `String?` passed to
+     `TranscriptEntry.text: String` (`SafeText.value(...)` results).
+- Delivered (all inside `apps/ios/**`):
+  - `Sources/OctetCompanionApp.swift` — the `@main` App entry point named by
+    `project.yml:17`, composing `CompanionComposition.makeService()` (fail-closed defaults).
+  - `Sources/OctetCompanion/CompanionComposition.swift` — the single composition root:
+    `UnconfiguredServeClientFactory` + `NoPairingAdapter` by default, plus
+    `isHostBound(factory:)` so the UI can distinguish "unconfigured build" from "offline host".
+  - `Sources/OctetCompanion/CompanionAppModel.swift` — `@MainActor ObservableObject` over the
+    service actor: bounds prompt/answer bytes to the encoder's own limits (256 KiB / 16 KiB),
+    refuses empty input locally, clears the composer only on acceptance, and re-reads
+    `service.snapshot()` after every action.
+  - `Sources/OctetCompanion/Views/{CompanionRootView,PairingGuidanceView,SessionListView,SessionDetailView}.swift`
+    — host-authoritative UI (transcript rows label provisional/streaming entries; approvals answer
+    only the host-reported `requestID`; stop appears only when the host reports `activeRunID`;
+    scene phase is bridged to `enterBackground`/`enterForeground`).
+  - `Tests/OctetCompanionTests/{CompanionTestSupport,CompanionAppModelTests,CompanionWireTests}.swift`
+    — the missing test target: memory credential/host stores, a scripted Serve transport that echoes
+    envelope identity as the ack contract requires, and 19 behavioral tests.
+  - `Package.swift` — declares `.macOS(.v13)` alongside `.iOS(.v16)` (host-side build/test of the same
+    host-neutral sources) and drops the unused `../apple-shared` product dependency (see blocker below).
+  - `project.yml:22` — the Xcode dependency named product `OctetServeClient`, which does not exist in
+    `../apple-shared` (its only product/target is `OctetServe`); corrected to `OctetServe`.
+  - `CommandEncoding.swift`/`WireModels.swift` — the three compile defects above repaired minimally.
+- Commands and observed results:
+  - `swift build` (apps/ios) -> `Build complete! (4.86 sec)`.
+  - `swift test` (apps/ios) -> `Executed 19 tests, with 0 failures (0 unexpected)`
+    (`CompanionAppModelTests` 11, `CompanionWireTests` 4, `SessionReducerTests` 2, `CompanionPairingTests` 2).
+  - `xcrun --sdk iphonesimulator swiftc -typecheck -target arm64-apple-ios16.0-simulator -swift-version 5 -module-name OctetCompanion Sources/OctetCompanionApp.swift Sources/OctetCompanion/*.swift Sources/OctetCompanion/Views/*.swift`
+    -> exit 0 (only the pre-existing `UnnecessaryEffectMarker` warning at `CompanionSessionService.swift:57`),
+    so the `@main` entry and views compile against the real iOS 16 SDK.
+  - `xcodegen generate --spec project.yml --project /tmp/octet-ios-proj` + `xcodebuild -project
+    /tmp/octet-ios-proj/OctetCompanion.xcodeproj -scheme OctetCompanion -destination 'generic/platform=iOS Simulator'
+    -configuration Debug CODE_SIGNING_ALLOWED=NO build` -> `** BUILD FAILED **`, every diagnostic inside
+    `apps/apple-shared/Sources/OctetServe` (not this worker's path): `WireEnums.swift:21`
+    (`public enum TrustedCatalogKind: ... { case skill, extension }` — the `extension` keyword used as a
+    case name) and `RuntimeModels.swift:44` (a single 1256-byte line). The app target itself was never reached.
+- ROW #221 = PARTIAL (source + tests landed, app target blocked). Exact missing primitive: a compiling
+  `apps/apple-shared/Sources/OctetServe` (its `WireEnums.swift`/`RuntimeModels.swift` are corrupted, most
+  likely by the archive round-trip) plus a real Serve transport adapter that satisfies
+  `ServeClientTransport`; no Xcode app build, signing, install or device run was performed and none is claimed.
+
+## ext7 — Roadmap #179 octet-mcp Streamable HTTP — QUEUE ROW IS STALE (verified, nothing to re-implement)
+
+- Verified at HEAD (28c09976) that both items the row calls missing already exist, landed by
+  the `fa4a7617` wave and never re-opened:
+  - **Static, extension-scoped credentials.** `StaticEnvironmentCredentialProvider`
+    (`extensions/octet-mcp/octet_mcp/streamable_http.py:77`) reads exactly one
+    `OCTET_MCP_*` variable per request through `is_static_credential_environment`
+    (`octet_mcp/config.py:89`, which rejects any other name), composes only for an explicit
+    `{"type": "static-bearer", "environment": ...}` descriptor
+    (`octet_mcp/runtime.py:54`), and fails closed as `authentication_unavailable` before any
+    socket. The token is used only to form that request's `Authorization: Bearer` header and is
+    registered as a redaction; it is never logged, stored, sent to `presentation`, echoed in an
+    error, or included in result metadata. Regression:
+    `tests/test_streamable_http.py:781` `test_static_environment_credential_is_scoped_read_per_request_and_never_echoed`,
+    plus `tests/test_config.py:112` `test_static_bearer_credentials_are_extension_scoped_and_never_echoed`.
+  - **Permanent GET notification stream.** Opened only when negotiated capabilities declare a
+    change notification (`streamable_http.py:597`), one bounded background connection
+    (`MAX_HTTP_STREAM_CONNECTIONS`, `streamable_http.py:47`), backoff-capped reconnects, cursor
+    committed only at complete event boundaries, an empty event id clearing the cursor, a replayed
+    acknowledged id failing closed as `sse_event_replayed`, `405` inert/unretried, and one
+    cumulative byte/event/control budget across POST and GET. Regressions:
+    `tests/test_streamable_http.py:875`, `:936`, `:987`, `:1020`, `:1064`.
+- Commands and observed results:
+  - `python3 -m unittest discover -s tests -t . -p 'test_*.py'` (extensions/octet-mcp) ->
+    `Ran 75 tests in 20.495s`, `OK`.
+  - `python3 -m unittest discover -s tests -t . -p 'test_config.py' -v` ->
+    `test_remote_gate_is_visible_to_the_product_runtime ... ok`,
+    `test_static_bearer_credentials_are_extension_scoped_and_never_echoed ... ok`, `Ran 12 tests`, `OK`.
+  - Nine-defect coverage re-checked: `tests/test_http_hardening.py` (15 tests over the nine
+    original defects, `test_http_hardening.py:1`), plus the `REFERENCE.md:150` remediation table.
+- **Gating stays HONEST — the default was NOT flipped.** `octet_mcp/config.py:251` still refuses an
+  enabled streamable server unless the process owner passes `--experimental-streamable-http-mcp`
+  (`octet_mcp/runtime.py:34`, `manager.py:113`, error code
+  `experimental_streamable_http_mcp_required`), and the docs keep saying so:
+  `config.schema.json:93` ("EXPERIMENTAL and blocked by default"), `README.md:87`,
+  `REFERENCE.md` ("still a candidate, not general availability"). This is a containment measure,
+  not a production safety qualification.
+- POLICY-GATED (exact missing primitive): a host-brokered OAuth/credential authorization service
+  negotiated over the extension API — a typed `authorization/request` capability plus a host-owned
+  token store and refresh ownership. OAuth discovery, dynamic client registration, browser
+  redirects, token acquisition/refresh, keychains, dotenv files, persistent token stores, arbitrary
+  static config headers and non-`OCTET_MCP_*` env fallback remain **unimplemented** and are recorded
+  as such in `extensions/octet-mcp/REFERENCE.md`; no self-composed browser flow was added.
+- NOT RUN / open: any live remote MCP server, real credential, real OAuth server or long-duration
+  stream (all evidence is deterministic loopback). Multi-owner partitioning, owner-settlement
+  cleanup and host-qualified owner-specific catalog visibility remain unimplemented.
+
+## ext7 — Roadmap #65 octet-serve multi-pane layout (apps/web) — ALREADY LANDED, independently re-verified
+
+- The queue row's "only a fixed pane set / no user-created splits" is stale: the user-created
+  split + rearrangeable persisted dock layout landed with `apps/web/src/workspace-layout.ts`
+  (`setDockSplit`, `dockSlotFor`, `dockSplitVisible`, `MAX_DOCK_LAYOUT_BYTES=256`),
+  `App.tsx:1103`/`:1109` (toggle + persisted `octet.ui.dock.layout`), `App.tsx:1436`
+  (`has-dock-split`), `App.tsx:2324`/`:2353` (`data-dock-slot`), unit tests in
+  `apps/web/src/workspace-layout.test.ts`, and the duplicated embedded copy stays in sync.
+- Commands and observed results (`apps/web`, HEAD + my changes, no web file modified by me):
+  - `npm test` -> `Test Files 35 passed (35)`, `Tests 299 passed (299)`.
+  - `npx tsc -b --pretty false` -> exit `0`, no diagnostics.
+  - `npm run build` -> `✓ built in 465ms`, `production fixture boundary verified (6 text assets)`.
+- No regression observed; no web change was needed.
+
+## ext7 — Roadmap #383/#386 computer use — ALREADY LANDED, independently re-verified
+
+- The wiring the rows call missing exists: `main.py:21`/`:121` compose `PolicyGate`, and
+  `octet_computer_use/runtime.py:82` constructs `LifecycleSession(self.owner, self._target, self, policy=self)`
+  with the gate as evaluator (`PolicyEvaluator` protocol at `policy.py:688`,
+  `evaluate_action` at `policy.py:695`), so `lifecycle.py` is reached by the dispatcher through the
+  runtime that owns the session. `Scope` (`policy.py:302`), `AuthorizationBinding`
+  (`policy.py:519`), `PolicyGate` (`policy.py:827`) and `LifecycleSession` (`lifecycle.py:1430`)
+  are all present, and the test targets the row called absent now exist:
+  `tests/test_policy.py`, `tests/test_lifecycle.py`, `tests/test_runtime.py`.
+- Commands and observed results (extensions/octet-computer-use):
+  - `python3 -m unittest discover -s tests -p 'test_*.py'` -> `Ran 93 tests in 0.099s`, `OK`.
+  - `python3 -m unittest discover -s tests -p 'test_runtime.py' -v` -> `Ran 32 tests in 0.080s`, `OK`,
+    including `test_unknown_or_replaced_scope_identifier_dispatches_nothing ... ok` (`test_runtime.py:299`),
+    `test_stopped_binding_cannot_redeem_a_captured_grant_or_frame ... ok` (`:322`),
+    `test_stop_and_takeover_are_trusted_entry_points_not_tool_arguments ... ok` (`:340`),
+    `test_trusted_takeover_and_eof_are_terminal ... ok` (`:118`).
+- #383 REMAINS HOST-GATED (policy-gated, exact missing primitive): a negotiated API 0.3
+  host-brokered automation authorization service — typed `policy/evaluate` plus host-owned approval,
+  target selection and owner settlement — supplying `PolicyEvaluator.evaluate_action`, `Scope` and
+  owner/target to the extension process. `crates/octet-coding-agent/src/host/policy.rs` is the
+  separate native protocol-1 host and deliberately never starts executable extensions.
+- #385/#389/#390 remain **HARDWARE/QUALIFICATION-GATED** (not claimed): a real macOS host with
+  Accessibility/AX trust for a selected window; a real Windows UIA/Composition host; physical
+  human takeover observation and hard process-loss release evidence. No live native run was performed.
+
+## ext7 — Parity 6.1 / 6.2 (docs)
+
+- Verified every topic page the row requires exists and is linked from `docs/README.md`:
+  configuration/session-format/commands/context/instructions/providers/packages/shell-aliases/
+  terminal/tmux/termux/windows (12/12 present; `docs/providers.md` deliberately not edited).
+- Verified the 6.2 artifact set: `AGENTS.md`, `docs/maintainers/README.md`, prompts
+  `cl|is|pr|wr.md`, skills `release|add-provider|interactive-testing` (9/9 present).
+- Updated `docs/parity/README.md`: rows `6.1`–`6.4` now read Landed/Existing owner with links into
+  `docs/parity/repo-tooling.md` instead of `Pending`, and a new "Detail documents" section links all
+  eight detail pages (previously the ledger linked none of them).
+- NEW `docs/parity/extensions.md` — extension-surface parity detail page (API 0.3 host-mediated
+  `theme_selection`, MCP transports incl. the static-credential/GET-stream record and the
+  policy-gated OAuth primitive, computer use with the hardware/policy gates, browse incl. the open
+  Firefox/Safari + focus-stealing rows, web search, subagents), linked from `docs/parity/README.md`
+  and `docs/README.md`.
+- Link check of `docs/README.md`, `docs/parity/README.md`, `docs/parity/extensions.md`,
+  `apps/ios/README.md` -> `missing links: 0`.
+- `python3 scripts/generate-extension-api-v03.py --check` -> exit `0`, no drift.
+
+## ext7 — Task 7: CI suggestion recorded, NOT applied (`.github/workflows/ci.yml` is not in this worker's paths)
+
+- Exact suggested edit: in `.github/workflows/ci.yml`, in the script-test block near lines 49-50,
+  add `python3 scripts/test_diff_model_catalog.py` so parity row `6.3` runs in CI
+  (`scripts/diff-model-catalog.py` itself is already invoked there).
+- Rationale anchor: `docs/parity/repo-tooling.md:99-101` records the same follow-up.
+
+## ext7 — CHANGELOG-ready bullets
+
+- `apps/ios`: deliver the missing `@main` entry point, composition root, session/approval/stop
+  views and the 19-test `OctetCompanionTests` target; repair three compile defects that stopped the
+  package from building at all (`CommandEncoding.swift` public default-arg/`mutating` helper,
+  `WireModels.swift` optional transcript text); declare macOS so the host-neutral sources build and
+  test without a simulator; correct the Xcode product name to `OctetServe`.
+- `docs`: add the extension-surface parity detail page (`docs/parity/extensions.md`), mark parity
+  rows `6.1`-`6.4` landed with links to their detail owner, and link the parity ledger from
+  `docs/README.md`.
+- `apps/ios`: document the companion's boundaries, build/test commands and source-only status in a
+  new `apps/ios/README.md`.
+
+## ext7 — Roadmap #394 (apps/macos) — verified source-only status, NOT built/signed
+
+- Observed at HEAD: `swift build` in `apps/macos` fails before compiling any app source with
+  `error: 'macos': resource 'Resources/Info.plist' in target 'OctetMacOS' is forbidden; Info.plist is
+  not supported as a top-level resource file in the resources bundle` (`apps/macos/Package.swift:24`
+  declares `.process("Resources")` around `Sources/OctetMacOS/Resources/Info.plist`).
+- Blocking follow-on: every `apps/macos/Sources/OctetMacOS/*.swift` file does `import OctetServeClient`,
+  but `apps/apple-shared/Package.swift` declares the single product/target `OctetServe`
+  (`Identifiers.swift`, `JSON.swift`, `RuntimeModels.swift`, `WireEnums.swift`, `WireModels.swift`);
+  there is no `OctetServeClient` module anywhere in the tree. That shared package also does not compile
+  (`WireEnums.swift:21`, `RuntimeModels.swift:44`).
+- Therefore #394 stays **source-only**: no build, signature, notarization, install or live run was
+  performed or claimed by this worker. Exact missing primitives: a compiling
+  `apps/apple-shared/Sources/OctetServe` and one agreed product/module name shared by
+  `apps/macos/Package.swift`, `apps/ios/project.yml` and the shared package (both app manifests named
+  `OctetServeClient`; only the iOS one was corrected here, inside this worker's paths).
+
+## ext7 — Gates (explicit list)
+
+- HARDWARE/QUALIFICATION-GATED (never claimed): #385 macOS native automation qualification (needs a
+  real macOS host with Accessibility/AX trust for a selected window); #389 Windows backend
+  qualification (needs a real Windows UIA/Composition host); #390 packaged parity release (needs
+  physical human takeover observation and hard process-loss release evidence); #179 live remote MCP
+  qualification (needs a real external MCP server, real credential and long-duration stream); #377
+  browser focus-stealing measurement (needs a real window manager / observation of TUI focus).
+- POLICY-GATED (exact missing primitives, nothing substituted): host-brokered OAuth/credential
+  authorization for MCP (typed `authorization/request` capability + host-owned token store and refresh
+  ownership); host-brokered automation authorization for computer use (typed `policy/evaluate` +
+  host-owned approval/target selection/owner settlement). Persisted project trust is untouched by every
+  change here; no clipboard image capture, rg/fd auto-download, or chord/CBOR/unix-socket work was done.
+- Repo-wide Rust check unchanged by this worker: no `.rs` file was edited (all changes are under
+  `apps/ios/**`, `docs/**`), so `cargo check --workspace --all-targets --locked` remains green as the
+  parent reported; it was not re-run here.
+- Workspace hygiene note: `swift build`/`swift test` created untracked build outputs under
+  `apps/ios/.build/` (`out/`, `debug`, `manifest.pif`, `.lock`); `.build` is already tracked in this
+  repo from an earlier wave. Nothing was committed, branched, reset, stashed or switched.

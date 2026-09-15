@@ -1,5 +1,8 @@
 use super::*;
-use crate::codex_context::{CODEX_5_6_CONTEXT_WINDOW, CODEX_LEGACY_CONTEXT_WINDOW};
+use crate::codex_context::{
+    CODEX_5_6_CONTEXT_WINDOW, CODEX_CONTEXT_WINDOW_CAP, CODEX_LEGACY_CONTEXT_WINDOW,
+    CodexContextClampReporter,
+};
 
 #[test]
 fn discovered_reasoning_supports_chat_and_responses_models() {
@@ -4978,7 +4981,7 @@ fn codex_context_tier_follows_the_plan_entitlement() {
     }
 }
 
-fn codex_discovered_model(
+pub(super) fn codex_discovered_model(
     model_id: &str,
     default_context_window: u64,
     max_context_window: u64,
@@ -5074,7 +5077,7 @@ fn codex_registration_applies_only_an_acknowledged_entitled_override() {
 
 #[test]
 fn codex_registration_names_above_tier_accounting_for_every_raised_route() {
-    // `codex_context_report` branches on `uncertain_usage_operation`, so this
+    // The recorded session note branches on `uncertain_usage_operation`, so this
     // asserts the same trigger the registration loop uses. The documented 372K
     // luna window is above the standard tier without any override, while the
     // deliberate 272K cap owes no obligation.

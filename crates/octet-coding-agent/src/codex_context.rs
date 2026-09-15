@@ -23,9 +23,13 @@
 //!   from `(model_id, plan tier, discovered default, discovered max, user
 //!   override)`.
 //! * [`CodexContextOverride::parse`] - opt-in parsing, fail-closed.
-//! * [`CodexContextClamp::message`] - bounded user-visible clamp notice.
+//! * [`codex_context_session_note`] - the ONE user-facing note a session may
+//!   print, for the effective session model only, and only when that model's
+//!   window is reduced by the deliberate cap or above the 272K standard tier.
+//! * [`CodexContextClamp::message`] - bounded user-visible clamp notice for a
+//!   single deliberate reduction.
 //! * [`CodexContextClampReporter::observe`] - once-per-transition notice
-//!   de-duplication (no per-turn spam).
+//!   de-duplication (no per-turn spam) for a frontend that tracks transitions.
 //! * [`CODEX_ABOVE_STANDARD_TIER_OPERATION`] - the
 //!   `Session::record_usage_uncertainty` operation identifier to use when
 //!   [`CodexContextWindow::has_uncertain_usage`] is set.
@@ -140,6 +144,36 @@ impl CodexContextOverride {
         Self {
             requested_tokens: Some(requested_tokens),
             acknowledge_cost_cliff,
+        }
+    }
+
+    /// The stable in-process entry point for a frontend that must publish a
+    /// chosen override without editing `app::bootstrap`.
+    ///
+    /// Bootstrap resolves the override from the documented environment bridge
+    /// (`OCTET_CODEX_CONTEXT_WINDOW` plus
+    /// `OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF`), so the CLI flags and
+    /// the TUI effort menu both publish through this one call. [`Self::NONE`]
+    /// clears both variables, which restores the deliberate default without any
+    /// persisted configuration change.
+    ///
+    /// A frontend must render [`CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING`] before it
+    /// publishes an acknowledged value above the deliberate cap; resolution still
+    /// fails closed if the published value is unacknowledged, above the model's
+    /// entitlement, or on a non-entitled plan.
+    pub fn publish(self) {
+        match self.requested_tokens {
+            Some(tokens) => {
+                std::env::set_var(CODEX_CONTEXT_OVERRIDE_ENV, tokens.to_string());
+                std::env::set_var(
+                    CODEX_CONTEXT_ACKNOWLEDGE_ENV,
+                    if self.acknowledge_cost_cliff { "1" } else { "0" },
+                );
+            }
+            None => {
+                std::env::remove_var(CODEX_CONTEXT_OVERRIDE_ENV);
+                std::env::remove_var(CODEX_CONTEXT_ACKNOWLEDGE_ENV);
+            }
         }
     }
 
@@ -271,17 +305,23 @@ pub struct CodexContextClamp {
 }
 
 impl CodexContextClamp {
-    /// The canonical, fixed-template notice text.
+    /// The canonical, fixed-template notice text for one deliberate reduction.
+    ///
+    /// Plain user language only: no internal API or operation identifiers, and
+    /// the windows are labelled so the reader never has to guess which number is
+    /// which. The effective window is the same one
+    /// [`codex_context_session_note`] reports.
     pub fn message(&self) -> String {
+        let effective = self.effective_context_window;
+        let advertised = self.advertised_context_window.max(effective);
         format!(
-            "note: {model} is budgeted at {effective} of {advertised} context tokens (clamped {}): octet caps Codex requests at {cap} because OpenAI recommends a 272K Codex context limit, usage above 272K is double-priced, and oversized long-running sessions can drop the Codex websocket. Raise it deliberately with {override_env} plus {ack_env}=1 (see docs/codex-context.md).",
-            self.advertised_context_window - self.effective_context_window,
+            "note: Codex model {model} context window — advertised {advertised}, effective {effective}. octet's deliberate {cap} Codex cap reduces the advertised window by {reduction} because OpenAI recommends a 272K Codex context limit, usage above 272K is double-priced (about 2x input and 1.5x output for the whole request, not just the excess), and oversized long-running sessions can drop the Codex websocket. {remedy}",
             model = self.model_id,
-            advertised = self.advertised_context_window,
-            effective = self.effective_context_window,
-            cap = CODEX_CONTEXT_WINDOW_CAP,
-            override_env = CODEX_CONTEXT_OVERRIDE_ENV,
-            ack_env = CODEX_CONTEXT_ACKNOWLEDGE_ENV,
+            advertised = context_window_label(advertised),
+            effective = context_window_label(effective),
+            cap = context_window_label(CODEX_CONTEXT_WINDOW_CAP),
+            reduction = context_window_label(advertised - effective),
+            remedy = codex_context_remedy(),
         )
     }
 }
@@ -352,6 +392,71 @@ impl CodexContextWindow {
         self.has_uncertain_usage
             .then_some(CODEX_ABOVE_STANDARD_TIER_OPERATION)
     }
+}
+
+/// `272K`, `372K`, ... for whole thousands, otherwise the exact token count.
+///
+/// Every window octet prints goes through this label so a user never has to
+/// guess which bare number means what.
+pub fn context_window_label(tokens: u64) -> String {
+    if tokens >= 1_000 && tokens % 1_000 == 0 {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// The in-app remedies first, with the environment variables as the scriptable
+/// alternative. Shared by every Codex context note.
+fn codex_context_remedy() -> String {
+    format!(
+        "Choose the window in-app with --codex-context-window <TOKENS> (the model effort menu offers the same choice), or script it with {CODEX_CONTEXT_OVERRIDE_ENV} plus {CODEX_CONTEXT_ACKNOWLEDGE_ENV}=1 above 272K; see docs/codex-context.md."
+    )
+}
+
+/// The ONE user-facing note an effective Codex session model needs, if any.
+///
+/// Call this once per session, for the model the session actually runs. It is
+/// deliberately not a catalog-time notice: enumerating Codex models must never
+/// print anything, so a session whose effective model is not a Codex route
+/// prints no note at all.
+///
+/// `None` when the effective window is neither reduced by the deliberate cap nor
+/// above the 272K standard tier. The text is plain user language: it names no
+/// internal API or operation identifier, labels every window it quotes, and
+/// states the same effective window in every variant (the 372K documented
+/// `gpt-5.6-luna` window therefore never reads as a clamp to 272K).
+pub fn codex_context_session_note(model_id: &str, window: &CodexContextWindow) -> Option<String> {
+    let effective = window.context_window;
+    let advertised = window.advertised_context_window.max(effective);
+    let entitled = window.entitled_max_context_window.max(effective);
+    let reduction = advertised - effective;
+    if reduction == 0 && !window.has_uncertain_usage {
+        return None;
+    }
+    let mut note = format!(
+        "note: Codex model {model_id} context window — advertised {advertised}, entitled {entitled}, effective {effective}.",
+        advertised = context_window_label(advertised),
+        entitled = context_window_label(entitled),
+        effective = context_window_label(effective),
+    );
+    if reduction > 0 {
+        note.push_str(&format!(
+            " octet's deliberate {cap} Codex cap reduces the advertised window by {reduction} because OpenAI recommends a 272K Codex context limit, usage above 272K is double-priced (about 2x input and 1.5x output for the whole request, not just the excess), and oversized long-running sessions can drop the Codex websocket.",
+            cap = context_window_label(CODEX_CONTEXT_WINDOW_CAP),
+            reduction = context_window_label(reduction),
+        ));
+    }
+    if window.has_uncertain_usage {
+        note.push_str(&format!(
+            " At {effective} — above the {cap} standard tier — every request is double-priced (about 2x input and 1.5x output for the whole request, not just the excess) and long-running sessions are likelier to drop the Codex websocket, so this session's usage is recorded as uncertain instead of an exact cost.",
+            effective = context_window_label(effective),
+            cap = context_window_label(CODEX_CONTEXT_WINDOW_CAP),
+        ));
+    }
+    note.push(' ');
+    note.push_str(&codex_context_remedy());
+    Some(note)
 }
 
 /// The deliberate conservative working window for a Codex model.

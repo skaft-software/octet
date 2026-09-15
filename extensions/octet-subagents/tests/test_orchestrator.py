@@ -37,7 +37,12 @@ class PolicyTests(unittest.TestCase):
             ({"name": "worker", "task": "x", "tools": ["read", "browser"]}, "invalid_request"),
             ({"name": "worker", "task": "x", "tools": ["read", "subagent_spawn"]}, "invalid_request"),
             ({"name": "worker", "task": "x", "tools": ["read", "read"]}, "invalid_request"),
-            ({"name": "worker", "task": "x", "model": "other"}, "unsupported_model"),
+            # A malformed provider/model/effort selection is refused with a typed
+            # error, never silently coerced.
+            ({"name": "worker", "task": "x", "model": "bad model"}, "unsupported_model"),
+            ({"name": "worker", "task": "x", "provider": "openai;rm"}, "unsupported_model"),
+            ({"name": "worker", "task": "x", "provider": "anthropic"}, "unsupported_model"),
+            ({"name": "worker", "task": "x", "reasoning": "extreme"}, "unsupported_reasoning"),
             ({"name": "worker", "task": "x", "max_tokens": 64000}, "invalid_request"),
             ({"name": "Worker", "task": "x"}, "invalid_request"),
             ({"name": "worker", "task": "bad\x1b[31m"}, "invalid_request"),
@@ -46,6 +51,120 @@ class PolicyTests(unittest.TestCase):
                 with self.assertRaises(SubagentError) as raised:
                     SpawnRequest.parse(arguments)
                 self.assertEqual(raised.exception.code, code)
+
+    def test_per_worker_model_and_reasoning_selection_is_validated_and_clamped(self):
+        """TASK 2: provider/model/reasoning spawn inputs, default inherit."""
+        inherited = SpawnRequest.parse({"name": "worker", "task": "x"})
+        self.assertEqual(
+            (inherited.provider, inherited.model, inherited.reasoning),
+            ("inherit", "inherit", "inherit"),
+        )
+        self.assertTrue(inherited.inherits_model_policy)
+        self.assertIsNone(inherited.reasoning_note)
+
+        # Only a model this session can confirm as configured is accepted: the
+        # parent session's own observed model is the sole verifiable selection.
+        confirmed = SpawnRequest.parse(
+            {
+                "name": "worker",
+                "task": "x",
+                "provider": "anthropic",
+                "model": "anthropic/claude-haiku-4-5",
+                "reasoning": "max",
+                "reasoning_capability": {"ceiling": "medium", "floor": "minimal"},
+            },
+            known_models=("anthropic/claude-haiku-4-5",),
+        )
+        self.assertEqual(confirmed.provider, "anthropic")
+        self.assertEqual(confirmed.model, "anthropic/claude-haiku-4-5")
+        self.assertEqual(confirmed.reasoning, "max")
+        self.assertFalse(confirmed.inherits_model_policy)
+        # Clamped by the mirrored ceiling policy, with an explicit note.
+        self.assertEqual(confirmed.effective_reasoning, "medium")
+        self.assertIn("clamped to medium", confirmed.reasoning_note or "")
+        self.assertNotEqual(confirmed.fingerprint, inherited.fingerprint)
+
+        # A level inside the advertised range is never clamped.
+        for level in ("inherit", "off", "low", "high"):
+            with self.subTest(level=level):
+                request = SpawnRequest.parse({"name": "worker", "task": "x", "reasoning": level})
+                self.assertEqual(request.reasoning, level)
+                self.assertEqual(request.effective_reasoning, level)
+                if level != "inherit":
+                    self.assertIsNone(request.reasoning_note)
+
+        # Unknown provider/model/effort and partial selections are refused with a
+        # typed error, never silently coerced to the inherited selection.
+        for arguments in (
+            {"name": "worker", "task": "x", "reasoning": "turbo"},
+            {"name": "worker", "task": "x", "model": ""},
+            {"name": "worker", "task": "x", "model": "a b"},
+            {"name": "worker", "task": "x", "provider": "../etc/passwd"},
+            {"name": "worker", "task": "x", "provider": "anthropic"},
+            {"name": "worker", "task": "x", "reasoning_capability": {"ceiling": "ludicrous"}},
+            {"name": "worker", "task": "x", "reasoning_capability": {"ceiling": "high", "nope": 1}},
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(SubagentError) as raised:
+                    SpawnRequest.parse(arguments)
+                self.assertIn(
+                    raised.exception.code, {"unsupported_model", "unsupported_reasoning"}
+                )
+
+    def test_unknown_model_is_rejected_even_when_well_formed(self):
+        """`{"model": "other"}` must fail closed: this process cannot confirm it."""
+        for known_models in ((), ("anthropic/claude-sonnet-5",)):
+            with self.subTest(known_models=known_models):
+                with self.assertRaises(SubagentError) as raised:
+                    SpawnRequest.parse(
+                        {"name": "worker", "task": "x", "model": "other"},
+                        known_models=known_models,
+                    )
+                self.assertEqual(raised.exception.code, "unsupported_model")
+                self.assertIn("confirm as configured", str(raised.exception))
+        # A provider that disagrees with the confirmed model is refused too.
+        with self.assertRaises(SubagentError) as raised:
+            SpawnRequest.parse(
+                {
+                    "name": "worker",
+                    "task": "x",
+                    "provider": "openai",
+                    "model": "anthropic/claude-sonnet-5",
+                },
+                known_models=("anthropic/claude-sonnet-5",),
+            )
+        self.assertEqual(raised.exception.code, "unsupported_model")
+
+    def test_worker_selection_is_recorded_as_requested_and_never_implied_applied(self):
+        """A confirmed selection is applied; an unconfirmable one is refused."""
+        clock = ManualClock()
+        host = FakeHostState(clock)
+        client = host.client()
+        orchestrator = Orchestrator(publish=lambda snapshot: None, now_ms=clock)
+        # The parent session's observed model is the one confirmable selection.
+        result = orchestrator.spawn(
+            client,
+            owner(),
+            {
+                "name": "reader",
+                "task": "x",
+                "model": "claude-sonnet-test",
+                "reasoning": "low",
+            },
+        )
+        worker = result["worker"]
+        self.assertEqual(worker["model_policy"], "claude-sonnet-test")
+        self.assertEqual(worker["reasoning_policy"], "low")
+        self.assertTrue(worker["model_policy_applied"])
+        self.assertEqual(worker["model"], "claude-sonnet-test")
+        # A requested reasoning level is never claimed applied by the host.
+        self.assertEqual(worker["reasoning"], "inherited")
+
+        with self.assertRaises(SubagentError) as raised:
+            orchestrator.spawn(
+                client, owner(), {"name": "other-reader", "task": "x", "model": "other"}
+            )
+        self.assertEqual(raised.exception.code, "unsupported_model")
 
     def test_canonical_child_message_keeps_task_as_data_and_never_grants_writer(self):
         request = SpawnRequest.parse(
@@ -350,6 +469,21 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(sibling["state"], "orphaned")
         self.assertIn("last observed state", sibling["last_error"])
         self.assertEqual(len(self.snapshots[-1]["collection"]["nodes"]), 2)
+        # TASK 3: `orphaned` no longer means dead. The worker is still owned by
+        # this session, visibly detached from any run, and reattachable.
+        self.assertTrue(sibling["detached"])
+        self.assertTrue(sibling["reattachable"])
+        self.assertEqual(sibling["detached_at_ms"], self.clock())
+        self.assertEqual(sibling["session"], fake_session_reference(sibling_id))
+        self.assertEqual(retained["worker"]["detached"], False)
+        node = next(
+            item
+            for item in self.snapshots[-1]["collection"]["nodes"]
+            if item["id"] == "worker:%s" % sibling_id
+        )
+        self.assertEqual(node["state"], "degraded")
+        self.assertIn("detached", node["secondary"])
+        self.assertIn("reattachable", node["secondary"])
 
         self.host.spawns.clear()
         retried = self.spawn("failed-worker", idempotency_key="failed-v1")
@@ -360,6 +494,95 @@ class OrchestrationTests(unittest.TestCase):
             [worker["name"] for worker in workers],
             ["running-sibling", "failed-worker"],
         )
+
+    def test_detached_worker_reattaches_when_the_host_republishes_the_record(self):
+        """Reattachment surface: a still-live worker is picked back up, not buried."""
+        agent_id = self.spawn("running-sibling")["worker"]["id"]
+        self.host.start(agent_id, phase="searching")
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        record = self.host.agents[agent_id]
+
+        # The owning run ended: the record disappears before the next observation.
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        detached = self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        self.assertEqual(detached["worker"]["state"], "orphaned")
+        self.assertTrue(detached["worker"]["detached"])
+        self.assertEqual(detached["worker"]["reattach_count"], 0)
+
+        # The owning session republishes the live record on a later turn.
+        self.host.agents[agent_id] = record
+        self.host.owners[("octet-subagents@test", "owner-a")] = [agent_id]
+        reattached = self.orchestrator.status(
+            self.client, self.owner, {"target": agent_id}
+        )
+        worker = reattached["worker"]
+        self.assertEqual(worker["state"], "running")
+        self.assertFalse(worker["detached"])
+        self.assertFalse(worker["reattachable"])
+        self.assertEqual(worker["reattach_count"], 1)
+        self.assertIsNotNone(worker["last_reattached_at_ms"])
+        self.assertIsNone(worker["last_error"], "the detachment note is cleared on reattach")
+        self.assertEqual(worker["session"], fake_session_reference(agent_id))
+
+    def test_explicit_wait_reports_detachment_reattachment_and_approval_parks(self):
+        agent_id = self.spawn("parked-worker")["worker"]["id"]
+        self.host.start(agent_id)
+        # A normally attached worker has nothing to reattach.
+        attached = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertNotIn("reattachment", attached)
+
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        gone = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertEqual(gone["reattachment"]["state"], "detached")
+        self.assertTrue(gone["reattachment"]["reattachable"])
+        self.assertIn("still owned by this parent session", gone["reattachment"]["detail"])
+
+        # The host parks it at the approval boundary: rendered, never a stall.
+        record = self.spawn("parked-worker-2")["worker"]["id"]
+        self.host.agents[record].status = {"state": "awaiting_approval"}
+        self.host.agents[record].phase = "waiting for approval"
+        parked = self.orchestrator.wait(
+            self.client, self.owner, {"target": record, "timeout_seconds": 1}
+        )
+        self.assertEqual(parked["worker"]["state"], "awaiting_approval")
+        self.assertEqual(parked["approval"]["state"], "awaiting_approval")
+        self.assertIn("cannot mutate unattended", parked["approval"]["detail"])
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.continue_worker(
+                self.client, self.owner, {"target": record, "message": "Keep going."}
+            )
+        self.assertEqual(raised.exception.code, "worker_awaiting_approval")
+        self.assertEqual(self.host.steers, [])
+        self.assertEqual(self.host.follow_ups, [])
+
+    def test_cached_command_surface_reports_detached_workers_without_faking_a_wait(self):
+        agent_id = self.spawn("detached-worker")["worker"]["id"]
+        self.host.start(agent_id)
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+
+        cached = {"host": {"session_id": "parent-session"}}
+        result = self.orchestrator.command(["wait", agent_id], cached)
+        self.assertIn("still owned by this parent session", result["text"])
+        self.assertIn("reattachable", result["text"])
+        self.assertIn("no wait", result["text"].lower())
+        self.assertTrue(result["notifications"])
+        self.assertIn(
+            "detached",
+            self.orchestrator.command(["list"], cached)["text"].lower(),
+        )
+        usage = self.orchestrator.command(["nonsense-with-extra"], cached)["text"]
+        self.assertIn("wait <name-or-id>", usage)
+        self.assertIn("reattach <name-or-id>", usage)
+        self.assertIn("open-all tmux", usage)
 
     def test_wall_timeout_interrupts_and_has_distinct_terminal_state(self):
         agent_id = self.spawn(timeout_seconds=5)["worker"]["id"]

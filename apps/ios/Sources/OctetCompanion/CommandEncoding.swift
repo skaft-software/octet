@@ -48,7 +48,9 @@ private struct PromptBody: Encodable {
 }
 
 private extension KeyedEncodingContainer where Key: CodingKey {
-    func encodeIfNotEmpty<T: Encodable>(_ value: [T], forKey key: Key) throws {
+    // `KeyedEncodingContainer.encode(_:forKey:)` is mutating, so this helper is
+    // too; it is called on the local `container` var in `PromptBody.encode`.
+    mutating func encodeIfNotEmpty<T: Encodable>(_ value: [T], forKey key: Key) throws {
         if !value.isEmpty { try encode(value, forKey: key) }
     }
 }
@@ -403,7 +405,10 @@ public enum CommandEnvelopeEncoder {
         }
     }
 
-    private static func nowMs() -> UInt64 {
+    /// Wall-clock issue time for a command envelope. Public because it is the
+    /// default value of public `issuedAtMs` parameters, which must be visible at
+    /// the call site.
+    public static func nowMs() -> UInt64 {
         UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
     }
 

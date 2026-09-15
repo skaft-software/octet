@@ -44,6 +44,36 @@ _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,512}$")
 _AGENT_PATH_RE = re.compile(r"^/[A-Za-z0-9_./:-]{1,1023}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+# Session-scoped delegation: one owning run retiring a child record means
+# "detached from any run", not "dead". These strings are the single source for
+# the diagnostic the extension writes when it first observes the detachment, so
+# a later reattachment can clear exactly that text and nothing else.
+DETACHED_PHASE = "detached from any host run; still owned by this session"
+DETACHED_DIAGNOSTIC = (
+    "The host no longer reports this worker for the current run; the worker's "
+    "session is still owned by this parent session, so its last observed state, "
+    "usage, and bounded output are retained for reattachment and diagnosis."
+)
+REATTACHED_PHASE = "reattached to the owning session; the host record is live again"
+# Host statuses that mean the worker is still owned by the session but is not
+# attached to a run. `awaiting_approval` is the bounded park state: the host
+# must not let it mutate unattended, and the extension must render it rather
+# than stalling silently or reporting a fake success.
+DETACHED_HOST_STATES = frozenset({"shutdown", "orphaned", "detached"})
+
+
+def known_models_for(owner: Owner) -> Tuple[str, ...]:
+    """The provider/model ids this session can confirm as configured.
+
+    API 0.2 exposes exactly one model to the extension -- the parent session's
+    observed model -- and no provider catalog, so that is the only per-worker
+    selection the extension can verify. Anything else is refused fail-closed by
+    `SpawnRequest.parse` rather than silently coerced to the inherited model.
+    """
+    model = owner.inherited_model
+    if not isinstance(model, str) or not model or len(model.encode("utf-8")) > 128:
+        return ()
+    return (model,)
 
 
 def _host_policy(
@@ -281,7 +311,9 @@ class Orchestrator:
         arguments: Mapping[str, Any],
         cancellation: Optional[Cancellation] = None,
     ) -> Dict[str, Any]:
-        request = SpawnRequest.parse(arguments)
+        request = SpawnRequest.parse(
+            arguments, known_models=known_models_for(owner)
+        )
         self._check_cancelled(cancellation)
         state = self._owner_state(owner)
         self._refresh(client, state, cancellation)
@@ -496,6 +528,33 @@ class Orchestrator:
             result["completion_delivery"] = (
                 "host_owned_parent_turn" if not wait_timed_out else "workers_continue_in_background"
             )
+            # An explicit parent wait is also the reattachment surface: the
+            # reconcile above is what lets the owning session pick a detached
+            # worker back up, so report that outcome explicitly instead of
+            # leaving a detached row reading as terminal.
+            if selected is not None and selected.detached:
+                result["reattachment"] = {
+                    "state": "detached",
+                    "reattachable": selected.reattachable,
+                    "detail": (
+                        "still owned by this parent session; the host has not yet "
+                        "republished a live record for the current run"
+                    ),
+                }
+            elif selected is not None and selected.reattached:
+                result["reattachment"] = {
+                    "state": "reattached",
+                    "count": selected.reattach_count,
+                    "detail": "the host republished the worker's live session",
+                }
+            if selected is not None and selected.awaiting_approval:
+                result["approval"] = {
+                    "state": "awaiting_approval",
+                    "detail": (
+                        "parked at the approval boundary; it cannot mutate unattended "
+                        "and stays visible until it is approved or stopped"
+                    ),
+                }
         return result
 
     def stop(
@@ -608,16 +667,32 @@ class Orchestrator:
             state.selected_agent_id = worker.agent_id
             display = worker.name
             if worker.state == "orphaned":
+                # Detached, not dead: the session still owns this worker and its
+                # durable session reference survives the owning run. The host
+                # republishes the live record on reattachment; until then this is
+                # an explicit bounded state, never a silent stall.
                 raise SubagentError(
-                    "worker %s was orphaned by a host shutdown and cannot be resumed"
+                    "worker %s is still owned by this session but is currently "
+                    "detached from any host run; reattach it with /subagents wait "
+                    "or subagent_status once the host republishes its live session"
                     % display,
-                    code="orphaned",
+                    code="detached",
                 )
             if worker.state == "stopping":
                 raise SubagentError(
                     "worker %s is stopping; wait for it to settle before continuing"
                     % display,
                     code="worker_stopping",
+                )
+            if worker.state == "awaiting_approval":
+                # The host parked this worker at the approval boundary. Queueing
+                # new work into it would be unattended mutation, so refuse with an
+                # explicit bounded state instead of stalling or pretending.
+                raise SubagentError(
+                    "worker %s is parked at the host approval boundary and cannot "
+                    "accept unattended input; approve it in an interactive session "
+                    "or stop it explicitly" % display,
+                    code="worker_awaiting_approval",
                 )
             action = "resumed" if worker.terminal else "steered"
             if worker.terminal:
@@ -680,6 +755,44 @@ class Orchestrator:
                 workers=workers,
                 arguments=arguments[1:],
             )
+        if verb in {"wait", "reattach"} and len(arguments) <= 2:
+            # The cached fallback holds no live agent_sessions client, so it can
+            # never claim a wait or a reattachment happened. Report the detached
+            # set explicitly instead of stalling or reporting success.
+            with self._lock:
+                detached = [
+                    worker for worker in state.workers.values() if worker.detached
+                ]
+                reattachable = sum(worker.reattachable for worker in detached)
+            if detached:
+                return {
+                    "text": (
+                        "%d worker(s) are still owned by this parent session but "
+                        "detached from any host run (%d reattachable). The cached "
+                        "fallback cannot observe the live host service, so no wait "
+                        "or reattachment was performed. Run /subagents wait from an "
+                        "interactive owner-bound session or call subagent_wait."
+                        % (len(detached), reattachable)
+                    ),
+                    "notifications": [
+                        {
+                            "level": "warning",
+                            "title": "Subagent wait requires owner authority",
+                            "message": (
+                                "Detached workers keep their evidence and stay "
+                                "reattachable; no silent stall and no fake success."
+                            ),
+                        }
+                    ],
+                }
+            return {
+                "text": (
+                    "No detached workers. An explicit live wait needs the owner-bound "
+                    "command context: run /subagents wait from an interactive session "
+                    "or call subagent_wait."
+                ),
+                "notifications": [],
+            }
         if verb == "stop" and len(arguments) == 2:
             # This cached fallback has no live service client. Never smuggle a
             # stale request ID through it; the runtime handles owner-bound stop.
@@ -708,10 +821,10 @@ class Orchestrator:
         return {
             "text": (
                 "Usage: /subagents [list|inspect <name-or-id>|stop <name-or-id|all>"
-                "|wait <name-or-id>|open-all tmux|open-all herdr]\n"
-                "The fallback is cached/read-only; authoritative wait and stop use "
-                "subagent_wait and subagent_stop, and open-all needs the owner-bound "
-                "command context."
+                "|wait <name-or-id>|reattach <name-or-id>|open-all tmux|open-all herdr]\n"
+                "The fallback is cached/read-only; authoritative wait, reattachment, "
+                "and stop use subagent_wait and subagent_stop, and open-all needs the "
+                "owner-bound command context."
             ),
             "notifications": [],
         }
@@ -978,14 +1091,12 @@ class Orchestrator:
                 # evidence instead of making the entire tree disappear.
                 if worker.active:
                     worker.state = "orphaned"
-                    worker.phase = "host worker record no longer available"
+                    worker.detached_at_ms = now
+                    worker.phase = DETACHED_PHASE
                     worker.current_tool = None
                     worker.completed_at_ms = now
                     if worker.last_error is None:
-                        worker.last_error = (
-                            "The host no longer reports this worker; its last "
-                            "observed state is retained for diagnosis."
-                        )
+                        worker.last_error = DETACHED_DIAGNOSTIC
             self._trim_workers_locked(state)
             persistence_error = snapshot.get("persistence_error")
             if isinstance(persistence_error, str) and persistence_error.strip():
@@ -1076,6 +1187,10 @@ class Orchestrator:
         self, worker: Worker, record: Mapping[str, Any]
     ) -> None:
         worker.host_present = True
+        # A detached worker whose record the host reports again has been
+        # reattached by the owning session: clear the detachment, count it, and
+        # drop exactly the diagnostic the extension wrote when it detached.
+        reattaching = worker.detached
         state_name, status = host_state(record)
         mapped = {
             "pending": "queued",
@@ -1090,10 +1205,16 @@ class Orchestrator:
             "cancelled": "cancelled",
             "shutdown": "orphaned",
             "orphaned": "orphaned",
+            "detached": "orphaned",
+            "awaiting_approval": "awaiting_approval",
             "timed_out": "timed_out",
             "stopped": "stopped",
             "restarted": "restarted",
         }.get(state_name, "orphaned")
+        if reattaching and mapped == "orphaned":
+            # The host still reports the same detached/parked state; this is not
+            # a reattachment, and the original detachment time is preserved.
+            reattaching = False
         if state_name == "interrupted":
             if worker.timeout_requested:
                 mapped = "timed_out"
@@ -1187,10 +1308,22 @@ class Orchestrator:
                 "cancelled": "cancelled",
                 "stopped": "stopped",
                 "timed_out": "timed out",
-                "orphaned": "host session unavailable",
+                "orphaned": DETACHED_PHASE,
+                "awaiting_approval": (
+                    "awaiting approval: parked by the host and not mutating unattended"
+                ),
                 "restarted": "recovered after restart",
                 "stopping": "host interrupt requested",
             }.get(worker.state, "unknown")
+        if reattaching:
+            worker.detached_at_ms = None
+            worker.reattach_count += 1
+            worker.last_reattached_at_ms = self._now_ms()
+            worker.phase = REATTACHED_PHASE
+            if worker.last_error == DETACHED_DIAGNOSTIC:
+                # Only the detachment diagnostic is cleared; a real host error is
+                # preserved across reattachment.
+                worker.last_error = None
         (
             turns,
             tool_calls,
@@ -1382,6 +1515,21 @@ class Orchestrator:
             profile=request.profile,
             requested_model=request.model,
             effective_model=owner.inherited_model or "inherited",
+            # Per-worker orchestration selection. API 0.2 `agent/spawn` carries
+            # no provider/model/reasoning field, so a confirmed model request is
+            # only ever the parent's own observed model (the one selection this
+            # process can verify); it is applied because the child demonstrably
+            # runs it. A requested reasoning level is surfaced as requested-only
+            # until the host reports a per-worker selection, and a level above the
+            # declared ceiling is clamped by the mirrored product policy.
+            requested_provider=request.provider,
+            effective_provider=(
+                request.provider if request.model != INHERIT else "inherited"
+            ),
+            requested_reasoning=request.reasoning,
+            effective_reasoning="inherited",
+            model_policy_applied=request.model != INHERIT,
+            reasoning_note=request.reasoning_note,
             tools=effective_tools,
             state="queued",
             phase="queued by host",

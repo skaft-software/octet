@@ -21,7 +21,11 @@ GENERIC_STATE = {
     "stopped": "stopped",
     "timed_out": "failed",
     "cancelled": "cancelled",
-    "orphaned": "unavailable",
+    # Detached is recoverable, not terminal: it stays "degraded" (usable with
+    # reduced functionality) rather than "unavailable" so no frontend renders a
+    # session-owned worker as a dead resource.
+    "orphaned": "degraded",
+    "awaiting_approval": "pending",
     "restarted": "degraded",
 }
 STATE_LABEL = {
@@ -35,7 +39,9 @@ STATE_LABEL = {
     "stopped": "stopped",
     "timed_out": "timed out",
     "cancelled": "cancelled",
-    "orphaned": "orphaned",
+    # Reworded: still owned by this session, just detached from any host run.
+    "orphaned": "detached",
+    "awaiting_approval": "awaiting approval",
     "restarted": "restarted",
 }
 
@@ -91,11 +97,15 @@ def counts(workers: Sequence[Worker]) -> Dict[str, int]:
         "limited": 0,
         "failed": 0,
         "stopped": 0,
+        # Detached workers are session-owned and reattachable, so they are
+        # counted separately from deliberately stopped workers instead of
+        # disappearing into the stopped bucket.
+        "detached": 0,
     }
     for worker in workers:
         if worker.state == "queued":
             values["queued"] += 1
-        elif worker.state in {"running", "waiting", "stopping"}:
+        elif worker.state in {"running", "waiting", "stopping", "awaiting_approval"}:
             values["running"] += 1
         elif worker.state == "done":
             values["done"] += 1
@@ -103,6 +113,8 @@ def counts(workers: Sequence[Worker]) -> Dict[str, int]:
             values["limited"] += 1
         elif worker.state == "failed" or worker.state == "timed_out":
             values["failed"] += 1
+        elif worker.state == "orphaned":
+            values["detached"] += 1
         else:
             values["stopped"] += 1
     return values
@@ -111,7 +123,7 @@ def counts(workers: Sequence[Worker]) -> Dict[str, int]:
 def compact_status(workers: Sequence[Worker]) -> Tuple[str, str, Optional[str]]:
     value = counts(workers)
     pieces = []
-    for key in ("running", "queued", "done", "limited", "failed", "stopped"):
+    for key in ("running", "queued", "done", "limited", "failed", "detached", "stopped"):
         if value[key]:
             pieces.append("%d %s" % (value[key], key))
     label = "Subagents" if not pieces else "Subagents · " + " · ".join(pieces)
@@ -121,6 +133,12 @@ def compact_status(workers: Sequence[Worker]) -> Tuple[str, str, Optional[str]]:
     elif value["limited"]:
         state = "degraded"
         detail = "One or more bounded workers reached their turn limit."
+    elif value["detached"]:
+        state = "degraded"
+        detail = (
+            "One or more workers are still owned by this session but detached "
+            "from any host run; they keep their evidence and can be reattached."
+        )
     elif value["running"] or value["queued"]:
         state = "active"
         detail = None
@@ -173,6 +191,28 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
         human_duration(worker.elapsed_ms(now_ms)),
         "%s/%s" % (worker.profile, worker.effective_model),
     ]
+    # Per-worker orchestration selection. `inherit` is the default and stays
+    # absent (absence is never rendered as text); an explicit request is shown as
+    # `requested→effective` so a pane-per-worker fleet is legible and a selection
+    # the host has not applied is never implied to be in force.
+    if worker.requested_model != "inherit":
+        requested_model = "%s/%s" % (worker.requested_provider, worker.requested_model)
+        marker = "" if worker.model_policy_applied else " (not applied by host)"
+        pieces.append("model %s%s" % (requested_model, marker))
+    if worker.requested_reasoning != "inherit":
+        if not worker.model_policy_applied:
+            pieces.append(
+                "reasoning %s (not applied by host)" % worker.requested_reasoning
+            )
+        elif worker.effective_reasoning == worker.requested_reasoning:
+            pieces.append("reasoning %s" % worker.requested_reasoning)
+        else:
+            pieces.append(
+                "reasoning %s→%s"
+                % (worker.requested_reasoning, worker.effective_reasoning)
+            )
+    if worker.reasoning_note:
+        pieces.append(worker.reasoning_note)
     pieces.append(
         "%d call%s" % (worker.tool_call_count, "" if worker.tool_call_count == 1 else "s")
     )
@@ -202,6 +242,14 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
             )
     if worker.recovered:
         pieces.append("restarted")
+    if worker.detached:
+        # A detached worker is still owned by this session; say so, and say
+        # whether it can be reattached, instead of rendering a terminal row.
+        pieces.append("reattachable" if worker.reattachable else "reattach pending")
+    if worker.reattached:
+        pieces.append("reattached ×%d" % worker.reattach_count)
+    if worker.awaiting_approval:
+        pieces.append("approval required")
     if worker.state in {"failed", "timed_out"}:
         # A failed row without its bounded reason is useless; the reason is a
         # host-observed failure class, never tool arguments or child prose.
@@ -211,8 +259,54 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
     return bounded_text(" · ".join(pieces), 1024)
 
 
+def _selection_text(worker: Worker) -> str:
+    """One bounded line describing the requested per-worker selection.
+
+    `inherit` is the default and is stated as such; a request the host has not
+    been able to apply is stated as not applied, never implied to be in force.
+    """
+    requested = []
+    if worker.requested_provider != "inherit" or worker.requested_model != "inherit":
+        requested.append(
+            "provider/model %s/%s" % (worker.requested_provider, worker.requested_model)
+        )
+    if worker.requested_reasoning != "inherit":
+        requested.append("reasoning %s" % worker.requested_reasoning)
+    if not requested:
+        return "inherit the parent session's provider, model, and reasoning."
+    applied = (
+        "applied by the host"
+        if worker.model_policy_applied
+        else "requested only; the host has not confirmed a per-worker selection"
+    )
+    text = "%s (%s; effective %s / reasoning %s)" % (
+        ", ".join(requested),
+        applied,
+        worker.effective_model,
+        worker.effective_reasoning,
+    )
+    if worker.reasoning_note:
+        text = "%s. %s" % (text, worker.reasoning_note)
+    return text
+
+
 def detail_body(worker: Worker, now_ms: int) -> str:
     tools = ", ".join(worker.tools)
+    if worker.awaiting_approval:
+        ownership = (
+            "still owned by this parent session but detached at the approval "
+            "boundary: it is parked and must not mutate unattended. Approve in an "
+            "interactive octet session, then reattach with /subagents wait or "
+            "subagent_continue."
+        )
+    elif worker.detached:
+        ownership = (
+            "still owned by this parent session; currently detached from any host "
+            "run (a recoverable state, not a terminal one). Use /subagents wait to "
+            "reattach, or open its live session pane with /subagents open-all."
+        )
+    else:
+        ownership = "attached to a host run owned by this parent session."
     token_use = str(worker.tokens_used) if worker.tokens_used is not None else "not exposed"
     token_limit = (
         str(worker.max_tokens)
@@ -225,6 +319,7 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Parentage: parent > %s; depth %d (maximum 1)" % (worker.name, worker.depth),
         "Elapsed: %s" % duration_label(worker.elapsed_ms(now_ms)),
         "Model/profile: %s (inherited) / %s" % (worker.effective_model, worker.profile),
+        "Orchestration selection: %s" % _selection_text(worker),
         "Current phase/tool: %s" % safe_label(worker.current_tool or worker.phase),
         "Requested tool policy: %s"
         % (
@@ -273,7 +368,22 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Isolation: the cwd/filesystem may be shared and is not an isolation boundary.",
         "Delivery: %s; octet's durable parent mailbox owns completion claim/ack." % worker.delivery_state,
         "Session: %s" % (worker.session or "not yet exposed by agent_sessions"),
+        "Session ownership: %s" % ownership,
     ]
+    if worker.reattach_count:
+        lines.append(
+            "Reattachment: reattached %d time(s); last reattached at %s."
+            % (
+                worker.reattach_count,
+                (
+                    "%d ms Unix time" % worker.last_reattached_at_ms
+                    if worker.last_reattached_at_ms is not None
+                    else "an unrecorded time"
+                ),
+            )
+        )
+    elif worker.detached_at_ms is not None:
+        lines.append("Detached since: %d ms Unix time." % worker.detached_at_ms)
     if worker.export_reference:
         lines.append("Export: %s" % safe_label(worker.export_reference))
     if worker.recovered:

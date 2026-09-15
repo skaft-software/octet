@@ -828,7 +828,9 @@ impl Drop for Run<'_> {
             self.lifecycle.dropped.store(true, Ordering::Release);
             self.context.run_dropped();
             if let Some(delegation) = &self.delegation {
-                delegation.request_shutdown();
+                // A dropped run ends the turn, not the fleet. Workers are
+                // owned by the session and stay reattachable.
+                delegation.detach_run();
             }
         }
     }
@@ -8358,13 +8360,12 @@ impl Agent {
                 }
             }
             if let Some(delegation) = &stream_delegation {
-                // Stop and briefly settle extension-owned children before the
-                // root checkpoint so their durable provider records can be
-                // mirrored into the root accounting ledger exactly once.
-                delegation.request_shutdown();
-                delegation
-                    .settle_descendants(Duration::from_secs(2))
-                    .await;
+                // Session-scoped lifetime: the fleet survives this run. Mark
+                // the detachment boundary explicitly, then mirror each
+                // extension-owned worker's accounting delta into the root
+                // ledger exactly once so surviving workers are never
+                // double-counted and never lose accounting.
+                delegation.detach_run();
                 for delegated in delegation.delegated_usage_records() {
                     match mirror_delegated_uncertainty(session, &model, delegated.usage_uncertain) {
                         Ok(true) => {

@@ -25,6 +25,7 @@ use crate::session_commands::SessionCommand;
 
 mod config_diagnostics;
 pub(crate) mod catalog_publish;
+pub(crate) mod eval;
 pub(crate) mod parity;
 
 use config_diagnostics::{
@@ -129,6 +130,14 @@ pub enum TopLevelCommand {
     Catalog {
         #[command(subcommand)]
         command: catalog_publish::CatalogCommand,
+    },
+    /// Run isolated, fixture-backed evaluation suites and record their deltas.
+    ///
+    /// The harness injects its own loopback provider, writes its own artifact
+    /// directory, and never makes a live or paid provider call.
+    Eval {
+        #[command(subcommand)]
+        command: eval::EvalCommand,
     },
     /// Check local prerequisites, configured providers, and model visibility.
     Doctor,

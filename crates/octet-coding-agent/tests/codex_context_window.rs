@@ -9,12 +9,12 @@
 //! in-crate tests, because `ChatGptPlan` is crate-private.
 
 use octet_sdk::codex_context::{
-    resolve_codex_context_window, working_context_window, CodexContextClamp,
-    CodexContextClampReporter, CodexContextOverride, CodexContextTier, CodexContextWindow,
-    CodexContextWindowError, CODEX_5_6_CONTEXT_WINDOW, CODEX_ABOVE_STANDARD_TIER_OPERATION,
-    CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING,
-    CODEX_CONTEXT_WINDOW_CAP, CODEX_LEGACY_CONTEXT_WINDOW, CODEX_MAX_OUTPUT_TOKENS,
-    CODEX_PRO_CONTEXT_WINDOW,
+    codex_context_session_note, resolve_codex_context_window, working_context_window,
+    CodexContextClamp, CodexContextClampReporter, CodexContextOverride, CodexContextTier,
+    CodexContextWindow, CodexContextWindowError, CODEX_5_6_CONTEXT_WINDOW,
+    CODEX_ABOVE_STANDARD_TIER_OPERATION, CODEX_ASTRA_MAX_CONTEXT_WINDOW,
+    CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING, CODEX_CONTEXT_WINDOW_CAP, CODEX_LEGACY_CONTEXT_WINDOW,
+    CODEX_MAX_OUTPUT_TOKENS, CODEX_PRO_CONTEXT_WINDOW,
 };
 
 /// The checked-in discovery fallback windows for a Codex model.
@@ -317,12 +317,126 @@ fn clamp_notice_fires_once_per_transition_and_never_without_a_clamp() {
 
     let message = clamp.message();
     assert!(message.contains("gpt-6-astra"), "{message}");
-    assert!(message.contains("872000"), "{message}");
-    assert!(message.contains("272000"), "{message}");
+    // Every window the note quotes is labelled, and the deliberate cap is the
+    // labelled 272K figure rather than a bare number the reader must decode.
+    assert!(message.contains("advertised 872K"), "{message}");
+    assert!(message.contains("effective 272K"), "{message}");
+    assert!(message.contains("272K Codex cap"), "{message}");
+    assert!(message.contains("reduces the advertised window by 600K"), "{message}");
     assert!(message.contains("double-priced"), "{message}");
     assert!(message.contains("websocket"), "{message}");
-    assert!(message.contains("OCTET_CODEX_CONTEXT_WINDOW"), "{message}");
+    // The in-app remedy leads; the environment variables stay the scriptable
+    // alternative.
+    let remedy = message.find("--codex-context-window");
+    let scriptable = message.find("OCTET_CODEX_CONTEXT_WINDOW");
+    assert!(remedy.is_some(), "{message}");
+    assert!(
+        remedy < scriptable,
+        "the in-app flag must be offered before the env vars: {message}"
+    );
+    assert!(message.contains("OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF=1"), "{message}");
     assert!(message.len() < 1024, "the notice is bounded: {}", message.len());
+}
+
+/// The single session note is a catalog-free, effective-model-only value: it is
+/// produced for one model, never per catalog entry and never per turn.
+#[test]
+fn one_session_note_per_effective_model_and_none_for_an_unclamped_legacy_route() {
+    // A Pro plan clamped to the deliberate cap: one note, naming the reduction.
+    let clamped = extended_tier("gpt-6-astra");
+    let note = codex_context_session_note("gpt-6-astra", &clamped).expect("astra is clamped");
+    assert!(note.contains("advertised 872K"), "{note}");
+    assert!(note.contains("entitled 872K"), "{note}");
+    assert!(note.contains("effective 272K"), "{note}");
+
+    // A legacy route whose advertised window is the cap itself needs no note.
+    let legacy = extended_tier("some-legacy-codex");
+    assert_eq!(legacy.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    assert_eq!(codex_context_session_note("some-legacy-codex", &legacy), None);
+
+    // A non-Codex model never reaches this policy at all; there is no window to
+    // note and nothing is emitted for one.
+    assert_eq!(codex_context_session_note("deepseek/v4.1-flash", &legacy), None);
+
+    // The note is a pure function of the resolution: resolving the same session
+    // model again yields the same single note, and the launch path calls it once.
+    assert_eq!(
+        codex_context_session_note("gpt-6-astra", &clamped).as_deref(),
+        Some(note.as_str())
+    );
+}
+
+/// The 372K `gpt-5.6-luna` window is above the standard tier but is not a clamp.
+/// Every note variant must state the same effective window.
+#[test]
+fn the_luna_note_states_372k_consistently_and_never_reads_as_a_cap_to_272k() {
+    let luna = default_tier("gpt-5.6-luna");
+    let note = codex_context_session_note("gpt-5.6-luna", &luna).expect("372K is above the tier");
+    assert!(note.contains("advertised 372K"), "{note}");
+    assert!(note.contains("entitled 372K"), "{note}");
+    assert!(note.contains("effective 372K"), "{note}");
+    assert!(
+        note.contains("above the 272K standard tier"),
+        "the note must say why it exists: {note}"
+    );
+    assert!(
+        !note.contains("reduces the advertised window"),
+        "372K luna is the documented window, not a reduction: {note}"
+    );
+
+    // A luna route that a smaller provider window does reduce still reports the
+    // same effective window in both facts, never a contradiction.
+    let reduced = resolve_codex_context_window(
+        "gpt-5.6-luna",
+        CodexContextTier::Extended,
+        500_000,
+        500_000,
+        Some(CODEX_MAX_OUTPUT_TOKENS),
+        CodexContextOverride::NONE,
+    )
+    .unwrap();
+    assert_eq!(reduced.context_window, CODEX_5_6_CONTEXT_WINDOW);
+    let note = codex_context_session_note("gpt-5.6-luna", &reduced).expect("still above the tier");
+    assert!(note.contains("effective 372K"), "{note}");
+    assert!(note.contains("reduces the advertised window by 128K"), "{note}");
+    assert!(note.contains("above the 272K standard tier"), "{note}");
+}
+
+/// The note is user-facing prose: no internal Rust API and no internal operation
+/// identifier may leak into a transcript.
+#[test]
+fn the_session_note_never_names_an_internal_api_or_operation() {
+    let mut variants = vec![
+        codex_context_session_note("gpt-6-astra", &extended_tier("gpt-6-astra")).unwrap(),
+        codex_context_session_note("gpt-5.6-luna", &default_tier("gpt-5.6-luna")).unwrap(),
+        extended_tier("gpt-6-astra").clamp.unwrap().message(),
+        extended_tier("gpt-5.4").clamp.unwrap().message(),
+    ];
+    variants.push(
+        codex_context_session_note(
+            "gpt-6-astra",
+            &resolve(
+                "gpt-6-astra",
+                CodexContextTier::Extended,
+                CodexContextOverride::raising(CODEX_ASTRA_MAX_CONTEXT_WINDOW, true),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    for note in variants {
+        for forbidden in [
+            "Session::",
+            "record_usage_uncertainty",
+            CODEX_ABOVE_STANDARD_TIER_OPERATION,
+            "CodexContextWindow",
+            "has_uncertain_usage",
+        ] {
+            assert!(!note.contains(forbidden), "{forbidden} leaked into: {note}");
+        }
+        assert!(note.starts_with("note: Codex model"), "{note}");
+        assert!(note.len() < 1200, "the note stays bounded: {}", note.len());
+    }
 }
 
 #[test]

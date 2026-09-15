@@ -251,3 +251,34 @@ search prints **no** re-index notice, after one transcript changes only 1 sessio
 is re-read, and a miss is explicit.
 
 START 2026-09-15T16:28:32Z cli6 alive
+
+START 2026-09-15T16:50:13Z cli7 alive
+
+### Round 7 (cli7) — P0 startup Codex-note spam fix (in progress)
+
+Root-reported symptom: EIGHT near-identical `note: ... is budgeted at ... context
+tokens (clamped ...)` lines at startup on a DeepSeek (non-Codex) session.
+
+Root cause: the note was emitted from the *catalog registration loop*
+(`app/bootstrap.rs::codex_context_report`, called at the per-model
+`codex_context_resolve_for_registration` site), so every registered Codex model
+printed a note regardless of the model the session actually runs. The
+above-standard-tier variant also leaked an internal Rust API name and operation
+id (`Session::record_usage_uncertainty("codex-context-above-272k")`) into
+user-facing prose, and its wording made the reader decode three unlabelled
+numbers.
+
+Fix (in flight):
+- `codex_context.rs`: added `codex_context_session_note(model_id, &window)` — the
+  ONE user-facing note for an *effective* Codex session model. `None` unless the
+  window is reduced by the deliberate cap or above the 272K standard tier.
+  `context_window_label()` renders labelled `272K`/`372K`/`600K` values. The note
+  leads with the in-app remedy (`--codex-context-window`, model effort menu) and
+  keeps the env vars as the scriptable alternative. No internal API name, no
+  operation id, no "bug/regression" language.
+- `CodexContextClamp::message()` reworded to the same labelled form.
+- `app/bootstrap.rs`: registration now *records* one note per model
+  (`codex_context_record_note` -> `CodexContextNotes`) and prints nothing;
+  `Bootstrap::codex_context_note(&ModelId)` is the single effective-model
+  boundary a frontend calls once per session (stderr for print/json/rpc,
+  `shell.notice` for the interactive shell).

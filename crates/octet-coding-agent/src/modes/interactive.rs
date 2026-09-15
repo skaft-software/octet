@@ -49,10 +49,10 @@ use crate::session_tree::render_session_tree;
 use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
-    confirmation_picker, extension_confirmation_picker, extension_input_picker, extension_picker,
-    message_picker, optional_model_picker, pick_list_with_preview, provider_setup_picker,
-    read_only_document, read_only_document_live_styled, session_picker, subagent_picker,
-    thinking_picker, tool_input_picker, SubagentPickerSnapshot,
+    self, confirmation_picker, extension_confirmation_picker, extension_input_picker,
+    extension_picker, message_picker, optional_model_picker, pick_list_with_preview,
+    provider_setup_picker, read_only_document, read_only_document_live_styled, session_picker,
+    subagent_picker, thinking_picker, tool_input_picker, SubagentPickerSnapshot,
 };
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
@@ -1655,42 +1655,57 @@ fn active_context_text(snapshot: &octet_agent::ContextSnapshot, model: &Model) -
 ///
 /// `thinking_picker` is bound to the concrete terminal input; an active run
 /// drives its own borrowed stream. The panel mechanics are the shared
-/// `pick_list_with_preview` used by every other picker.
+/// `pick_list_with_preview` used by every other picker, and the trailing Codex
+/// context-window row uses the same shared menu.
 async fn active_thinking_picker<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     levels: &[ThinkingLevel],
+    codex_context: Option<&commands::CodexContextSurface>,
 ) -> anyhow::Result<Option<ThinkingLevel>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let mut items: Vec<String> = levels.iter().map(|level| level.label().into()).collect();
-    let (_, current) = shell.selected_identity();
-    let initial = match levels.iter().position(|level| level.label() == current) {
-        Some(index) => {
-            items[index].push_str(" (current)");
-            index
+    loop {
+        let mut items: Vec<String> = levels.iter().map(|level| level.label().into()).collect();
+        if let Some(surface) = codex_context {
+            items.push(pickers::codex_context_menu_row(surface));
         }
-        None => 0,
-    };
-    let Some(index) = pick_list_with_preview(
-        shell,
-        input,
-        OrdinarySurfaceMetadata::with_purpose(
-            "Select thinking level",
-            "Choose effort for subsequent prompts and the startup default",
-        ),
-        items,
-        vec![None; levels.len()],
-        initial,
-        PanelAction::SelectThinking(levels.to_vec()),
-        |_, _| {},
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(levels[index]))
+        let (_, current) = shell.selected_identity();
+        let initial = match levels.iter().position(|level| level.label() == current) {
+            Some(index) => {
+                items[index].push_str(" (current)");
+                index
+            }
+            None => 0,
+        };
+        let Some(index) = pick_list_with_preview(
+            shell,
+            input,
+            OrdinarySurfaceMetadata::with_purpose(
+                "Select thinking level",
+                "Choose effort for subsequent prompts and the startup default",
+            ),
+            items,
+            vec![None; levels.len() + usize::from(codex_context.is_some())],
+            initial,
+            PanelAction::SelectThinking(levels.to_vec()),
+            |_, _| {},
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        let Some(level) = levels.get(index).copied() else {
+            // The trailing Codex context-window row is never an effort level.
+            if let Some(surface) = codex_context {
+                pickers::codex_context_menu(shell, input, surface).await?;
+                continue;
+            }
+            return Ok(None);
+        };
+        return Ok(Some(level));
+    }
 }
 
 /// Handle a slash command while the model is running.
@@ -1884,7 +1899,10 @@ where
         Command::Thinking(None) => {
             let levels =
                 supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
-            if let Some(level) = active_thinking_picker(shell, input, &levels).await? {
+            let codex_context = codex_context_surface(&inspection.model);
+            if let Some(level) =
+                active_thinking_picker(shell, input, &levels, codex_context.as_ref()).await?
+            {
                 let reasoning = thinking_to_reasoning_with_subagents(
                     level,
                     &inspection.model,
@@ -3218,10 +3236,30 @@ async fn thinking_configuration_picker(
     input: &mut EventStream,
 ) -> anyhow::Result<Option<(ReasoningMode, ThinkingLevel)>> {
     let levels = supported_levels_with_subagents(&app.model, app.subagents_available());
-    let Some(level) = thinking_picker(shell, input, &levels).await? else {
+    let codex_context = codex_context_surface(&app.model);
+    let Some(level) = thinking_picker(shell, input, &levels, codex_context.as_ref()).await? else {
         return Ok(None);
     };
     Ok(Some((ReasoningMode::Standard, level)))
+}
+
+/// Codex context-window facts for the effort menu, or `None` on every other
+/// route.
+///
+/// Entitlement is read from the same subscription credential the launch used,
+/// and an unreadable or unparsable credential reports `false` so an unknown plan
+/// never grants a raise above the deliberate cap.
+fn codex_context_surface(model: &octet_ai::Model) -> Option<commands::CodexContextSurface> {
+    if !commands::codex_responses_endpoint(model) {
+        return None;
+    }
+    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
+    let entitled = crate::auth::codex::usable_subscription_claims(&store)
+        .ok()
+        .flatten()
+        .and_then(|claims| claims.plan)
+        .is_some_and(|plan| plan.uses_max_context_window());
+    commands::CodexContextSurface::capture(model, entitled)
 }
 
 fn delegated_session_text(
@@ -8155,6 +8193,51 @@ mod tests {
         std::sync::Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
             octet_ai::ResponsesRuntimeProfile::Codex;
         model
+    }
+
+    /// The effort menu must offer the Codex context-window surface on a Codex
+    /// route and nowhere else, and it must report the live effective window.
+    #[test]
+    fn codex_context_surface_follows_the_declared_route_and_the_effective_window() {
+        let plain = scripted_model("http://127.0.0.1:1");
+        assert!(
+            codex_context_surface(&plain).is_none(),
+            "a non-Codex route must not offer a Codex context-window surface"
+        );
+
+        let mut codex = scripted_codex_model("http://127.0.0.1:1");
+        std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-6-astra".into());
+        std::sync::Arc::make_mut(&mut codex.spec).limits.context_window = 272_000;
+        let surface = codex_context_surface(&codex).expect("Codex route");
+        assert_eq!(surface.effective_window(), 272_000);
+        assert!(!surface.has_uncertain_usage());
+        let row = pickers::codex_context_menu_row(&surface);
+        assert!(row.contains("272000"), "{row}");
+        let lines = surface.summary_lines().join("\n");
+        assert!(lines.contains("272000"), "{lines}");
+        assert!(
+            lines.contains("Codex"),
+            "the surface must name the Codex working window it reports: {lines}"
+        );
+
+        // An above-standard-tier route renders its accounting as uncertain and
+        // never as an exact figure.
+        std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-5.6-luna".into());
+        std::sync::Arc::make_mut(&mut codex.spec).limits.context_window = 372_000;
+        let uncertain = codex_context_surface(&codex).expect("Codex route");
+        assert!(uncertain.has_uncertain_usage());
+        assert!(pickers::codex_context_menu_row(&uncertain).contains("UNCERTAIN"));
+        let lines = uncertain.summary_lines().join("\n");
+        assert!(lines.contains("UNCERTAIN"), "{lines}");
+        assert!(lines.contains(octet_ai_operation_name()), "{lines}");
+        assert!(
+            !lines.contains('$'),
+            "no exact-looking figure may be rendered above the standard tier: {lines}"
+        );
+    }
+
+    fn octet_ai_operation_name() -> &'static str {
+        crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
     }
 
     /// Inspection facts for tests that drive `drive_active_run` directly. The

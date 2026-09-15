@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use octet_ai::{AssistantPart, Cost, ToolDef, Usage, PICODOLLARS_PER_MICRODOLLAR};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Notify, OwnedSemaphorePermit, Semaphore};
@@ -293,7 +293,14 @@ pub enum DelegationError {
 }
 
 /// Durable status exposed by `list_agents` and `wait_agent`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+///
+/// Lifetime is session-scoped: a worker survives the parent turn that spawned
+/// it. Retirement at run end is no longer the default; instead the record
+/// moves to [`DelegatedAgentStatus::Detached`] (recoverable) or
+/// [`DelegatedAgentStatus::AwaitingApproval`] (parked on new authority), and
+/// only an explicit session/process teardown reaches
+/// [`DelegatedAgentStatus::Shutdown`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum DelegatedAgentStatus {
     /// The worker exists but has not started its task yet.
@@ -323,6 +330,21 @@ pub enum DelegatedAgentStatus {
     },
     /// The worker exceeded its host-owned wall deadline.
     TimedOut,
+    /// The worker is owned by the session, not the run, and has no live task
+    /// in this process. It survives the parent turn and is recoverable: a
+    /// later turn (or a restarted process holding the durable record) can
+    /// reattach and continue, steer, or stop it. It is never silently
+    /// forgotten.
+    Detached,
+    /// A detached worker parked on an effect that requires new authority.
+    ///
+    /// The worker neither proceeds nor blocks forever: it settled without
+    /// acting because no approval authority was attached to this run. A later
+    /// turn that reattaches can supply the decision and resume it.
+    AwaitingApproval {
+        /// Bounded diagnostic describing the parked decision.
+        reason: String,
+    },
     /// The worker was shut down and cannot accept more work.
     Shutdown,
 }
@@ -330,6 +352,11 @@ pub enum DelegatedAgentStatus {
 impl DelegatedAgentStatus {
     fn is_running(&self) -> bool {
         matches!(self, Self::Pending | Self::Running)
+    }
+
+    /// Whether a durable record in this state can be reattached and resumed.
+    fn is_recoverable(&self) -> bool {
+        matches!(self, Self::Detached | Self::AwaitingApproval { .. })
     }
 
     fn label(&self) -> &'static str {
@@ -341,6 +368,8 @@ impl DelegatedAgentStatus {
             Self::Interrupted => "interrupted",
             Self::Failed { .. } => "failed",
             Self::TimedOut => "timed_out",
+            Self::Detached => "detached",
+            Self::AwaitingApproval { .. } => "awaiting_approval",
             Self::Shutdown => "shutdown",
         }
     }
@@ -360,7 +389,7 @@ impl DelegationBinding {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExtensionAgentSessionPolicy {
     /// Child tool scope: a non-empty duplicate-free subset of the standard
     /// tools `read`, `search`, `edit`, `write`, and `bash`.
@@ -508,6 +537,16 @@ struct IdempotentExtensionSpawn {
     result: Value,
 }
 
+/// A session-owned worker re-discovered by a durable extension spawn
+/// idempotency key after the owning run (or process) ended.
+struct ExtensionDurableSpawn {
+    task_name: String,
+    profile: Option<String>,
+    fingerprint: Option<String>,
+    policy: Option<ExtensionAgentSessionPolicy>,
+    result: Value,
+}
+
 impl DelegationBinding {
     pub(crate) fn team_directory(&self) -> &Path {
         &self.manager.team_directory
@@ -571,10 +610,13 @@ impl DelegationBinding {
         self.manager.request_shutdown_descendants(&self.identity.id);
     }
 
-    pub(crate) async fn settle_descendants(&self, timeout: Duration) {
-        self.manager
-            .wait_for_descendants_to_settle(&self.identity.id, timeout)
-            .await;
+    /// Session-scoped detachment at the owning run boundary.
+    ///
+    /// Replaces run-scoped retirement: the fleet survives the turn, the durable
+    /// roster is refreshed, and an explicit `run_detached` provenance record is
+    /// written instead of a silent vanish.
+    pub(crate) fn detach_run(&self) {
+        self.manager.detach_run(&self.identity);
     }
 
     pub(crate) fn delegated_usage_records(&self) -> Vec<DelegatedUsageRecord> {
@@ -832,6 +874,39 @@ impl ExtensionDelegationService {
                 ));
             }
             return Ok(existing.result.clone());
+        }
+        // Durable idempotency: the worker survived the owning run (or a
+        // restart) as a session-owned record. Re-issue its original result
+        // instead of spawning a duplicate worker, and re-arm the fast path.
+        if let Some(durable) = manager.extension_owned_record(&self.principal, &idempotency_key) {
+            if durable.task_name != task_name
+                || durable.profile != profile
+                || durable.fingerprint != fingerprint
+                || durable.policy.as_ref() != Some(&policy)
+            {
+                return Err(reject_spawn(
+                    "spawn idempotency_key was reused with different input".into(),
+                ));
+            }
+            let mut result = durable.result;
+            result["task_name"] = Value::String(task_name.clone());
+            result["principal"] = Value::String(self.principal.to_string());
+            result["resource_owner"] = Value::String(resource_owner.to_owned());
+            if let Some(agent_id) = result.get("agent_id").and_then(Value::as_str) {
+                owner_state.owned_agents.insert(agent_id.to_owned());
+            }
+            owner_state.idempotent_spawns.insert(
+                idempotency_key,
+                IdempotentExtensionSpawn {
+                    task_name,
+                    profile,
+                    fingerprint,
+                    message_sha256,
+                    policy,
+                    result: result.clone(),
+                },
+            );
+            return Ok(result);
         }
         let internal_digest = Sha256::digest(format!("{task_name}\0{idempotency_key}").as_bytes());
         let internal_task_name = format!(
@@ -1103,6 +1178,14 @@ pub(crate) struct DelegationManager {
     /// delegation is enabled. Inert unless the host installed one; it never
     /// participates in worker accounting, admission or budgeting.
     span_context: RwLock<TelemetryContext>,
+    /// Session-scoped durable fleet roster. `None` disables persistence (unit
+    /// tests that never reopen the manager). When present it is the
+    /// authoritative record that lets a later turn or a restarted process
+    /// reconstruct workers that outlived the run that spawned them.
+    roster_path: Option<PathBuf>,
+    /// Root session path recorded in the roster so a foreign roster file is
+    /// rejected instead of being trusted.
+    root_session: PathBuf,
 }
 
 struct DelegationTelemetryState {
@@ -1194,7 +1277,88 @@ struct AgentRecord {
     deadline_at_ms: Option<u64>,
     /// Effective per-run turn ceiling retained for terminal evidence.
     turn_limit: Option<u64>,
+    /// Session-scoped lifetime marker: `true` once the owning run ended and
+    /// the worker left the run that spawned it. Detached workers keep running
+    /// while they need no new authority, and park in
+    /// [`DelegatedAgentStatus::AwaitingApproval`] when they do.
+    detached: bool,
+    /// Command receiver parked for a detached record restored from the
+    /// durable roster. Keeping it alive buffers a later turn's steering or
+    /// follow-up until reattachment; it is taken exactly once.
+    detached_commands: Option<mpsc::Receiver<WorkerCommand>>,
+    /// Bounded diagnostic retained when a durable record could not be
+    /// reattached (unknown state), so it fails closed visibly.
+    durable_diagnostic: Option<String>,
+    /// Cumulative accounting already mirrored to the root ledger so a worker
+    /// that survives several runs is mirrored as deltas, never double-counted.
+    mirrored_usage: Usage,
+    mirrored_cost: Option<Cost>,
+    mirrored_turn_count: u64,
+    mirrored_tool_call_count: u64,
 }
+
+/// Bounded durable snapshot of one session-owned worker.
+///
+/// Persisted beside the delegation directory so the owning session can
+/// reconstruct its fleet after the owning run ends and after a process
+/// restart. It never carries process-local handles: on load a record without a
+/// live task surfaces as an explicit [`DelegatedAgentStatus::Detached`]
+/// diagnostic instead of a silently-forgotten worker.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DurableFleetRecord {
+    agent_id: String,
+    agent_path: String,
+    parent_id: String,
+    depth: usize,
+    task_name: String,
+    display_task_name: Option<String>,
+    session_path: PathBuf,
+    status: DelegatedAgentStatus,
+    detached: bool,
+    created_at_ms: u64,
+    started_at_ms: Option<u64>,
+    completed_at_ms: Option<u64>,
+    turn_count: u64,
+    tool_call_count: u64,
+    usage: Usage,
+    usage_uncertain: bool,
+    cost: Option<Cost>,
+    cost_microdollars: Option<u64>,
+    deadline_at_ms: Option<u64>,
+    turn_limit: Option<u64>,
+    extension_principal: Option<String>,
+    extension_profile: Option<String>,
+    extension_idempotency_key: Option<String>,
+    extension_fingerprint: Option<String>,
+    extension_policy: Option<ExtensionAgentSessionPolicy>,
+    #[serde(default)]
+    resource_owner: Option<String>,
+    #[serde(default)]
+    durable_diagnostic: Option<String>,
+    #[serde(default)]
+    mirrored_usage: Usage,
+    #[serde(default)]
+    mirrored_cost: Option<Cost>,
+    #[serde(default)]
+    mirrored_turn_count: u64,
+    #[serde(default)]
+    mirrored_tool_call_count: u64,
+}
+
+/// Versioned durable fleet file written to the session-scoped delegation
+/// directory.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DurableFleet {
+    version: u32,
+    root_session: PathBuf,
+    records: Vec<DurableFleetRecord>,
+}
+
+/// Bounded roster file limit. A larger or malformed file fails closed instead
+/// of being partially trusted.
+const MAX_FLEET_ROSTER_BYTES: usize = 256 * 1024;
+const FLEET_ROSTER_VERSION: u32 = 1;
+const FLEET_ROSTER_FILE: &str = "fleet.json";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct QueueUsage {
@@ -1281,7 +1445,9 @@ struct WorkerCommand {
 struct WorkerStartup {
     identity: AgentIdentity,
     session: Session,
-    initial_task: String,
+    /// Initial task. `None` reattaches a detached worker with an empty task
+    /// queue; it idles until a later turn steers it, follows up, or stops it.
+    initial_task: Option<String>,
     commands: mpsc::Receiver<WorkerCommand>,
     shutdown: crate::CancellationToken,
     initial_permit: OwnedSemaphorePermit,
@@ -1379,6 +1545,14 @@ enum ProvenanceEvent<'a> {
         from: &'a str,
         to: &'a str,
     },
+    /// Explicit session-scoped detachment boundary: the owning run ended but
+    /// these workers survive it. This replaces run-scoped retirement as the
+    /// default, keeping the end-of-run boundary visible instead of a silent
+    /// vanish.
+    RunDetached {
+        timestamp_ms: u128,
+        agent_ids: Vec<String>,
+    },
     TeamShutdown {
         timestamp_ms: u128,
     },
@@ -1473,6 +1647,14 @@ impl DelegationManager {
                         Some("cancellation".to_owned()),
                         Some("worker was shut down by its owning run".to_owned()),
                     ),
+                    DelegatedAgentStatus::AwaitingApproval { reason } => (
+                        Some("approval".to_owned()),
+                        Some(bounded_text_to(reason, MAX_TELEMETRY_FAILURE_BYTES)),
+                    ),
+                    DelegatedAgentStatus::Detached => (
+                        Some("detached".to_owned()),
+                        Some("worker outlived its owning run and awaits reattachment".to_owned()),
+                    ),
                     _ => (None, None),
                 };
                 DelegationTelemetryChild {
@@ -1495,6 +1677,8 @@ impl DelegationManager {
                             DelegatedAgentStatus::Interrupted => "interrupted",
                             DelegatedAgentStatus::Failed { .. } => "failed",
                             DelegatedAgentStatus::TimedOut => "timed_out",
+                            DelegatedAgentStatus::Detached => "detached",
+                            DelegatedAgentStatus::AwaitingApproval { .. } => "awaiting_approval",
                             DelegatedAgentStatus::Shutdown => "shutdown",
                         }
                         .to_owned()
@@ -1580,6 +1764,7 @@ impl DelegationManager {
         ) -> Result<ProvenanceJournal, DelegationError>,
     ) -> Result<Arc<Self>, DelegationError> {
         config.validate()?;
+        let roster_path = Some(config.session_directory.join(FLEET_ROSTER_FILE));
         let team_storage = create_private_team_directory(&config.session_directory)?;
         let team_directory = team_storage.path().to_path_buf();
         let activation = (|| {
@@ -1613,6 +1798,8 @@ impl DelegationManager {
                     sender: None,
                 }),
                 span_context: RwLock::new(TelemetryContext::default()),
+                roster_path: roster_path.clone(),
+                root_session: root_session.to_path_buf(),
             });
             manager.journal.append(&ProvenanceEvent::TeamStarted {
                 timestamp_ms: timestamp_ms(),
@@ -1623,6 +1810,11 @@ impl DelegationManager {
                     DelegationMode::Proactive => "proactive",
                 },
             })?;
+            // Reconstruct the session-owned fleet persisted before this
+            // process (or this run) started. Records without a live task
+            // surface as explicit `detached` diagnostics; the owning session
+            // reattaches them on a later turn.
+            manager.restore_durable_fleet();
             Ok(manager)
         })();
         match activation {
@@ -1691,8 +1883,298 @@ impl DelegationManager {
     }
 
     fn reopen_child_session(&self, path: &Path) -> Result<Session, DelegationError> {
-        let file = self.open_team_file_for_append(path)?;
+        let file = match &self.team_storage {
+            Some(directory) if path.parent() == Some(directory.path()) => {
+                self.open_team_file_for_append(path)?
+            }
+            // A record restored from an earlier process points at its original
+            // team directory, which is retained on disk. Open it by absolute
+            // path instead of through the current team capability.
+            _ => secure_fs::open_regular_file_for_append(path)?,
+        };
         Ok(Session::open_with_file(path, file)?)
+    }
+
+    /// Persist the session-owned fleet roster.
+    ///
+    /// Fail-closed: serialization or write failure marks the team unusable
+    /// through the same `persistence_error` path as the provenance journal, so
+    /// a durable-record loss can never be silently ignored.
+    fn persist_durable_fleet_locked(&self, state: &mut ManagerState) {
+        let Some(path) = self.roster_path.clone() else {
+            return;
+        };
+        if state.persistence_error.is_some() {
+            return;
+        }
+        let fleet = DurableFleet {
+            version: FLEET_ROSTER_VERSION,
+            root_session: self.root_session.clone(),
+            records: state.records.values().map(durable_fleet_record).collect(),
+        };
+        let encoded = match serde_json::to_vec(&fleet) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.fail_persistence_locked(state, &io::Error::other(error));
+                return;
+            }
+        };
+        if encoded.len() > MAX_FLEET_ROSTER_BYTES {
+            self.fail_persistence_locked(
+                state,
+                &io::Error::other("durable fleet roster exceeded its bounded size"),
+            );
+            return;
+        }
+        if let Err(error) =
+            secure_fs::write_private_atomic(&path, &encoded, MAX_FLEET_ROSTER_BYTES)
+        {
+            self.fail_persistence_locked(state, &io::Error::other(error));
+        }
+    }
+
+    /// Reconstruct the session-owned fleet persisted by an earlier run or
+    /// process.
+    ///
+    /// Records that were live when the snapshot was written have no task in
+    /// this process, so they surface explicitly as
+    /// [`DelegatedAgentStatus::Detached`] with a bounded diagnostic — never as
+    /// a silently-forgotten worker. A malformed, oversized, foreign, or
+    /// unreadable roster is ignored entirely (fail closed) rather than
+    /// partially trusted.
+    fn restore_durable_fleet(&self) {
+        let Some(path) = self.roster_path.as_ref() else {
+            return;
+        };
+        let Ok(bytes) = secure_fs::read_private_file_bounded(path, MAX_FLEET_ROSTER_BYTES) else {
+            return;
+        };
+        let Ok(fleet) = serde_json::from_slice::<DurableFleet>(&bytes) else {
+            return;
+        };
+        if fleet.version != FLEET_ROSTER_VERSION || fleet.root_session != self.root_session {
+            return;
+        }
+        let effective_tool_policy = self
+            .template
+            .sandbox
+            .effective_tool_policy(self.template.effect_broker.policy());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.shutting_down || state.persistence_error.is_some() {
+            return;
+        }
+        let capacity = self.config.limits.max_total_agents.saturating_sub(1);
+        for durable in fleet.records.into_iter().take(capacity) {
+            if state.records.contains_key(&durable.agent_id) {
+                continue;
+            }
+            let status = match durable.status {
+                DelegatedAgentStatus::Pending | DelegatedAgentStatus::Running => {
+                    DelegatedAgentStatus::Detached
+                }
+                other => other,
+            };
+            let recoverable = status.is_recoverable();
+            let extension_policy = durable.extension_policy.clone();
+            let orchestration_provenance = child_orchestration_provenance(extension_policy.as_ref());
+            let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+            let identity = AgentIdentity {
+                id: durable.agent_id.clone(),
+                path: durable.agent_path,
+                depth: durable.depth,
+            };
+            if let Some(number) = agent_number_from_id(&identity.id) {
+                state.next_agent_number = state.next_agent_number.max(number.saturating_add(1));
+            }
+            state.records.insert(
+                identity.id.clone(),
+                AgentRecord {
+                    identity,
+                    task_name: durable.task_name,
+                    display_task_name: durable.display_task_name,
+                    parent_id: durable.parent_id,
+                    session_path: durable.session_path,
+                    status,
+                    command_tx,
+                    shutdown: crate::CancellationToken::default(),
+                    interrupt_requested: false,
+                    pending_messages: VecDeque::new(),
+                    reserved_messages: QueueUsage::default(),
+                    queued_follow_ups: QueueUsage::default(),
+                    mailbox: VecDeque::new(),
+                    mailbox_delivery: None,
+                    resource_owner: durable.resource_owner,
+                    extension_policy,
+                    effective_tool_policy: effective_tool_policy.clone(),
+                    orchestration_provenance,
+                    extension_principal: durable.extension_principal,
+                    extension_profile: durable.extension_profile,
+                    extension_idempotency_key: durable.extension_idempotency_key,
+                    extension_fingerprint: durable.extension_fingerprint,
+                    created_at_ms: durable.created_at_ms,
+                    started_at_ms: durable.started_at_ms,
+                    completed_at_ms: durable.completed_at_ms,
+                    turn_count: durable.turn_count,
+                    tool_call_count: durable.tool_call_count,
+                    active_tools: BTreeMap::new(),
+                    recent_tools: VecDeque::new(),
+                    usage: durable.usage,
+                    usage_uncertain: durable.usage_uncertain,
+                    cost: durable.cost,
+                    cost_microdollars: durable.cost_microdollars,
+                    deadline_at_ms: durable.deadline_at_ms,
+                    turn_limit: durable.turn_limit,
+                    detached: true,
+                    detached_commands: recoverable.then_some(command_rx),
+                    durable_diagnostic: durable.durable_diagnostic,
+                    mirrored_usage: durable.mirrored_usage,
+                    mirrored_cost: durable.mirrored_cost,
+                    mirrored_turn_count: durable.mirrored_turn_count,
+                    mirrored_tool_call_count: durable.mirrored_tool_call_count,
+                },
+            );
+            state.total_agents = state.total_agents.saturating_add(1);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+        self.publish_telemetry(None, None);
+    }
+
+    /// Session-scoped detachment: leave the fleet alive when the owning run
+    /// ends and record that boundary explicitly.
+    ///
+    /// Nothing is cancelled or cleared. Workers that need no new authority
+    /// keep running; workers that do park in
+    /// [`DelegatedAgentStatus::AwaitingApproval`]. The durable roster is
+    /// refreshed so a later turn or a restarted process can reconstruct the
+    /// fleet.
+    fn detach_run(&self, owner: &AgentIdentity) {
+        if owner.id != ROOT_AGENT_ID {
+            return;
+        }
+        let detached_ids = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.shutting_down || state.persistence_error.is_some() {
+                return;
+            }
+            let mut detached_ids = Vec::new();
+            for record in state.records.values_mut() {
+                if record.status.is_running() || record.status.is_recoverable() {
+                    record.detached = true;
+                    detached_ids.push(record.identity.id.clone());
+                }
+            }
+            self.persist_durable_fleet_locked(&mut state);
+            detached_ids
+        };
+        if !detached_ids.is_empty() {
+            let event = ProvenanceEvent::RunDetached {
+                timestamp_ms: timestamp_ms(),
+                agent_ids: detached_ids,
+            };
+            if let Ok(encoded) = serde_json::to_vec(&event) {
+                let _ = self.journal.append_encoded(&encoded);
+            }
+        }
+        self.changed.notify_waiters();
+        self.publish_telemetry(None, None);
+    }
+
+    /// Reattach every detached record the owning session can resume.
+    ///
+    /// Reattachment resumes the persisted child session with an empty task
+    /// queue: the worker idles until a later turn steers it, follows up, or
+    /// stops it. It never spawns a duplicate worker, and it acquires a permit
+    /// per record so the concurrency cap still holds across the turn boundary.
+    fn reattach_detached(self: &Arc<Self>, owner: &AgentIdentity) -> Result<(), String> {
+        if owner.id != ROOT_AGENT_ID {
+            return Ok(());
+        }
+        let _journal_order = self
+            .journal_order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut starts = Vec::new();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.shutting_down {
+                return Err("delegation team is shutting down".into());
+            }
+            if let Some(error) = &state.persistence_error {
+                return Err(format!("delegation persistence is unavailable: {error}"));
+            }
+            let ids = state
+                .records
+                .iter()
+                .filter(|(_, record)| record.status.is_recoverable())
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for id in ids {
+                let permit = match self.current_permits().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    // The bound is authoritative: a record that cannot acquire
+                    // a slot stays visibly detached instead of oversubscribing.
+                    Err(_) => break,
+                };
+                let Some(record) = state.records.get_mut(&id) else {
+                    continue;
+                };
+                let Some(commands) = record.detached_commands.take() else {
+                    // The worker still owns its receiver in this process;
+                    // reattachment only clears the run-scoped marker.
+                    record.status = DelegatedAgentStatus::Pending;
+                    record.detached = false;
+                    continue;
+                };
+                let session = match self.reopen_child_session(&record.session_path) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        // Fail closed: keep the record and its buffered
+                        // commands visible so a later turn can retry instead of
+                        // silently forgetting the worker.
+                        record.detached_commands = Some(commands);
+                        record.status = DelegatedAgentStatus::Detached;
+                        record.detached = true;
+                        record.durable_diagnostic = Some(bounded_text(&format!(
+                            "detached worker could not be reattached: {error}"
+                        )));
+                        break;
+                    }
+                };
+                record.status = DelegatedAgentStatus::Pending;
+                record.detached = false;
+                record.durable_diagnostic = None;
+                starts.push(WorkerStartup {
+                    identity: record.identity.clone(),
+                    session,
+                    initial_task: None,
+                    commands,
+                    shutdown: record.shutdown.clone(),
+                    initial_permit: permit,
+                    extension_policy: record.extension_policy.clone(),
+                    deadline: None,
+                    deadline_ms: None,
+                });
+            }
+        }
+        for startup in starts {
+            let manager = Arc::clone(self);
+            tokio::spawn(async move {
+                manager.run_worker(startup).await;
+            });
+        }
+        self.changed.notify_waiters();
+        self.publish_telemetry(None, None);
+        Ok(())
     }
 
     fn tools(self: &Arc<Self>, identity: &AgentIdentity) -> Vec<Arc<dyn Tool>> {
@@ -1708,46 +2190,28 @@ impl DelegationManager {
             .collect()
     }
 
-    fn prepare_owning_run(&self, owner: &AgentIdentity) -> Result<(), String> {
+    fn prepare_owning_run(self: &Arc<Self>, owner: &AgentIdentity) -> Result<(), String> {
         if owner.id == ROOT_AGENT_ID {
             if owner.path != ROOT_AGENT_PATH || owner.depth != 0 {
                 return Err("invalid root delegation identity".into());
             }
-            let child_slots = self.config.limits.max_concurrent_agents - 1;
-            // Serialize the reset against journaled operations'
-            // decide → append → commit windows so it cannot interleave with
-            // their commit phases. Lock order: journal_order → permits → state.
-            let _journal_order = self
-                .journal_order
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mut permits = self
-                .permits
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(error) = &state.persistence_error {
-                return Err(format!("delegation persistence is unavailable: {error}"));
+            // Session-scoped lifetime: a new owning run reattaches the fleet
+            // that survived the previous turn instead of retiring it. Live
+            // workers keep running; workers reconstructed from the durable
+            // roster are resumed with an empty task queue.
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(error) = &state.persistence_error {
+                    return Err(format!("delegation persistence is unavailable: {error}"));
+                }
+                if state.shutting_down {
+                    return Err("delegation team is shutting down".into());
+                }
             }
-            if state.shutting_down {
-                return Err("delegation team is shutting down".into());
-            }
-
-            for record in state.records.values() {
-                record.shutdown.cancel();
-                let _ = record.command_tx.try_send(WorkerCommand::shutdown());
-            }
-            state.records.clear();
-            state.total_agents = 1;
-            state.root_active = true;
-            *permits = Arc::new(Semaphore::new(child_slots));
-            drop(state);
-            drop(permits);
-            self.changed.notify_waiters();
-            self.publish_telemetry(None, None);
+            self.reattach_detached(owner)?;
             return Ok(());
         }
 
@@ -2081,6 +2545,13 @@ impl DelegationManager {
                     .then_some(0),
                     deadline_at_ms,
                     turn_limit,
+                    detached: false,
+                    detached_commands: None,
+                    durable_diagnostic: None,
+                    mirrored_usage: Usage::default(),
+                    mirrored_cost: None,
+                    mirrored_turn_count: 0,
+                    mirrored_tool_call_count: 0,
                 },
             );
             state.total_agents += 1;
@@ -2099,7 +2570,7 @@ impl DelegationManager {
                 .run_worker(WorkerStartup {
                     identity: worker_identity,
                     session,
-                    initial_task,
+                    initial_task: Some(initial_task),
                     commands: command_rx,
                     shutdown,
                     initial_permit: permit,
@@ -2152,7 +2623,10 @@ impl DelegationManager {
         let session_path = session.path().to_path_buf();
         let mut unopened_session = Some(session);
         let mut agent = None;
-        let mut queued_tasks = VecDeque::from([QueuedTask::Initial(initial_task)]);
+        let mut queued_tasks = match initial_task {
+            Some(task) => VecDeque::from([QueuedTask::Initial(task)]),
+            None => VecDeque::new(),
+        };
         let mut initial_permit = Some(initial_permit);
         let mut retry_undelivered_task = false;
         let mut retry_pending_messages = 0;
@@ -2373,6 +2847,24 @@ impl DelegationManager {
                         retry_pending_messages = retained_pending_messages;
                     }
                     WorkerOutcome::Failed(error) => {
+                        if self.worker_is_detached(&identity.id)
+                            && is_missing_approval_authority(&error)
+                        {
+                            // Unattended mutation fails closed. A detached
+                            // worker that needs a decision it no longer has
+                            // authority for parks in a bounded, durable state:
+                            // it neither proceeds nor blocks forever. A later
+                            // turn that reattaches can supply the decision.
+                            self.set_status(
+                                &identity.id,
+                                DelegatedAgentStatus::AwaitingApproval {
+                                    reason: bounded_text(&error),
+                                },
+                                true,
+                            );
+                            self.request_shutdown_descendants(&identity.id);
+                            return;
+                        }
                         self.set_status(
                             &identity.id,
                             DelegatedAgentStatus::Failed {
@@ -3117,6 +3609,15 @@ impl DelegationManager {
         self.publish_telemetry(None, None);
     }
 
+    fn worker_is_detached(&self, id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
+            .get(id)
+            .is_some_and(|record| record.detached)
+    }
+
     fn set_status(&self, id: &str, status: DelegatedAgentStatus, notify_parent: bool) -> bool {
         // The journal_order guard makes this operation's decide → append →
         // commit window mutually exclusive with every other provenance-
@@ -3245,6 +3746,16 @@ impl DelegationManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             push_mailbox_locked(&mut state, &parent_id, message);
+        }
+        {
+            // Refresh the durable session-owned roster after every durable
+            // status transition so the fleet survives the owning run and a
+            // process restart.
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.persist_durable_fleet_locked(&mut state);
         }
         self.changed.notify_waiters();
         self.publish_telemetry(None, None);
@@ -4130,74 +4641,83 @@ impl DelegationManager {
         )
     }
 
-    async fn wait_for_descendants_to_settle(&self, owner_id: &str, timeout: Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let changed = self.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            let active = {
-                let state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let owner_path = if owner_id == ROOT_AGENT_ID {
-                    Some(ROOT_AGENT_PATH)
-                } else {
-                    state
-                        .records
-                        .get(owner_id)
-                        .map(|record| record.identity.path.as_str())
-                };
-                owner_path.is_some_and(|owner_path| {
-                    state.records.values().any(|record| {
-                        is_descendant_path(&record.identity.path, owner_path)
-                            && record.status.is_running()
-                    })
-                })
-            };
-            if !active {
-                return;
-            }
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => return,
-                _ = &mut changed => {}
-            }
-        }
-    }
-
+    /// Accounting deltas for extension-owned children of `owner_id`.
+    ///
+    /// Child records are cumulative snapshots. A worker that survives several
+    /// runs is mirrored as the increment since the last mirror, so the root
+    /// ledger neither double-counts cumulative snapshots nor loses accounting
+    /// when a worker is still running at the run boundary.
     fn extension_usage_records(&self, owner_id: &str) -> Vec<DelegatedUsageRecord> {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let owner_path = if owner_id == ROOT_AGENT_ID {
-            Some(ROOT_AGENT_PATH)
+            Some(ROOT_AGENT_PATH.to_owned())
         } else {
             state
                 .records
                 .get(owner_id)
-                .map(|record| record.identity.path.as_str())
+                .map(|record| record.identity.path.clone())
         };
         let Some(owner_path) = owner_path else {
             return Vec::new();
         };
-        state
-            .records
-            .values()
-            .filter(|record| {
-                record.extension_principal.is_some()
-                    && is_descendant_path(&record.identity.path, owner_path)
-            })
-            .map(|record| DelegatedUsageRecord {
+        let mut records = Vec::new();
+        for record in state.records.values_mut() {
+            if record.extension_principal.is_none()
+                || !is_descendant_path(&record.identity.path, &owner_path)
+            {
+                continue;
+            }
+            let usage = subtract_usage(record.usage, record.mirrored_usage);
+            let cost = record
+                .cost
+                .map(|cost| subtract_cost(cost, record.mirrored_cost.unwrap_or_default()));
+            let unchanged = usage == Usage::default()
+                && record.turn_count == record.mirrored_turn_count
+                && record.tool_call_count == record.mirrored_tool_call_count;
+            record.mirrored_usage = record.usage;
+            record.mirrored_cost = record.cost;
+            record.mirrored_turn_count = record.turn_count;
+            record.mirrored_tool_call_count = record.tool_call_count;
+            if unchanged {
+                continue;
+            }
+            records.push(DelegatedUsageRecord {
                 agent_id: record.identity.id.clone(),
-                usage: record.usage,
+                usage,
                 usage_uncertain: record.usage_uncertain,
-                cost: record.cost,
+                cost,
                 turn_count: record.turn_count,
                 tool_call_count: record.tool_call_count,
-            })
-            .collect()
+            });
+        }
+        records
+    }
+
+    /// Durable idempotency: the spawn result for an extension principal's
+    /// idempotency key, reconstructed from the session-owned record that
+    /// survived the parent turn or a process restart.
+    fn extension_owned_record(&self, principal: &str, idempotency_key: &str) -> Option<ExtensionDurableSpawn> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let record = state.records.values().find(|record| {
+            record.extension_principal.as_deref() == Some(principal)
+                && record.extension_idempotency_key.as_deref() == Some(idempotency_key)
+        })?;
+        Some(ExtensionDurableSpawn {
+            task_name: record
+                .display_task_name
+                .clone()
+                .unwrap_or_else(|| record.task_name.clone()),
+            profile: record.extension_profile.clone(),
+            fingerprint: record.extension_fingerprint.clone(),
+            policy: record.extension_policy.clone(),
+            result: extension_spawn_result_value(record),
+        })
     }
 
     fn request_shutdown_descendants(&self, owner_id: &str) {
@@ -4955,11 +5475,99 @@ fn status_message(path: &str, status: &DelegatedAgentStatus) -> String {
         DelegatedAgentStatus::Failed { error } => format!("{path} failed: {error}"),
         DelegatedAgentStatus::Interrupted => format!("{path} was interrupted"),
         DelegatedAgentStatus::TimedOut => format!("{path} timed out"),
+        DelegatedAgentStatus::Detached => {
+            format!("{path} is detached: it survived its owning run and can be reattached")
+        }
+        DelegatedAgentStatus::AwaitingApproval { reason } => {
+            format!("{path} is awaiting approval and has not acted: {reason}")
+        }
         DelegatedAgentStatus::Shutdown => format!("{path} was shut down"),
         DelegatedAgentStatus::Pending | DelegatedAgentStatus::Running => {
             format!("{path} is {}", status.label())
         }
     }
+}
+
+/// One bounded durable snapshot of a session-owned worker.
+fn durable_fleet_record(record: &AgentRecord) -> DurableFleetRecord {
+    DurableFleetRecord {
+        agent_id: record.identity.id.clone(),
+        agent_path: record.identity.path.clone(),
+        parent_id: record.parent_id.clone(),
+        depth: record.identity.depth,
+        task_name: record.task_name.clone(),
+        display_task_name: record.display_task_name.clone(),
+        session_path: record.session_path.clone(),
+        status: record.status.clone(),
+        detached: record.detached,
+        created_at_ms: record.created_at_ms,
+        started_at_ms: record.started_at_ms,
+        completed_at_ms: record.completed_at_ms,
+        turn_count: record.turn_count,
+        tool_call_count: record.tool_call_count,
+        usage: record.usage,
+        usage_uncertain: record.usage_uncertain,
+        cost: record.cost,
+        cost_microdollars: record.cost_microdollars,
+        deadline_at_ms: record.deadline_at_ms,
+        turn_limit: record.turn_limit,
+        extension_principal: record.extension_principal.clone(),
+        extension_profile: record.extension_profile.clone(),
+        extension_idempotency_key: record.extension_idempotency_key.clone(),
+        extension_fingerprint: record.extension_fingerprint.clone(),
+        extension_policy: record.extension_policy.clone(),
+        resource_owner: record.resource_owner.clone(),
+        durable_diagnostic: record.durable_diagnostic.clone(),
+        mirrored_usage: record.mirrored_usage,
+        mirrored_cost: record.mirrored_cost,
+        mirrored_turn_count: record.mirrored_turn_count,
+        mirrored_tool_call_count: record.mirrored_tool_call_count,
+    }
+}
+
+/// Parse the numeric suffix of a stable `agent-{n}` identity.
+fn agent_number_from_id(id: &str) -> Option<u64> {
+    id.strip_prefix("agent-").and_then(|rest| rest.parse().ok())
+}
+
+/// Reconstruct the stable `spawn_agent` result for a session-owned record.
+///
+/// Used to honour an extension spawn idempotency key across a turn or process
+/// boundary without spawning a duplicate worker.
+fn extension_spawn_result_value(record: &AgentRecord) -> Value {
+    json!({
+        "agent_id": record.identity.id,
+        "agent_path": record.identity.path,
+        "task_name": record
+            .display_task_name
+            .as_deref()
+            .unwrap_or(record.task_name.as_str()),
+        "profile": record.extension_profile,
+        "idempotency_key": record.extension_idempotency_key,
+        "fingerprint": record.extension_fingerprint,
+        "status": record.status,
+        "policy": record.extension_policy,
+        "effective_tool_policy": record.effective_tool_policy,
+        "orchestration_provenance": record.orchestration_provenance,
+        "created_at_ms": record.created_at_ms,
+        "started_at_ms": record.started_at_ms,
+        "completed_at_ms": record.completed_at_ms,
+        "turn_limit": record.turn_limit,
+        "deadline_at_ms": record.deadline_at_ms,
+    })
+}
+
+/// Whether a child failure means the effect required an approval authority
+/// that was not attached to this run.
+///
+/// This is the authority-to-act gate for unattended mutation, not the
+/// credential/OAuth or persisted-trust gate.
+fn is_missing_approval_authority(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("approval is unavailable")
+        || lower.contains("approval was not granted")
+        || lower.contains("approval_unavailable")
+        || lower.contains("approval_denied")
 }
 
 fn list_value_locked(state: &ManagerState) -> Value {
@@ -4983,6 +5591,8 @@ fn agent_record_value(record: &AgentRecord) -> Value {
             DelegatedAgentStatus::Interrupted => "interrupted",
             DelegatedAgentStatus::Failed { .. } => "failed",
             DelegatedAgentStatus::TimedOut => "timed_out",
+            DelegatedAgentStatus::Detached => "detached",
+            DelegatedAgentStatus::AwaitingApproval { .. } => "awaiting_approval",
             DelegatedAgentStatus::Shutdown => "shutdown",
         }
     };
@@ -5003,6 +5613,8 @@ fn agent_record_value(record: &AgentRecord) -> Value {
         "created_at_ms": record.created_at_ms,
         "started_at_ms": record.started_at_ms,
         "completed_at_ms": record.completed_at_ms,
+        "detached": record.detached,
+        "diagnostic": record.durable_diagnostic,
         "turn_count": record.turn_count,
         "turn_limit": record.turn_limit,
         "tool_call_count": record.tool_call_count,
@@ -5117,6 +5729,41 @@ fn add_delegated_cost(total: &mut Cost, next: Cost) {
         .saturating_add(next.total)
         .saturating_add(remainder / u64::from(PICODOLLARS_PER_MICRODOLLAR));
     total.total_picodollars_remainder = (remainder % u64::from(PICODOLLARS_PER_MICRODOLLAR)) as u32;
+}
+
+/// Increment of a cumulative token snapshot. Saturating, so a record that was
+/// somehow rolled back can never underflow the root ledger.
+fn subtract_usage(total: Usage, mirrored: Usage) -> Usage {
+    Usage {
+        input_tokens: total.input_tokens.saturating_sub(mirrored.input_tokens),
+        cache_read_tokens: total.cache_read_tokens.saturating_sub(mirrored.cache_read_tokens),
+        cache_write_tokens: total
+            .cache_write_tokens
+            .saturating_sub(mirrored.cache_write_tokens),
+        cache_write_1h_tokens: total
+            .cache_write_1h_tokens
+            .saturating_sub(mirrored.cache_write_1h_tokens),
+        output_tokens: total.output_tokens.saturating_sub(mirrored.output_tokens),
+        reasoning_tokens: total
+            .reasoning_tokens
+            .saturating_sub(mirrored.reasoning_tokens),
+        total_tokens: total.total_tokens.saturating_sub(mirrored.total_tokens),
+    }
+}
+
+/// Increment of a cumulative cost snapshot.
+fn subtract_cost(total: Cost, mirrored: Cost) -> Cost {
+    Cost {
+        input: total.input.saturating_sub(mirrored.input),
+        output: total.output.saturating_sub(mirrored.output),
+        reasoning: total.reasoning.saturating_sub(mirrored.reasoning),
+        cache_read: total.cache_read.saturating_sub(mirrored.cache_read),
+        cache_write: total.cache_write.saturating_sub(mirrored.cache_write),
+        total: total.total.saturating_sub(mirrored.total),
+        total_picodollars_remainder: total
+            .total_picodollars_remainder
+            .saturating_sub(mirrored.total_picodollars_remainder),
+    }
 }
 
 fn delegation_usage_tokens(usage: &Usage) -> u64 {
@@ -5356,6 +6003,8 @@ mod tests {
                 sender: None,
             }),
             span_context: RwLock::new(TelemetryContext::default()),
+            roster_path: Some(directory.join(FLEET_ROSTER_FILE)),
+            root_session: PathBuf::new(),
         })
     }
 
@@ -5484,6 +6133,8 @@ mod tests {
                 sender: None,
             }),
             span_context: RwLock::new(TelemetryContext::default()),
+            roster_path: Some(directory.join(FLEET_ROSTER_FILE)),
+            root_session: PathBuf::new(),
         })
     }
 
@@ -5724,6 +6375,13 @@ mod tests {
                     cost_microdollars: None,
                     deadline_at_ms: None,
                     turn_limit: None,
+                    detached: false,
+                    detached_commands: None,
+                    durable_diagnostic: None,
+                    mirrored_usage: Usage::default(),
+                    mirrored_cost: None,
+                    mirrored_turn_count: 0,
+                    mirrored_tool_call_count: 0,
                 },
             );
             state.total_agents += 1;
@@ -6135,6 +6793,13 @@ mod tests {
                 cost_microdollars: None,
                 deadline_at_ms: None,
                 turn_limit: None,
+                detached: false,
+                detached_commands: None,
+                durable_diagnostic: None,
+                mirrored_usage: Usage::default(),
+                mirrored_cost: None,
+                mirrored_turn_count: 0,
+                mirrored_tool_call_count: 0,
             },
         );
         state.total_agents += 1;
@@ -7916,6 +8581,13 @@ mod tests {
                     cost_microdollars: None,
                     deadline_at_ms: None,
                     turn_limit: None,
+                    detached: false,
+                    detached_commands: None,
+                    durable_diagnostic: None,
+                    mirrored_usage: Usage::default(),
+                    mirrored_cost: None,
+                    mirrored_turn_count: 0,
+                    mirrored_tool_call_count: 0,
                 },
             );
         }

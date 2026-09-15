@@ -81,27 +81,40 @@ pub struct CodexContextClamp {
 impl CodexContextClamp { pub fn message(&self) -> String; }
 ```
 
-The message states the model id, the advertised/entitled window, the effective
-window, and the reason (OpenAI's 272K recommendation, the double-priced cliff,
-and the websocket-drop risk), and names the override lever.
-
-Emission is once per transition via the reporter:
-
-```rust
-let mut reporter = CodexContextClampReporter::default();
-if let Some(clamp) = reporter.observe(resolution.clamp.clone()) {
-    // render clamp.message() once; repeated identical states report nothing
-}
-```
-
-`observe(None)` reports nothing and re-arms the reporter, so a later transition
-(model switch, plan change, or removing an override) reports again. Bootstrap
-calls this from `codex_context_report` while registering Codex models, so each
-clamped model is reported at most once per catalog construction — never per turn,
-and never once per model registration pass.
+The message states the model id, the labelled advertised and effective windows,
+and the reason (OpenAI's 272K recommendation, the double-priced cliff, and the
+websocket-drop risk). It offers the in-app remedy first
+(`--codex-context-window`, the model effort menu) and keeps
+`OCTET_CODEX_CONTEXT_WINDOW` plus
+`OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF=1` as the scriptable
+alternative. Windows are printed with explicit labels (`advertised 872K,
+entitled 872K, effective 272K`), never as three bare numbers.
 
 A user-chosen *lower* window is not a clamp, and an override that was applied is
 not a clamp either: only a deliberate reduction is reported.
+
+### Emission: one note, for the effective session model only
+
+`codex_context_session_note(model_id, &window)` is the single user-facing note for
+an *effective* Codex session model. It returns `None` unless that model's window is
+reduced by the deliberate cap or above the 272K standard tier, and its wording is
+plain user language: no internal API name, no operation id, and the effective
+window is identical in the clamp and above-standard-tier variants (so the 372K
+`gpt-5.6-luna` window never reads as a clamp to 272K).
+
+Catalog construction only *records* notes (`CodexContextNotes`); it never prints.
+A frontend asks `Bootstrap::codex_context_note(&ModelId)` once, when the session's
+model is resolved:
+
+* print / `--mode json` / `--mode rpc` launch resolution writes the note to stderr;
+* the interactive shell adds it to the transcript via `shell.notice`.
+
+Consequences: a session whose effective model is not a Codex route prints **no**
+Codex note however many Codex models the catalog carries, and the note cannot be
+repeated per turn because it is emitted at launch resolution, not from the agent
+loop. `CodexContextClampReporter::observe` remains available for a frontend that
+tracks transitions after launch (a model switch mid-session reports again, at most
+once per transition).
 
 ## 4. The opt-in override
 
@@ -112,8 +125,9 @@ explicit acknowledgement of the cost cliff and websocket risk.
 ### Interface
 
 * CLI: `--codex-context-window <TOKENS>` with
-  `--codex-context-window-acknowledge-cost-cliff` (parsed by
-  `crate::cli::codex_context`, owned by the CLI worker).
+  `--codex-context-window-acknowledge-cost-cliff` (parsed and validated by
+  `crate::cli::parity::ParityOptions`, then published to the environment bridge by
+  `install_codex_context_env` before bootstrap).
 * Environment (used by bootstrap, so print/headless/TUI launches have the same
   lever): `OCTET_CODEX_CONTEXT_WINDOW` and
   `OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF=1`.
@@ -158,6 +172,10 @@ override, and `gpt-5.6-luna`'s documented 372K working window).
 `has_uncertain_usage` true and therefore keeps known-cost totals and hard
 ceilings fail-closed.
 
+The effective-model note for such a route says so in plain language ("this
+session's usage is recorded as uncertain instead of an exact cost") without
+naming the API or the operation id.
+
 Wiring note: the durable record must be appended by the agent/attempt path that
 owns the provider attempt. octet's agent loop currently has no pre-attempt hook
 for a route-level accounting decision, so the frontends that consume
@@ -195,8 +213,19 @@ compaction threshold; provider-side enforcement is unchanged.
 * `crates/octet-coding-agent/tests/codex_context_window.rs` — cap holds per
   family on a Pro plan, non-entitled plans cannot exceed the cap, acknowledged
   Pro overrides reach 872K/1M, above-entitlement and unacknowledged requests fail
-  closed, above-272K marks usage uncertain, output never exceeds the window, and
-  the notice fires once per transition and never without a clamp.
+  closed, above-272K marks usage uncertain, output never exceeds the window, the
+  notice fires once per transition and never without a clamp, the single session
+  note is absent for an unreduced legacy route, luna's 372K is consistent in every
+  variant, and no note names an internal API or operation id.
+* `crates/octet-coding-agent/src/app/bootstrap.rs`
+  (`codex_context_note_regression_tests`) — registration records one note per
+  reduced model and none for an unreduced route, a non-Codex effective model has
+  no note while the catalog carries Codex models, and the recorded note matches
+  the effective resolution.
+* `crates/octet-coding-agent/tests/parity_cli.rs`
+  (`codex_context_notes_are_not_emitted_for_a_non_codex_session_or_per_turn`) —
+  process boundary: with a synthetic Codex credential (so the catalog carries
+  Codex models) and a two-turn non-Codex session, stderr contains no Codex note.
 * `crates/octet-coding-agent/src/app/bootstrap/tests.rs` —
   `codex_context_tier_follows_the_plan_entitlement`,
   `codex_registration_keeps_the_deliberate_cap_and_reports_it_once`,

@@ -12,6 +12,21 @@ missing primitive/release blocker. Generated provider/model artifacts must be
 regenerated; no upstream TypeScript is vendored. A source/type/load-only check
 never qualifies behavior.
 
+## Detail documents
+
+Each detail owner records exact upstream anchors, evidence and remaining gates. A
+`Pending` row above is owned by one of these pages; a landed row links the page
+section that owns it.
+
+- [Providers](providers.md) — provider declarations, catalogs and request surfaces.
+- [Codec depth](codecs.md) — per-codec codec/streaming depth.
+- [Tools](tools.md) — built-in tool parity.
+- [TUI](editor.md) — terminal UI and editor parity.
+- [Telemetry](telemetry.md) — vendor-neutral telemetry surface.
+- [CLI](cli.md) — CLI and output-mode parity.
+- [Repo tooling](repo-tooling.md) — rows `6.1`–`6.4` (docs, maintainer artifacts, catalog diff, changelog tooling).
+- [Extensions](extensions.md) — extension-surface parity: extension API capabilities, MCP transports and computer use.
+
 ## Non-negotiable exclusions
 
 No persisted project-trust changes; no host-brokered OAuth/credential-policy
@@ -110,10 +125,10 @@ outcomes. Grouped options below remain individually required, not alternatives.
 | 5.9 | Incremental session/entry search + change notification | CLI | Pending |
 | 5.10 | Catalog publish min-client/required-provider/count/checksum/immutable-path gates | CLI | Pending |
 | 5.11 | Isolated model-backed eval harness/artifacts/pass/latency/cost deltas | CLI | Pending |
-| 6.1 | Docs for settings/session format/keybindings/compaction/templates/providers/packages/shell aliases/terminal/tmux/termux/Windows | repo tooling | Pending |
-| 6.2 | Maintainer prompts and release/add-provider/interactive-testing skills; AGENTS conventions | repo tooling | Pending |
-| 6.3 | HEAD/worktree catalog diff including effective reasoning levels | repo tooling | Pending |
-| 6.4 | CHANGELOG release extraction and link repair | repo tooling | Pending |
+| 6.1 | Docs for settings/session format/keybindings/compaction/templates/providers/packages/shell aliases/terminal/tmux/termux/Windows | repo tooling | Landed — [repo tooling 6.1](repo-tooling.md#61--docs-coverage) |
+| 6.2 | Maintainer prompts and release/add-provider/interactive-testing skills; AGENTS conventions | repo tooling | Landed — [repo tooling 6.2](repo-tooling.md#62--maintainer-prompts-skills-and-agent-conventions) |
+| 6.3 | HEAD/worktree catalog diff including effective reasoning levels | repo tooling | Landed — [repo tooling 6.3](repo-tooling.md#63--headworktree-catalog-diff) |
+| 6.4 | CHANGELOG release extraction and link repair | repo tooling | Existing owner — [repo tooling 6.4](repo-tooling.md#64--changelog-release-extraction-and-link-repair) |
 | 6.5 | Deterministic git-archive source artifact pinned by version/ref | repo tooling | Pending |
 
 Tracked route/API/theme/chrome/queue/media/lifecycle/import work is referenced
