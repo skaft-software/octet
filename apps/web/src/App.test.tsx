@@ -117,6 +117,116 @@ describe("session header safe export", () => {
   });
 });
 
+describe("workspace dock layout controls", () => {
+  afterEach(cleanup);
+
+  function renderDockHeader(options: {
+    dockSplitAvailable: boolean;
+    dockSplitOn: boolean;
+    dockOrder?: readonly ("activity" | "inspector")[];
+  }) {
+    const onToggleDockSplit = vi.fn();
+    const onMoveDockPane = vi.fn();
+    render(
+      <SessionHeader
+        sidebarOpen
+        sessionId="session-safe"
+        sessionTitle="Dock session"
+        projectName="Local project"
+        status="idle"
+        activityAvailable
+        activityOpen
+        terminalAvailable={false}
+        terminalOpen={false}
+        pinned={false}
+        archived={false}
+        sessionActionsAvailable={false}
+        metadataActionsAvailable={false}
+        branchHistoryAvailable={false}
+        sessionExportAvailable={false}
+        activityButtonRef={createRef<HTMLButtonElement>()}
+        sidebarButtonRef={createRef<HTMLButtonElement>()}
+        onOpenSidebar={vi.fn()}
+        onToggleActivity={vi.fn()}
+        onToggleTerminal={vi.fn()}
+        dockSplitAvailable={options.dockSplitAvailable}
+        dockSplitOn={options.dockSplitOn}
+        dockOrder={options.dockOrder ?? ["activity", "inspector"]}
+        onToggleDockSplit={onToggleDockSplit}
+        onMoveDockPane={onMoveDockPane}
+        onRename={vi.fn()}
+        onPin={vi.fn()}
+        onArchive={vi.fn()}
+        onOpenBranchHistory={vi.fn()}
+      />,
+    );
+    return { onToggleDockSplit, onMoveDockPane };
+  }
+
+  it("creates and merges the split dock, and never offers it without a capable layout", async () => {
+    const user = userEvent.setup();
+    const inert = renderDockHeader({
+      dockSplitAvailable: false,
+      dockSplitOn: false,
+    });
+    expect(
+      screen.queryByRole("button", { name: "Split dock into two panes" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Move the first dock pane right" }),
+    ).toBeNull();
+    expect(inert.onToggleDockSplit).not.toHaveBeenCalled();
+    cleanup();
+
+    const split = renderDockHeader({
+      dockSplitAvailable: true,
+      dockSplitOn: false,
+    });
+    const toggle = screen.getByRole("button", {
+      name: "Split dock into two panes",
+    });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await user.click(toggle);
+    expect(split.onToggleDockSplit).toHaveBeenCalledOnce();
+  });
+
+  it("rearranges the persisted pane order one step at a time", async () => {
+    const user = userEvent.setup();
+    const merged = renderDockHeader({
+      dockSplitAvailable: true,
+      dockSplitOn: false,
+    });
+    expect(
+      screen.getByRole("button", { name: "Move the first dock pane right" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Move the second dock pane left" }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Move the first dock pane right" }),
+    );
+    expect(merged.onMoveDockPane).toHaveBeenLastCalledWith("activity", 1);
+    await user.click(
+      screen.getByRole("button", { name: "Move the second dock pane left" }),
+    );
+    expect(merged.onMoveDockPane).toHaveBeenLastCalledWith("inspector", -1);
+    cleanup();
+
+    const swapped = renderDockHeader({
+      dockSplitAvailable: true,
+      dockSplitOn: true,
+      dockOrder: ["inspector", "activity"],
+    });
+    expect(
+      screen.getByRole("button", { name: "Merge dock panes" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await user.click(
+      screen.getByRole("button", { name: "Move the first dock pane right" }),
+    );
+    expect(swapped.onMoveDockPane).toHaveBeenLastCalledWith("inspector", 1);
+  });
+});
+
 describe("delegated parent navigation", () => {
   it("prefers authoritative snapshot metadata over stale inferred history", () => {
     const delegated = {

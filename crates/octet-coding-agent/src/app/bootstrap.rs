@@ -28,6 +28,11 @@ use crate::app::{
     normalize_reasoning_for_model, normalize_reasoning_selection_for_model_with_subagents,
     thinking_to_reasoning, App,
 };
+use crate::codex_context::{
+    resolve_codex_context_window, CodexContextClampReporter, CodexContextOverride,
+    CodexContextTier, CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGE_ENV,
+    CODEX_CONTEXT_OVERRIDE_ENV, CODEX_CONTEXT_WINDOW_CAP, CODEX_MAX_OUTPUT_TOKENS,
+};
 use crate::config::{CompactionMode, Config, ResumeSelector};
 use crate::extensions::{
     provider_preflight_config, ExecutableExtensions, ExtensionProviderRuntime,
@@ -4274,17 +4279,17 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
 
 // Codex's checked-in defaults are only a discovery fallback. The authenticated
 // `/models` response is authoritative for plan-specific advertised limits; octet
-// then applies the bounded working-window policy below.
-const CODEX_LEGACY_CONTEXT_WINDOW: u64 = 272_000;
-const CODEX_5_6_CONTEXT_WINDOW: u64 = 372_000;
-const CODEX_ASTRA_MAX_CONTEXT_WINDOW: u64 = 872_000;
-const CODEX_PRO_CONTEXT_WINDOW: u64 = 1_000_000;
-const CODEX_CONTEXT_WINDOW_CAP: u64 = 272_000;
-const CODEX_MAX_OUTPUT_TOKENS: u64 = 128_000;
+// then applies the bounded working-window policy implemented by
+// `crate::codex_context` (the deliberate 272K cap with its `gpt-5.6-luna` 372K
+// exception, the per-family entitlement ceiling, the explicit opt-in override,
+// and the clamp notice), so frontends and bootstrap share one definition.
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-const CODEX_MODEL_CACHE_VERSION: u8 = 6;
+/// Version 7 records the pre-cap backend default window alongside the effective
+/// window so the explicit override and its clamp notice stay exact; version 6
+/// caches are refreshed.
+const CODEX_MODEL_CACHE_VERSION: u8 = 7;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
@@ -4312,6 +4317,10 @@ struct DiscoveredCodexModel {
     display_name: Option<String>,
     reasoning_options: octet_ai::types::ReasoningOptions,
     context_window: u64,
+    /// Backend default window before octet's deliberate working cap. Kept so the
+    /// explicit override and its clamp notice can be re-resolved exactly.
+    #[serde(default)]
+    default_context_window: u64,
     max_context_window: u64,
     max_output_tokens: u64,
     min_effort: octet_ai::ReasoningEffort,
@@ -4467,19 +4476,22 @@ fn codex_models_from_response(
             max_context_window = max_context_window.min(CODEX_ASTRA_MAX_CONTEXT_WINDOW);
             default_context_window = default_context_window.min(max_context_window);
         }
-        let context_window =
-            codex_context_window_for_plan(id, default_context_window, max_context_window, plan);
-        let max_output_tokens =
-            positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
-                .unwrap_or(CODEX_MAX_OUTPUT_TOKENS)
-                .min(context_window);
-        let max_output_tokens = if id == "gpt-6-astra" {
-            // Astra's advertised input envelope never changes its 128K output
-            // contract, while lower live metadata remains authoritative.
-            max_output_tokens.min(CODEX_MAX_OUTPUT_TOKENS)
-        } else {
-            max_output_tokens
-        };
+        // The plan-selected, pre-cap backend window for this model. octet's
+        // deliberate working cap is applied by `crate::codex_context`, which also
+        // reports the clamp and applies the explicit opt-in override.
+        let resolution = resolve_codex_context_window(
+            id,
+            codex_context_tier(plan),
+            default_context_window,
+            max_context_window,
+            positive_u64(entry, &["max_output_tokens", "max_completion_tokens"]),
+            CodexContextOverride::NONE,
+        )
+        .expect("resolving a Codex context window without a user override cannot fail");
+        let context_window = resolution.context_window;
+        // Astra's advertised input envelope never changes its 128K output
+        // contract, while lower live metadata remains authoritative.
+        let max_output_tokens = resolution.max_output_tokens;
         let agent_delegation = entry
             .get("multi_agent_version")
             .and_then(serde_json::Value::as_str)
@@ -4513,6 +4525,7 @@ fn codex_models_from_response(
             display_name: discovered_display_name(entry, id),
             reasoning_options,
             context_window,
+            default_context_window,
             max_context_window,
             max_output_tokens,
             min_effort,
@@ -4529,38 +4542,39 @@ fn codex_models_from_response(
     Ok(models)
 }
 
+/// Checked-in discovery fallback windows for a Codex family. The policy itself
+/// (working cap and entitlement ceiling) is owned by `crate::codex_context`.
 fn codex_model_context_limits(model_id: &str) -> (u64, u64) {
-    if model_id == "gpt-6-astra" {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
-    } else if model_id == "gpt-5.4" || model_id == "codex-auto-review" {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_PRO_CONTEXT_WINDOW)
-    } else if model_id.starts_with("gpt-5.6-") {
-        (CODEX_5_6_CONTEXT_WINDOW, CODEX_5_6_CONTEXT_WINDOW)
-    } else {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_LEGACY_CONTEXT_WINDOW)
-    }
+    crate::codex_context::entitled_context_windows(model_id)
 }
 
-fn codex_context_window_cap(model_id: &str) -> u64 {
-    if model_id == "gpt-5.6-luna" {
-        CODEX_5_6_CONTEXT_WINDOW
-    } else {
-        CODEX_CONTEXT_WINDOW_CAP
-    }
+/// The plan tier that selects between the backend default and advertised maximum.
+fn codex_context_tier(plan: Option<&crate::auth::codex::ChatGptPlan>) -> CodexContextTier {
+    CodexContextTier::from_plan_entitlement(
+        plan.is_some_and(crate::auth::codex::ChatGptPlan::uses_max_context_window),
+    )
 }
 
+/// Resolve one Codex model's context envelope without a user override.
+///
+/// Used by discovery and the conservative fallback catalog. The explicit opt-in
+/// override is applied once, where discovered metadata becomes catalog limits.
 fn codex_context_window_for_plan(
     model_id: &str,
     default_context_window: u64,
     max_context_window: u64,
     plan: Option<&crate::auth::codex::ChatGptPlan>,
 ) -> u64 {
-    let selected = if plan.is_some_and(crate::auth::codex::ChatGptPlan::uses_max_context_window) {
-        max_context_window
-    } else {
-        default_context_window
-    };
-    selected.min(codex_context_window_cap(model_id))
+    resolve_codex_context_window(
+        model_id,
+        codex_context_tier(plan),
+        default_context_window,
+        max_context_window,
+        None,
+        CodexContextOverride::NONE,
+    )
+    .expect("resolving a Codex context window without a user override cannot fail")
+    .context_window
 }
 
 fn codex_model_limits(
@@ -4661,6 +4675,8 @@ fn load_codex_model_cache(
             || model.id.is_empty()
             || !ids.insert(model.id.as_str())
             || model.context_window == 0
+            || model.default_context_window == 0
+            || model.default_context_window > model.max_context_window
             || model.max_context_window < model.context_window
             || model.max_output_tokens == 0
             || model.max_output_tokens > model.context_window
@@ -4697,12 +4713,14 @@ fn fallback_codex_models(
     crate::auth::codex::MODELS
         .iter()
         .map(|model_id| {
+            let (default_context_window, _) = codex_model_context_limits(model_id);
             let (limits, max_context_window) = codex_model_limits(model_id, plan);
             DiscoveredCodexModel {
                 id: (*model_id).to_owned(),
                 display_name: None,
                 reasoning_options: codex_fallback_reasoning_options(model_id),
                 context_window: limits.context_window,
+                default_context_window,
                 max_context_window,
                 max_output_tokens: limits.max_output_tokens,
                 min_effort: codex_min_effort(model_id),
@@ -4765,6 +4783,82 @@ fn codex_user_agent() -> String {
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS
     )
+}
+
+/// Read the explicit opt-in Codex context-window override.
+///
+/// Fail-closed: an unreadable, unrecognised, or out-of-range value leaves the
+/// deliberate cap in force and reports why.
+fn codex_context_override_from_env() -> anyhow::Result<CodexContextOverride> {
+    let requested = optional_env(CODEX_CONTEXT_OVERRIDE_ENV)?;
+    let acknowledged = optional_env(CODEX_CONTEXT_ACKNOWLEDGE_ENV)?;
+    match CodexContextOverride::parse(requested.as_deref(), acknowledged.as_deref()) {
+        Ok(user_override) => Ok(user_override),
+        Err(error) => {
+            crate::output::stderr!("warning: {error}; keeping the deliberate Codex context cap");
+            Ok(CodexContextOverride::NONE)
+        }
+    }
+}
+
+/// Resolve the context envelope for one discovered Codex model.
+///
+/// The deliberate working cap is applied here as it always has been; a
+/// deliberate reduction is reported through the typed [`CodexContextClamp`] the
+/// caller observes, and the explicit opt-in override can raise the window (never
+/// past the model's entitlement) when the operator acknowledged it. A refused
+/// override keeps the deliberate cap.
+fn codex_context_resolve_for_registration(
+    model: &DiscoveredCodexModel,
+    tier: CodexContextTier,
+    user_override: CodexContextOverride,
+) -> crate::codex_context::CodexContextWindow {
+    match resolve_codex_context_window(
+        &model.id,
+        tier,
+        model.default_context_window,
+        model.max_context_window,
+        Some(model.max_output_tokens),
+        user_override,
+    ) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            crate::output::stderr!("warning: {error}; keeping the deliberate Codex context cap");
+            resolve_codex_context_window(
+                &model.id,
+                tier,
+                model.default_context_window,
+                model.max_context_window,
+                Some(model.max_output_tokens),
+                CodexContextOverride::NONE,
+            )
+            .expect("resolving a Codex context window without a user override cannot fail")
+        }
+    }
+}
+
+/// Report the deliberate Codex clamp once per transition, and name the
+/// above-standard-tier accounting obligation when the override raised it.
+fn codex_context_report(
+    model_id: &str,
+    resolution: &crate::codex_context::CodexContextWindow,
+    clamp_reporter: &mut CodexContextClampReporter,
+) {
+    if let Some(clamp) = clamp_reporter.observe(resolution.clamp.clone()) {
+        crate::output::stderr!("{}", clamp.message());
+    }
+    if let Some(operation) = resolution.uncertain_usage_operation() {
+        // Above the standard tier the *whole* request is metered differently, so
+        // accounting must stay fail-closed for this route. That covers a granted
+        // override and the documented 372K `gpt-5.6-luna` window alike; the
+        // obligation is named once per registered model instead of leaving an
+        // exact-looking cost behind.
+        crate::output::stderr!(
+            "note: {model_id} budgets {} Codex context tokens, above the {}-token standard tier: those requests are double-priced, so their usage must be recorded as uncertain with Session::record_usage_uncertainty({operation:?})",
+            resolution.context_window,
+            CODEX_CONTEXT_WINDOW_CAP,
+        );
+    }
 }
 
 /// Register the OpenAI Codex (Sign in with ChatGPT) endpoint and discover the
@@ -4866,6 +4960,10 @@ fn register_openai_codex(
         timeout: PROVIDER_RESPONSE_HEADER_TIMEOUT,
     })?;
 
+    let user_override = codex_context_override_from_env()?;
+    let tier = codex_context_tier(initial_claims.plan.as_ref());
+    let mut clamp_reporter = CodexContextClampReporter::default();
+
     for model in models {
         // Astra is always namespaced so an OAuth selection cannot be confused
         // with the direct public OpenAI route when credentials change. Other
@@ -4876,6 +4974,14 @@ fn register_openai_codex(
             } else {
                 ModelId(model.id.clone())
             };
+        let limits = {
+            let resolution = codex_context_resolve_for_registration(&model, tier, user_override);
+            codex_context_report(&model.id, &resolution, &mut clamp_reporter);
+            ModelLimits {
+                context_window: resolution.context_window,
+                max_output_tokens: resolution.max_output_tokens,
+            }
+        };
         let pricing = crate::providers::pricing_for(declaration, &model.id);
         let supports_image_input = codex_supports_image_input(&model.id);
         // The declaration keeps application session identity separate from the
@@ -4916,10 +5022,7 @@ fn register_openai_codex(
 
                 deferred_tool_loading: false,
             },
-            limits: ModelLimits {
-                context_window: model.context_window,
-                max_output_tokens: model.max_output_tokens,
-            },
+            limits,
             pricing,
             cache,
         })?;

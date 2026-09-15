@@ -1,9 +1,10 @@
 #![allow(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use octet_agent::{EntryId, EntryValue, Session};
@@ -12,7 +13,9 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::session_catalog::{
-    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, SessionCatalog,
+    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, IndexedEntry, IndexedEntryHit,
+    IndexedEntryKind, IndexedEntryUpdate, SessionCatalog, MAX_INDEXED_ENTRIES_PER_SESSION,
+    MAX_INDEXED_ENTRY_CHARS,
 };
 
 static NEXT_SESSION_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -1202,6 +1205,280 @@ fn summarize_session_with_usage(
     })
 }
 
+/// One session-entry search hit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntrySearchHit {
+    /// Workspace-local session id.
+    pub session_id: String,
+    /// Durable entry id inside that session.
+    pub entry_id: String,
+    /// Which conversation role produced the entry.
+    pub kind: EntryKind,
+    /// Bounded matching entry text.
+    pub text: String,
+}
+
+/// Which conversation role produced an indexed entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    User,
+    Assistant,
+}
+
+/// Result of one bounded incremental entry search.
+#[derive(Clone, Debug, Default)]
+pub struct EntrySearchOutcome {
+    /// Matching entries, ordered by `(session_id, entry ordinal)`.
+    pub hits: Vec<EntrySearchHit>,
+    /// Whether the disposable index changed during this search.
+    pub index_changed: bool,
+    /// The entry-index revision observed after the search.
+    pub revision: i64,
+    /// How many transcripts this search had to re-read (the incremental bound).
+    pub scanned_sessions: usize,
+}
+
+/// Watches the disposable entry-index revision so a caller is notified exactly
+/// when the index changed since its previous observation.
+///
+/// The revision only advances when a session's fingerprint changed or a session
+/// vanished, so a repeated observation with no transcript change is silent.
+#[derive(Clone, Debug, Default)]
+pub struct SessionSearchWatcher {
+    last_revision: Option<i64>,
+}
+
+impl SessionSearchWatcher {
+    /// Observe the current revision. Returns `true` exactly once per change.
+    pub fn observe(&mut self, revision: i64) -> bool {
+        let changed = self.last_revision != Some(revision);
+        self.last_revision = Some(revision);
+        changed
+    }
+}
+
+/// Extract a bounded, user-visible entry projection for the incremental search
+/// index.
+///
+/// Only submitted user text and assistant-visible text are retained; reasoning,
+/// tool calls/arguments, media, provider metadata and private answers are never
+/// indexed. The index is disposable and rebuilt from JSONL, so this is a lenient
+/// scan that does not re-run the graph validation `summarize_session` performs;
+/// it still honours the same byte and record bounds.
+pub(crate) fn index_session_entries(path: &Path) -> anyhow::Result<Vec<IndexedEntry>> {
+    let path = absolute_read_path(path)?;
+    let file = octet_agent::secure_fs::open_regular_file_for_read(&path)?;
+    let file_len = file.metadata()?.len();
+    if file_len > MAX_SESSION_FILE_BYTES as u64 {
+        anyhow::bail!("session is {file_len} bytes (limit {MAX_SESSION_FILE_BYTES})");
+    }
+    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    let mut line_bytes = Vec::new();
+    let mut observed_bytes = 0usize;
+    let mut line_no = 0usize;
+    let mut entries = Vec::new();
+    loop {
+        line_bytes.clear();
+        let read_limit = MAX_SESSION_FILE_BYTES
+            .saturating_sub(observed_bytes)
+            .saturating_add(1);
+        let bytes_read = reader
+            .by_ref()
+            .take(u64::try_from(read_limit).expect("session byte limit fits u64"))
+            .read_until(b'\n', &mut line_bytes)?;
+        if bytes_read == 0 {
+            break;
+        }
+        observed_bytes = observed_bytes
+            .checked_add(bytes_read)
+            .ok_or_else(|| anyhow::anyhow!("session read length overflow"))?;
+        if observed_bytes > MAX_SESSION_FILE_BYTES {
+            anyhow::bail!("session exceeds the {MAX_SESSION_FILE_BYTES}-byte limit while being read");
+        }
+        line_no += 1;
+        if line_no > MAX_SESSION_RECORDS {
+            anyhow::bail!("session has more than {MAX_SESSION_RECORDS} records");
+        }
+        let has_newline = line_bytes.last() == Some(&b'\n');
+        let line_bytes = if has_newline {
+            &line_bytes[..line_bytes.len() - 1]
+        } else {
+            line_bytes.as_slice()
+        };
+        let line = match std::str::from_utf8(line_bytes) {
+            Ok(line) => line,
+            Err(_) if !has_newline => break,
+            Err(_) => continue,
+        };
+        let record = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(record) => record,
+            Err(_) if !has_newline => break,
+            Err(_) => continue,
+        };
+        if let Some(entry) = indexed_entry_from_record(&record) {
+            entries.push(entry);
+            if entries.len() >= MAX_INDEXED_ENTRIES_PER_SESSION {
+                break;
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn indexed_entry_from_record(record: &serde_json::Value) -> Option<IndexedEntry> {
+    if record.get("type").and_then(|value| value.as_str()) != Some("entry") {
+        return None;
+    }
+    let entry_id = record.get("id")?.as_str()?.to_owned();
+    let value = record.get("value")?;
+    if value.get("type").and_then(|value| value.as_str()) != Some("message") {
+        return None;
+    }
+    let (role, kind) = if value.get("User").is_some() {
+        ("User", IndexedEntryKind::User)
+    } else if value.get("Assistant").is_some() {
+        ("Assistant", IndexedEntryKind::Assistant)
+    } else {
+        return None;
+    };
+    let parts = value.get(role)?.get("content")?.as_array()?;
+    let mut text = String::new();
+    for part in parts {
+        let Some(part_text) = part.get("Text").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.extend(part_text.chars().take(MAX_INDEXED_ENTRY_CHARS));
+        if text.chars().count() >= MAX_INDEXED_ENTRY_CHARS {
+            break;
+        }
+    }
+    let text = text.chars().take(MAX_INDEXED_ENTRY_CHARS).collect::<String>();
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(IndexedEntry {
+        entry_id,
+        kind,
+        text,
+    })
+}
+
+/// Directory (inside the workspace session store) holding accounting-only
+/// records for ephemeral `--no-session` runs.
+const EPHEMERAL_ACCOUNTING_DIRECTORY: &str = ".accounting";
+const EPHEMERAL_ACCOUNTING_FILE: &str = "ephemeral-sessions.jsonl";
+const MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES: usize = 256 * 1024;
+const MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Durable, conversation-free accounting for one ephemeral (`--no-session`) run.
+///
+/// The transcript is discarded, but provider usage, cost and any
+/// usage-uncertainty exposure are recorded so cost accounting stays complete
+/// and fail-closed across the run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EphemeralAccountingRecord {
+    /// Wall-clock time the record was durably appended.
+    pub recorded_at_unix_ms: u64,
+    /// Cumulative session cost after the run, in microdollars.
+    pub session_cost_microdollars: u64,
+    /// Whether the run exposed at least one unknown-usage attempt.
+    pub has_uncertain_usage: bool,
+    /// Provider usage records, exactly as the transcript recorded them.
+    pub usage_records: Vec<octet_agent::UsageRecord>,
+    /// Unknown-usage exposure records.
+    pub usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
+}
+
+/// Aggregate durable ephemeral accounting for one workspace store.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EphemeralAccountingSummary {
+    /// Number of ephemeral runs recorded.
+    pub runs: usize,
+    /// Sum of every recorded run's cumulative session cost.
+    pub total_cost_microdollars: u64,
+    /// Whether any recorded run had unknown usage.
+    pub has_uncertain_usage: bool,
+}
+
+struct EphemeralRun {
+    transcript_root: PathBuf,
+    accounting_session_dir: PathBuf,
+    workspace: PathBuf,
+}
+
+/// The one active ephemeral run, if any. A shared process may take a single
+/// `--no-session` run at a time.
+static EPHEMERAL_RUN: Mutex<Option<EphemeralRun>> = Mutex::new(None);
+
+/// Register an ephemeral run: its transcript lives under `transcript_root` and
+/// is deleted afterwards, while accounting is persisted into
+/// `SessionStore::new(accounting_session_dir, workspace)`.
+pub fn begin_ephemeral_run(
+    transcript_root: PathBuf,
+    accounting_session_dir: PathBuf,
+    workspace: PathBuf,
+) {
+    *EPHEMERAL_RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(EphemeralRun {
+        transcript_root,
+        accounting_session_dir,
+        workspace,
+    });
+}
+
+/// Persist the active ephemeral run's accounting, delete its transcript
+/// directory, and return what was recorded.
+///
+/// A no-op returning `None` when no run is active. The transcript is discarded
+/// even when accounting fails, because the conversation must never outlive the
+/// run.
+pub fn finish_ephemeral_run() -> anyhow::Result<Option<EphemeralAccountingRecord>> {
+    let run = EPHEMERAL_RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let Some(run) = run else {
+        return Ok(None);
+    };
+    let store = SessionStore::new(&run.accounting_session_dir, &run.workspace);
+    let workspace_dir = run.transcript_root.join(workspace_key(&run.workspace));
+    let recorded = match newest_transcript(&workspace_dir) {
+        Some(path) => store.record_ephemeral_accounting(&path).map(Some),
+        None => Ok(None),
+    };
+    let _ = std::fs::remove_dir_all(&run.transcript_root);
+    recorded
+}
+
+fn newest_transcript(directory: &Path) -> Option<PathBuf> {
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(directory).ok()?.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(current, _)| modified >= *current) {
+            newest = Some((modified, path));
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 impl SessionStore {
     /// Create a store rooted at `<session_dir>/<workspace-key>`.
     pub fn new(session_dir: &Path, workspace: &Path) -> Self {
@@ -1302,6 +1579,185 @@ impl SessionStore {
     pub fn new_path(&self, stamp: &str) -> PathBuf {
         let suffix = NEXT_SESSION_SUFFIX.fetch_add(1, Ordering::Relaxed);
         self.dir.join(format!("{stamp}-{suffix:04x}.jsonl"))
+    }
+
+    /// Bounded incremental entry search over this workspace's sessions.
+    ///
+    /// Only transcripts whose fingerprint changed since the last search are
+    /// re-read; unchanged sessions are served from the disposable catalog, so a
+    /// repeat search does not re-scan the workspace.
+    pub fn search_entries(&self, query: &str, limit: usize) -> anyhow::Result<EntrySearchOutcome> {
+        self.search_entries_with(query, limit, index_session_entries)
+    }
+
+    /// The current entry-index revision, for callers that poll for changes.
+    pub fn entry_index_revision(&self) -> anyhow::Result<i64> {
+        let (catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        catalog.entry_revision()
+    }
+
+    pub(crate) fn search_entries_with<F>(
+        &self,
+        query: &str,
+        limit: usize,
+        extractor: F,
+    ) -> anyhow::Result<EntrySearchOutcome>
+    where
+        F: Fn(&Path) -> anyhow::Result<Vec<IndexedEntry>>,
+    {
+        let candidates = self.candidates();
+        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let indexed = catalog.entry_fingerprints()?;
+        let current_ids = candidates
+            .iter()
+            .filter_map(|candidate| {
+                candidate
+                    .path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+            .collect::<HashSet<_>>();
+        let stale_ids = indexed
+            .keys()
+            .filter(|id| !current_ids.contains(*id))
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut updates = Vec::new();
+        for candidate in &candidates {
+            let Some(id) = candidate
+                .path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let Some(fingerprint) = catalog_fingerprint(candidate) else {
+                continue;
+            };
+            if indexed.get(&id) == Some(&fingerprint) {
+                continue;
+            }
+            if let Ok(entries) = extractor(&candidate.path) {
+                updates.push(IndexedEntryUpdate {
+                    session_id: id,
+                    fingerprint,
+                    entries,
+                });
+            }
+        }
+        let scanned_sessions = updates.len();
+        let index_changed = catalog.apply_entries(&updates, &stale_ids)?;
+        let revision = catalog.entry_revision()?;
+        let hits = catalog
+            .search_entries(query, limit)?
+            .into_iter()
+            .map(|hit| EntrySearchHit {
+                session_id: hit.session_id,
+                entry_id: hit.entry_id,
+                kind: match hit.kind {
+                    IndexedEntryKind::User => EntryKind::User,
+                    IndexedEntryKind::Assistant => EntryKind::Assistant,
+                },
+                text: hit.text,
+            })
+            .collect();
+        Ok(EntrySearchOutcome {
+            hits,
+            index_changed,
+            revision,
+            scanned_sessions,
+        })
+    }
+
+    /// Persist only the durable accounting for one ephemeral transcript.
+    ///
+    /// Reads the run's usage and unknown-usage records plus its cumulative cost
+    /// and appends them to the workspace's accounting ledger. The conversation
+    /// itself is never copied.
+    pub fn record_ephemeral_accounting(
+        &self,
+        transcript: &Path,
+    ) -> anyhow::Result<EphemeralAccountingRecord> {
+        let session = Session::open_read_only(transcript.to_path_buf()).map_err(|error| {
+            anyhow::anyhow!("ephemeral accounting could not read the run: {error}")
+        })?;
+        let usage_uncertainty_records = session.usage_uncertainty_records().to_vec();
+        let record = EphemeralAccountingRecord {
+            recorded_at_unix_ms: now_unix_ms(),
+            session_cost_microdollars: session.total_cost_microdollars(),
+            has_uncertain_usage: !usage_uncertainty_records.is_empty(),
+            usage_records: session.usage_records().to_vec(),
+            usage_uncertainty_records,
+        };
+        self.append_ephemeral_accounting(&record)?;
+        Ok(record)
+    }
+
+    fn append_ephemeral_accounting(
+        &self,
+        record: &EphemeralAccountingRecord,
+    ) -> anyhow::Result<()> {
+        let directory = self.dir.join(EPHEMERAL_ACCOUNTING_DIRECTORY);
+        octet_agent::secure_fs::create_private_directory_all(&directory)?;
+        let path = directory.join(EPHEMERAL_ACCOUNTING_FILE);
+        let mut line = serde_json::to_vec(record)?;
+        if line.len() > MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES {
+            anyhow::bail!(
+                "ephemeral accounting record is {} bytes (limit {MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES})",
+                line.len()
+            );
+        }
+        line.push(b'\n');
+        let mut file = match octet_agent::secure_fs::open_regular_file_for_append(&path) {
+            Ok(file) => file,
+            Err(octet_agent::secure_fs::SecureFileError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                octet_agent::secure_fs::create_regular_file_for_append(&path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        file.write_all(&line)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Aggregate durable accounting for every ephemeral run in this workspace.
+    ///
+    /// `has_uncertain_usage` is fail-closed: while any recorded run exposed
+    /// unknown usage, the workspace total remains uncertain.
+    pub fn ephemeral_accounting_summary(&self) -> anyhow::Result<EphemeralAccountingSummary> {
+        let path = self
+            .dir
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(EphemeralAccountingSummary::default())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if bytes.len() as u64 > MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES {
+            anyhow::bail!(
+                "ephemeral accounting ledger is {} bytes (limit {MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES})",
+                bytes.len()
+            );
+        }
+        let mut summary = EphemeralAccountingSummary::default();
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let Ok(record) = serde_json::from_str::<EphemeralAccountingRecord>(line) else {
+                continue;
+            };
+            summary.runs += 1;
+            summary.total_cost_microdollars = summary
+                .total_cost_microdollars
+                .saturating_add(record.session_cost_microdollars);
+            summary.has_uncertain_usage |= record.has_uncertain_usage;
+        }
+        Ok(summary)
     }
 
     fn candidates(&self) -> Vec<SessionCandidate> {
@@ -2534,6 +2990,107 @@ mod tests {
         });
         assert_eq!(scans.get(), 0);
         assert_eq!(warm[0].title, "a distinct replacement title");
+    }
+
+    #[test]
+    fn entry_search_is_incremental_and_notifies_only_on_change() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let mut first = Session::create(store.dir().join("one.jsonl")).unwrap();
+        first
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("alpha needle".into())],
+            })))
+            .unwrap();
+        drop(first);
+        let mut second = Session::create(store.dir().join("two.jsonl")).unwrap();
+        second
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("beta needle".into())],
+            })))
+            .unwrap();
+        drop(second);
+
+        let scans = std::cell::Cell::new(0usize);
+        let cold = store
+            .search_entries_with("needle", 10, |path| {
+                scans.set(scans.get() + 1);
+                index_session_entries(path)
+            })
+            .unwrap();
+        assert_eq!(scans.get(), 2, "a cold index reads every session exactly once");
+        assert_eq!(cold.scanned_sessions, 2);
+        assert!(cold.index_changed);
+        assert_eq!(cold.hits.len(), 2);
+        assert!(cold.hits.iter().any(|hit| hit.session_id == "one"));
+        assert!(cold.hits.iter().any(|hit| hit.text.contains("alpha needle")));
+
+        let mut watcher = SessionSearchWatcher::default();
+        assert!(watcher.observe(cold.revision), "the first observation is a change");
+        assert!(!watcher.observe(cold.revision), "an unchanged index is silent");
+
+        scans.set(0);
+        let warm = store
+            .search_entries_with("needle", 10, |path| {
+                scans.set(scans.get() + 1);
+                index_session_entries(path)
+            })
+            .unwrap();
+        assert_eq!(scans.get(), 0, "a warm index must not re-read any transcript");
+        assert!(!warm.index_changed);
+        assert!(!watcher.observe(warm.revision));
+
+        // Only the new/changed transcript is re-read.
+        let mut third = Session::create(store.dir().join("three.jsonl")).unwrap();
+        third
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("gamma needle".into())],
+            })))
+            .unwrap();
+        drop(third);
+        scans.set(0);
+        let delta = store
+            .search_entries_with("needle", 10, |path| {
+                scans.set(scans.get() + 1);
+                index_session_entries(path)
+            })
+            .unwrap();
+        assert_eq!(scans.get(), 1, "only the changed session is re-read");
+        assert!(delta.index_changed);
+        assert!(watcher.observe(delta.revision), "the change fires the notification");
+        assert_eq!(delta.hits.len(), 3);
+    }
+
+    #[test]
+    fn indexed_entries_keep_only_user_and_assistant_text() {
+        let record = serde_json::json!({
+            "type": "entry",
+            "id": "e1",
+            "value": {"type": "message", "Assistant": {"content": [
+                {"Text": "visible answer"},
+                {"Reasoning": {"text": "hidden needle"}},
+                {"ToolCall": {"name": "bash", "arguments": {"command": "secret needle"}}}
+            ]}}
+        });
+        let entry = indexed_entry_from_record(&record).unwrap();
+        assert_eq!(entry.kind, IndexedEntryKind::Assistant);
+        assert!(entry.text.contains("visible answer"));
+        assert!(!entry.text.contains("hidden needle"));
+        assert!(!entry.text.contains("secret needle"));
+
+        let user = serde_json::json!({
+            "type": "entry",
+            "id": "e2",
+            "value": {"type": "message", "User": {"content": [
+                {"Text": "user needle"},
+                {"Media": {"mime": "image/png"}}
+            ]}}
+        });
+        let entry = indexed_entry_from_record(&user).unwrap();
+        assert_eq!(entry.kind, IndexedEntryKind::User);
+        assert_eq!(entry.text, "user needle");
     }
 
     #[test]

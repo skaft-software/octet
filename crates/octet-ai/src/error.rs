@@ -262,6 +262,22 @@ pub enum StreamProtocolError {
     /// Stream closed prematurely.
     #[error("Premature end-of-file")]
     PrematureEof,
+    /// The provider stream died and the route offers no primitive to resume
+    /// that exact generation, or the bounded reconnect budget was spent. The
+    /// assistant turn is incomplete: the partial output must not be treated as
+    /// a finished response, and octet never replays the request because doing
+    /// so could duplicate already-emitted output or provider work.
+    #[error(
+        "Provider stream was interrupted and could not be resumed (reconnect attempts: {attempts}, visible output: {visible_output}): {detail}; the turn is incomplete"
+    )]
+    ResponseNotResumable {
+        /// Bounded reconnect attempts spent before giving up.
+        attempts: u32,
+        /// Whether consumer-visible output had already been forwarded.
+        visible_output: bool,
+        /// Bounded, credential-redacted cause of the interruption.
+        detail: String,
+    },
     /// Unexpected event type received.
     #[error("Unexpected event: {0}")]
     UnexpectedEvent(String),
@@ -322,6 +338,10 @@ pub enum UnsupportedError {
     /// protocols.
     #[error("Responses request options are unsupported")]
     ResponsesOptions,
+    /// The selected route does not declare the Responses `service_tier`
+    /// request field.
+    #[error("Responses service tier is unsupported on this route")]
+    ServiceTier,
 }
 
 /// Configuration loading or resolution error.

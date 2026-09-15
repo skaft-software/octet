@@ -9,10 +9,18 @@ documents `packages/agent/docs/tool-durability.md` and
 `packages/agent/docs/mobile-handoff/01-harness/04-tool-output/rate-limiting.md`.
 No upstream TypeScript is vendored.
 
-Behavioral evidence is `crates/octet-agent/tests/parity_tools.rs` (17 tests) plus
+Behavioral evidence is `crates/octet-agent/tests/parity_tools.rs` (23 tests) plus
 the in-crate unit tests of the tool modules. A row is only "Landed" when a test
 that exercises the real tool ran and passed; observed output for every run is
 recorded in [`../swarm-audit/EXECUTION-parity-tools.md`](../swarm-audit/EXECUTION-parity-tools.md).
+
+Rows 4.7, 4.11, 4.12, and 4.14 are landed as **tool-layer primitives** in
+`crates/octet-agent/src/tools/{durability,deferred,summarization}.rs`. Pi stores
+their state in the session's bound-value family; octet's session is an
+append-only JSONL log whose keyed replace/scan API does not exist yet, and
+`session.rs`/`agent.rs` are outside this change's scope, so each module
+implements the row's decision logic behind one owned type and documents the exact
+consumer that still has to be wired in "Recorded gaps" below.
 
 ## Status matrix
 
@@ -24,14 +32,14 @@ recorded in [`../swarm-audit/EXECUTION-parity-tools.md`](../swarm-audit/EXECUTIO
 | 4.4 | Bash spilled output path | Landed | `src/tools/bash.rs` (`Capture::{spill,spill_path}`); `bash_truncated_output_spills_the_full_stream_to_a_readable_path`, `bash_untruncated_output_leaks_no_spill_path` |
 | 4.5 | Bash session identity/provider/model/reasoning env + `commandPrefix` | Landed | `src/tools/shell_environment.rs`; `session_shell_exposes_live_identity_metadata_and_host_command_prefix`, `session_shell_clears_inherited_metadata_and_rereads_the_resolver` |
 | 4.6 | Opt-in PowerShell (+ Windows CI evidence) | Opt-in gating landed; Windows execution evidence blocked | `src/tools/powershell.rs`, `src/tools/mod.rs`; `powershell_is_opt_in_and_never_a_bash_fallback` proves the gate, the non-Windows refusal, and the never-a-fallback contract. The Windows execution path is `#[cfg(windows)]` and is **not compiled here**: real Windows CI evidence is blocked on a Windows runner (human/hardware-gated, no primitive available in this environment) |
-| 4.7 | Interval durable partial bash output checkpoints | Blocked | Missing durable invocation-scoped value store; see below |
+| 4.7 | Interval durable partial bash output checkpoints | Landed (tool layer) | `src/tools/bash.rs` (`BashCheckpointPublisher`, `BashCheckpoints`, `CheckpointedBashTool`) + `src/tools/durability.rs` (`DurableInvocationStore`); `bash_checkpoint_publisher_is_interval_bounded_and_dedupes_identical_snapshots`, `bash_checkpoints_land_at_interval_boundaries_and_final_output_is_complete` |
 | 4.8 | Adaptive preview coalescing (interval/rate/single trailing timer) | Landed (tool layer) | `AdaptivePreviewCoalescer` in `src/tool.rs`; `preview_coalescer_paces_both_interval_and_encoded_bytes`. Live-panel consumer pending |
 | 4.9 | Original-file nonoverlapping multi-edit + legacy normalization | Landed | `src/tools/edit.rs`; `edit_applies_multiple_edits_against_the_original_file`, `edit_legacy_shapes_are_normalized_into_one_batch` |
 | 4.10 | Unanimous finalized-result batch termination | Landed (tool layer) | `ToolOutput::requesting_termination`/`terminates_run` + `batch_requests_termination` in `src/tool.rs`; `batch_termination_requires_unanimous_finalized_results`. Loop consumer pending |
-| 4.11 | Durable invocation memos through replay until outcome known | Blocked | Missing operation/invocation-scoped memo store; see below |
-| 4.12 | Deferred provider suspend/resume/handles/poll permits | Blocked | Missing harness suspended-run lifecycle; see below |
+| 4.11 | Durable invocation memos through replay until outcome known | Landed (tool layer) | `src/tools/durability.rs`; `invocation_memos_survive_replay_until_the_outcome_is_known` |
+| 4.12 | Deferred provider suspend/resume/handles/poll permits | Landed (tool layer) | `src/tools/deferred.rs`; `deferred_suspension_requires_a_valid_handle_and_rejects_every_mismatch`, `deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or_foreign_handles` |
 | 4.13 | Tool `promptSnippet`/`promptGuidelines` | Landed (tool layer) | `Tool::prompt_snippet`/`prompt_guidelines` + `collect_tool_prompt_contributions`; `tool_prompt_contributions_match_pi_snippets_and_guidelines`. Prompt consumer pending |
-| 4.14 | Summarization retry distinct from compaction failure | Blocked | Missing distinct summarization retry policy; see below |
+| 4.14 | Summarization retry distinct from compaction failure | Landed (tool layer) | `src/tools/summarization.rs`; `summarization_retries_are_distinct_from_compaction_failures_without_duplicate_durable_state` |
 
 ## Contract notes for the landed rows
 
@@ -78,6 +86,62 @@ recorded in [`../swarm-audit/EXECUTION-parity-tools.md`](../swarm-audit/EXECUTIO
   termination (`batch_requests_termination`); an empty batch or any dissent
   keeps the run going, so no sibling result is discarded. `ToolOutput` defaults
   to not requesting termination.
+- **4.7** `BashCheckpointPublisher` implements Pi's bash policy: a checkpoint is
+  requested at most once per interval (default `BASH_CHECKPOINT_INTERVAL = 2000
+  ms`, floored at 10 ms) and only when the complete bounded snapshot differs from
+  the last requested one, so output volume never accelerates checkpoint
+  frequency. The snapshot is the bounded capture render, capped at
+  `BASH_CHECKPOINT_MAX_BYTES = 50 KiB` (the two stream sections share the cap,
+  over-long sections keep their newest bytes on a code-point boundary and are
+  marked elided), and a checkpoint never emits `complete_<stream>=true`, so a
+  recovery consumer cannot read it as proof the command finished. The durable
+  value is `pi.pending.tool_output:`*operation*`:`*invocation — one replaceable
+  value per invocation, deleted when the outcome becomes known, and a late
+  checkpoint after settlement is refused instead of reviving state. A checkpoint
+  write failure never changes the command's result; it is counted
+  (`checkpoint_stats().failures`) for the host to report.
+- **4.11** memos live at `pi.op.tool_memo:`*operation*`:`*invocation*`:`*name,
+  where the name is non-empty and cannot contain `:`. A memo survives replay
+  while the call is `effect_pending`: `replay_lookup` returns `Memoized(value)`
+  or `NotYetRecorded`, and `replay_step` runs its effect only for
+  `NotYetRecorded` and then commits the value (Pi's `step.do`). Settlement is one
+  operation that fences every open handle and deletes memos and partial output
+  together; afterwards `open` reports `OutcomeKnown` and a late memo read is an
+  error — never `None` — because "no value" would mean "run the effect again".
+  An orphaned `effect_pending` invocation is recovered as an interruption result
+  whose outcome is explicitly `Unknown` with Pi's mandatory marker, and a second
+  recovery is refused. Values, names, values per invocation, live invocations,
+  and retained settled invocations are all hard-bounded; an over-limit write
+  fails closed instead of truncating a memo.
+- **4.12** a response suspends only with a valid handle: non-empty `id`, provider
+  and model id equal to the durable run configuration, and `api` equal to the api
+  of the response that carried it. Anything else is a terminal
+  `DeferredSuspendFailure` (`MalformedHandle`) whose diagnostic starts with Pi's
+  "Provider returned an invalid deferred handle" plus the specific rejection, so
+  an untrustworthy handle can never park a run. Polling requires a permit:
+  `DeferredPollPermit::none` leaves the run durably suspended with nothing
+  written, while a granted permit admits exactly one poll, is consumed, and emits
+  `run_resume`. Stale (minted for another durable generation), duplicate (the
+  same permit twice), foreign (handle/configuration mismatch), and expired
+  (provider-supplied `expires_at`) polls are refusals rather than silent waits. A
+  poll from `deferred.suspended` increments the poll number and reserves fresh
+  response/usage ids; a poll that replaces an unknown-outcome
+  `deferred.effect_pending` keeps the same poll number, uses fresh ids, and
+  reports the abandoned frame list to delete. A still-deferred poll returns to
+  `deferred.suspended` at the same poll number with a bumped generation, and an
+  invalid handle returned by a poll fails closed.
+- **4.14** one `SummarizationRetryPolicy` (default three attempts, doubling
+  backoff capped at 60 s) serves compaction and branch summarization.
+  `SummarizationRetryScheduled` (diagnostic `summarization retry scheduled …`) is
+  a distinct type and distinct wording from `CompactionFailure` (diagnostic
+  `compaction boundary failed: …`), and `CompactionStepOutcome::is_compaction_failure()`
+  is false for a scheduled retry, so a live boundary cannot be reported as
+  failed. Deterministic failures and aborts are terminal on the first attempt.
+  The driver calls the caller's commit closure only after a successful attempt,
+  so durable summary records are exactly one on success and zero on failure — a
+  retry can never duplicate durable state — and a commit that fails is reported
+  as `CompactionFailureKind::DurableWrite` rather than as a summarization
+  failure.
 - **4.13** `prompt_snippet`/`prompt_guidelines` default to nothing, so no
   existing tool changes behavior, and `collect_tool_prompt_contributions` skips
   tools without a snippet — the list is presentation intent, never a tool
@@ -113,46 +177,46 @@ one-line wiring change, not a missing primitive.
    unattainable in this environment and requires a Windows runner or Windows
    hardware.**
 
-## Blocked rows and their exact missing primitives
+## Recorded gaps in the four durability rows
 
-- **4.7 — interval durable partial bash output checkpoints.**
-  Missing primitive: a durable, invocation-scoped *replaceable* value store in
-  `crates/octet-agent/src/session.rs` (Pi's `setValue(pendingToolOutput(operationId,
-  invocationId), snapshot)` with a mutation that verifies the call is still
-  `effect_pending`, plus prefix `scanValues` cleanup) and a `checkpoint: true`
-  option on the tool progress callback (`ToolProgress`) that requests it. Both
-  are outside `crates/octet-agent/src/tools/**` and `tool.rs`. The tool side is
-  ready: bash already produces the bounded snapshot (head/tail plus
-  `full_output_path`), and Pi's rule (`BASH_CHECKPOINT_INTERVAL_MS = 2000`,
-  only when the bounded snapshot differs) can be added to `bash.rs` as soon as
-  the channel exists. Crash recovery of a checkpoint additionally needs the
-  agent loop (`agent.rs`) to rehydrate it as auxiliary observation data.
-- **4.11 — durable invocation memos through replay until outcome known.**
-  Missing primitive: an operation/invocation-scoped memo store
-  (`pi.op.tool_memo` equivalent: non-empty name validation, replace/delete,
-  prefix scan for atomic invocation cleanup when the outcome becomes ready) plus
-  the invocation capability that fences late writes after settlement. octet's
-  session is an append-only JSONL log with no keyed replace/scan API
-  (`crates/octet-agent/src/session.rs`) and tools receive no invocation-scoped
-  capability (`crates/octet-agent/src/tool.rs` `ToolContext`), so this cannot be
-  implemented inside the owned tool paths.
-- **4.12 — deferred provider suspend/resume/handles/poll permits.**
-  Missing primitive: the harness suspended-run lifecycle — a durable
-  `deferred.suspended` run state carrying a `DeferredHandle`, `run_suspend`/
-  `run_resume` events, and "one deferred poll permit per pass" with unknown-poll
-  replacement under fresh ids (`packages/agent/docs/work-packages/05-direct-durable-drive.md`).
-  Owner paths are `crates/octet-agent/src/{agent,events,session}.rs` and the
-  provider surface, none of which are owned here; no tool-local change can
-  satisfy the row.
-- **4.14 — summarization retry distinct from compaction failure.**
-  Missing primitive: a summarization-call retry policy shared by
-  compaction and branch summarization (Pi's `_summarizationRetryCallbacks`
-  emitting `summarization_retry_scheduled` / `_attempt_start` / `_finished`),
-  applied to `Agent::summarize`/`auxiliary_compact`. octet's
-  `ProviderRetryKind` has no summarization kind, and `compact_boundary` awaits
-  `self.summarize(...)?`, so a transient summarization error fails the
-  compaction boundary. Owner paths: `crates/octet-agent/src/agent.rs` and
-  `crates/octet-agent/src/compaction.rs`, outside this worker's paths.
+Each of these is a consumer or a cross-process storage binding, not missing tool
+logic; the row behavior itself is implemented and covered by the tests named in
+the matrix.
+
+6. **4.7 cross-process durability + host wiring.**
+   `DurableInvocationStore` is process-durable: it implements Pi's contract
+   (replace one value, fence on `effect_pending`, delete on settlement, hard
+   bounds) but keeps values in memory because `crates/octet-agent/src/session.rs`
+   owns the durable log and has no keyed `setValue`/`scanValues` API yet. The
+   exact session primitive needed is `setValue(pendingToolOutput(operationId,
+   invocationId), snapshot)` as one scalar replacement whose mutation verifies
+   the call is still `effect_pending`, plus prefix `scanValues` cleanup for
+   operation-owned families. Wiring is also required for a host to construct
+   `CheckpointedBashTool` (or pass a `PartialOutputCheckpointSink` through a
+   future `ToolContext` field, which today would change every `ToolContext`
+   literal in `agent.rs`); crash recovery must additionally rehydrate the stored
+   snapshot as auxiliary observation data and call
+   `DurableInvocationStore::recover_unsafe_orphan`.
+7. **4.11 cross-process memos + capability injection.** Same storage gap as 4.7
+   for `pi.op.tool_memo`, plus an invocation capability handed to tools
+   (`AgentHarnessToolInvocation` in Pi). Until then, a tool that wants memos must
+   be constructed with the handle it should use for its call.
+8. **4.12 harness suspended-run lifecycle.** `crates/octet-agent/src/agent.rs`
+   and `events.rs` must carry the durable leaves (`deferred.suspended`,
+   `deferred.effect_pending`), emit `run_suspend`/`run_resume`, mint exactly one
+   permit per `resume()`/poll-installed pass, and perform the poll through the
+   provider's deferred-fetch stream. `crates/octet-ai` has no deferred stop
+   reason or `DeferredHandle` yet, so `DeferredStopReason` and the provider call
+   must be connected there; the decision core (`suspend_deferred_response`,
+   `prepare_deferred_poll`, `DeferredSuspended::resume_after_poll`) is landed and
+   tested against that lifecycle.
+9. **4.14 compaction/branch-summary wiring.** `crates/octet-agent/src/compaction.rs`
+   and `agent.rs` must call `run_summarization_with_retry` for both summary
+   sources (with the session's durable write as the commit closure) and route
+   `CompactionStepOutcome::Retrying` to the boundary without closing it;
+   `ProviderRetryKind` (used by the ordinary assistant-turn retry hook) has no
+   summarization kind, and `compact_boundary` awaits `self.summarize(...)?`, so a
+   transient error still fails the boundary today.
 
 ## CHANGELOG-ready bullets
 
@@ -179,3 +243,20 @@ one-line wiring change, not a missing primitive.
 - Tools can now contribute a model-visible `prompt_snippet` and
   `prompt_guidelines` (Pi's `promptSnippet`/`promptGuidelines`), collected in
   registration order by `collect_tool_prompt_contributions`.
+- Bash can now persist interval-bounded durable partial-output checkpoints
+  (`CheckpointedBashTool`, `BashCheckpointPublisher`): at most one checkpoint per
+  interval, only when the bounded snapshot changed, capped at 50 KiB, and never
+  mistaken for a final result.
+- Added the durable invocation store (`DurableInvocationStore`,
+  `InvocationHandle`): one replaceable partial-output value plus named replay
+  memos, fenced on the call still being `effect_pending`, hard-bounded, and
+  deleted atomically when the outcome becomes known — a settled invocation fails
+  closed instead of looking like an unrecorded memo.
+- Added durable deferred provider suspend/resume: valid handles park a run,
+  invalid handles fail terminally with Pi's diagnostic, and each pass needs its
+  own poll permit, with stale, duplicate, foreign, and expired polls refusing
+  instead of double-polling or parking forever.
+- Added the shared summarization retry policy for compaction and branch
+  summarization: a scheduled retry is a distinct typed outcome and diagnostic
+  from a compaction failure, aborts and deterministic errors never retry, and a
+  retry can never duplicate durable summary state.

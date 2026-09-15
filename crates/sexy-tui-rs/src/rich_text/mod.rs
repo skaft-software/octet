@@ -5,7 +5,9 @@
 //! string at the terminal boundary.
 
 pub mod diff;
+pub mod latex;
 pub mod markdown;
+pub mod mermaid;
 pub mod render;
 pub mod stream;
 

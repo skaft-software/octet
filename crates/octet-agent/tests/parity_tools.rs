@@ -11,14 +11,36 @@
 //! why it skipped instead of silently passing.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use octet_agent::effect::ToolEffect;
 use octet_agent::sandbox::SandboxConfig;
-use octet_agent::tool::{Tool, ToolContext, ToolProgressSink};
+use octet_agent::tool::{
+    PartialOutputCheckpointSink, Tool, ToolContext, ToolError, ToolProgressSink,
+};
 use octet_agent::tools::{
-    BashTool, EditTool, FindTool, GrepTool, LsTool, PowerShellTool, ReadTool, SearchTool,
-    ShellSessionEnvironment, WriteTool,
+    deferred::{
+        prepare_deferred_poll, suspend_deferred_response, DeferredHandle, DeferredHandleRejection,
+        DeferredPhase, DeferredPollOutcome, DeferredPollPermit, DeferredPollPreparation,
+        DeferredPollRefusalKind, DeferredResponseDeclaration, DeferredResume, DeferredStopReason,
+        DeferredSuspendDecision, DeferredSuspendFailureKind, DeferredSuspended, ModelIdentity,
+        INVALID_DEFERRED_HANDLE_DIAGNOSTIC,
+    },
+    durability::{
+        DurableInvocationStore, InvocationError, InvocationHandle, InvocationOutcome,
+        InvocationScope, InvocationState, MemoLookup, StoreLimits,
+        INTERRUPTED_OUTCOME_UNKNOWN_MARKER,
+    },
+    summarization::{
+        run_summarization_with_retry, CompactionFailureKind, CompactionStepOutcome,
+        SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure,
+        SummarizationFailureKind, SummarizationOutcome, SummarizationRetryPolicy,
+    },
+    BashCheckpointPublisher, BashTool, CheckpointedBashTool, EditTool, FindTool, GrepTool, LsTool,
+    PowerShellTool, ReadTool, SearchTool, ShellSessionEnvironment, WriteTool,
+    BASH_CHECKPOINT_MAX_BYTES,
 };
 use serde_json::json;
 
@@ -1059,5 +1081,968 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
         SearchTool.prompt_snippet(),
         None,
         "search stays unadvertised: the coding product disables it by default"
+    );
+}
+
+// ── 4.7 interval durable partial bash output checkpoints ─────────────────
+
+/// Counts and retains every checkpoint a bash run asks the host to persist.
+struct RecordingCheckpointSink {
+    snapshots: Mutex<Vec<String>>,
+}
+
+impl RecordingCheckpointSink {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            snapshots: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn snapshots(&self) -> Vec<String> {
+        self.snapshots.lock().unwrap().clone()
+    }
+}
+
+impl PartialOutputCheckpointSink for RecordingCheckpointSink {
+    fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
+        assert!(
+            snapshot.len() <= BASH_CHECKPOINT_MAX_BYTES,
+            "checkpoint snapshot is {} bytes (cap {BASH_CHECKPOINT_MAX_BYTES})",
+            snapshot.len()
+        );
+        self.snapshots.lock().unwrap().push(snapshot.to_owned());
+        Ok(())
+    }
+}
+
+/// The bounded `stdout: N bytes seen` marker a checkpoint snapshot carries.
+fn checkpoint_seen_bytes(snapshot: &str) -> usize {
+    snapshot
+        .lines()
+        .find_map(|line| line.strip_prefix("stdout: "))
+        .and_then(|rest| rest.split(' ').next())
+        .expect("checkpoint snapshot carries a stdout byte marker")
+        .parse()
+        .expect("stdout byte marker is a number")
+}
+
+#[test]
+fn bash_checkpoint_publisher_is_interval_bounded_and_dedupes_identical_snapshots() {
+    use std::time::Instant;
+
+    // The host may pace checkpoints faster than Pi's two seconds, but never
+    // below the interval floor, and output volume never accelerates them.
+    let mut publisher = BashCheckpointPublisher::new(Duration::from_millis(30));
+    assert_eq!(publisher.interval(), Duration::from_millis(30));
+    assert_eq!(
+        BashCheckpointPublisher::new(Duration::ZERO).interval(),
+        Duration::from_millis(10),
+        "an interval floor bounds storage write rate independently of output volume"
+    );
+
+    let start = Instant::now();
+    // First observation after idle is due immediately.
+    assert!(publisher
+        .observe("stdout: 5 bytes seen\nhello", start)
+        .is_some());
+    // Observations before the interval boundary never reach the sink.
+    for offset in [1_u64, 10, 29] {
+        assert!(publisher
+            .observe(
+                "stdout: 6 bytes seen\nhello!",
+                start + Duration::from_millis(offset)
+            )
+            .is_none());
+    }
+    // At the boundary a changed snapshot is published...
+    assert!(publisher
+        .observe(
+            "stdout: 6 bytes seen\nhello!",
+            start + Duration::from_millis(30)
+        )
+        .is_some());
+    // ...and a repeated snapshot is suppressed even though the interval elapsed.
+    assert!(publisher
+        .observe(
+            "stdout: 6 bytes seen\nhello!",
+            start + Duration::from_millis(60)
+        )
+        .is_none());
+    // A fresh interval with new bytes publishes again.
+    assert!(publisher
+        .observe(
+            "stdout: 7 bytes seen\nhello!!",
+            start + Duration::from_millis(90)
+        )
+        .is_some());
+
+    let stats = publisher.stats();
+    assert_eq!(stats.requested, 3, "{stats:?}");
+    assert_eq!(stats.suppressed, 1, "{stats:?}");
+    assert_eq!(stats.before_interval, 3, "{stats:?}");
+
+    // A snapshot too large for the durable value keeps its most recent bytes on
+    // a code-point boundary and says so.
+    let oversized = format!("{}tail", "x".repeat(BASH_CHECKPOINT_MAX_BYTES));
+    let bounded = BashCheckpointPublisher::bound_snapshot(&oversized);
+    assert!(
+        bounded.len() <= BASH_CHECKPOINT_MAX_BYTES,
+        "{} bytes",
+        bounded.len()
+    );
+    assert!(bounded.ends_with("tail"), "{bounded}");
+    assert!(bounded.starts_with("[earlier output elided]"), "{bounded}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_checkpoints_land_at_interval_boundaries_and_final_output_is_complete() {
+    let _serial = serial().await;
+    let f = fixture();
+
+    // The durable side is the invocation store: the sink is the real capability
+    // a host would hand a tool, so this test proves the whole path.
+    let store = Arc::new(DurableInvocationStore::new());
+    let scope = InvocationScope::new("op-4-7", "inv-4-7").unwrap();
+    let handle = store.open(scope.clone()).unwrap();
+    let recorder = RecordingCheckpointSink::new();
+    let sink: Arc<dyn PartialOutputCheckpointSink> = Arc::new(DurableCheckpointSink {
+        handle: handle.clone(),
+        recorder: Arc::clone(&recorder),
+    });
+
+    let interval = Duration::from_millis(30);
+    let tool = CheckpointedBashTool::with_checkpoints(sink, interval);
+    let started = std::time::Instant::now();
+    let output = tool
+        .execute(
+            json!({"command": "i=1; while [ $i -le 6 ]; do printf 'line-%02d\\n' $i; i=$((i+1)); sleep 0.03; done"}),
+            &f.ctx(),
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    // The final result is complete and ordered: every line, ascending, with the
+    // completion marker and no truncation.
+    for index in 1..=6 {
+        assert!(
+            output.text.contains(&format!("line-{index:02}")),
+            "final output lost line-{index:02}: {}",
+            output.text
+        );
+    }
+    let final_line_order: Vec<usize> = output
+        .text
+        .lines()
+        .filter_map(|line| line.strip_prefix("line-"))
+        .filter_map(|line| line.parse::<usize>().ok())
+        .collect();
+    assert_eq!(final_line_order, vec![1, 2, 3, 4, 5, 6], "{}", output.text);
+    assert!(
+        output.text.contains("complete_stdout=true"),
+        "{}",
+        output.text
+    );
+
+    let snapshots = recorder.snapshots();
+    eprintln!(
+        "observed {} durable checkpoints at a {} ms cadence; last snapshot {} bytes",
+        snapshots.len(),
+        tool.interval().as_millis(),
+        snapshots.last().map(String::len).unwrap_or(0)
+    );
+    assert!(
+        snapshots.len() >= 2,
+        "a ~0.2 s command at a 30 ms cadence must checkpoint at interval boundaries: {}",
+        snapshots.len()
+    );
+    // Cadence is bounded by the interval, not by output volume: however long the
+    // command took under load, it cannot have requested more checkpoints than
+    // intervals elapsed.
+    let interval_budget = elapsed.as_millis() / interval.as_millis() + 2;
+    assert!(
+        snapshots.len() as u128 <= interval_budget,
+        "{} checkpoints in {elapsed:?} exceeded the interval budget {interval_budget}",
+        snapshots.len()
+    );
+
+    let mut previous = 0;
+    for snapshot in &snapshots {
+        // A checkpoint never claims completion: it shares no wording with a
+        // final result, so recovery cannot read it as proof the command ended.
+        assert!(
+            !snapshot.contains("complete_") && !snapshot.contains("truncated_"),
+            "checkpoint text implies terminal state: {snapshot}"
+        );
+        let seen = checkpoint_seen_bytes(snapshot);
+        assert!(
+            seen >= previous,
+            "checkpoints must describe progress in order: {previous} -> {seen}"
+        );
+        assert!(
+            seen <= output.text.len() + 32,
+            "a checkpoint cannot report more bytes than the command produced"
+        );
+        previous = seen;
+        // Every line present in a checkpoint appears in the final output, in the
+        // same ascending order.
+        for line in snapshot.lines().filter(|line| line.starts_with("line-")) {
+            assert!(
+                output.text.contains(line),
+                "checkpoint line {line} is missing from the final output"
+            );
+        }
+    }
+
+    // The durable value is the latest checkpoint, and it is a single replaced
+    // value rather than an append log.
+    let durable = handle
+        .partial_output()
+        .unwrap()
+        .expect("a durable checkpoint");
+    assert_eq!(durable, snapshots.last().unwrap().clone());
+    assert_eq!(store.stored_values(&scope).len(), 1, "one replaced value");
+    assert_eq!(tool.checkpoint_stats().failures, 0);
+
+    // Settlement deletes it and fences late writes: a checkpoint can never
+    // outlive the outcome it belongs to.
+    let settlement = handle.settle().unwrap();
+    assert!(!settlement.deleted_values.is_empty());
+    assert!(handle.partial_output().is_err());
+    assert!(handle.checkpoint_partial_output("late").is_err());
+    assert_eq!(store.state(&scope), Some(InvocationState::OutcomeReady));
+    assert!(store.stored_values(&scope).is_empty());
+}
+
+/// The invocation store's implementation of the checkpoint sink.
+struct DurableCheckpointSink {
+    handle: InvocationHandle,
+    recorder: Arc<RecordingCheckpointSink>,
+}
+
+impl PartialOutputCheckpointSink for DurableCheckpointSink {
+    fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
+        self.recorder.checkpoint_partial_output(snapshot)?;
+        self.handle
+            .replace_partial_output(snapshot)
+            .map_err(ToolError::from)
+    }
+}
+
+// ── 4.11 durable invocation memos through replay until the outcome is known ─
+
+#[test]
+fn invocation_memos_survive_replay_until_the_outcome_is_known() {
+    let store = Arc::new(DurableInvocationStore::new());
+    let scope = InvocationScope::new("op-4-11", "inv-4-11").unwrap();
+    let step_a = AtomicUsize::new(0);
+    let step_b = AtomicUsize::new(0);
+
+    // First pass: both steps run and are recorded.
+    let handle = store.open(scope.clone()).unwrap();
+    assert_eq!(
+        handle
+            .replay_step("step/read", || {
+                step_a.fetch_add(1, Ordering::SeqCst);
+                json!({"file": "a.txt", "bytes": 12})
+            })
+            .unwrap(),
+        json!({"file": "a.txt", "bytes": 12})
+    );
+    assert_eq!(
+        handle.replay_lookup("step/summarize").unwrap(),
+        MemoLookup::NotYetRecorded
+    );
+    handle
+        .set_memo("step/summarize", json!("done"))
+        .expect("a live capability records memos");
+
+    // Replay before the outcome is known: a fresh capability for the same
+    // invocation returns the recorded step and only runs the missing one.
+    let replayed = store.open(scope.clone()).unwrap();
+    assert_eq!(
+        replayed.replay_lookup("step/read").unwrap(),
+        MemoLookup::Memoized(json!({"file": "a.txt", "bytes": 12}))
+    );
+    assert_eq!(
+        replayed
+            .replay_step("step/read", || {
+                step_a.fetch_add(1, Ordering::SeqCst);
+                json!({"file": "a.txt", "bytes": 12})
+            })
+            .unwrap(),
+        json!({"file": "a.txt", "bytes": 12})
+    );
+    assert_eq!(
+        step_a.load(Ordering::SeqCst),
+        1,
+        "a memoized step never re-runs"
+    );
+    replayed
+        .replay_step("step/write", || {
+            step_b.fetch_add(1, Ordering::SeqCst);
+            json!({"written": true})
+        })
+        .unwrap();
+    assert_eq!(step_b.load(Ordering::SeqCst), 1);
+
+    // The capability is invocation-scoped: another invocation sees nothing.
+    let other_scope = InvocationScope::new("op-4-11", "inv-4-11-b").unwrap();
+    let other = store.open(other_scope).unwrap();
+    assert_eq!(
+        other.replay_lookup("step/read").unwrap(),
+        MemoLookup::NotYetRecorded
+    );
+
+    // Also bounded: an oversized memo fails closed instead of being truncated.
+    let tiny = Arc::new(DurableInvocationStore::with_limits(StoreLimits {
+        max_value_bytes: 64,
+        ..StoreLimits::default()
+    }));
+    let tiny_handle = tiny
+        .open(InvocationScope::new("op-tiny", "inv-tiny").unwrap())
+        .unwrap();
+    let oversized = tiny_handle.set_memo("step/big", json!("x".repeat(4096)));
+    assert!(
+        matches!(oversized, Err(InvocationError::BoundExceeded(_))),
+        "{oversized:?}"
+    );
+
+    // Outcome known: memos are gone and the capability is expired.
+    let settlement = handle.settle().unwrap();
+    assert_eq!(settlement.scope, scope);
+    assert!(settlement.generation > 0);
+    assert!(store.stored_values(&scope).is_empty(), "memos are deleted");
+    assert_eq!(store.state(&scope), Some(InvocationState::OutcomeReady));
+
+    // Replay after the outcome is known fails closed. It is never "memoized"
+    // (the value is gone) and never "not yet recorded" (which would re-run the
+    // effect after the outcome was already delivered).
+    let expired = store.open(scope.clone());
+    assert!(
+        matches!(expired, Err(InvocationError::OutcomeKnown(_))),
+        "{expired:?}"
+    );
+    let replayed_after = handle.replay_lookup("step/read");
+    assert!(
+        matches!(replayed_after, Err(InvocationError::OutcomeKnown(_))),
+        "a settled invocation must not look like an unrecorded memo: {replayed_after:?}"
+    );
+    let ran_after_settlement = handle.replay_step("step/read", || {
+        step_a.fetch_add(1, Ordering::SeqCst);
+        json!("must not run")
+    });
+    assert!(ran_after_settlement.is_err(), "{ran_after_settlement:?}");
+    assert_eq!(step_a.load(Ordering::SeqCst), 1, "the effect never re-ran");
+
+    // An unknown outcome is never reported as success or failure: recovery
+    // preserves the bounded snapshot and states that the outcome is unknown.
+    let orphan_scope = InvocationScope::new("op-4-11", "inv-orphan").unwrap();
+    let orphan = store.open(orphan_scope.clone()).unwrap();
+    orphan
+        .replace_partial_output("stdout: 8 bytes seen\npartial")
+        .unwrap();
+    orphan
+        .set_memo("step/read", json!({"file": "a.txt"}))
+        .unwrap();
+    let recovery = store.recover_unsafe_orphan(orphan_scope.clone()).unwrap();
+    assert_eq!(recovery.invocation.outcome, InvocationOutcome::Unknown);
+    assert!(recovery.invocation.is_error);
+    assert!(recovery
+        .invocation
+        .text
+        .contains(INTERRUPTED_OUTCOME_UNKNOWN_MARKER));
+    assert!(recovery.invocation.text.starts_with("stdout: 8 bytes seen"));
+    assert_eq!(
+        recovery.invocation.partial_output.as_deref(),
+        Some("stdout: 8 bytes seen\npartial")
+    );
+    assert!(!recovery.settlement.deleted_values.is_empty());
+    assert!(store.stored_values(&orphan_scope).is_empty());
+    // A second recovery must refuse: the outcome is now known.
+    let second = store.recover_unsafe_orphan(orphan_scope);
+    assert!(second.is_err(), "{second:?}");
+}
+
+// ── 4.12 deferred provider suspend/resume/handles/poll permits ───────────
+
+fn deferred_identity() -> ModelIdentity {
+    ModelIdentity::new("anthropic", "claude-sonnet-4")
+}
+
+fn deferred_handle(id: &str) -> DeferredHandle {
+    DeferredHandle::new("anthropic", "claude-sonnet-4", "anthropic-messages", id)
+}
+
+fn suspend_with(declaration: DeferredResponseDeclaration) -> DeferredSuspendDecision {
+    suspend_deferred_response(&deferred_identity(), "run-4-12", "entry-1", declaration)
+}
+
+fn deferred_declaration(handle: Option<DeferredHandle>) -> DeferredResponseDeclaration {
+    DeferredResponseDeclaration {
+        stop_reason: DeferredStopReason::Deferred,
+        api: "anthropic-messages".to_string(),
+        handle,
+    }
+}
+
+fn valid_suspension() -> DeferredSuspended {
+    match suspend_with(deferred_declaration(Some(deferred_handle("resp-1")))) {
+        DeferredSuspendDecision::Suspended(suspended) => *suspended,
+        other => panic!("a valid handle must suspend, got {other:?}"),
+    }
+}
+
+#[test]
+fn deferred_suspension_requires_a_valid_handle_and_rejects_every_mismatch() {
+    let suspended = valid_suspension();
+    assert_eq!(suspended.poll, 0);
+    assert_eq!(suspended.phase, DeferredPhase::Suspended);
+    assert_eq!(suspended.generation, 0);
+    assert_eq!(suspended.source_entry_id, "entry-1");
+    assert_eq!(suspended.observation().poll, 0);
+
+    for (handle, expected) in [
+        (None, DeferredHandleRejection::Absent),
+        (Some(deferred_handle("")), DeferredHandleRejection::EmptyId),
+        (
+            Some(DeferredHandle::new(
+                "openai",
+                "gpt-5",
+                "anthropic-messages",
+                "resp-foreign",
+            )),
+            DeferredHandleRejection::ForeignProvider {
+                configured: deferred_identity(),
+                handle: ModelIdentity::new("openai", "gpt-5"),
+            },
+        ),
+        (
+            Some(DeferredHandle::new(
+                "anthropic",
+                "claude-sonnet-4",
+                "openai-responses",
+                "resp-wrong-api",
+            )),
+            DeferredHandleRejection::ForeignApi {
+                configured: "anthropic-messages".to_string(),
+                handle: "openai-responses".to_string(),
+            },
+        ),
+    ] {
+        match suspend_with(deferred_declaration(handle)) {
+            DeferredSuspendDecision::Failed(failure) => {
+                assert_eq!(
+                    failure.kind,
+                    DeferredSuspendFailureKind::MalformedHandle(expected.clone())
+                );
+                assert!(
+                    failure
+                        .diagnostic
+                        .starts_with(INVALID_DEFERRED_HANDLE_DIAGNOSTIC),
+                    "{}",
+                    failure.diagnostic
+                );
+            }
+            other => panic!("{expected:?} must fail terminally, got {other:?}"),
+        }
+    }
+
+    // Non-deferred stop reasons never suspend; aborts and provider errors are
+    // terminal decisions, not suspensions.
+    assert_eq!(
+        suspend_with(DeferredResponseDeclaration {
+            stop_reason: DeferredStopReason::Settled,
+            api: "anthropic-messages".to_string(),
+            handle: None,
+        }),
+        DeferredSuspendDecision::Settled
+    );
+    for (stop_reason, kind) in [
+        (
+            DeferredStopReason::Aborted,
+            DeferredSuspendFailureKind::Aborted,
+        ),
+        (
+            DeferredStopReason::Failed,
+            DeferredSuspendFailureKind::ProviderRejected,
+        ),
+    ] {
+        match suspend_with(DeferredResponseDeclaration {
+            stop_reason,
+            api: "anthropic-messages".to_string(),
+            handle: None,
+        }) {
+            DeferredSuspendDecision::Failed(failure) => assert_eq!(failure.kind, kind),
+            other => panic!("{stop_reason:?} must fail terminally, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or_foreign_handles() {
+    let suspended = valid_suspension();
+    let mut counter = 0usize;
+    let mut fresh_ids = move || {
+        counter += 1;
+        format!("id-{counter}")
+    };
+
+    // No permit: the run stays durably suspended, allocates nothing, and starts
+    // no provider work.
+    let mut no_permit = DeferredPollPermit::none("pass-quiet", suspended.generation);
+    let waiting = prepare_deferred_poll(&suspended, &mut no_permit, 0, &mut fresh_ids);
+    let observed_waiting = match &waiting {
+        DeferredPollPreparation::Waiting(observation) => {
+            assert_eq!(observation.poll, 0);
+            assert_eq!(observation.handle.id, "resp-1");
+            format!("waiting(handle={})", observation.handle.id)
+        }
+        other => panic!("a pass without a permit must stay suspended, got {other:?}"),
+    };
+
+    // A stale permit (minted for another generation) is refused, not treated as
+    // waiting: the run must not poll with a permit it was not granted.
+    let mut stale = DeferredPollPermit::one("pass-stale", suspended.generation + 7);
+    match prepare_deferred_poll(&suspended, &mut stale, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Refused(refusal) => assert_eq!(
+            refusal.kind,
+            DeferredPollRefusalKind::StalePermit {
+                permit: suspended.generation + 7,
+                leaf: suspended.generation,
+            }
+        ),
+        other => panic!("a stale permit must be refused, got {other:?}"),
+    }
+
+    // A foreign handle is refused before any provider work.
+    let mut foreign_leaf = suspended.clone();
+    foreign_leaf.handle = DeferredHandle::new("openai", "gpt-5", "anthropic-messages", "resp-x");
+    let mut permit = DeferredPollPermit::one("pass-foreign", foreign_leaf.generation);
+    match prepare_deferred_poll(&foreign_leaf, &mut permit, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Refused(refusal) => assert!(
+            matches!(
+                refusal.kind,
+                DeferredPollRefusalKind::ForeignHandle(
+                    DeferredHandleRejection::ForeignProvider { .. }
+                )
+            ),
+            "{refusal:?}"
+        ),
+        other => panic!("a foreign handle must be refused, got {other:?}"),
+    }
+
+    // An expired handle is refused; expiry is provider-supplied and absolute.
+    let mut expired_leaf = suspended.clone();
+    expired_leaf.handle.expires_at_ms = Some(1_000);
+    let mut permit = DeferredPollPermit::one("pass-expired", expired_leaf.generation);
+    match prepare_deferred_poll(&expired_leaf, &mut permit, 2_000, &mut fresh_ids) {
+        DeferredPollPreparation::Refused(refusal) => assert_eq!(
+            refusal.kind,
+            DeferredPollRefusalKind::ExpiredHandle {
+                expires_at_ms: 1_000
+            }
+        ),
+        other => panic!("an expired handle must be refused, got {other:?}"),
+    }
+
+    eprintln!(
+        "observed {observed_waiting} for a permit-less pass against generation {}",
+        suspended.generation
+    );
+
+    // The granted permit admits exactly one poll, increments the poll number,
+    // reserves fresh ids, and emits `run_resume`.
+    let mut permit = DeferredPollPermit::one("pass-fresh", suspended.generation);
+    let admitted = match prepare_deferred_poll(&suspended, &mut permit, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Admitted(intent) => *intent,
+        other => panic!("the permit must admit one poll, got {other:?}"),
+    };
+    assert_eq!(admitted.poll, 1, "a permitted poll starts poll 1");
+    assert!(admitted.resume_event, "a permitted poll resumes the run");
+    assert!(admitted.discard_unknown_poll.is_none());
+    assert_eq!(
+        admitted.phase,
+        DeferredPhase::EffectPending {
+            response_id: "id-1".to_string(),
+            usage_id: "id-2".to_string(),
+        }
+    );
+    assert!(permit.is_consumed());
+    assert_eq!(permit.remaining(), 0);
+
+    // A duplicate poll under the same permit is refused: the provider must not
+    // be polled twice for one permit.
+    match prepare_deferred_poll(&suspended, &mut permit, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Refused(refusal) => assert_eq!(
+            refusal.kind,
+            DeferredPollRefusalKind::AlreadyConsumed,
+            "{refusal:?}"
+        ),
+        other => panic!("a duplicate poll must be refused, got {other:?}"),
+    }
+
+    // An unknown-outcome poll is replaced under fresh ids at the SAME poll
+    // number, and its abandoned frame list is deleted.
+    let mut unknown = valid_suspension();
+    unknown.poll = 3;
+    unknown.generation = 1;
+    unknown.phase = DeferredPhase::EffectPending {
+        response_id: "resp-unknown".to_string(),
+        usage_id: "usage-unknown".to_string(),
+    };
+    let mut permit = DeferredPollPermit::one("pass-recovery", unknown.generation);
+    let admitted = match prepare_deferred_poll(&unknown, &mut permit, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Admitted(intent) => *intent,
+        other => panic!("recovery must admit one poll, got {other:?}"),
+    };
+    assert_eq!(admitted.poll, 3, "replacement keeps the poll number");
+    let replacement = admitted
+        .discard_unknown_poll
+        .clone()
+        .expect("the abandoned unknown poll is discarded");
+    assert_eq!(replacement.abandoned_response_id, "resp-unknown");
+    assert_eq!(replacement.abandoned_usage_id, "usage-unknown");
+    assert_ne!(replacement.replacement_response_id, "resp-unknown");
+    assert_ne!(replacement.replacement_usage_id, "usage-unknown");
+    assert_eq!(
+        admitted.phase,
+        DeferredPhase::EffectPending {
+            response_id: replacement.replacement_response_id.clone(),
+            usage_id: replacement.replacement_usage_id.clone(),
+        }
+    );
+    assert_ne!(
+        replacement.replacement_response_id,
+        replacement.replacement_usage_id
+    );
+
+    // Still deferred: back to `deferred.suspended` at the same poll number, with
+    // a bumped generation, so the consumed permit cannot be reused.
+    let mut polled_handle = deferred_handle("resp-2");
+    polled_handle.poll_after_ms = Some(1_000);
+    let resumed = unknown.resume_after_poll(
+        &admitted,
+        DeferredPollOutcome::StillDeferred(polled_handle.clone()),
+    );
+    let _ = &admitted;
+    let resumed = match resumed {
+        DeferredResume::Suspended(leaf) => *leaf,
+        other => panic!("a still-deferred poll re-suspends, got {other:?}"),
+    };
+    assert_eq!(resumed.poll, 3);
+    assert_eq!(resumed.phase, DeferredPhase::Suspended);
+    assert_eq!(resumed.generation, unknown.generation + 1);
+    assert_eq!(
+        resumed.source_entry_id, replacement.replacement_response_id,
+        "the newest response entry becomes the suspension source"
+    );
+    assert_eq!(resumed.handle, polled_handle);
+    // The old permit is now stale and a new pass polls the new generation.
+    let mut stale_again = DeferredPollPermit::one("pass-old", unknown.generation);
+    assert!(matches!(
+        prepare_deferred_poll(&resumed, &mut stale_again, 0, &mut fresh_ids),
+        DeferredPollPreparation::Refused(_)
+    ));
+    let mut next_pass = DeferredPollPermit::one("pass-next", resumed.generation);
+    match prepare_deferred_poll(&resumed, &mut next_pass, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Admitted(intent) => assert_eq!(intent.poll, 4),
+        other => panic!("the next permitted pass polls again, got {other:?}"),
+    }
+
+    // A poll that returns another invalid handle fails closed instead of
+    // parking the run on a handle nobody can poll.
+    let bad = unknown.resume_after_poll(
+        &admitted,
+        DeferredPollOutcome::StillDeferred(DeferredHandle::new(
+            "openai",
+            "gpt-5",
+            "anthropic-messages",
+            "resp-bad",
+        )),
+    );
+    match bad {
+        DeferredResume::Failed(failure) => assert!(matches!(
+            failure.kind,
+            DeferredSuspendFailureKind::MalformedHandle(_)
+        )),
+        other => panic!("an invalid re-poll handle must fail, got {other:?}"),
+    }
+
+    // Settled and failed polls end the suspension instead of re-parking it.
+    assert_eq!(
+        unknown.resume_after_poll(&admitted, DeferredPollOutcome::Settled),
+        DeferredResume::Settled
+    );
+    match unknown.resume_after_poll(
+        &admitted,
+        DeferredPollOutcome::Failed {
+            message: "provider error".to_string(),
+        },
+    ) {
+        DeferredResume::Failed(failure) => {
+            assert_eq!(failure.kind, DeferredSuspendFailureKind::ProviderRejected)
+        }
+        other => panic!("a failed poll is terminal, got {other:?}"),
+    }
+}
+
+// ── 4.14 summarization retry distinct from compaction failure ────────────
+
+#[tokio::test]
+async fn summarization_retries_are_distinct_from_compaction_failures_without_duplicate_durable_state(
+) {
+    // Deterministic capped exponential backoff, mirroring Pi's `retryDelayMs`.
+    let default = SummarizationRetryPolicy::default();
+    assert_eq!(default.attempts(), 3);
+    assert_eq!(default.backoff_for_retry(1), Duration::from_millis(500));
+    assert_eq!(default.backoff_for_retry(2), Duration::from_secs(1));
+    assert_eq!(default.backoff_for_retry(3), Duration::from_secs(2));
+    assert_eq!(
+        SummarizationRetryPolicy {
+            max_attempts: 0,
+            ..default
+        }
+        .attempts(),
+        1,
+        "a zero attempt budget is one attempt"
+    );
+    assert_eq!(
+        SummarizationRetryPolicy {
+            max_attempts: usize::MAX,
+            ..default
+        }
+        .attempts(),
+        8,
+        "attempts are clamped at the hard cap"
+    );
+
+    let policy = SummarizationRetryPolicy {
+        max_attempts: 3,
+        initial_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+    };
+
+    // Transient failures then success: the durable summary is committed exactly
+    // once, and every scheduled retry is reported as a retry, not a failure.
+    let attempts = std::cell::Cell::new(0usize);
+    let commits = std::cell::Cell::new(0usize);
+    let run = run_summarization_with_retry(
+        &policy,
+        |attempt| {
+            attempts.set(attempts.get() + 1);
+            async move {
+                match attempt {
+                    1 | 2 => SummarizationAttempt::RetryableFailure {
+                        message: format!("stream dropped on attempt {attempt}"),
+                    },
+                    3 => SummarizationAttempt::Succeeded { summary_bytes: 128 },
+                    _ => unreachable!("policy allows three attempts"),
+                }
+            }
+        },
+        |_attempt| {
+            commits.set(commits.get() + 1);
+            Ok(())
+        },
+    )
+    .await;
+
+    assert_eq!(
+        run.outcome,
+        SummarizationOutcome::Succeeded {
+            attempts: 3,
+            summary_bytes: 128
+        }
+    );
+    assert_eq!(run.durable_summary_records(), 1);
+    assert_eq!(commits.get(), 1, "a retry never re-commits durable state");
+    assert_eq!(attempts.get(), 3);
+    assert_eq!(
+        run.diagnostics,
+        vec![
+            SummarizationDiagnostic::RetryScheduled {
+                attempt: 1,
+                max_attempts: 3,
+                delay_ms: 0,
+                error: "stream dropped on attempt 1".to_string(),
+            },
+            SummarizationDiagnostic::AttemptStart { attempt: 2 },
+            SummarizationDiagnostic::RetryScheduled {
+                attempt: 2,
+                max_attempts: 3,
+                delay_ms: 0,
+                error: "stream dropped on attempt 2".to_string(),
+            },
+            SummarizationDiagnostic::AttemptStart { attempt: 3 },
+            SummarizationDiagnostic::Finished {
+                succeeded: true,
+                attempts: 3,
+                error: None,
+            },
+        ]
+    );
+    let retry_diagnostics: Vec<String> = run
+        .diagnostics
+        .iter()
+        .filter_map(CompactionStepOutcome::from_diagnostic)
+        .map(|outcome| match &outcome {
+            CompactionStepOutcome::Retrying(retry) => {
+                assert!(!outcome.is_compaction_failure());
+                retry.diagnostic()
+            }
+            other => panic!("a scheduled retry is not a boundary outcome: {other:?}"),
+        })
+        .collect();
+    assert_eq!(retry_diagnostics.len(), 2);
+    for diagnostic in &retry_diagnostics {
+        assert!(
+            diagnostic.starts_with("summarization retry scheduled"),
+            "{diagnostic}"
+        );
+    }
+    assert_eq!(
+        run.compaction_outcome(),
+        CompactionStepOutcome::Committed {
+            attempts: 3,
+            durable_summary_records: 1
+        }
+    );
+
+    // Exhausted retries: now the boundary fails, with the summarization cause
+    // preserved and wording that cannot be confused with a retry.
+    let run = run_summarization_with_retry(
+        &policy,
+        |_attempt| async {
+            SummarizationAttempt::RetryableFailure {
+                message: "socket closed".to_string(),
+            }
+        },
+        |_attempt| panic!("a failed summarization must not commit"),
+    )
+    .await;
+    let failed = match &run.outcome {
+        SummarizationOutcome::Failed(failure) => failure.clone(),
+        other => panic!("two retryable failures exhaust a three-attempt budget: {other:?}"),
+    };
+    assert_eq!(failed.kind, SummarizationFailureKind::RetriesExhausted);
+    assert_eq!(failed.attempts, 3);
+    assert_eq!(run.durable_summary_records(), 0);
+    assert_eq!(
+        run.diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(
+                diagnostic,
+                SummarizationDiagnostic::RetryScheduled { .. }
+            ))
+            .count(),
+        2
+    );
+    let boundary = run.compaction_outcome();
+    let boundary_failure = match &boundary {
+        CompactionStepOutcome::Failed(failure) => failure.clone(),
+        other => panic!("exhausted retries fail the boundary: {other:?}"),
+    };
+    assert!(boundary.is_compaction_failure());
+    assert_eq!(
+        boundary_failure.kind,
+        CompactionFailureKind::Summarization(SummarizationFailureKind::RetriesExhausted)
+    );
+    assert!(
+        boundary_failure
+            .diagnostic
+            .starts_with("compaction boundary failed"),
+        "{}",
+        boundary_failure.diagnostic
+    );
+    assert!(
+        !boundary_failure.diagnostic.contains("retry scheduled"),
+        "a failure must not borrow the retry wording: {}",
+        boundary_failure.diagnostic
+    );
+    for diagnostic in &retry_diagnostics {
+        assert_ne!(diagnostic, &boundary_failure.diagnostic);
+        assert_ne!(diagnostic, &failed.diagnostic());
+    }
+
+    // A deterministic failure is terminal on the first attempt.
+    let run = run_summarization_with_retry(
+        &policy,
+        |_attempt| async {
+            SummarizationAttempt::NonRetryableFailure {
+                message: "summarization attempted to call a tool".to_string(),
+            }
+        },
+        |_attempt| panic!("a failed summarization must not commit"),
+    )
+    .await;
+    let failure = match &run.outcome {
+        SummarizationOutcome::Failed(failure) => failure.clone(),
+        other => panic!("a deterministic failure is terminal: {other:?}"),
+    };
+    assert_eq!(failure.kind, SummarizationFailureKind::NonRetryable);
+    assert_eq!(failure.attempts, 1);
+    assert!(run
+        .diagnostics
+        .iter()
+        .all(|diagnostic| !matches!(diagnostic, SummarizationDiagnostic::RetryScheduled { .. })));
+    assert_eq!(
+        failure.diagnostic(),
+        "summarization attempt 1 failed deterministically: summarization attempted to call a tool"
+    );
+
+    // An abort is terminal and never retried.
+    let run = run_summarization_with_retry(
+        &policy,
+        |_attempt| async { SummarizationAttempt::Aborted },
+        |_attempt| panic!("an aborted summarization must not commit"),
+    )
+    .await;
+    match &run.outcome {
+        SummarizationOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, SummarizationFailureKind::Aborted)
+        }
+        other => panic!("an abort is terminal: {other:?}"),
+    }
+
+    eprintln!(
+        "observed retry diagnostic {:?} and boundary diagnostic {:?}",
+        retry_diagnostics.first(),
+        boundary_failure.diagnostic
+    );
+
+    // A summary that cannot be recorded is a durable-write failure of the
+    // boundary, not a summarization retry: the two are reported distinctly.
+    let run = run_summarization_with_retry(
+        &policy,
+        |_attempt| async { SummarizationAttempt::Succeeded { summary_bytes: 64 } },
+        |_attempt| Err("session log is read-only".to_string()),
+    )
+    .await;
+    assert_eq!(run.durable_summary_records(), 0);
+    let boundary = run.compaction_outcome();
+    match boundary {
+        CompactionStepOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, CompactionFailureKind::DurableWrite);
+            assert!(
+                failure.diagnostic.contains("durable summary write failed"),
+                "{}",
+                failure.diagnostic
+            );
+        }
+        other => panic!("a failed commit fails the boundary: {other:?}"),
+    }
+
+    // The policy is shared by compaction and branch summarization, so both
+    // sources reach the same retry path.
+    assert_eq!(
+        SummarizationFailure {
+            kind: SummarizationFailureKind::RetriesExhausted,
+            attempts: 2,
+            message: "socket closed".to_string(),
+        }
+        .diagnostic(),
+        "summarization retries exhausted after 2 attempts: socket closed"
     );
 }

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import http.client
 import json
+import os
 import socket
 import ssl
 import subprocess
@@ -19,7 +20,7 @@ import time
 from typing import Any, Callable, Mapping, Optional, Protocol
 from urllib.parse import urlsplit
 
-from .config import Limits, ServerConfig
+from .config import Limits, ServerConfig, is_static_credential_environment
 from .http_network import PinnedConnection, resolve_addresses
 from .ownership import ResourceOwner
 from .protocol import (
@@ -43,6 +44,10 @@ MAX_HTTP_EVENT_ID_BYTES = 1024
 MAX_HTTP_EVENTS = 256
 MAX_CREDENTIAL_BYTES = 64 * 1024
 MAX_HTTP_CONTROLS = 16
+# The optional permanent GET notification stream is one long-lived connection
+# renewed inside the configured request timeout; total connections are bounded
+# so a hostile peer can never turn it into an unbounded reconnect loop.
+MAX_HTTP_STREAM_CONNECTIONS = 64
 
 
 class CredentialProvider(Protocol):
@@ -51,7 +56,9 @@ class CredentialProvider(Protocol):
     Implementations must return an ephemeral bearer token or ``None``.  The
     bridge never stores the token, puts it in configuration, logs it, or exposes
     it through presentation/result metadata.  OAuth/browser flows are outside
-    this adapter and are intentionally not implemented by this transport.
+    this adapter and are intentionally not implemented by this transport; the
+    bundled static source is :class:`StaticEnvironmentCredentialProvider` and is
+    composed only for ``static-bearer`` configuration.
     """
 
     def bearer_token(self, credential: str, *, server_id: str, resource_owner: ResourceOwner) -> Optional[str]:
@@ -64,6 +71,39 @@ class UnavailableCredentialProvider:
     def bearer_token(self, credential: str, *, server_id: str, resource_owner: ResourceOwner) -> Optional[str]:
         del credential, server_id, resource_owner
         return None
+
+
+class StaticEnvironmentCredentialProvider:
+    """The bundled static credential source: one extension-scoped environment name.
+
+    This is deliberately *not* an authorization or OAuth broker.  It reads the
+    exact variable name configured for the server on every request, so a token
+    is never retained by the bridge, and it refuses any name outside the
+    extension's own ``OCTET_MCP_*`` namespace so a configuration cannot point
+    the bridge at an unrelated ambient provider/cloud token.  Nothing is logged,
+    echoed in an error, written to configuration, or published through
+    presentation/result metadata; an unset variable fails closed as
+    ``authentication_unavailable``.
+    """
+
+    def __init__(self, environ: Optional[Mapping[str, str]] = None) -> None:
+        # ``None`` reads the live process environment at request time so a
+        # rotated value is observed without restarting the extension.
+        self._environ = environ
+
+    def bearer_token(self, credential: str, *, server_id: str, resource_owner: ResourceOwner) -> Optional[str]:
+        del server_id, resource_owner
+        if not is_static_credential_environment(credential):
+            return None
+        source = os.environ if self._environ is None else self._environ
+        try:
+            value = source.get(credential)
+        except Exception:
+            return None
+        if not isinstance(value, str):
+            return None
+        token = value.strip()
+        return token or None
 
 
 class McpAuthenticationError(McpError):
@@ -85,6 +125,7 @@ class _HttpRead:
     is_sse: bool = False
     last_event_id: Optional[str] = None
     retry_ms: Optional[int] = None
+    first_event_id: Optional[str] = None
 
 
 class _HttpOperation:
@@ -222,9 +263,27 @@ class McpStreamableHttpClient:
         # These server-issued values are intentionally memory-only and never
         # enter logging, presentation, configuration, or result metadata.
         self._session_id: Optional[str] = None
+        # The optional permanent GET notification stream is owned by exactly one
+        # background thread; its committed cursor is memory-only like the session.
+        self._stream_stop = threading.Event()
+        self._stream_lock = threading.Lock()
+        self._stream_cursor: Optional[str] = None
+        self._stream_state = "off"
         self.server_info: dict[str, Any] = {}
         self.server_capabilities: dict[str, Any] = {}
         self.protocol_version: Optional[str] = None
+
+    @property
+    def notification_stream(self) -> str:
+        """Bounded diagnostic state of the optional permanent GET stream.
+
+        One of ``off`` (not requested by the server), ``opening``, ``open``,
+        ``unsupported`` (the server answered 405), ``failed``, or ``closed``.
+        It never carries a cursor, session identity, or credential.
+        """
+
+        with self._stream_lock:
+            return self._stream_state
 
     @property
     def alive(self) -> bool:
@@ -277,6 +336,7 @@ class McpStreamableHttpClient:
                 self.server_info = dict(server_info)
                 self.server_capabilities = dict(capabilities)
             self.notify("notifications/initialized", {}, deadline=self._startup_deadline)
+            self._start_notification_stream()
         except BaseException:
             self.close(terminate_session=False)
             raise
@@ -480,6 +540,10 @@ class McpStreamableHttpClient:
             self._closing = True
             operations = tuple(self._operations)
             session_id = self._session_id
+        # Stop and abandon the optional notification stream before its socket is
+        # aborted, so its reconnect loop cannot start another connection.
+        self._stream_stop.set()
+        self._abandon_notification_stream()
         for operation in operations:
             operation.abort()
 
@@ -509,6 +573,131 @@ class McpStreamableHttpClient:
             active.done.wait(max(0, deadline - time.monotonic()))
         with self._lock:
             self._session_id = None
+
+    # -- Optional permanent GET notification stream ------------------------
+    #
+    # MCP Streamable HTTP lets a client open one long-lived GET/SSE stream for
+    # server-initiated messages. The bridge opens it only when the negotiated
+    # server capabilities actually promise a change notification, and treats it
+    # as best-effort: a server that answers 405 simply has no stream, and no
+    # request path ever depends on it. The stream is bounded per connection by
+    # the shared frame/event/control budgets, renewed inside the configured
+    # request timeout, reconnected with ``Last-Event-ID`` only after a committed
+    # event identity, and capped by ``MAX_HTTP_STREAM_CONNECTIONS``.
+
+    def _set_stream_state(self, state: str) -> None:
+        with self._stream_lock:
+            self._stream_state = state
+
+    def _abandon_notification_stream(self) -> None:
+        with self._stream_lock:
+            if self._stream_state in {"opening", "open"}:
+                self._stream_state = "closed"
+
+    def _stream_notifications_declared(self) -> bool:
+        """Whether the negotiated capabilities promise server-initiated changes."""
+
+        with self._lock:
+            capabilities = dict(self.server_capabilities)
+        for capability in capabilities.values():
+            if isinstance(capability, Mapping) and capability.get("listChanged") is True:
+                return True
+        return False
+
+    def _start_notification_stream(self) -> None:
+        if not self._stream_notifications_declared():
+            return
+        thread = threading.Thread(
+            target=self._run_notification_stream,
+            name=f"mcp-{self.config.id}-http-stream",
+            daemon=True,
+        )
+        with self._lock:
+            if self._closing or self._fatal is not None or self._stream_stop.is_set():
+                return
+        self._set_stream_state("opening")
+        thread.start()
+
+    def _commit_stream_cursor(self, value: Optional[str]) -> None:
+        with self._stream_lock:
+            self._stream_cursor = value
+
+    def _run_notification_stream(self) -> None:
+        try:
+            self._notification_stream_loop()
+        except McpError as error:
+            self._set_stream_state("failed")
+            self._fail(error)
+
+    def _notification_stream_loop(self) -> None:
+        failures = 0
+        connections = 0
+        while not self._stream_should_stop():
+            if connections >= MAX_HTTP_STREAM_CONNECTIONS:
+                raise McpTransportError(
+                    "notification_stream_exhausted",
+                    "MCP notification stream exceeded its bounded reconnect limit",
+                    ambiguous=True,
+                )
+            delay_ms = (
+                min(
+                    self.limits.backoff_initial_ms * (2 ** (failures - 1)),
+                    self.limits.backoff_max_ms,
+                )
+                if failures
+                else self.limits.backoff_initial_ms
+            )
+            if self._stream_stop.wait(delay_ms / 1000):
+                return
+            if self._stream_should_stop():
+                return
+            connections += 1
+            deadline = time.monotonic() + self.config.request_timeout_ms / 1000
+            try:
+                self._stream_exchange(deadline)
+            except McpTimeout:
+                # An idle permanent stream that renews inside the configured
+                # request timeout is healthy; it is not a failed request.
+                failures = 0
+            except McpTransportError as error:
+                if error.code == "notification_stream_unsupported":
+                    self._set_stream_state("unsupported")
+                    self.logs.append(b"MCP notification stream was not offered by the server")
+                    return
+                failures += 1
+                if failures > self.config.max_restarts:
+                    raise
+            else:
+                failures = 0
+
+    def _stream_should_stop(self) -> bool:
+        if self._stream_stop.is_set():
+            return True
+        with self._lock:
+            return self._closing or self._fatal is not None
+
+    def _stream_exchange(self, deadline: float) -> None:
+        with self._lock:
+            cursor = self._stream_cursor
+        operation = self._launch(
+            lambda active: self._exchange(
+                active,
+                verb="GET",
+                payload=None,
+                expected_id=None,
+                deadline=deadline,
+                accept_session=False,
+                response_required=True,
+                phase="stream",
+                last_event_id=cursor,
+                permanent=True,
+            ),
+            release_slot=False,
+        )
+        try:
+            self._await(operation, deadline)
+        finally:
+            operation.abort()
 
     def _post_request(
         self,
@@ -593,6 +782,7 @@ class McpStreamableHttpClient:
         phase: str,
         last_event_id: Optional[str] = None,
         allow_closing: bool = False,
+        permanent: bool = False,
     ) -> _HttpRead:
         operation.check(deadline)
         # Credential resolution remains ahead of DNS when an adapter is absent.
@@ -624,6 +814,7 @@ class McpStreamableHttpClient:
                 phase=phase,
                 redactions=response_redactions,
                 last_event_id=last_event_id,
+                permanent=permanent,
             )
         except McpError:
             raise
@@ -670,6 +861,7 @@ class McpStreamableHttpClient:
         phase: str,
         redactions: tuple[str, ...],
         last_event_id: Optional[str] = None,
+        permanent: bool = False,
     ) -> _HttpRead:
         status = response.status
         if status == 202:
@@ -692,11 +884,11 @@ class McpStreamableHttpClient:
 
         content_type = _content_type(response)
         if content_type == "application/json":
-            if phase == "resume":
+            if phase in {"resume", "stream"}:
                 _close_response(response)
                 raise McpProtocolError(
                     "invalid_content_type",
-                    "MCP SSE resumption did not return an event stream",
+                    "MCP SSE stream did not return an event stream",
                     permanent=True,
                 )
             raw = _read_bounded_body(response, operation, deadline, self.limits.max_frame_bytes)
@@ -709,6 +901,8 @@ class McpStreamableHttpClient:
                 messages=[message], complete=_matching_response_id(message, expected_id)
             )
         if content_type == "text/event-stream":
+            if permanent:
+                self._set_stream_state("open")
             return self._read_sse(
                 response,
                 operation=operation,
@@ -716,6 +910,7 @@ class McpStreamableHttpClient:
                 deadline=deadline,
                 redactions=redactions,
                 last_event_id=last_event_id,
+                permanent=permanent,
             )
         _close_response(response)
         raise McpProtocolError(
@@ -733,23 +928,45 @@ class McpStreamableHttpClient:
         deadline: float,
         redactions: tuple[str, ...],
         last_event_id: Optional[str] = None,
+        permanent: bool = False,
     ) -> _HttpRead:
         length = _validate_content_length(response, self.limits.max_frame_bytes)
         result = _HttpRead(is_sse=True, last_event_id=last_event_id)
         data_lines: list[str] = []
         event_type = "message"
         event_id = last_event_id
+        event_id_explicit = False
+        first_id_seen = False
         event_bytes = 0
         total_bytes = 0
 
         def dispatch() -> None:
-            nonlocal data_lines, event_type, event_bytes
+            nonlocal data_lines, event_type, event_bytes, event_id_explicit, first_id_seen
             operation.events += 1
             if operation.events > MAX_HTTP_EVENTS:
                 raise McpProtocolError("sse_event_limit", "MCP SSE operation exceeded the event limit", permanent=True)
             # Commit IDs only at a complete event boundary. Empty id clears the
             # cursor; absence on the next response preserves the incoming cursor.
             result.last_event_id = event_id
+            if permanent and event_id_explicit:
+                # The permanent stream keeps its own committed cursor, and a
+                # server that replays the identity the client acknowledged is
+                # treated as a protocol violation instead of a duplicate action.
+                if not first_id_seen:
+                    first_id_seen = True
+                    result.first_event_id = event_id
+                    if (
+                        event_id is not None
+                        and last_event_id is not None
+                        and event_id == last_event_id
+                    ):
+                        raise McpProtocolError(
+                            "sse_event_replayed",
+                            "MCP notification stream replayed an acknowledged event identity",
+                            permanent=True,
+                        )
+            if permanent:
+                self._commit_stream_cursor(event_id)
             if data_lines and event_type in {"", "message"}:
                 event_redactions = self._redactions((*redactions, event_id))
                 # Parse before redaction: credentials must never rewrite peer
@@ -771,6 +988,7 @@ class McpStreamableHttpClient:
                     result.complete = True
             data_lines = []
             event_type = "message"
+            event_id_explicit = False
             event_bytes = 0
 
         while True:
@@ -809,6 +1027,7 @@ class McpStreamableHttpClient:
                 event_type = field_value
             elif field_name == "id":
                 event_id = _validate_event_id(field_value)
+                event_id_explicit = True
             elif field_name == "retry" and field_value.isascii() and field_value.isdecimal():
                 result.retry_ms = self.limits.backoff_max_ms if len(field_value) > 10 else min(int(field_value), self.limits.backoff_max_ms)
         return result
@@ -978,7 +1197,7 @@ class McpStreamableHttpClient:
                         raise operation.error
                     raise McpTransportError(
                         "http_transport_failed", "MCP HTTP transport failed", ambiguous=cancellation_request is not None
-                    )
+                    ) from operation.error
                 return operation.result
 
     def _launch(
@@ -1188,6 +1407,14 @@ class McpStreamableHttpClient:
                 "sse_resumption_unavailable",
                 "MCP server did not allow SSE response resumption",
                 ambiguous=ambiguous,
+            )
+        if phase == "stream" and status == 405:
+            # The spec permits a server without a notification stream; this is
+            # informational, not a request failure.
+            return McpTransportError(
+                "notification_stream_unsupported",
+                "MCP server does not offer the optional notification stream",
+                permanent=True,
             )
         if phase == "delete" and status == 405:
             return McpTransportError("session_delete_unsupported", "MCP session deletion is unsupported")

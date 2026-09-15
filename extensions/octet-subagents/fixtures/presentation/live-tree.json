@@ -63,7 +63,7 @@
         "id": "worker:agent-1",
         "state": "running",
         "label": "explore-auth",
-        "secondary": "running · 00:42 · searching · explore/inherited · 4 tool calls · ?/8 turns · 13020 tok · inherited no ceiling · $0.0072/$0.2000",
+        "secondary": "running · 42s · explore/inherited · 4 calls · max 8 turns · 13K tok · $0.0072/$0.2000",
         "action_ids": ["inspect:agent-1", "stop:agent-1"],
         "references": [
           {
@@ -77,7 +77,7 @@
         "id": "worker:agent-2",
         "state": "succeeded",
         "label": "inspect-tests",
-        "secondary": "done · 01:08 · completed · test-analysis/inherited · 6 tool calls · 3/8 turns · 1450 tok · inherited no ceiling · $0.0018/$0.2000",
+        "secondary": "done · 1m08s · test-analysis/inherited · 6 calls · 3/8 turns · 1450 tok · $0.0018/$0.2000",
         "action_ids": ["inspect:agent-2"],
         "references": [
           {

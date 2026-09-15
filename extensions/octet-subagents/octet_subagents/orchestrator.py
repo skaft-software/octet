@@ -11,6 +11,9 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Seque
 
 from .model import (
     CHILD_TOOLS,
+    DETACHED_LABEL,
+    DETACHED_STATE,
+    INHERIT,
     MAX_ACTIVE_CHILDREN,
     MAX_CHILD_MESSAGE_BYTES,
     MAX_DEPTH,
@@ -33,6 +36,7 @@ from .model import (
     sanitize_document,
     validate_plain_text,
 )
+from .launcher import execute_plan, plan_open_all, render_outcome
 from .presentation import build_snapshot, detail_body, narrow_list
 
 
@@ -668,6 +672,14 @@ class Orchestrator:
                 publish = self._snapshot_locked(state)
             self._publish(publish)
             return {"text": text, "notifications": []}
+        if verb == "open-all":
+            with self._lock:
+                workers = list(state.workers.values())
+            return self.open_all(
+                owner=state.owner,
+                workers=workers,
+                arguments=arguments[1:],
+            )
         if verb == "stop" and len(arguments) == 2:
             # This cached fallback has no live service client. Never smuggle a
             # stale request ID through it; the runtime handles owner-bound stop.
@@ -694,8 +706,72 @@ class Orchestrator:
                 ],
             }
         return {
-            "text": "Usage: /subagents [list|inspect <name-or-id>|stop <name-or-id|all>]\nThe fallback is cached/read-only; authoritative wait and stop use subagent_wait and subagent_stop.",
+            "text": (
+                "Usage: /subagents [list|inspect <name-or-id>|stop <name-or-id|all>"
+                "|wait <name-or-id>|open-all tmux|open-all herdr]\n"
+                "The fallback is cached/read-only; authoritative wait and stop use "
+                "subagent_wait and subagent_stop, and open-all needs the owner-bound "
+                "command context."
+            ),
             "notifications": [],
+        }
+
+    def open_all(
+        self,
+        *,
+        owner: Owner,
+        workers: Sequence[Worker],
+        arguments: Sequence[Any] = (),
+        environment: Optional[Mapping[str, str]] = None,
+        launcher: Optional[Callable[..., Any]] = None,
+    ) -> Dict[str, Any]:
+        """Open one interactive octet pane per running worker plus the parent.
+
+        The escape hatch is deliberately read-only with respect to orchestration
+        state: it creates panes and never writes worker state, so the normal
+        read-only parent-controlled path is untouched and the command is safe to
+        re-run. Planning failures (a missing multiplexer, an unsafe identifier,
+        the pane cap) raise before anything is created.
+        """
+        if len(arguments) > 1:
+            raise SubagentError("Usage: /subagents open-all tmux|herdr")
+        multiplexer = arguments[0] if arguments else None
+        running = [worker for worker in workers if worker.active]
+        plan = plan_open_all(
+            multiplexer=multiplexer,
+            parent_session_id=owner.host_session_id,
+            workers=running,
+            workspace=owner.workspace,
+            environment=environment,
+        )
+        execute = launcher if launcher is not None else (lambda value: execute_plan(value, workspace=owner.workspace))
+        outcome = execute(plan)
+        notifications: List[Dict[str, Any]] = []
+        if not outcome.ok:
+            notifications.append(
+                {
+                    "level": "warning",
+                    "title": "Subagent open-all stopped early",
+                    "message": "Some panes were not opened; nothing created was destroyed. "
+                    "Re-run the command after fixing the reported cause.",
+                }
+            )
+        elif outcome.blocked:
+            notifications.append(
+                {
+                    "level": "warning",
+                    "title": "Subagent open-all is missing a host primitive",
+                    "message": (
+                        "%d running worker pane(s) were planned but not opened: the "
+                        "extension only holds a path-free opaque session reference."
+                        % len(outcome.blocked)
+                    ),
+                }
+            )
+        return {
+            "text": render_outcome(plan, outcome),
+            "notifications": notifications,
+            "panes": [pane.plan_row() for pane in plan.panes],
         }
 
     def status_contribution(self, context: Mapping[str, Any]) -> Optional[Dict[str, Any]]:

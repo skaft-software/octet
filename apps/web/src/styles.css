@@ -11841,3 +11841,33 @@ body {
     padding-left: max(8px, env(safe-area-inset-left));
   }
 }
+/* User-created dock split (Serve workspace layout): two dock panes side by side.
+   The class is only added on a wide layout with no terminal split, so the
+   default single-column dock above is untouched. */
+@media (min-width: 761px) {
+  .app-shell.has-dock-split {
+    --side-width: max(280px, var(--dock-a-width, 320px));
+    grid-template-columns:
+      var(--sidebar-width) minmax(320px, 38fr)
+      var(--side-width)
+      max(280px, var(--dock-b-width, 520px));
+  }
+
+  .app-shell.has-dock-split .activity-rail[data-dock-slot="a"],
+  .app-shell.has-dock-split .inspector[data-dock-slot="a"] {
+    grid-column: 3;
+  }
+
+  .app-shell.has-dock-split .activity-rail[data-dock-slot="b"],
+  .app-shell.has-dock-split .inspector[data-dock-slot="b"] {
+    grid-column: 4;
+  }
+
+  .app-shell.has-dock-split .pane-resize-handle[data-dock-slot="a"] {
+    grid-column: 3;
+  }
+
+  .app-shell.has-dock-split .pane-resize-handle[data-dock-slot="b"] {
+    grid-column: 4;
+  }
+}

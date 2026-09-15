@@ -21,6 +21,7 @@ MAX_LABEL_BYTES = 64
 MAX_COMMAND_BYTES = 4096
 MAX_URL_BYTES = 4096
 MAX_CREDENTIAL_REFERENCE_BYTES = 64
+MAX_CREDENTIAL_ENVIRONMENT_BYTES = 64
 MAX_ARGS = 64
 MAX_ARGUMENT_BYTES = 16 * 1024
 MAX_ENVIRONMENT_ENTRIES = 32
@@ -30,6 +31,12 @@ _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CREDENTIAL_REFERENCE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _HOSTNAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+# Static credentials may only be read from this extension's own environment
+# namespace. That keeps a reviewed configuration from pointing the bridge at an
+# unrelated ambient provider/cloud token that happens to be exported.
+STATIC_CREDENTIAL_ENVIRONMENT_PREFIX = "OCTET_MCP_"
+STATIC_CREDENTIAL_AUTH_TYPE = "static-bearer"
+_STATIC_CREDENTIAL_ENVIRONMENT = re.compile(r"^OCTET_MCP_[A-Z0-9_]{1,48}$")
 STREAMABLE_HTTP_GATE_ERROR = (
     "enabled Streamable HTTP MCP requires --experimental-streamable-http-mcp "
     "from the process owner"
@@ -63,11 +70,26 @@ class Limits:
     backoff_max_ms: int = 30_000
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class HttpAuthConfig:
-    """A non-secret reference resolved only by a runtime credential adapter."""
+    """One explicit remote credential source, never a secret value.
+
+    ``type`` is either ``"bearer"`` — a logical reference resolved only by an
+    explicitly composed host credential adapter — or ``"static-bearer"``, where
+    ``credential`` names one extension-scoped environment variable that the
+    bridge itself reads per request.  Neither form stores, logs, or reports the
+    token value.  ``repr`` is suppressed so the reference cannot be echoed by a
+    diagnostic that prints a composed configuration.
+    """
 
     credential: str
+    type: str = "bearer"
+
+
+def is_static_credential_environment(name: Any) -> bool:
+    """Return whether ``name`` is an extension-scoped static credential name."""
+
+    return isinstance(name, str) and bool(_STATIC_CREDENTIAL_ENVIRONMENT.fullmatch(name))
 
 
 @dataclass(frozen=True)
@@ -138,7 +160,7 @@ _SERVER_FIELDS = {
     "requestTimeoutMs",
     "maxRestarts",
 }
-_AUTH_FIELDS = {"type", "credential"}
+_AUTH_FIELDS = {"type", "credential", "environment"}
 
 
 def default_config_path() -> Path:
@@ -640,21 +662,39 @@ def _parse_streamable_http_url(value: Any, server_id: str) -> str:
 
 
 def _parse_http_auth(value: Any, server_id: str) -> HttpAuthConfig:
+    label = f"server {server_id} auth"
     if not isinstance(value, dict):
-        raise ConfigError(f"server {server_id} auth must be an object")
-    _require_keys(value, _AUTH_FIELDS, f"server {server_id} auth")
-    if value.get("type") != "bearer":
-        raise ConfigError(f"server {server_id} auth type must be bearer")
-    credential = _bounded_text(
-        value.get("credential"),
-        f"server {server_id} auth credential",
-        MAX_CREDENTIAL_REFERENCE_BYTES,
-    )
-    if not _CREDENTIAL_REFERENCE.fullmatch(credential):
-        raise ConfigError(
-            f"server {server_id} auth credential must be a bounded logical reference"
+        raise ConfigError(f"{label} must be an object")
+    _require_keys(value, _AUTH_FIELDS, label)
+    auth_type = value.get("type")
+    if auth_type == "bearer":
+        if "environment" in value:
+            raise ConfigError(f"{label} of type bearer must not name an environment variable")
+        credential = _bounded_text(
+            value.get("credential"), f"{label} credential", MAX_CREDENTIAL_REFERENCE_BYTES
         )
-    return HttpAuthConfig(credential=credential)
+        if not _CREDENTIAL_REFERENCE.fullmatch(credential):
+            raise ConfigError(f"{label} credential must be a bounded logical reference")
+        return HttpAuthConfig(credential=credential, type="bearer")
+    if auth_type == STATIC_CREDENTIAL_AUTH_TYPE:
+        if "credential" in value:
+            raise ConfigError(
+                f"{label} of type {STATIC_CREDENTIAL_AUTH_TYPE} must name only its own environment variable"
+            )
+        environment = _bounded_text(
+            value.get("environment"),
+            f"{label} environment",
+            MAX_CREDENTIAL_ENVIRONMENT_BYTES,
+        )
+        if not is_static_credential_environment(environment):
+            raise ConfigError(
+                f"{label} environment must be an extension-scoped "
+                f"{STATIC_CREDENTIAL_ENVIRONMENT_PREFIX}* variable name"
+            )
+        return HttpAuthConfig(credential=environment, type=STATIC_CREDENTIAL_AUTH_TYPE)
+    raise ConfigError(
+        f"{label} type must be bearer or {STATIC_CREDENTIAL_AUTH_TYPE}"
+    )
 
 
 def _parse_environment(value: Any, server_id: str) -> dict[str, str]:

@@ -15,6 +15,8 @@ use std::path::PathBuf;
 #[cfg(any(unix, windows))]
 use std::process::Stdio;
 #[cfg(any(unix, windows))]
+use std::sync::{Arc, Mutex};
+#[cfg(any(unix, windows))]
 use std::time::{Duration, Instant};
 
 #[cfg(any(unix, windows))]
@@ -35,7 +37,10 @@ use crate::extension_process::{wait_for_bash_process, BashProcessLaunch};
 use crate::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]
 use crate::sandbox::resolve_shell;
-use crate::tool::{OutputStream, Tool, ToolContext, ToolError, ToolOutput, ToolProgressSink};
+use crate::tool::{
+    OutputStream, PartialOutputCheckpointSink, Tool, ToolContext, ToolError, ToolOutput,
+    ToolProgressSink,
+};
 #[cfg(any(unix, windows))]
 use crate::tools::parse_args;
 use crate::tools::validate_effect_path;
@@ -174,7 +179,14 @@ impl Tool for BashTool {
     ) -> Result<ToolOutput, ToolError> {
         #[cfg(windows)]
         {
-            self.execute_windows(args, ctx, false, &super::ShellSessionEnvironment::default()).await
+            self.execute_windows(
+                args,
+                ctx,
+                false,
+                &super::ShellSessionEnvironment::default(),
+                None,
+            )
+            .await
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -185,7 +197,8 @@ impl Tool for BashTool {
         }
         #[cfg(unix)]
         {
-            self.execute_unix(args, ctx, &super::ShellSessionEnvironment::default()).await
+            self.execute_unix(args, ctx, &super::ShellSessionEnvironment::default(), None)
+                .await
         }
     }
 }
@@ -197,6 +210,7 @@ impl BashTool {
         args: serde_json::Value,
         ctx: &ToolContext<'_>,
         environment: &super::ShellSessionEnvironment,
+        checkpoints: Option<&BashCheckpoints>,
     ) -> Result<ToolOutput, ToolError> {
         self.effect(&args, ctx)?;
         let args: BashArgs = parse_args(args)?;
@@ -281,13 +295,15 @@ impl BashTool {
                     &mut stdout_pipe,
                     capture_budget,
                     &stdout_progress,
-                    OutputStream::Stdout
+                    OutputStream::Stdout,
+                    checkpoints
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
                     capture_budget,
                     &stderr_progress,
-                    OutputStream::Stderr
+                    OutputStream::Stderr,
+                    checkpoints
                 ),
                 wait_for_bash_process(&mut child, handoff),
             );
@@ -384,6 +400,367 @@ impl BashTool {
     }
 }
 
+/// Pi's bash checkpoint cadence: at most one durable partial-output checkpoint
+/// every two seconds, regardless of how much output the command produces.
+#[cfg(any(unix, windows))]
+pub const BASH_CHECKPOINT_INTERVAL: Duration = Duration::from_millis(2_000);
+
+/// Smallest accepted checkpoint interval. A host may pace checkpoints faster
+/// than Pi's two seconds, but an interval floor keeps storage write rate bounded
+/// independently of output volume.
+#[cfg(any(unix, windows))]
+pub const MIN_BASH_CHECKPOINT_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Hard cap for one durable partial-output snapshot. Pi's bash snapshot is "the
+/// last 2,000 lines or 50 KiB"; the two stream sections share this cap, so
+/// replacing one invocation's value can never grow with the command's output.
+#[cfg(any(unix, windows))]
+pub const BASH_CHECKPOINT_MAX_BYTES: usize = 50 * 1024;
+
+/// Marker prepended when a checkpoint snapshot had to drop earlier bytes.
+#[cfg(any(unix, windows))]
+const CHECKPOINT_ELISION_MARKER: &str = "[earlier output elided]";
+
+/// Bounded interval publisher for durable partial-output checkpoints.
+///
+/// The tool owns cadence, snapshot bounding, and duplicate suppression; the sink
+/// owns storage. `observe` therefore returns a snapshot only when the interval
+/// elapsed *and* the complete bounded snapshot differs from the last requested
+/// one, exactly like Pi's bash policy (`BASH_CHECKPOINT_INTERVAL_MS = 2_000`,
+/// duplicate suppression against the last requested checkpoint).
+#[cfg(any(unix, windows))]
+#[derive(Clone, Debug)]
+pub struct BashCheckpointPublisher {
+    interval: Duration,
+    last_requested_at: Option<Instant>,
+    last_snapshot: Option<String>,
+    requested: u64,
+    suppressed: u64,
+    before_interval: u64,
+    failures: u64,
+}
+
+/// Observable checkpoint bookkeeping for one bash invocation.
+#[cfg(any(unix, windows))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BashCheckpointStats {
+    /// Checkpoints handed to the sink.
+    pub requested: u64,
+    /// Intervals skipped because the bounded snapshot was unchanged.
+    pub suppressed: u64,
+    /// Observations that arrived before the next interval boundary.
+    pub before_interval: u64,
+    /// Checkpoint writes the sink refused (storage faults).
+    pub failures: u64,
+}
+
+#[cfg(any(unix, windows))]
+impl BashCheckpointPublisher {
+    /// Creates a publisher with `interval` clamped to at least
+    /// [`MIN_BASH_CHECKPOINT_INTERVAL`].
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval: interval.max(MIN_BASH_CHECKPOINT_INTERVAL),
+            last_requested_at: None,
+            last_snapshot: None,
+            requested: 0,
+            suppressed: 0,
+            before_interval: 0,
+            failures: 0,
+        }
+    }
+
+    /// Effective cadence.
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// Whether a checkpoint may be requested at `now`.
+    pub fn is_due(&self, now: Instant) -> bool {
+        match self.last_requested_at {
+            None => true,
+            Some(last) => now.saturating_duration_since(last) >= self.interval,
+        }
+    }
+
+    /// Records the latest complete bounded snapshot and decides what to persist.
+    ///
+    /// Returns the snapshot to hand to the sink, or `None` when this observation
+    /// is before the interval boundary or repeats the last requested checkpoint.
+    /// A suppressed observation still restarts the interval, so output volume can
+    /// never increase checkpoint frequency.
+    pub fn observe(&mut self, snapshot: &str, now: Instant) -> Option<String> {
+        if !self.is_due(now) {
+            self.before_interval = self.before_interval.saturating_add(1);
+            return None;
+        }
+        self.last_requested_at = Some(now);
+        if self.last_snapshot.as_deref() == Some(snapshot) {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return None;
+        }
+        self.last_snapshot = Some(snapshot.to_owned());
+        self.requested = self.requested.saturating_add(1);
+        Some(snapshot.to_owned())
+    }
+
+    /// Records an observation that arrived before the next interval boundary.
+    pub fn note_before_interval(&mut self) {
+        self.before_interval = self.before_interval.saturating_add(1);
+    }
+
+    /// Records that the sink refused the last checkpoint.
+    pub fn note_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+    }
+
+    /// Bounds one snapshot to [`BASH_CHECKPOINT_MAX_BYTES`].
+    ///
+    /// Public so a host or tool that builds its own checkpoint snapshot applies
+    /// exactly the bound this publisher relies on.
+    pub fn bound_snapshot(snapshot: &str) -> String {
+        bound_snapshot(snapshot, BASH_CHECKPOINT_MAX_BYTES)
+    }
+
+    /// Current bookkeeping.
+    pub fn stats(&self) -> BashCheckpointStats {
+        BashCheckpointStats {
+            requested: self.requested,
+            suppressed: self.suppressed,
+            before_interval: self.before_interval,
+            failures: self.failures,
+        }
+    }
+}
+
+/// Bounds one checkpoint snapshot to `max_bytes` without splitting a UTF-8 code
+/// point. Over-long snapshots keep their most recent bytes, because that is what
+/// a recovery consumer needs, and are marked as elided.
+#[cfg(any(unix, windows))]
+fn bound_snapshot(snapshot: &str, max_bytes: usize) -> String {
+    if snapshot.len() <= max_bytes {
+        return snapshot.to_owned();
+    }
+    let reserve = CHECKPOINT_ELISION_MARKER.len() + 1;
+    let budget = max_bytes.saturating_sub(reserve);
+    let mut start = snapshot.len().saturating_sub(budget);
+    while start < snapshot.len() && !snapshot.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("{CHECKPOINT_ELISION_MARKER}\n{}", &snapshot[start..])
+}
+
+/// Renders one bounded checkpoint section for a stream.
+///
+/// Deliberately shares no wording with a final result: it never emits
+/// `complete_<stream>=true`, so a consumer cannot mistake a checkpoint for proof
+/// that the command finished.
+#[cfg(any(unix, windows))]
+fn render_checkpoint_section(name: &str, capture: &Capture) -> String {
+    let total = capture.total_bytes;
+    if total == 0 {
+        return format!("{name}: 0 bytes seen");
+    }
+    let head = String::from_utf8_lossy(&capture.head);
+    if capture.tail.is_empty() {
+        return format!(
+            "{name}: {total} bytes seen\n{}",
+            head.trim_end_matches('\n')
+        );
+    }
+    let tail_bytes: Vec<u8> = capture.tail.iter().copied().collect();
+    let tail = String::from_utf8_lossy(&tail_bytes);
+    let head = head.rsplit_once('\n').map(|(kept, _)| kept).unwrap_or("");
+    let tail = tail.split_once('\n').map(|(_, kept)| kept).unwrap_or("");
+    format!(
+        "{name}: {total} bytes seen, showing first and last lines\n{head}\n...\n{}",
+        tail.trim_end_matches('\n')
+    )
+}
+
+/// Host-supplied checkpoint sink plus the bounded pacing state for one bash run.
+#[cfg(any(unix, windows))]
+pub(super) struct BashCheckpoints {
+    sink: Arc<dyn PartialOutputCheckpointSink>,
+    state: Mutex<CheckpointState>,
+}
+
+#[cfg(any(unix, windows))]
+pub(super) struct CheckpointState {
+    publisher: BashCheckpointPublisher,
+    /// Latest bounded snapshot per stream (`stdout`, `stderr`).
+    sections: [Option<String>; 2],
+}
+
+#[cfg(any(unix, windows))]
+impl BashCheckpoints {
+    fn new(sink: Arc<dyn PartialOutputCheckpointSink>, interval: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            sink,
+            state: Mutex::new(CheckpointState {
+                publisher: BashCheckpointPublisher::new(interval),
+                sections: [None, None],
+            }),
+        })
+    }
+
+    /// Observes the current bounded capture state for one stream.
+    ///
+    /// Building the snapshot and calling the sink happen only when the interval
+    /// elapsed, so an arbitrary amount of output costs at most one bounded
+    /// snapshot per interval. The sink call happens outside the pacing lock so a
+    /// slow durable write cannot stall the other stream's reader.
+    fn observe(&self, stream: OutputStream, capture: &Capture) {
+        let now = Instant::now();
+        let pending = {
+            let mut state = self.lock();
+            if !state.publisher.is_due(now) {
+                state.publisher.note_before_interval();
+                return;
+            }
+            let (index, name) = match stream {
+                OutputStream::Stdout => (0, "stdout"),
+                OutputStream::Stderr => (1, "stderr"),
+            };
+            let section = bound_snapshot(
+                &render_checkpoint_section(name, capture),
+                BASH_CHECKPOINT_MAX_BYTES / 2,
+            );
+            state.sections[index] = Some(section);
+            let combined = format!(
+                "{}\n{}",
+                state.sections[0]
+                    .as_deref()
+                    .unwrap_or("stdout: 0 bytes seen"),
+                state.sections[1]
+                    .as_deref()
+                    .unwrap_or("stderr: 0 bytes seen")
+            );
+            let combined = bound_snapshot(&combined, BASH_CHECKPOINT_MAX_BYTES);
+            state.publisher.observe(&combined, now)
+        };
+        if let Some(snapshot) = pending {
+            if self.sink.checkpoint_partial_output(&snapshot).is_err() {
+                // A storage fault is the host's to observe and report; it never
+                // changes the command's result and never fabricates settlement.
+                self.lock().publisher.note_failure();
+            }
+        }
+    }
+
+    fn stats(&self) -> BashCheckpointStats {
+        self.lock().publisher.stats()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CheckpointState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+/// Bash tool whose host supplies durable partial-output checkpoints.
+///
+/// Row 4.7's delivery mechanism: `ToolContext` carries no durable handle, so a
+/// host that wants interval checkpoints injects a sink and a cadence here. An
+/// unwrapped [`BashTool`] never checkpoints, so the default behavior is
+/// unchanged and no other consumer pays for this.
+#[cfg(any(unix, windows))]
+pub struct CheckpointedBashTool {
+    checkpoints: Arc<BashCheckpoints>,
+}
+
+#[cfg(any(unix, windows))]
+impl CheckpointedBashTool {
+    /// Wraps `BashTool` with durable checkpoints at `interval` (clamped to at
+    /// least [`MIN_BASH_CHECKPOINT_INTERVAL`]).
+    pub fn with_checkpoints(
+        sink: Arc<dyn PartialOutputCheckpointSink>,
+        interval: Duration,
+    ) -> Self {
+        Self {
+            checkpoints: BashCheckpoints::new(sink, interval),
+        }
+    }
+
+    /// Wraps `BashTool` with Pi's two-second checkpoint cadence.
+    pub fn with_default_checkpoints(sink: Arc<dyn PartialOutputCheckpointSink>) -> Self {
+        Self::with_checkpoints(sink, BASH_CHECKPOINT_INTERVAL)
+    }
+
+    /// Effective cadence.
+    pub fn interval(&self) -> Duration {
+        self.checkpoints.lock().publisher.interval()
+    }
+
+    /// Checkpoint bookkeeping for the run(s) this tool has executed.
+    pub fn checkpoint_stats(&self) -> BashCheckpointStats {
+        self.checkpoints.stats()
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[async_trait::async_trait]
+impl Tool for CheckpointedBashTool {
+    fn definition(&self) -> ToolDef {
+        BashTool.definition()
+    }
+
+    fn effect(
+        &self,
+        args: &serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        BashTool.effect(args, ctx)
+    }
+
+    fn replay_safety(&self) -> crate::tool::ReplaySafety {
+        BashTool.replay_safety()
+    }
+
+    fn concurrency(&self) -> crate::tool::ToolConcurrency {
+        BashTool.concurrency()
+    }
+
+    fn prompt_snippet(&self) -> Option<&str> {
+        BashTool.prompt_snippet()
+    }
+
+    fn prompt_guidelines(&self) -> &[&str] {
+        BashTool.prompt_guidelines()
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        #[cfg(windows)]
+        {
+            BashTool
+                .execute_windows(
+                    args,
+                    ctx,
+                    false,
+                    &super::ShellSessionEnvironment::default(),
+                    Some(&self.checkpoints),
+                )
+                .await
+        }
+        #[cfg(unix)]
+        {
+            BashTool
+                .execute_unix(
+                    args,
+                    ctx,
+                    &super::ShellSessionEnvironment::default(),
+                    Some(&self.checkpoints),
+                )
+                .await
+        }
+    }
+}
+
 #[cfg(windows)]
 fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<PathBuf, ToolError> {
     if let Some(configured) = configured {
@@ -434,7 +811,9 @@ impl BashTool {
         args: serde_json::Value,
         ctx: &ToolContext<'_>,
         powershell: bool,
-        environment: &super::ShellSessionEnvironment,    ) -> Result<ToolOutput, ToolError> {
+        environment: &super::ShellSessionEnvironment,
+        checkpoints: Option<&BashCheckpoints>,
+    ) -> Result<ToolOutput, ToolError> {
         self.effect(&args, ctx)?;
         let args: BashArgs = parse_args(args)?;
         let shell = if powershell { super::powershell::resolve_shell()? } else { resolve_windows_shell(ctx.sandbox.shell_path.as_deref())? };
@@ -512,13 +891,15 @@ impl BashTool {
                     &mut stdout_pipe,
                     capture_budget,
                     &stdout_progress,
-                    OutputStream::Stdout
+                    OutputStream::Stdout,
+                    checkpoints
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
                     capture_budget,
                     &stderr_progress,
-                    OutputStream::Stderr
+                    OutputStream::Stderr,
+                    checkpoints
                 ),
                 child.wait(),
             );
@@ -724,6 +1105,7 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     budget: usize,
     progress: &ToolProgressSink,
     stream: OutputStream,
+    checkpoints: Option<&BashCheckpoints>,
 ) -> Capture {
     let Some(reader) = reader.as_mut() else {
         return Capture::empty();
@@ -762,6 +1144,13 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
                         let excess = capture.tail.len() - tail_cap;
                         capture.tail.drain(..excess);
                     }
+                }
+                // Interval-bounded durable checkpoint of the complete bounded
+                // snapshot the tool already streams live. Output volume never
+                // accelerates checkpoint frequency, and a checkpoint never
+                // becomes part of the result.
+                if let Some(checkpoints) = checkpoints {
+                    checkpoints.observe(stream, &capture);
                 }
             }
         }

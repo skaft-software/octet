@@ -96,11 +96,11 @@ impl Tool for SessionShellTool {
         let args = self.apply_command_prefix(args);
         let environment = (self.resolve)();
         #[cfg(windows)]
-        { BashTool.execute_windows(args,ctx,self.powershell,&environment).await }
+        { BashTool.execute_windows(args,ctx,self.powershell,&environment,None).await }
         #[cfg(unix)]
         {
             if self.powershell { return Err(ToolError::new("powershell is available only on Windows")); }
-            BashTool.execute_unix(args,ctx,&environment).await
+            BashTool.execute_unix(args,ctx,&environment,None).await
         }
         #[cfg(not(any(unix,windows)))]
         { let _ = environment; Err(ToolError::new("shell is unavailable on this platform")) }

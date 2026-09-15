@@ -19,7 +19,7 @@ impl Tool for PowerShellTool {
     async fn execute(&self,args:serde_json::Value,ctx:&ToolContext<'_>)->Result<ToolOutput,ToolError> {
         self.effect(&args,ctx)?;
         #[cfg(windows)]
-        { BashTool.execute_windows(args,ctx,true,&super::ShellSessionEnvironment::default()).await }
+        { BashTool.execute_windows(args,ctx,true,&super::ShellSessionEnvironment::default(),None).await }
         #[cfg(not(windows))]
         { Err(ToolError::new("powershell is available only on Windows")) }
     }

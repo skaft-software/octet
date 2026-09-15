@@ -19,14 +19,6 @@ use crate::tui::theme::OctetTheme;
 
 /// Indices of the items matching the current filter. Every whitespace-delimited
 /// term must appear in either the label or description, case-insensitively.
-pub(super) fn filtered_indices(
-    items: &[String],
-    descriptions: &[Option<String>],
-    filter: &str,
-) -> Vec<usize> {
-    filtered_indices_with_groups(items, descriptions, None, filter)
-}
-
 fn filtered_indices_with_groups(
     items: &[String],
     descriptions: &[Option<String>],
@@ -68,7 +60,22 @@ pub(super) fn filtered_indices_for_action(
     action: &PanelAction,
     filter: &str,
 ) -> Vec<usize> {
-    filtered_indices_with_groups(items, descriptions, action.model_provider_groups(), filter)
+    let mut indices =
+        filtered_indices_with_groups(items, descriptions, action.model_provider_groups(), filter);
+    // Terminal subagent groups collapse behind their heading. A typed filter
+    // still searches every worker, hidden groups included, so filtering for a
+    // finished worker can never look like the worker disappeared.
+    if let Some(subagents) = action.subagent_panel() {
+        if filter.is_empty() {
+            indices.retain(|index| !subagents.hides(*index));
+        }
+        // An active state view filter is an explicit narrowing: it restricts
+        // the visible rows whether or not a typed filter is present.
+        if let Some(active) = subagents.state_filter_label() {
+            indices.retain(|index| subagents.group_label(*index) == Some(active));
+        }
+    }
+    indices
 }
 
 fn normalize_search_text(text: &str) -> String {
@@ -1297,6 +1304,71 @@ fn render_provider_heading(state: &ShellState, provider: &str, width: u16) -> St
     fit_line(&format!("{prefix}{}", state.theme.bold(&provider)), width)
 }
 
+/// Minimum remaining body rows before the `/subagents` column header is worth a
+/// row. A short terminal keeps worker rows instead of chrome.
+const SUBAGENT_HEADER_MIN_BODY: usize = 5;
+
+/// Names the fields every `/subagents` row carries, in the order the extension
+/// emits them. It is chrome: never selectable, never an item index.
+fn render_subagent_column_header(state: &ShellState, width: u16) -> String {
+    let plan = PresentationLayout::new(&state.theme, width);
+    let prefix = format!("{}  ", " ".repeat(usize::from(plan.inset)));
+    let header = "state · elapsed · model · calls · turns · tokens · cost";
+    fit_line(
+        &format!(
+            "{prefix}{}",
+            subdued_text(&state.theme, &panel_cell(header, state.theme.unicode()))
+        ),
+        width,
+    )
+}
+
+/// State-group heading with its displayed count, e.g. `Running · 8`.
+fn render_subagent_heading(state: &ShellState, label: &str, count: usize, width: u16) -> String {
+    let plan = PresentationLayout::new(&state.theme, width);
+    let prefix = format!("{}", " ".repeat(usize::from(plan.inset)));
+    let text = panel_cell(&format!("{label} · {count}"), state.theme.unicode());
+    fit_line(
+        &format!("{prefix}{}", state.theme.bold(&subdued_text(&state.theme, &text))),
+        width,
+    )
+}
+
+/// One bounded summary line for every collapsed group, so a hidden terminal
+/// worker is always accounted for instead of silently missing.
+fn render_hidden_subagent_groups(
+    state: &ShellState,
+    hidden: &[(String, usize)],
+    width: u16,
+) -> String {
+    let plan = PresentationLayout::new(&state.theme, width);
+    let prefix = format!("{}  ", " ".repeat(usize::from(plan.inset)));
+    let unicode = state.theme.unicode();
+    let separator = if unicode { " · " } else { " | " };
+    let summary = hidden
+        .iter()
+        .map(|(label, count)| format!("{count} {label}"))
+        .collect::<Vec<_>>()
+        .join(separator);
+    let hint = if unicode {
+        format!("hidden{separator}ctrl+t shows all")
+    } else {
+        "hidden | ctrl+t shows all".to_owned()
+    };
+    let text = if summary.is_empty() {
+        hint
+    } else {
+        format!("{summary} {hint}")
+    };
+    fit_line(
+        &format!(
+            "{prefix}{}",
+            subdued_text(&state.theme, &panel_cell(&text, unicode))
+        ),
+        width,
+    )
+}
+
 fn select_list_uses_stacked_rows(
     state: &ShellState,
     action: &PanelAction,
@@ -1716,7 +1788,67 @@ fn render_panel_output_with_limit(
                 && max_rows >= lines.len().saturating_add(2 + usize::from(show_borders));
             let max_body = max_rows
                 .saturating_sub(lines.len() + usize::from(show_borders) + usize::from(show_footer));
-            if filtered.is_empty() && max_body > 0 {
+            // `/subagents` chrome: one heading per visible state group, a
+            // column header, and a single summary line for collapsed groups.
+            // Chrome is budgeted out of the body so a bounded panel can never
+            // render past the row allowance it was given.
+            let subagents = action.subagent_panel();
+            let subagent_counts = subagents.map(|panel| panel.counts(&filtered));
+            let hidden_groups: Vec<(String, usize)> =
+                match (subagents, subagent_counts.as_ref()) {
+                    (Some(panel), Some(counts)) => panel
+                        .groups
+                        .iter()
+                        .zip(counts)
+                        .filter(|(group, count)| {
+                            panel.collapsed && group.collapsible && **count > 0
+                        })
+                        .map(|(group, count)| (group.label.clone(), *count))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+            let visible_groups = match (subagents, subagent_counts.as_ref()) {
+                (Some(panel), Some(counts)) => panel
+                    .groups
+                    .iter()
+                    .zip(counts)
+                    .filter(|(group, count)| {
+                        **count > 0 && !(panel.collapsed && group.collapsible)
+                    })
+                    .count(),
+                _ => 0,
+            };
+            // A column header is chrome, so it yields before any worker row.
+            let show_subagent_header =
+                subagents.is_some() && max_body >= SUBAGENT_HEADER_MIN_BODY;
+            let requested_chrome = visible_groups
+                .saturating_add(usize::from(!hidden_groups.is_empty()))
+                .saturating_add(usize::from(show_subagent_header));
+            // Chrome yields entirely rather than pushing the panel past the row
+            // allowance it was given: a short terminal keeps worker rows.
+            let chrome_rows = if requested_chrome < max_body {
+                requested_chrome
+            } else {
+                0
+            };
+            let chrome_fits = chrome_rows > 0;
+            let hidden_groups = if chrome_fits {
+                hidden_groups
+            } else {
+                Vec::new()
+            };
+            let show_subagent_header = show_subagent_header && chrome_fits;
+            let hidden_groups_empty = hidden_groups.is_empty();
+            let max_body = max_body.saturating_sub(chrome_rows);
+            if filtered.is_empty() && !hidden_groups_empty && max_body > 0 {
+                // Every remaining worker is behind a collapsed heading: report
+                // the groups instead of claiming there are no items.
+                lines.push(render_hidden_subagent_groups(
+                    state,
+                    &hidden_groups,
+                    width,
+                ));
+            } else if filtered.is_empty() && max_body > 0 {
                 let lifecycle = if matches!(&surface.lifecycle, OrdinarySurfaceLifecycle::Empty(_))
                 {
                     surface.lifecycle.clone()
@@ -1751,9 +1883,27 @@ fn render_panel_output_with_limit(
                 let label_width = (!confirmation && !stacked)
                     .then(|| panel_label_width(state, items, descriptions, &filtered, width))
                     .flatten();
+                if show_subagent_header {
+                    lines.push(render_subagent_column_header(state, width));
+                }
                 let mut previous_provider: Option<&str> = None;
+                let mut previous_group: Option<usize> = None;
                 for position in window {
                     let index = filtered[position];
+                    if let (Some(panel), Some(counts)) = (subagents, subagent_counts.as_ref()) {
+                        let group = panel.group_of(index);
+                        if chrome_fits && group != previous_group {
+                            if let Some(group) = group {
+                                lines.push(render_subagent_heading(
+                                    state,
+                                    &panel.groups[group].label,
+                                    counts[group],
+                                    width,
+                                ));
+                            }
+                        }
+                        previous_group = group;
+                    }
                     if let Some(provider) = providers
                         .and_then(|providers| providers.get(index))
                         .map(String::as_str)
@@ -1786,6 +1936,13 @@ fn render_panel_output_with_limit(
                     }
                     lines.extend(item_render.lines);
                 }
+                if !hidden_groups_empty {
+                    lines.push(render_hidden_subagent_groups(
+                        state,
+                        &hidden_groups,
+                        width,
+                    ));
+                }
             }
             if show_footer {
                 let navigation = if state.theme.unicode() {
@@ -1793,13 +1950,26 @@ fn render_panel_output_with_limit(
                 } else {
                     "up/down"
                 };
+                let mut hints: Vec<(&str, &str)> = vec![(navigation, "navigate")];
+                // Only the grouped subagent panel has collapsible groups and a
+                // declared-state view filter, so those are advertised only
+                // there. The active state filter rides in the footer scope so
+                // the reader can always see which view is in effect.
+                let subagent_scope = subagents
+                    .and_then(|panel| panel.state_filter_label())
+                    .map(|label| format!("state: {label}"));
+                if subagents.is_some() {
+                    hints.push(("ctrl+t", "show all"));
+                    hints.push(("ctrl+f", "state filter"));
+                }
+                hints.push(("esc", "close"));
                 lines.push(panel_action_footer(
                     state,
                     width,
                     &content_inset,
-                    None,
+                    subagent_scope.as_deref(),
                     ("enter", "select"),
-                    &[(navigation, "navigate"), ("esc", "close")],
+                    &hints,
                 ));
             }
             if show_borders {

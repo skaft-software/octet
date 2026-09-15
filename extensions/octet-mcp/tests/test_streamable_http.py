@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import ssl
 import threading
+import time
 from typing import Any, Callable, Optional
 import unittest
 
@@ -14,7 +15,11 @@ from octet_mcp.config import BridgeConfig, HttpAuthConfig, ServerConfig
 from octet_mcp.manager import BridgeManager
 from octet_mcp.ownership import ResourceOwner
 from octet_mcp.protocol import McpCancelled, McpError, McpTransportError
-from octet_mcp.streamable_http import McpAuthenticationError, McpStreamableHttpClient
+from octet_mcp.streamable_http import (
+    McpAuthenticationError,
+    McpStreamableHttpClient,
+    StaticEnvironmentCredentialProvider,
+)
 
 from .helpers import FakeCancellation, FakeExtension, ROOT, limits, wait_for
 
@@ -174,10 +179,10 @@ def _json_result(
     )
 
 
-def _initialize_result(name: str = "loopback-mcp") -> dict[str, Any]:
+def _initialize_result(name: str = "loopback-mcp", *, list_changed: bool = False) -> dict[str, Any]:
     return {
         "protocolVersion": "2025-06-18",
-        "capabilities": {"tools": {"listChanged": False}},
+        "capabilities": {"tools": {"listChanged": list_changed}},
         "serverInfo": {"name": name, "version": "1.0.0"},
     }
 
@@ -275,9 +280,12 @@ class StreamableHttpTests(unittest.TestCase):
         fixture: _LoopbackFixture,
         *,
         auth: Optional[HttpAuthConfig] = None,
-        credential_provider: Optional[_TokenProvider] = None,
+        credential_provider: Optional[Any] = None,
         request_timeout_ms: int = 1000,
         max_restarts: int = 1,
+        on_failure: Optional[Callable[[Any, McpError], None]] = None,
+        on_tools_changed: Optional[Callable[[Any], None]] = None,
+        backoff_initial_ms: int = 20,
     ) -> McpStreamableHttpClient:
         return McpStreamableHttpClient(
             _remote_config(
@@ -286,9 +294,15 @@ class StreamableHttpTests(unittest.TestCase):
                 request_timeout_ms=request_timeout_ms,
                 max_restarts=max_restarts,
             ),
-            limits(shutdown_timeout_ms=250),
+            limits(
+                shutdown_timeout_ms=250,
+                backoff_initial_ms=backoff_initial_ms,
+                backoff_max_ms=max(backoff_initial_ms, 40),
+            ),
             resource_owner=OWNER,
             credential_provider=credential_provider,
+            on_failure=on_failure,
+            on_tools_changed=on_tools_changed,
         )
 
     def test_json_session_lifecycle_and_stdio_compatible_catalog_calls(self) -> None:
@@ -763,6 +777,363 @@ class StreamableHttpTests(unittest.TestCase):
         self.assertEqual(fixture.errors, ())
         self.assertGreaterEqual(len(provider.calls), 5)
         self.assertTrue(all(request.header("authorization") == f"Bearer {token}" for request in fixture.requests))
+
+    def test_static_environment_credential_is_scoped_read_per_request_and_never_echoed(self) -> None:
+        token = "static-secret-value"
+        rotated = "static-secret-rotated"
+        environ = {"OCTET_MCP_REMOTE_TOKEN": token, "OPENAI_API_KEY": "ambient-provider-token"}
+        provider = StaticEnvironmentCredentialProvider(environ)
+        session = "static-session"
+        calls: list[str] = []
+
+        def responder(request: _HttpRequest) -> _HttpReply:
+            if request.method == "DELETE":
+                return _HttpReply()
+            calls.append(request.header("authorization") or "")
+            message = request.message()
+            method = message["method"]
+            if method == "initialize":
+                return _json_result(
+                    request,
+                    _initialize_result(name=token),
+                    headers={"Mcp-Session-Id": session},
+                )
+            if method == "notifications/initialized":
+                return _HttpReply(status=202)
+            if method == "tools/list":
+                return _json_result(request, {"tools": [_tool()]})
+            return _HttpReply(status=400)
+
+        fixture = self.fixture(responder)
+        client = self.client(
+            fixture,
+            auth=HttpAuthConfig(credential="OCTET_MCP_REMOTE_TOKEN", type="static-bearer"),
+            credential_provider=provider,
+        )
+        try:
+            client.start()
+            client.list_tools()
+            self.assertEqual(client.server_info["name"], "[redacted]")
+            self.assertNotIn(token, repr(client.config))
+            self.assertNotIn(token, repr(client.config.auth))
+            self.assertNotIn(token, " ".join(entry.text for entry in client.logs.snapshot()))
+            self.assertEqual(client.notification_stream, "off")
+
+            # The source is read per request, so a rotated variable is observed
+            # without retaining or restarting the bridge.
+            environ["OCTET_MCP_REMOTE_TOKEN"] = rotated
+            client.list_tools()
+        finally:
+            client.close()
+
+        self.assertEqual(fixture.errors, ())
+        self.assertEqual(calls[0], f"Bearer {token}")
+        self.assertEqual(calls[-1], f"Bearer {rotated}")
+        self.assertNotIn("ambient-provider-token", " ".join(calls))
+
+        # A non-namespaced name never resolves: the bundled source refuses to
+        # read an ambient provider token, and the request fails closed before I/O.
+        hostile = self.fixture(lambda request: _HttpReply(status=400))
+        inert = self.client(
+            hostile,
+            auth=HttpAuthConfig(credential="OPENAI_API_KEY", type="static-bearer"),
+            credential_provider=provider,
+            max_restarts=0,
+        )
+        try:
+            with self.assertRaises(McpAuthenticationError) as raised:
+                inert.start()
+            self.assertEqual(raised.exception.code, "authentication_unavailable")
+            self.assertNotIn("OPENAI_API_KEY", str(raised.exception))
+            self.assertNotIn("ambient-provider-token", str(raised.exception))
+        finally:
+            inert.close()
+        self.assertEqual(hostile.requests, ())
+
+        # An unset variable is equally closed.
+        unset = self.fixture(lambda request: _HttpReply(status=400))
+        missing = self.client(
+            unset,
+            auth=HttpAuthConfig(credential="OCTET_MCP_ABSENT", type="static-bearer"),
+            credential_provider=provider,
+            max_restarts=0,
+        )
+        try:
+            with self.assertRaises(McpAuthenticationError) as absent:
+                missing.start()
+            self.assertEqual(absent.exception.code, "authentication_unavailable")
+        finally:
+            missing.close()
+        self.assertEqual(unset.requests, ())
+
+    def test_static_source_is_not_composed_without_an_explicit_descriptor(self) -> None:
+        from octet_mcp.runtime import static_credential_provider
+        from octet_mcp.config import BridgeConfig
+
+        self.assertIsNone(static_credential_provider(BridgeConfig.empty()))
+
+    def test_permanent_get_stream_reconnects_with_the_committed_cursor(self) -> None:
+        session = "stream-session"
+        stop = threading.Event()
+        gets: list[Optional[str]] = []
+        changed: list[int] = []
+
+        def responder(request: _HttpRequest) -> _HttpReply:
+            if request.method == "DELETE":
+                return _HttpReply()
+            if request.method == "GET":
+                gets.append(request.header("last-event-id"))
+                if len(gets) == 1:
+                    return _HttpReply(
+                        headers={"Content-Type": "text/event-stream"},
+                        body=_sse_event(
+                            {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+                            event_id="stream-1",
+                        ),
+                        include_content_length=False,
+                    )
+                # Later connections stay open until the test ends.
+                return _HttpReply(
+                    headers={"Content-Type": "text/event-stream"},
+                    include_content_length=False,
+                    stream=lambda handle: stop.wait(timeout=5),
+                )
+            message = request.message()
+            method = message["method"]
+            if method == "initialize":
+                return _json_result(
+                    request,
+                    _initialize_result(list_changed=True),
+                    headers={"Mcp-Session-Id": session},
+                )
+            if method == "notifications/initialized":
+                return _HttpReply(status=202)
+            if method == "tools/list":
+                return _json_result(request, {"tools": [_tool()]})
+            return _HttpReply(status=400)
+
+        fixture = self.fixture(responder)
+        client = self.client(fixture, on_tools_changed=lambda changed_client: changed.append(1))
+        try:
+            client.start()
+            self.assertEqual(client.notification_stream, "opening")
+            wait_for(lambda: len(gets) >= 2, message="stream reconnection")
+            self.assertIsNone(gets[0])
+            self.assertEqual(gets[1], "stream-1")
+            self.assertEqual(client.notification_stream, "open")
+            wait_for(lambda: changed, message="tools-changed notification")
+            stream_gets = [request for request in fixture.requests if request.method == "GET"]
+            self.assertTrue(all(request.header("accept") == "text/event-stream" for request in stream_gets))
+            self.assertTrue(all(request.header("mcp-session-id") == session for request in stream_gets))
+            self.assertTrue(all("authorization" not in request.headers for request in stream_gets))
+        finally:
+            stop.set()
+            client.close()
+
+        self.assertEqual(client.notification_stream, "closed")
+        self.assertEqual(fixture.errors, ())
+
+    def test_permanent_get_stream_replayed_event_identity_fails_closed(self) -> None:
+        session = "replay-session"
+        stop = threading.Event()
+        gets: list[Optional[str]] = []
+        failures: list[str] = []
+
+        def responder(request: _HttpRequest) -> _HttpReply:
+            if request.method == "DELETE":
+                return _HttpReply()
+            if request.method == "GET":
+                gets.append(request.header("last-event-id"))
+                return _HttpReply(
+                    headers={"Content-Type": "text/event-stream"},
+                    body=_sse_event(
+                        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+                        event_id="replay-1",
+                    ),
+                    include_content_length=False,
+                )
+            message = request.message()
+            method = message["method"]
+            if method == "initialize":
+                return _json_result(
+                    request,
+                    _initialize_result(list_changed=True),
+                    headers={"Mcp-Session-Id": session},
+                )
+            if method == "notifications/initialized":
+                return _HttpReply(status=202)
+            if method == "tools/list":
+                return _json_result(request, {"tools": [_tool()]})
+            return _HttpReply(status=400)
+
+        fixture = self.fixture(responder)
+        client = self.client(
+            fixture,
+            on_failure=lambda failing, error: failures.append(error.code),
+            backoff_initial_ms=10,
+        )
+        try:
+            client.start()
+            wait_for(lambda: len(gets) >= 2, message="stream replay")
+            self.assertEqual(gets[1], "replay-1")
+            wait_for(lambda: failures, message="fatal replay error")
+            self.assertEqual(failures[0], "sse_event_replayed")
+            wait_for(lambda: not client.alive, message="fatal client state")
+            self.assertEqual(client.fatal_error.code, "sse_event_replayed")
+        finally:
+            stop.set()
+            client.close()
+
+    def test_permanent_get_stream_is_absent_without_declared_notifications(self) -> None:
+        session = "quiet-session"
+
+        def responder(request: _HttpRequest) -> _HttpReply:
+            if request.method == "DELETE":
+                return _HttpReply()
+            if request.method == "GET":
+                self.fail("the bridge must not open a GET stream the server did not offer")
+            message = request.message()
+            method = message["method"]
+            if method == "initialize":
+                return _json_result(
+                    request,
+                    _initialize_result(),
+                    headers={"Mcp-Session-Id": session},
+                )
+            if method == "notifications/initialized":
+                return _HttpReply(status=202)
+            if method == "tools/list":
+                return _json_result(request, {"tools": [_tool()]})
+            return _HttpReply(status=400)
+
+        fixture = self.fixture(responder)
+        client = self.client(fixture)
+        try:
+            client.start()
+            client.list_tools()
+            time.sleep(0.1)
+            self.assertEqual(client.notification_stream, "off")
+        finally:
+            client.close()
+        self.assertEqual(fixture.errors, ())
+
+    def test_permanent_get_stream_405_is_inert_and_never_retried(self) -> None:
+        session = "unsupported-session"
+        gets: list[int] = []
+
+        def responder(request: _HttpRequest) -> _HttpReply:
+            if request.method == "DELETE":
+                return _HttpReply()
+            if request.method == "GET":
+                gets.append(1)
+                return _HttpReply(status=405)
+            message = request.message()
+            method = message["method"]
+            if method == "initialize":
+                return _json_result(
+                    request,
+                    _initialize_result(list_changed=True),
+                    headers={"Mcp-Session-Id": session},
+                )
+            if method == "notifications/initialized":
+                return _HttpReply(status=202)
+            if method == "tools/list":
+                return _json_result(request, {"tools": [_tool()]})
+            return _HttpReply(status=400)
+
+        fixture = self.fixture(responder)
+        failures: list[str] = []
+        client = self.client(fixture, on_failure=lambda failing, error: failures.append(error.code))
+        try:
+            client.start()
+            wait_for(lambda: client.notification_stream == "unsupported", message="stream rejection")
+            tools = client.list_tools()
+            self.assertEqual(len(tools), 1)
+            time.sleep(0.2)
+            self.assertEqual(len(gets), 1)
+            self.assertEqual(failures, [])
+            self.assertTrue(client.alive)
+            self.assertIn(
+                "notification stream was not offered",
+                " ".join(entry.text for entry in client.logs.snapshot()),
+            )
+        finally:
+            client.close()
+        self.assertEqual(fixture.errors, ())
+
+    def test_manager_refreshes_the_catalog_from_the_permanent_stream(self) -> None:
+        session = "manager-stream-session"
+        stop = threading.Event()
+        extra = {
+            **_tool(),
+            "name": "second",
+            "description": "Second bounded fixture tool",
+        }
+
+        def responder(request: _HttpRequest) -> _HttpReply:
+            if request.method == "DELETE":
+                return _HttpReply()
+            if request.method == "GET":
+                if not state["notified"]:
+                    state["notified"] = True
+                    return _HttpReply(
+                        headers={"Content-Type": "text/event-stream"},
+                        body=_sse_event(
+                            {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+                            event_id="manager-1",
+                        ),
+                        include_content_length=False,
+                    )
+                return _HttpReply(
+                    headers={"Content-Type": "text/event-stream"},
+                    include_content_length=False,
+                    stream=lambda handle: stop.wait(timeout=5),
+                )
+            message = request.message()
+            method = message["method"]
+            if method == "initialize":
+                return _json_result(
+                    request,
+                    _initialize_result(list_changed=True),
+                    headers={"Mcp-Session-Id": session},
+                )
+            if method == "notifications/initialized":
+                return _HttpReply(status=202)
+            if method == "tools/list":
+                tools = [_tool(), extra] if state["notified"] else [_tool()]
+                return _json_result(request, {"tools": tools})
+            return _HttpReply(status=400)
+
+        state: dict[str, bool] = {"notified": False}
+        fixture = self.fixture(responder)
+        with tempfile.TemporaryDirectory() as directory:
+            extension = FakeExtension(Path(directory))
+            manager = BridgeManager(
+                extension,
+                BridgeConfig(
+                    servers=(_remote_config(fixture.url, request_timeout_ms=500),),
+                    limits=limits(
+                        backoff_initial_ms=10,
+                        backoff_max_ms=20,
+                        shutdown_timeout_ms=250,
+                    ),
+                ),
+                scratch_directory=Path(directory),
+                experimental_streamable_http_mcp=True,
+                resource_owner=OWNER,
+            )
+            try:
+                manager.start()
+                wait_for(
+                    lambda: _server_node(manager.snapshot(), "remote")["state"] == "active",
+                    message="remote manager ready",
+                )
+                wait_for(lambda: len(extension._tools) == 2, message="stream-driven catalog refresh")
+            finally:
+                stop.set()
+                manager.shutdown()
+
+        self.assertEqual(fixture.errors, ())
 
     def test_manager_fails_closed_when_auth_has_no_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

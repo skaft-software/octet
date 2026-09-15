@@ -267,6 +267,13 @@ pub struct ResponsesOptions {
     /// Responses storage policy. Durable agent replay uses `false`.
     #[serde(default)]
     pub store: bool,
+    /// Requested provider service tier (`service_tier`).
+    ///
+    /// `None` means the caller made no request and the codec sends no tier. A
+    /// codec fails closed when the selected route's declared profile does not
+    /// accept the field instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<crate::types::ServiceTier>,
 }
 
 impl ResponsesOptions {
@@ -281,7 +288,19 @@ impl ResponsesOptions {
             previous_response_id: None,
             context_management: None,
             store: false,
+            service_tier: None,
         }
+    }
+
+    /// Returns these options with a requested provider service tier.
+    ///
+    /// The tier rides on Requests-family options because it is a Responses
+    /// request control; nothing here decides whether the selected endpoint may
+    /// receive it. The codec re-checks the route's declared
+    /// [`crate::ResponsesRuntimeProfile`] and fails closed.
+    pub fn with_service_tier(mut self, tier: crate::types::ServiceTier) -> Self {
+        self.service_tier = Some(tier);
+        self
     }
 }
 

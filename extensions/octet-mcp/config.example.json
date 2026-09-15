@@ -21,6 +21,10 @@
       "transport": "streamable-http",
       "label": "Example remote MCP",
       "url": "https://mcp.example.invalid/mcp",
+      "auth": {
+        "type": "static-bearer",
+        "environment": "OCTET_MCP_EXAMPLE_TOKEN"
+      },
       "enabled": false,
       "required": false
     }

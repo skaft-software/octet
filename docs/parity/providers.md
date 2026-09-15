@@ -37,6 +37,34 @@ route/discovery/credential declaration is landed; the static catalog needs a
 models.dev generation pass. Deterministic checks here do not qualify live
 provider availability.
 
+## Codex `service_tier` (row 1a.1 — landed, unblocks roadmap #175 `/fast`)
+
+Upstream anchors: `packages/ai/src/api/openai-responses.ts:105`, `:321`
+(`params.service_tier = options.serviceTier`), `:362-389`
+(`getServiceTierCostMultiplier` / `applyServiceTierPricing`);
+`packages/ai/src/api/openai-codex-responses.ts:75`, `:566`, `:600-625`
+(same field and multipliers on the Codex envelope).
+
+Outcome (landed): octet:`crates/octet-ai/src/types.rs` adds the typed
+`ServiceTier` (`auto | default | flex | priority`) and
+`ResponsesRuntimeProfile::accepts_service_tier`, the declared capability.
+octet:`crates/octet-ai/src/responses.rs` (`ResponsesOptions::service_tier`,
+`with_service_tier`) carries the per-request selection;
+octet:`crates/octet-ai/src/protocol/openai_responses.rs` emits the
+`service_tier` body field and fails closed with
+`UnsupportedError::ServiceTier` for any profile that does not declare it.
+Behavioral tests: `service_tier_is_absent_unless_the_caller_requests_it`,
+`codex_service_tier_wire_values_match_the_declared_tiers`,
+`service_tier_fails_closed_on_a_profile_that_does_not_declare_it`
+(`cargo test -p octet-ai --lib service_tier` -> 3 passed).
+
+Gap: `applyServiceTierPricing` (usage-cost multiplier 0.5 flex, 2 priority,
+2.5 for `gpt-5.5` priority) is not applied to `Response.cost`. Named missing
+primitive: thread the requested/echoed tier into
+`ResponseBuilder::finish` (`crates/octet-ai/src/stream.rs:809-822`, the only
+`cost_of` call on the Responses streaming path). Until then octet reports the
+catalog-rate cost and never a fabricated tier-adjusted one.
+
 ## 1b.1 — per-request overrides
 
 Upstream anchors: `packages/ai/src/types.ts:130` (`fetch`),

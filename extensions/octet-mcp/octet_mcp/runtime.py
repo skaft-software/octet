@@ -13,11 +13,13 @@ from octet_extension import Extension
 
 from .config import (
     STREAMABLE_HTTP_GATE_ERROR,
+    STATIC_CREDENTIAL_AUTH_TYPE,
     BridgeConfig,
     ConfigError,
     load_config,
 )
 from .manager import BridgeManager
+from .streamable_http import StaticEnvironmentCredentialProvider
 
 
 SUPPORTED_FEATURES = (
@@ -47,6 +49,30 @@ class ProtocolReadyExtension(Extension):
             and isinstance(result.get("protocol"), Mapping)
         ):
             self.protocol_ready.set()
+
+
+def static_credential_provider(
+    config: BridgeConfig,
+) -> Optional[StaticEnvironmentCredentialProvider]:
+    """Compose the bundled static credential source only when it is configured.
+
+    The bridge never inspects ambient environment variables by itself. A
+    ``static-bearer`` server descriptor must explicitly name one
+    ``OCTET_MCP_*`` variable, and the provider refuses any other name. Every
+    other remote descriptor keeps the fail-closed unavailable default until the
+    process owner explicitly composes a host credential adapter. OAuth/browser
+    authorization stays policy-gated and unimplemented.
+    """
+
+    for server in config.servers:
+        if (
+            server.enabled
+            and server.transport == "streamable-http"
+            and server.auth is not None
+            and server.auth.type == STATIC_CREDENTIAL_AUTH_TYPE
+        ):
+            return StaticEnvironmentCredentialProvider()
+    return None
 
 
 def build_runtime(
@@ -94,6 +120,7 @@ def build_runtime(
         scratch_directory=Path(
             os.environ.get("OCTET_EXTENSION_SCRATCH", ".octet-mcp-scratch")
         ),
+        credential_provider=static_credential_provider(config),
         experimental_streamable_http_mcp=experimental_streamable_http_mcp,
     )
 

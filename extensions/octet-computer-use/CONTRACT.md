@@ -85,6 +85,35 @@ namespace nor established descriptor/capability/syscall isolation. No shipped
 launcher is qualified, including on Linux. Failed or unsupported containment
 must execute no model source, even with all capability booleans set to true.
 
+## Host integration blocker (unchanged)
+
+The scoped authorization *inside* this extension is wired and fail-closed: the
+entry point dispatches through `MacOSRuntime`, which owns the `LifecycleSession`
+and the exact-action `PolicyGate`, and a created runtime refuses to exist unless
+the trusted `Scope` already matches the selected owner generation, session,
+target app/window and native identity. What remains unimplemented is the
+**host-brokered adapter**: API 0.3 offers no typed automation
+policy/approval/target-selection service, and the native protocol-1 host in
+`crates/octet-coding-agent/src/host/policy.rs` deliberately never starts
+executable extensions. The exact missing primitive is a negotiated API 0.3
+capability (for example `policy/evaluate` plus a host-owned approval/target
+selection service) that supplies `PolicyEvaluator.evaluate_action`, `Scope` and
+owner/target settlement to this process. No Rust host authority was fabricated,
+and no cooperative confirmation UI, native permission flag, model context or
+configuration field is treated as that authority. Until then the standalone
+process stays inert (no evaluator, no scope, no factory, no dispatcher).
+
+## Stop, takeover and scope lifetime
+
+`stop()`, `takeover()`, process EOF/shutdown, cancellation and lost response
+transport are the only revocation entry points; they are not tool operations and
+cannot be named by model arguments or host context fields. A stopped or replaced
+binding is not reusable: the gate is terminally revoked and the lifecycle owner
+is settled, so a later request is denied before policy evaluation, before the
+native factory and before input, even when its scope identifier, frame
+generation or captured grant is replayed. An unknown or replaced scope
+identifier is denied at the same boundary.
+
 ## Verification boundary
 
 Deterministic tests exercise the actual entrypoint, lifecycle, backend, policy
@@ -93,3 +122,9 @@ load native OS APIs, start code workers, contact providers or ask permissions.
 They are not live macOS/Windows, sandbox-escape, host-frontend, package-install
 or release-packaging qualification. Outstanding work is recorded explicitly;
 no unrun test or platform check is reported as passed.
+
+The stop/scope lifetime properties above are covered by
+`tests/test_runtime.py::RuntimeTests::test_unknown_or_replaced_scope_identifier_dispatches_nothing`,
+`::test_stopped_binding_cannot_redeem_a_captured_grant_or_frame` and
+`::test_stop_and_takeover_are_trusted_entry_points_not_tool_arguments`, alongside
+the existing policy/lifecycle/runtime suites.

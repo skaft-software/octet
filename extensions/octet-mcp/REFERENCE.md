@@ -113,19 +113,39 @@ client lifetime, with no second DNS lookup during connection; TLS still uses the
 original endpoint hostname for SNI and certificate verification. Non-public HTTPS
 endpoints are not supported (apart from that literal loopback exception).
 
-Remote `auth` contains only a logical credential reference, never a token or
-header value. A host/application composition may inject the narrow
-`CredentialProvider.bearer_token(reference, server_id=..., resource_owner=...)` adapter; the bridge
-asks it at request time, uses the returned token only to form that request's
-`Authorization: Bearer` header, redacts it from parsed remote data, then drops
-it. The owner is an immutable host-issued `ResourceOwner`, never a tool argument.
-Adapters must bind their lookup to that complete owner and return promptly; a
-blocking application callback cannot be forcibly killed inside Python. Its late
-return cannot initiate DNS or a connection after cancellation/deadline.
-The normal bundled runtime intentionally has no provider, so an owner-bound server
-requiring auth parks with `authentication_unavailable`. OAuth discovery, browser redirects,
-token acquisition/refresh, persistent token stores, static config headers, and
-secret environment fallback are not implemented.
+Remote `auth` never contains a token or header value; it names one of two
+explicit sources. `{"type": "bearer", "credential": "<reference>"}` is a bounded
+logical reference that only an explicitly composed
+`CredentialProvider.bearer_token(reference, server_id=..., resource_owner=...)`
+adapter can resolve; the bridge asks it at request time, uses the returned token
+only to form that request's `Authorization: Bearer` header, redacts it from
+parsed remote data, then drops it. The owner is an immutable host-issued
+`ResourceOwner`, never a tool argument. Adapters must bind their lookup to that
+complete owner and return promptly; a blocking application callback cannot be
+forcibly killed inside Python. Its late return cannot initiate DNS or a
+connection after cancellation/deadline.
+
+`{"type": "static-bearer", "environment": "OCTET_MCP_<NAME>"}` is the only
+bundled static source. It must name exactly one environment variable inside this
+extension's own `OCTET_MCP_*` namespace; the bridge reads that name from the
+process environment per request, so a rotated value is observed without
+retaining it, and it refuses any other name so a configuration cannot point the
+bridge at an unrelated ambient provider/cloud token. The value is never stored,
+logged, echoed in an error or diagnostic, sent to `presentation`, or included in
+result metadata; an unset or unnamespaced name fails closed as
+`authentication_unavailable` before any socket is opened. Either way, an
+owner-bound server whose source resolves nothing parks with
+`authentication_unavailable`.
+
+OAuth discovery, dynamic client registration, browser redirects, token
+acquisition/refresh, keychains, dotenv files, persistent token stores, arbitrary
+static config headers, and env-var fallback outside `OCTET_MCP_*` are **not**
+implemented and are policy-gated. The exact missing primitive is a
+host-brokered OAuth/credential authorization service negotiated over the
+extension API (a typed `authorization/request` capability plus a host-owned
+token store); nothing in the extension API or this package may substitute a
+self-composed browser flow, and a configuration file must never be able to
+widen it.
 
 ### Known Streamable HTTP defects
 
@@ -156,11 +176,27 @@ multi-owner partitioning, owner-settlement cleanup and host-qualified owner-spec
 catalog visibility remain unimplemented; foreign tool calls fail closed. These
 limitations must not be mistaken for a fully shared remote service.
 
+Static, extension-scoped credentials and the optional permanent GET notification
+stream are now implemented and covered by deterministic loopback regressions
+(`tests/test_streamable_http.py`), so the previous "no static credentials / no
+permanent GET stream" defects are closed locally. Two gates remain open:
+
+- **OAuth/credential brokering is policy-gated, not missing by accident.** The
+  exact missing primitive is a host-brokered authorization service negotiated
+  over the extension API — a typed `authorization/request` capability with a
+  host-owned token store and refresh ownership. Nothing in the bundled API `0.2`
+  surface can express it, and this package will not substitute a self-composed
+  browser/OAuth flow or read an ambient provider token.
+- **No live remote qualification.** All stream/credential evidence comes from
+  deterministic loopback HTTP fixtures; no external MCP server, real credential,
+  real OAuth server, or long-duration stream has been exercised here.
+
 An injected synchronous credential/progress callback is trusted application code;
 Python cannot forcibly terminate it. Its operation remains bounded in admission
 and late network activity is fenced, but full cleanup cannot be guaranteed until
-it returns. The stock executable still has no credential adapter. API `0.2`
-product integration and release qualification remain independent gates.
+it returns. An unresolved `bearer` reference still has no stock credential
+adapter. API `0.2` product integration and release qualification remain
+independent gates.
 
 ## Requirements and installation
 
@@ -218,7 +254,8 @@ duplicate server IDs, NUL/control characters, mutually incompatible transport
 fields, unsafe remote URLs, and values outside package ceilings. Commands are
 direct argument arrays and never pass through a shell. Remote endpoints are exact
 URL strings rather than discovery patterns; there is no raw `headers`, token,
-password, or OAuth configuration field.
+password, or OAuth configuration field. The one static credential form names an
+extension-scoped `OCTET_MCP_*` environment variable and never carries its value.
 
 A minimal user file is:
 
@@ -278,10 +315,31 @@ absolute endpoint. It accepts `https`; `http` is accepted only for literal
 
 `credential` is a bounded logical reference, not a secret. It requires an
 application-provided `CredentialProvider`; the stock executable fails closed
-without one. Omit `auth` for an endpoint that does not need authorization. Do
-not put tokens in a URL, label, argument, `env`, or any other config field. The
-parser rejects remote header/auth-value fields and this package deliberately does
-not offer static HTTP headers.
+without one. The bundled static form is likewise explicit and extension-scoped:
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "remote-static-example": {
+      "transport": "streamable-http",
+      "url": "https://mcp.example.invalid/mcp",
+      "auth": {"type": "static-bearer", "environment": "OCTET_MCP_REMOTE_TOKEN"}
+    }
+  }
+}
+```
+
+`environment` must match `OCTET_MCP_` followed by uppercase letters, digits, or
+underscores (at most 48 more bytes). The bridge reads exactly that variable from
+the process environment on each request, holds no token, and never logs, echoes,
+or publishes it; an unset variable fails closed as `authentication_unavailable`.
+Any other name — including an ambient `OPENAI_API_KEY`-style provider token — is
+rejected by the parser and by the bundled source. Omit `auth` for an endpoint
+that does not need authorization. Do not put tokens in a URL, label, argument,
+`env`, or `headers`: the parser still rejects a `headers` field and any
+`auth` field that would carry a literal token, and this package deliberately
+offers no arbitrary static header or OAuth configuration.
 
 ### Digest-pinned trusted project configuration
 
@@ -354,9 +412,24 @@ terminal response *after* such an ID, the bridge may perform at most the
 configured `maxRestarts` bounded GET resumptions with `Last-Event-ID`; it never
 re-POSTs the original request. Without an ID, an interrupted request is
 ambiguous and is not replayed. Server-provided SSE `retry` values are capped by
-the configured backoff maximum. This path does not open a permanent optional GET
-notification stream and does not implement the retired standalone/legacy SSE
-transport.
+the configured backoff maximum.
+
+After the `initialize` response and `notifications/initialized`, the bridge opens
+the optional permanent GET notification stream **only when the negotiated server
+capabilities actually declare a `listChanged: true` capability**. That stream is
+best-effort and never gates a request: `405 Method Not Allowed` marks it
+`unsupported` in one bounded log line and it is never retried, while every POST
+path keeps working. Each connection is renewed inside the configured
+`requestTimeoutMs`, so an idle stream connection is a normal renewal rather than
+a failure; a connection ends with a committed SSE event ID, the next connection
+sends that exact `Last-Event-ID`, and a peer that replays the acknowledged
+identity fails closed with `sse_event_replayed` (an empty `id:` clears the
+cursor). Its committed cursor is memory-only, exactly like the session identity.
+At most `backoffInitialMs`→`backoffMaxMs` consecutive failed connections (bounded
+by `maxRestarts`) and at most 64 total connections are attempted; exceeding
+either ends the stream through the normal bounded lifecycle failure path instead
+of looping forever. The retired standalone/legacy SSE transport is still not
+implemented.
 
 HTTP response bodies, event streams, request slots, timeouts, and shutdown use
 the configured bounds, subject to the closure gates above. Redirects are rejected

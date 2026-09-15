@@ -281,3 +281,41 @@ Re-verification after formatting:
   target(s) in 41.23s`.
 - `git diff --check -- crates/octet-agent/src/tool.rs crates/octet-agent/src/tools/
   crates/octet-agent/tests/parity_tools.rs` → exit 0 (no whitespace errors).
+
+START 2026-09-15T15:43:44Z tools5 alive
+
+## 2026-09-15T16:20Z tools5 — rows 4.7 / 4.11 / 4.12 / 4.14 implemented, tests green
+
+Files (all exclusive to this worker):
+- `crates/octet-agent/src/tools/durability.rs` (new): durable invocation-scoped
+  store — one replaceable `pi.pending.tool_output` value (4.7) and named
+  `pi.op.tool_memo` values (4.11), fenced on the invocation still being
+  `effect_pending`, with hard bounds on value bytes, values per invocation, live
+  invocations, and retained settled invocations.
+- `crates/octet-agent/src/tools/deferred.rs` (new): `DeferredHandle` validation,
+  `deferred.suspended`/`deferred.effect_pending` leaves, one-poll-per-pass
+  `DeferredPollPermit`, and fail-closed refusals for stale/duplicate/foreign/
+  expired polls (4.12).
+- `crates/octet-agent/src/tools/summarization.rs` (new): shared summarization
+  retry policy plus `SummarizationRetryScheduled` vs `CompactionFailure` /
+  `CompactionStepOutcome` typed outcomes and a driver that commits the summary at
+  most once (4.14).
+- `crates/octet-agent/src/tools/bash.rs`: `BashCheckpointPublisher`
+  (interval-bound, duplicate-suppressed, bounded snapshot), `BashCheckpoints`,
+  and `CheckpointedBashTool`; `read_bounded_with_progress` now observes the
+  bounded capture at interval boundaries.
+- `crates/octet-agent/src/tool.rs`: `PartialOutputCheckpointSink` contract.
+- `crates/octet-agent/src/tools/mod.rs`: module declarations + re-exports.
+- `crates/octet-agent/tests/parity_tools.rs`: 6 new behavioral tests (23 total).
+
+Observed:
+- `cargo test -p octet-agent --test parity_tools -- --nocapture --test-threads=1`
+  → `test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;
+  finished in 0.41s`, with
+  `observed 6 durable checkpoints at a 30 ms cadence; last snapshot 90 bytes`,
+  `observed waiting(handle=resp-1) for a permit-less pass against generation 0`,
+  and `observed retry diagnostic Some("summarization retry scheduled 1/3 in 0ms:
+  stream dropped on attempt 1") and boundary diagnostic "compaction boundary
+  failed: summarization retries exhausted after 3 attempts: socket closed"`.
+- `cargo test -p octet-agent --lib` → `test result: ok. 533 passed; 0 failed;
+  1 ignored`.

@@ -102,8 +102,9 @@ pub use types::{
     ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
     ReasoningEffortBudgets, ReasoningMode, ReasoningPart, ReasoningState, ReasoningStateKind,
     Request, RequestBodyEncoding, RequestRuntime, Response, ResponsesRuntimeProfile,
-    SessionAffinityFormat, StopReason, ToolArgumentValidation, ToolCall, ToolCallArgumentError,
-    ToolCallId, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
+    ServiceTier, SessionAffinityFormat, StopReason, ToolArgumentValidation, ToolCall,
+    ToolCallArgumentError, ToolCallId, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage,
+    UserMessage, UserPart,
 };
 
 /// Selects reasoning for a host-generated auxiliary request.

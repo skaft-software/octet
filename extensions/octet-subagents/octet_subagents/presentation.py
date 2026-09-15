@@ -56,6 +56,27 @@ def duration_label(elapsed_ms: int) -> str:
     return "%02d:%02d" % (minutes, seconds)
 
 
+def human_duration(elapsed_ms: int) -> str:
+    """Readable elapsed label for the live panel: `42s`, `5m49s`, `2h05m`."""
+    total_seconds = max(0, elapsed_ms // 1000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return "%dh%02dm" % (hours, minutes)
+    if minutes:
+        return "%dm%02ds" % (minutes, seconds)
+    return "%ds" % seconds
+
+
+def human_tokens(value: int) -> str:
+    """Bounded-width token label: exact below 10K, then `13K`, then `1.2M`."""
+    if value < 10_000:
+        return str(value)
+    if value < 995_000:
+        return "%.0fK" % (value / 1000.0)
+    return "%.1fM" % (value / 1_000_000.0)
+
+
 def cost_label(microdollars: Optional[int]) -> str:
     if microdollars is None:
         return "?"
@@ -139,51 +160,55 @@ def worker_references(worker: Worker) -> List[Dict[str, Any]]:
 
 
 def worker_secondary(worker: Worker, now_ms: int) -> str:
-    state = STATE_LABEL.get(worker.state, safe_label(worker.state))
-    if worker.max_turns is None:
-        turns = "%s turns, no ceiling" % (
-            worker.turn_count if worker.turn_count is not None else "?"
-        )
-    else:
-        turns = "?/%d turns" % worker.max_turns
-        if worker.turn_count is not None:
-            turns = "%d/%d turns" % (worker.turn_count, worker.max_turns)
-    if worker.max_tokens is None:
-        tokens = "%s tok · inherited no ceiling" % (
-            worker.tokens_used if worker.tokens_used is not None else "?"
-        )
-    else:
-        tokens = "?/%d tok" % worker.max_tokens
-        if worker.tokens_used is not None:
-            tokens = "%d/%d tok" % (worker.tokens_used, worker.max_tokens)
-    if worker.max_cost_microdollars is None:
-        cost = "%s / no ceiling" % cost_label(worker.cost_microdollars)
-    else:
-        cost = "%s/%s" % (
-            cost_label(worker.cost_microdollars),
-            cost_label(worker.max_cost_microdollars),
-        )
-    restart = " · restarted" if worker.recovered else ""
-    tool_calls = "%d tool call%s" % (
-        worker.tool_call_count,
-        "" if worker.tool_call_count == 1 else "s",
+    """Information-only row for the live `/subagents` panel.
+
+    Absence is never rendered as text: an inherited turn/token/cost ceiling, an
+    unexposed counter, and a healthy worker's missing failure reason are simply
+    omitted. Every field that remains carries information, so a panel of many
+    workers cannot fill with `no ceiling`/`?` placeholders. Values are
+    human-format (`5m49s`, `263K`) so a bounded row still reads as data.
+    """
+    pieces = [
+        STATE_LABEL.get(worker.state, safe_label(worker.state)),
+        human_duration(worker.elapsed_ms(now_ms)),
+        "%s/%s" % (worker.profile, worker.effective_model),
+    ]
+    pieces.append(
+        "%d call%s" % (worker.tool_call_count, "" if worker.tool_call_count == 1 else "s")
     )
-    # Tool identities and arguments belong only in the explicit inspector.
-    return bounded_text(
-        "%s · %s · %s/%s · %s · %s · %s · %s%s"
-        % (
-            state,
-            duration_label(worker.elapsed_ms(now_ms)),
-            worker.profile,
-            worker.effective_model,
-            tool_calls,
-            turns,
-            tokens,
-            cost,
-            restart,
-        ),
-        1024,
-    )
+    if worker.turn_count is not None:
+        if worker.max_turns is not None:
+            pieces.append("%d/%d turns" % (worker.turn_count, worker.max_turns))
+        else:
+            pieces.append("%d turns" % worker.turn_count)
+    elif worker.max_turns is not None:
+        pieces.append("max %d turns" % worker.max_turns)
+    if worker.tokens_used is not None:
+        used = human_tokens(worker.tokens_used)
+        if worker.max_tokens is None:
+            pieces.append("%s tok" % used)
+        else:
+            pieces.append("%s/%s tok" % (used, human_tokens(worker.max_tokens)))
+    if worker.cost_microdollars is not None:
+        if worker.max_cost_microdollars is None:
+            pieces.append(cost_label(worker.cost_microdollars))
+        else:
+            pieces.append(
+                "%s/%s"
+                % (
+                    cost_label(worker.cost_microdollars),
+                    cost_label(worker.max_cost_microdollars),
+                )
+            )
+    if worker.recovered:
+        pieces.append("restarted")
+    if worker.state in {"failed", "timed_out"}:
+        # A failed row without its bounded reason is useless; the reason is a
+        # host-observed failure class, never tool arguments or child prose.
+        reason = bounded_text(safe_label(worker.last_error or ""), 160).strip()
+        if reason:
+            pieces.append(reason)
+    return bounded_text(" · ".join(pieces), 1024)
 
 
 def detail_body(worker: Worker, now_ms: int) -> str:

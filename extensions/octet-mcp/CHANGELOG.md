@@ -17,8 +17,14 @@
   visibility/settlement, uncooperative injected callbacks and live/platform
   qualification remain closure gates. Ownerless remotes now park until an owned
   `/mcp restart <server>`; foreign owners require a new extension process.
-- Credential adapters now receive the immutable host `ResourceOwner`; there is
-  still no stock credential provider, static auth header or OAuth flow.
+- Credential adapters now receive the immutable host `ResourceOwner`; an
+  unresolved `bearer` reference still has no stock credential adapter or OAuth
+  flow.
+- Add the bundled static credential source: `"type": "static-bearer"` with an
+  extension-scoped `OCTET_MCP_*` `environment` name, read per request and never
+  stored, logged, echoed, or published. Non-namespaced names (for example an
+  ambient provider token) and any literal token field stay rejected, so the
+  fail-closed default is unchanged.
 
 ### Added
 
@@ -30,9 +36,21 @@
 - Add an explicit, bounded Streamable HTTP transport with negotiated session
   identity, JSON/SSE response framing, no-replay SSE resumption, cancellation,
   status/content-type policy, and lifecycle reconnects.
+- Add the optional permanent GET notification stream. It opens only when the
+  negotiated server capabilities declare `listChanged: true`, renews each
+  connection inside `requestTimeoutMs`, reconnects with the committed
+  `Last-Event-ID`, fails closed on a replayed acknowledged identity
+  (`sse_event_replayed`), treats `405` as `unsupported` without failing any POST
+  path, and is bounded by `backoffInitialMs`→`backoffMaxMs`/`maxRestarts` and 64
+  total connections.
+- Add deterministic static-credential and permanent-stream regressions: scoped
+  environment resolution, rotation, refusal of ambient names, absent/unset
+  variables, committed-cursor reconnection, replayed identity, `405`
+  non-retry, no GET without a declared capability, and a manager catalog refresh
+  driven by a stream notification.
 - Add strict remote configuration, exact-origin/TLS/redirect controls, and a
-  non-persistent bearer credential-adapter boundary; OAuth and static credential
-  configuration remain intentionally unsupported.
+  non-persistent bearer credential-adapter boundary; OAuth/browser authorization
+  remains policy-gated and unimplemented.
 
 <a id="010--ygg-061"></a>
 

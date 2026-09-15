@@ -1,0 +1,27 @@
+{
+  "object" : {
+    "artifacts" : [
+
+    ],
+    "dependencies" : [
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "apple-shared",
+          "kind" : "fileSystem",
+          "location" : "/Users/achumukundan/github/skaft-software/octet/apps/apple-shared",
+          "name" : "OctetServe"
+        },
+        "state" : {
+          "name" : "fileSystem",
+          "path" : "/Users/achumukundan/github/skaft-software/octet/apps/apple-shared"
+        },
+        "subpath" : "apple-shared"
+      }
+    ],
+    "prebuilts" : [
+
+    ]
+  },
+  "version" : 7
+}

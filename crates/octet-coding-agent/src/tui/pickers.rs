@@ -21,6 +21,7 @@ use crate::session_store::{SessionMeta, SessionStorageLifecycle, SessionStore};
 use crate::tui::view::{
     ForkMessage, InteractiveShell, MessagePicker, OrdinarySurfaceLifecycle,
     OrdinarySurfaceMetadata, Panel, PanelAction, PanelRequest, PanelResult, PickerState,
+    SubagentGroup, SubagentPanel,
 };
 
 const MAX_SECRET_INPUT_BYTES: usize = 4096;
@@ -412,6 +413,9 @@ pub struct SubagentPickerSnapshot {
     pub items: Vec<String>,
     pub descriptions: Vec<Option<String>>,
     pub node_ids: Vec<String>,
+    /// Declared state groups, aligned with `items` by index. Group headings are
+    /// panel chrome and never selectable rows.
+    pub groups: Vec<SubagentGroup>,
     pub notices: Vec<String>,
 }
 
@@ -440,7 +444,14 @@ where
         descriptions: initial.descriptions,
         selected,
         filter: String::new(),
-        action: PanelAction::SelectSubagent(initial.node_ids),
+        action: PanelAction::SelectSubagent(SubagentPanel {
+            node_ids: initial.node_ids,
+            groups: initial.groups,
+            // Terminal groups start collapsed so finished workers cannot bury
+            // live ones; ctrl+t toggles them back on.
+            collapsed: true,
+            state_filter: None,
+        }),
     });
     for notice in initial.notices {
         shell.notice(notice);
@@ -483,8 +494,8 @@ where
                 if let Some((result, action)) = shell.panel_input(&event) {
                     shell.render();
                     return Ok(match (result, action) {
-                        (PanelResult::Confirm(index), PanelAction::SelectSubagent(node_ids)) => {
-                            node_ids.get(index).cloned()
+                        (PanelResult::Confirm(index), PanelAction::SelectSubagent(panel)) => {
+                            panel.node_ids.get(index).cloned()
                         }
                         (PanelResult::Cancel, _) => None,
                         _ => None,
@@ -501,7 +512,12 @@ where
                     snapshot.title,
                     snapshot.items,
                     snapshot.descriptions,
-                    snapshot.node_ids,
+                    SubagentPanel {
+                        node_ids: snapshot.node_ids,
+                        groups: snapshot.groups,
+                        collapsed: true,
+                        state_filter: None,
+                    },
                 );
                 shell.render();
             }
@@ -1656,6 +1672,18 @@ mod tests {
                 items: vec!["beta".into(), "gamma".into()],
                 descriptions: vec![Some("done".into()), Some("running".into())],
                 node_ids: vec!["node-b".into(), "node-c".into()],
+                groups: vec![
+                    SubagentGroup {
+                        label: "Running".into(),
+                        indices: vec![1],
+                        collapsible: false,
+                    },
+                    SubagentGroup {
+                        label: "Done".into(),
+                        indices: vec![0],
+                        collapsible: true,
+                    },
+                ],
                 notices: Vec::new(),
             }
         })
@@ -1685,6 +1713,11 @@ mod tests {
                 items: vec!["alpha".into(), "beta".into()],
                 descriptions: vec![Some("running".into()), Some("running".into())],
                 node_ids: vec!["node-a".into(), "node-b".into()],
+                groups: vec![SubagentGroup {
+                    label: "Running".into(),
+                    indices: vec![0, 1],
+                    collapsible: false,
+                }],
                 notices: Vec::new(),
             },
             1,
