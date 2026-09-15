@@ -1,0 +1,994 @@
+[
+ {
+  "issue": 4,
+  "verdict": "absent",
+  "evidence": "crates/octet-coding-agent/src/migrate.rs:84 import subcommand (settings/model/skills/MCP only); docs/pi-migration.md:47 tablet of portable data",
+  "missing": "no Pi session/transcript import path",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 23,
+  "verdict": "not-code",
+  "evidence": "docs/design/extensions-spike.md:177 LSP row \"No host LSP manager\"",
+  "missing": "spike/evaluation deliverable; no LSP layer or design doc committed",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 41,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/extensions.rs:795 (host-validated shortcut registration); crates/octet-coding-agent/src/extensions.rs:5086 (reserved/first-owner unit test); crates/octet-agent/src/extension_process.rs:2743 (manifest ShortcutDefinition)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 42,
+  "verdict": "absent",
+  "evidence": "crates/octet-coding-agent/src/migrate.rs:2404 only analyzes Pi eventBus usage; docs/pi-migration.md:211 local event bus is a Pi-bridge compat feature",
+  "missing": "no host-level extension-to-extension event bus or API",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 47,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_process.rs:14761 (typed bounded flag validation); crates/octet-agent/src/extension_process.rs:16301 (API 0.3-only flag unit test); docs/extensions.md:136 (documented API 0.3 CLI flags)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 58,
+  "verdict": "implemented",
+  "evidence": "apps/web/src/shortcuts.ts:24 GLOBAL_SHORTCUTS table; apps/web/src/App.tsx:326 \"?\" shortcut-reference panel; apps/web/src/shortcuts.test.ts",
+  "missing": "\u2014",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 65,
+  "verdict": "partial",
+  "evidence": "apps/web/src/styles.css:182-215 .app-shell grid (sidebar/center/activity-inspector); apps/web/src/App.tsx:1215 resizePaneBy persists widths; apps/web/src/App.tsx:2089 pane resize handle",
+  "missing": "fixed pane set only: no user-created splits or rearrangeable layout",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 70,
+  "verdict": "implemented",
+  "evidence": "apps/web/src/model-preferences.ts:1-60 bounded per-model reasoning store; apps/web/src/model-preferences.test.ts",
+  "missing": "\u2014",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 71,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/extensions/serve/runs.rs:39-56 PR store+refresh worker; apps/web/src/notifications.ts:70 PR notification copy; apps/web/src/notifications.test.ts",
+  "missing": "\u2014",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 111,
+  "verdict": "not-code",
+  "evidence": "scripts/check-production-panics.py:21 defines clippy expect_used/unwrap_used audit; .github/workflows/production-panic-audit.yml:1 gated workflow; docs/qualification/production-panic-audit-current.md:3 status note",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "exact"
+ },
+ {
+  "issue": 112,
+  "verdict": "implemented",
+  "evidence": "Cargo.toml:44 (`ci-test`: limited debug, no incremental), Cargo.toml:51 (`profiling`: debug=full, lto=off, strip=none), docs/build-profiles.md:26; measurement-retention contract target scripts/tests/test_bench_systems.py:162 (retained repetitions/raw samples), wired at .github/workflows/ci.yml:94",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "exact"
+ },
+ {
+  "issue": 119,
+  "verdict": "not-code",
+  "evidence": "docs/design/extension-capability-and-orchestration-boundaries.md:91 scopes #119 as a spike with stop criteria",
+  "missing": "no durable-graph design or evaluation artifact committed",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 127,
+  "verdict": "not-code",
+  "evidence": "BACKLOG.md:169 design review; no design doc under docs/design/ for Serve command center",
+  "missing": "human design review, no code artifact committed",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 150,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/presentation/request.rs:187 tokens_per_second_milli; presentation/request.rs:203 RequestThroughputTracker; presentation/ownership_tests.rs:131",
+  "missing": "\u2014",
+  "src": "later",
+  "cite": "resolved"
+ },
+ {
+  "issue": 156,
+  "verdict": "partial",
+  "evidence": "crates/octet-coding-agent/src/migrate/migration_import.rs:326, crates/octet-coding-agent/src/migrate.rs:102, crates/octet-coding-agent/src/migrate/migration_import.rs:491",
+  "missing": "Pi adapter ships as a hidden built-in (`octet migrate adapter pi`, self-identifies as octet-import-pi); no `extensions/octet-import-pi/` package (manifest/tests/README) unlike octet-import-aider/-cline",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 157,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/migrate/migration_import.rs:154, crates/octet-coding-agent/src/migrate/migration_import.rs:1798, crates/octet-coding-agent/tests/migration_host_full.rs:113",
+  "missing": "\u2014 (real symbols are apply_ingestion_plan/create_backup/restore_backup + migration lock, not `apply_migrated_setup`)",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 160,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-import-cline/cline_import.py:1 (detect/import_setup), extensions/octet-import-cline/extension.py:633 (migration/detect dispatch), extensions/octet-import-cline/test_cline_import.py:235 (subprocess negotiation test)",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 161,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-import-aider/extension.py:67 (API 0.3 methods), extensions/octet-import-aider/tests/test_extension.py:81 (detect/import/shutdown canonical test)",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 162,
+  "verdict": "not-code",
+  "evidence": "docs/benchmarks/tb21-v0.6.2/verify.py:1 verifies evidence package checksums; docs/benchmarks/tb21-v0.6.2/run-full.sanitized.sh:3 reconstruction script; scripts/tests/test_bench_render.py:1 report-contract fixtures (runs in .github/workflows/ci.yml:97)",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "exact"
+ },
+ {
+  "issue": 173,
+  "verdict": "implemented",
+  "evidence": "crates/octet-ai/src/stream.rs:18 (queued/loading/ready state), crates/octet-ai/src/client.rs:1084 (opt-in x-octet-lifecycle negotiation + namespaced SSE-comment parse), test targets crates/octet-ai/tests/client_stream.rs:128 and crates/octet-agent/tests/agent_run.rs (openai_lifecycle_feedback_is_forwarded_but_not_persisted)",
+  "missing": "feedback is endpoint-opt-in: stock llama.cpp/vLLM must emit x-octet-lifecycle / `: octet-lifecycle:`; no automatic cold-start probe and no 503 handling (docs/providers.md:266)",
+  "src": "audits",
+  "cite": "exact"
+ },
+ {
+  "issue": 174,
+  "verdict": "absent",
+  "evidence": "Cargo.toml:14 edition = \"2021\"; crates/sexy-tui-rs/Cargo.toml:4",
+  "missing": "no crate is on Rust 2024",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 175,
+  "verdict": "absent",
+  "evidence": "crates/octet-coding-agent/src/commands.rs:135 SLASH_COMMANDS (30 entries, none \"fast\")",
+  "missing": "no /fast command or Codex-only gating",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 179,
+  "verdict": "partial",
+  "evidence": "extensions/octet-mcp/octet_mcp/streamable_http.py:129; extensions/octet-mcp/octet_mcp/manager.py:41; extensions/octet-mcp/tests/test_streamable_http.py:240",
+  "missing": "transport coded+tested but blocked-by-default behind --experimental-streamable-http-mcp; nine documented defects remain (no OAuth/static creds, no permanent GET stream)",
+  "src": "phase1",
+  "cite": "exact"
+ },
+ {
+  "issue": 180,
+  "verdict": "partial",
+  "evidence": "crates/octet-coding-agent/src/cli.rs:133 Serve variant has only no_open/port/web_root; serve/startup.rs:64 run_with_session_name; serve/startup/tests.rs:14",
+  "missing": "no CLI flag reaches it: lib.rs:147 dispatch calls run() which passes None",
+  "src": "later",
+  "cite": "resolved"
+ },
+ {
+  "issue": 184,
+  "verdict": "not-code",
+  "evidence": "BACKLOG.md:205 spike scope; docs/experimental/octet-serve/current-state.md:388 fixture-only/absent list",
+  "missing": "no background-session evaluation artifact",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 191,
+  "verdict": "partial",
+  "evidence": "docs/benchmarks/README.md:92 bench-systems.py method; docs/benchmarks/runtime-footprint-2026-08-29.md:1 peak-RSS medians; docs/benchmarks/README.md:17 historical only",
+  "missing": "no 0.7.x RSS campaign; PSS unavailable on that host",
+  "src": "later",
+  "cite": "resolved"
+ },
+ {
+  "issue": 192,
+  "verdict": "partial",
+  "evidence": "docs/benchmarks/tb21-v0.6.2/README.md:34 frozen Ygg 0.6.2; docs/benchmarks/README.md:25 Harbor adapter reproduces 0.6.2 only",
+  "missing": "TB2.1 not re-run on current release; no Harbor Index campaign",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 193,
+  "verdict": "partial",
+  "evidence": "docs/qualification/quickstart-current-candidate.md (install journey), docs/extensions.md:26 qualified API 0.3 example, docs/README.md:18 + :61 (media/roadmap cross-links)",
+  "missing": "media journey has no qualification record \u2014 docs/media.md is self-declared \"an input recipe, not a recorded/live-provider demonstration\"; no per-issue evidence doc for #193",
+  "src": "phase0",
+  "cite": "exact"
+ },
+ {
+  "issue": 194,
+  "verdict": "absent",
+  "evidence": "docs/benchmarks/README.md:15-23 lists every published campaign (no TB4); BACKLOG.md:192",
+  "missing": "no Terminal-Bench 4 harness wiring or campaign evidence",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 195,
+  "verdict": "not-code",
+  "evidence": "docs/benchmarks/beta-protocol.md:11-13 protocol stub; docs/benchmarks/README.md:204 report method",
+  "missing": "no voluntary install/daily-driver reports recorded",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 219,
+  "verdict": "partial",
+  "evidence": "docs/benchmarks/README.md:46 telemetry records context occupancy; docs/context.md:21 per-turn provider-visible request estimate",
+  "missing": "no baseline or per-integration context-footprint measurement published",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 221,
+  "verdict": "partial",
+  "evidence": "apps/ios/project.yml:17 names Sources/OctetCompanionApp.swift (absent from tree); apps/ios/Package.swift:19 test-target path absent; apps/ios/Sources/OctetCompanion/ has only 7 shared-service files",
+  "missing": "no @main app entry, no Tests/OctetCompanionTests, no UI/views",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 244,
+  "verdict": "implemented",
+  "evidence": "crates/octet-ai/src/protocol/google.rs:1 (Google Generative AI/Vertex generateContent, function-call, thought-signature and SSE codec), crates/octet-coding-agent/src/providers/declarations.json:592 (GEMINI env auth + google static inventory + x-goog-api-key discovery header), test targets crates/octet-ai/tests/google_current.rs:98 and crates/octet-coding-agent/tests/vertex_current.rs:6",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "exact"
+ },
+ {
+  "issue": 245,
+  "verdict": "partial",
+  "evidence": "crates/octet-ai/src/protocol/mistral_conversations.rs:1; crates/octet-ai/tests/mistral_current.rs:199; FAILURES.md:38",
+  "missing": "2 of 16 mistral_current assertions fail: `invalid_destinations_reject_before_credentials_without_echoing_url_secrets` (base-URL classification) and `eof_is_not_native_done_even_after_valid_arguments` (missing-finish classification); codec incomplete at both recorded points",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 246,
+  "verdict": "implemented",
+  "evidence": "crates/octet-ai/src/protocol/bedrock.rs:1 (Converse/ConverseStream codec with incremental CRC-checked AWS Event Stream decoder), crates/octet-coding-agent/src/providers/auth.rs:245 (credentials: env -> profile -> IMDS; unit test auth.rs:695 ordered without metadata fallback), test targets crates/octet-ai/tests/bedrock_current.rs and crates/octet-coding-agent/tests/bedrock_auth_current.rs",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "ambiguous"
+ },
+ {
+  "issue": 248,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/providers/vertex.rs:109 (ADC resolution); crates/octet-coding-agent/src/providers/vertex.rs:536 (ADC parse unit test); crates/octet-coding-agent/tests/vertex_current.rs:6 (declaration/auth boundary)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 249,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/providers/copilot.rs:538 (host-owned provider + route selection); crates/octet-coding-agent/src/auth/copilot/wire.rs:169 (refresh/lifetime); test targets copilot_current.rs + copilot_host_current.rs (known-passing)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "resolved"
+ },
+ {
+  "issue": 250,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/providers/declarations.json:835 (declaration + openai_chat route); crates/octet-coding-agent/src/providers/contract.rs:2231 (Workers AI base-URL/template test); crates/octet-coding-agent/src/providers/contract.rs:2027 (pinned Pi route fixtures)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 252,
+  "verdict": "implemented",
+  "evidence": "docs/pi-provider-compatibility.md:1 (generated per-provider decision ledger + closure guard); crates/octet-coding-agent/src/providers/contract.rs:1911 (inventory has tested decisions); extensions/octet-pi-compat/profiles/0.84.4.ledger.json (provider-oauth gate covered)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 253,
+  "verdict": "implemented",
+  "evidence": "examples/extensions/api-v03-minimal/{extension.toml (api_version=\"0.3\", requires_octet=\"=0.7.6\"), extension.py, README.md, test_extension.py}, docs/extensions.md:26 \"Qualified API 0.3 example\" + docs/extensions/API-0.3-REFERENCE.md, test target crates/octet-agent/tests/api_v03_runnable.rs:33",
+  "missing": "\u2014",
+  "src": "phase0",
+  "cite": "ambiguous"
+ },
+ {
+  "issue": 254,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_runtime.rs:943 (bind_session -> ExtensionSessionBinding); crates/octet-agent/tests/runtime_governance_full.rs:141 (binding + eager activation); crates/octet-coding-agent/src/app/bootstrap.rs:5634 (App builds with runtime manager)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 255,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_runtime.rs:425 (process/FD/byte/startup/reload/restart budget); crates/octet-agent/tests/runtime_governance_full.rs:210 (aggregate budget denials); crates/octet-agent/tests/runtime_governance_full.rs:292 (startup-slot waiters)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 257,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-pi-compat/conformance.py:331, extensions/octet-pi-compat/real_runtime.py:417, extensions/octet-pi-compat/tests/test_conformance.py:63",
+  "missing": "\u2014",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 258,
+  "verdict": "partial",
+  "evidence": "extensions/octet-pi-compat/conformance.py:1 (checks 118 rows / 78 examples / 6 plan journeys); extensions/octet-pi-compat/COMPATIBILITY.md:55; docs/qualification/pi-runtime-current-candidate.md:65 (`No #258 closure` stated)",
+  "missing": "real unchanged-source load of all 78 examples and the plan-mode journeys never executed (needs exact Pi 0.84.4 artifacts + Linux `unshare --net`; ledger gate `real-runtime-aggregate` is unrun); 5 of 6 plan journeys deferred",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 259,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-pi-compat/semantic_ui.mjs:1 (bounded legacy semantic UI projection); extensions/octet-pi-compat/tests/test_semantic_ui.mjs:110 and :217 (data-only contributions; renderer bounds by kind)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 260,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-pi-compat/editor_handoff.mjs:1 (bounded get/set/paste/focus + suffix autocomplete + resize); extensions/octet-pi-compat/tests/test_editor_handoff.mjs:13 (acknowledgement fencing); extensions/octet-pi-compat/README.md:71 (documented handoff boundary)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 261,
+  "verdict": "partial",
+  "evidence": "scripts/bench-pi-runtime.py:1, docs/benchmarks/pi-runtime-evidence.md:1, docs/benchmarks/pi-runtime-evidence.md:3",
+  "missing": "harness measures resource samples + per-profile p95 latency but declares release decision always `hold`; no v0.8 resource/latency evidence artifact published anywhere in tree",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 262,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_api_v03.rs:85, crates/octet-coding-agent/src/migrate/migration_import.rs:350, crates/octet-coding-agent/src/migrate/migration_import.rs:1028",
+  "missing": "\u2014 (typed detect/import adapter contract + MigratedSetup normalization; test targets crates/octet-migrate-types/tests/schemas.rs, crates/octet-coding-agent/tests/migration_import.rs)",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 263,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension.rs:157, crates/octet-agent/src/extension.rs:826, crates/octet-agent/tests/agent_run.rs:8166",
+  "missing": "\u2014",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 264,
+  "verdict": "partial",
+  "evidence": "crates/octet-agent/src/tool.rs:197, crates/octet-agent/src/extension_process.rs:14448, sdk/python/octet_extension/extension.py:1161",
+  "missing": "no test target exercises the bounded progress-decoration path (`progress_decoration` appears in code only, never in crates tests/fixtures or SDK tests)",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 265,
+  "verdict": "partial",
+  "evidence": "crates/octet-agent/src/extension.rs:229, crates/octet-agent/src/agent.rs:3209, crates/octet-agent/src/session.rs:251",
+  "missing": "no test target covers the `before_persistence` path (no test in crates/*/tests or SDK tests references extension_metadata/persistence_metadata)",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 267,
+  "verdict": "partial",
+  "evidence": "crates/octet-agent/src/extension.rs:250 (typed PostMutation kind/state/context/disposition/rescan); crates/octet-agent/src/extension_process.rs:5918 (edge request_rescan); crates/octet-coding-agent/src/extensions.rs:3750 (drain)",
+  "missing": "`take_post_mutation_rescans` is `#[expect(dead_code)]`: no product mutation path drains the typed rescan queue, and no test exercises the hook end to end",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 268,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_process.rs:5649, crates/octet-coding-agent/src/extensions.rs:3147, extensions/octet-pi-compat/tests/test_bridge_protocol.py:425",
+  "missing": "\u2014",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 269,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_provider.rs:195, crates/octet-agent/src/extension_provider.rs:265, crates/octet-agent/src/extension_provider.rs:822",
+  "missing": "\u2014 (registration + catalog lifecycle proven by `crates/octet-agent` --lib tests)",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 270,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_process.rs:5236, crates/octet-agent/src/extension_process.rs:14013, crates/octet-agent/src/extension_process.rs:16919",
+  "missing": "\u2014 (bounded buffer/idle/deadline config + cancel, proven by `crates/octet-agent` --lib tests)",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 271,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/src/extension_provider.rs:85 (host-owned authorization policy trait; host owns credentials/lease); crates/octet-agent/src/extension_provider.rs:961 (secret-free declaration unit test); crates/octet-coding-agent/src/extensions.rs:1006 (product policy impl)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 272,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-pi-compat/bridge.mjs:1257 (API 0.3-only registerProvider admission); extensions/octet-pi-compat/bridge.mjs:3337 (register/unregister wiring); extensions/octet-pi-compat/tests/test_bridge_protocol.py:1081 (provider stream translation + safe hooks)",
+  "missing": "\u2014",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 274,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/modes/interactive.rs:4831 (guided first-run provider setup with LM Studio local preset), crates/octet-coding-agent/src/provider_setup.rs:736, test target crates/octet-coding-agent/tests/setup_tui_acceptance.rs:656 (real-binary VT100 first-run local-provider journey, asserts LM Studio/OpenAI-compatible picker)",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "exact"
+ },
+ {
+  "issue": 275,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/cli.rs:29 (deterministic SetupCommand: --preset/--endpoint/--model/--manual-model), crates/octet-coding-agent/src/cli.rs:125 (`octet setup --yes`, review-only default), test target crates/octet-coding-agent/tests/setup_cli_acceptance.rs:668 (print/rpc unresolved startup is actionable and non-interactive)",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "exact"
+ },
+ {
+  "issue": 276,
+  "verdict": "implemented",
+  "evidence": "crates/sexy-tui-rs/src/images.rs:1358 (ImageProtocolEncoder), images.rs:857 (ImageCapabilityQuery), crates/sexy-tui-rs/tests/images_current.rs:333",
+  "missing": "\u2014",
+  "src": "phase1",
+  "cite": "resolved"
+ },
+ {
+  "issue": 277,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/hydrate.rs:179, crates/octet-coding-agent/src/tui/view.rs:3134, crates/octet-coding-agent/src/tui/view/tests.rs:12501",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 278,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/tui/view.rs:322, crates/octet-coding-agent/src/tui/view/tests.rs:12622, crates/octet-coding-agent/src/tui/terminal/backend_tests.rs:61",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 279,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/migrate.rs:61, crates/octet-coding-agent/src/migrate/migration_import.rs:52, crates/octet-coding-agent/tests/migration_import.rs:7",
+  "missing": "\u2014",
+  "src": "api",
+  "cite": "exact"
+ },
+ {
+  "issue": 282,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/tui/pickers.rs:1308 (model picker title/purpose via OrdinarySurfaceMetadata), crates/octet-coding-agent/src/tui/pickers.rs:671 (resume session picker), lib test crates/octet-coding-agent/src/tui/view/ordinary_surface_contract_tests.rs:422 `ordinary_surface_contract_migrates_resume_extensions_and_inline_completion`",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "exact"
+ },
+ {
+  "issue": 283,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/tui/view.rs:4566 (show_report_text shared title/purpose/status/action chrome), crates/octet-coding-agent/src/modes/interactive.rs:3712 (help/context/cost/cache dispatch; status at view.rs:4655), lib test crates/octet-coding-agent/src/tui/view/ordinary_surface_contract_tests.rs:473 `ordinary_report_contract_keeps_navigation_and_lifecycle_semantic`",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "resolved"
+ },
+ {
+  "issue": 311,
+  "verdict": "partial",
+  "evidence": "crates/sexy-tui-rs/src/rich_text/diff.rs:1 diff model+parser split out; render.rs:1 (3547 ln) and stream.rs:1 (2146 ln) carry rendering; docs/qualification/rich-text-render-full.md:7 says historical block/inline/code/table/diff move is not a prerequisite",
+  "missing": "block/inline/code/table modules never split; render.rs still holds render_table/render_code (render.rs:1062, render.rs:681)",
+  "src": "refactors",
+  "cite": "ambiguous"
+ },
+ {
+  "issue": 313,
+  "verdict": "absent",
+  "evidence": "docs/qualification/configuration-diagnostics-full.md:3 (target private module cli/config_diagnostics.rs); crates/octet-coding-agent/src/cli.rs:1462 (ConfigDiagnostic still inline)",
+  "missing": "extraction never happened: no src/cli/ dir; diagnostics logic still in cli.rs:1462-1700",
+  "src": "phase1",
+  "cite": "unresolved"
+ },
+ {
+  "issue": 314,
+  "verdict": "implemented",
+  "evidence": "providers.rs:8-15 child mods auth/catalog/compatibility/contract/copilot/models/pricing/vertex; providers.rs:17-22 pub use of definitions/presets (contract + declarations.json) and copilot",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 315,
+  "verdict": "partial",
+  "evidence": "resources.rs:10-14 base persona/system-prompt text + resources.rs:68 documentation_paths; prompts.rs:20-104 PromptTrust/PromptSource provenance + prompts.rs:634 expansion; resource_resolver.rs:3-7 shared discovery policy",
+  "missing": "resources.rs keeps documentation+system prompts+skills in one 96KB file; prompts.rs keeps formats+expansion+provenance in one 1002-line file",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 316,
+  "verdict": "partial",
+  "evidence": "modes/interactive.rs:177 pub PendingIdleAction (documented idle-boundary actions) + interactive.rs:203 push_pending_action; no StateMachine/Active types anywhere in crate",
+  "missing": "modes/interactive.rs:236 `enum Idle` stays private/undocumented in 8065-line file; no exposed Active state machine",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 317,
+  "verdict": "absent",
+  "evidence": "modes/rpc.rs:44 framing const MAX_RPC_LINE_BYTES; modes/rpc.rs:46 RpcInput framing enum; modes/rpc.rs:818 RpcSessionProjection \u2014 all in one 3021-line file, no rpc/ dir",
+  "missing": "missing rpc/{framing,protocol,commands,events,projection,bash}.rs modules",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 318,
+  "verdict": "implemented",
+  "evidence": "host.rs:11-19 child mods events/framing/media/policy/protocol/routing/run/sessions/transport; host.rs:20 pub use protocol; docs/qualification/host-ownership-full.md:15-24 ownership map",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 319,
+  "verdict": "absent",
+  "evidence": "extensions.rs:6-9 self-describes owning discovery/trust/commands/context/hooks in one module; extensions.rs:11 only `pub mod serve`, no other child mod; extensions.rs:164 hook payloads inline",
+  "missing": "missing discovery/trust/runtime/lifecycle/hooks/commands/presentation modules (extensions.rs 7681 ln, 5073 impl)",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 320,
+  "verdict": "partial",
+  "evidence": "pi.rs:23 `mod package;`; pi/package.rs:226 PackageTransaction (Pi install/package ownership); extension_package.rs:483 install_local",
+  "missing": "extension package transactions (install_local/install_archive) still in extension_package.rs:500 with no child modules",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 321,
+  "verdict": "implemented",
+  "evidence": "serve.rs:261-272 declares conversations/projects/recovery/runs/sessions/routing/startup; serve/routing.rs:11 impl HostService for OctetHost; serve/runs.rs:1 serialized worker loop; docs/qualification/serve-integration-ownership-full.md:9-16",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 322,
+  "verdict": "partial",
+  "evidence": "serve/recovery.rs:1 durable deletion/recovery journal owner",
+  "missing": "run projection (ProjectionState serve.rs:4085), ToolActivity and resource glue (serve.rs:5271, serve.rs:6393) remain in 17.9k-line serve.rs",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 323,
+  "verdict": "absent",
+  "evidence": "PullRequestStore still serve.rs:775; GitHub CLI resolution serve.rs:585-621; PR refresh/projection serve.rs:3676-3739; no repository module under serve/",
+  "missing": "missing repository and pull-request service modules",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 324,
+  "verdict": "partial",
+  "evidence": "session_catalog.rs:1 disposable SQLite catalog; session_commands.rs:229 export_portable; session_tree.rs:1 tree owner",
+  "missing": "session paths/metadata (session_store.rs:24-141)/transcript scans/maintenance still in session_store.rs (3386 ln, 2122 impl)",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 325,
+  "verdict": "partial",
+  "evidence": "migrate/migration_import.rs:3-7 typed host-owned Pi import; migrate.rs:14 only `mod migration_import`; hydrate.rs:1 hydration owner",
+  "missing": "discovery/scanners/planning/reporting still in migrate.rs (scan_pi migrate.rs:648, print_human_report migrate.rs:532)",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 326,
+  "verdict": "implemented",
+  "evidence": "presentation.rs:7-13 mods changed_files/formatting/model/request/run/tool_display; presentation/run.rs:1, presentation/changed_files.rs:1, presentation/tool_display.rs:1",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 328,
+  "verdict": "partial",
+  "evidence": "update.rs:21 `mod progress;` + update/progress.rs:1 updater progress/process presentation owner",
+  "missing": "checking (update.rs:184), actions (update.rs:303), install detection (update.rs:414), package layout (update.rs:750) remain in update.rs (1169 impl lines)",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 330,
+  "verdict": "implemented",
+  "evidence": "composer.rs:13-16 mods attachments/composition/paste/picker; composer.rs:18-31 facet re-exports; composer/attachments.rs ledger, composer/paste.rs, composer/picker.rs",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 331,
+  "verdict": "implemented",
+  "evidence": "terminal.rs:14-19 mods backend/capabilities/input/lifecycle/signal; terminal.rs:21-26 re-exports; terminal/backend.rs, terminal/lifecycle.rs, terminal/signal.rs",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "ambiguous"
+ },
+ {
+  "issue": 332,
+  "verdict": "implemented",
+  "evidence": "theme loading tui/theme_reload.rs:1 with tui/theme.rs + tui/theme_schema.rs; color policy tui/terminal.rs:23 (ColorDepth/ColorMode); panel filtering tui/view/panel_render.rs:1 (filtered_indices used at tui/view.rs:66), layout tui/layout.rs:1, rendering tui/view/*.rs",
+  "missing": "\u2014",
+  "src": "refactors",
+  "cite": "resolved"
+ },
+ {
+  "issue": 341,
+  "verdict": "partial",
+  "evidence": "docs/qualification/serve-lifecycle-current-candidate.md:3 scopes #396+#341; extensions/octet-serve/tests/security_full.rs:29 opaque session-scoped resources; scripts/check-octet-serve-boundaries.sh:1 diff gate",
+  "missing": "candidate revision \"pending; source-only and uncommitted\"; no recorded cross-boundary invariant run",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 343,
+  "verdict": "partial",
+  "evidence": "crates/octet-agent/src/artifact.rs:1 (bounded store), crates/octet-agent/src/artifact.rs:276 (tempdir-backed per-process root) + :529 settle_generation, crates/octet-coding-agent/src/host/policy.rs:486 (bounded media projection)",
+  "missing": "no durable/persistent asset store: artifacts live in a private tempdir and are settled with the generation; cross-restart media durability is only the bounded session file",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 344,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/main.rs:6 (explicit worker_threads = 2), crates/octet-agent/src/tools/read.rs:233 (ToolConcurrency::Parallel), crates/octet-agent/tests/read_concurrency_current.rs:892 (text/image/audio identity in ordered slots)",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 346,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/tests/activity_wait_pty.rs:556 `run_activity_case` (bounded frames while response held, :587), :615 types `draft remains local` during the wait, :623 resize during wait; test target activity_wait_pty",
+  "missing": "\u2014",
+  "src": "phase0",
+  "cite": "exact"
+ },
+ {
+  "issue": 347,
+  "verdict": "not-code",
+  "evidence": "BACKLOG.md:206 effort Epic / Human decision; docs/design/extensions-spike.md:175-178 Claude Code comparison rows",
+  "missing": "separately scheduled human follow-up; no audit artifact",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 348,
+  "verdict": "not-code",
+  "evidence": "crates/octet-coding-agent/src/providers/declarations.json:66 anthropic_models discovery kind; docs/qualification/discovery-current-candidate.md:3 verification UNRUN",
+  "missing": "no reconciliation artifact for verified Anthropic discovery vs limits",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 349,
+  "verdict": "partial",
+  "evidence": "crates/octet-coding-agent/src/tui/keymap.rs:393 (Enter while active => InputAction::Steer), src/tui/view.rs:3388 (queue_steering), src/modes/interactive.rs:1278 (queued steering restored to editor on abort)",
+  "missing": "Option+Up queue editing not found (no Alt+Up mapping in keymap); Escape-while-active still maps to plain Abort (keymap.rs:350)",
+  "src": "phase1",
+  "cite": "resolved"
+ },
+ {
+  "issue": 350,
+  "verdict": "implemented",
+  "evidence": "crates/octet-agent/tests/recovery_current.rs:3 (\"#350 qualification fixtures for the current Codex recovery path\"), :247 interrupted Codex stream discards provisional tool, :440 retired WebSocket falls back to HTTP without stale reuse, :488 bounded/cancellable network wait; test target recovery_current (loopback fixtures only \u2014 file header disclaims live-provider claims)",
+  "missing": "\u2014",
+  "src": "phase0",
+  "cite": "exact"
+ },
+ {
+  "issue": 354,
+  "verdict": "partial",
+  "evidence": "ROADMAP.md:5 (epic scope: install/TUI/`/model`/resumable sessions), docs/qualification/quickstart-current-candidate.md:1-11 (install/core-workflow candidate record), :163 (no terminal/PTY, color, scrolling or session-resume journey exercised), docs/qualification/api-v03-current-candidate.md",
+  "missing": "session-resume and TUI `/model` journeys lack qualification evidence and no release-gate record closes the epic (human decision)",
+  "src": "phase0",
+  "cite": "exact"
+ },
+ {
+  "issue": 377,
+  "verdict": "partial",
+  "evidence": "extensions/octet-browse/tests/test_worker.py:478 `test_repeated_launch_reuses_visible_context_without_new_tab_or_relaunch` (launch_calls==1, no new tab), octet_browse/worker.py:509-513 timed-out launch closes instead of leaving a stray browser that can reacquire the foreground",
+  "missing": "focus stealing itself: launch is still `headless=False` (worker.py:504) with no activation/window-position suppression and no test asserting the TUI keeps focus",
+  "src": "phase0",
+  "cite": "resolved"
+ },
+ {
+  "issue": 378,
+  "verdict": "partial",
+  "evidence": "extensions/octet-browse/CONNECTORS.md:8-15 (existing browser opt-in; native Firefox/Safari unsupported); extensions/octet-browse/octet_browse/adapters.py:537 (firefox/safari => unsupported_capability); test target extensions/octet-browse/tests/test_worker.py (owner-mismatch selected-target test)",
+  "missing": "Firefox/Safari native operation absent; only host-registered Chromium/Playwright connectors operate explicitly selected existing targets",
+  "src": "phase1",
+  "cite": "exact"
+ },
+ {
+  "issue": 379,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/host/media.rs:63-105 (per-modality errors), src/host/media/tests.rs:146 `audio_requires_a_route_effectively_supporting_its_format`, crates/octet-coding-agent/tests/host_protocol.rs:506 `ordered_image_and_audio_cross_the_process_and_provider_boundaries`",
+  "missing": "\u2014",
+  "src": "phase0",
+  "cite": "resolved"
+ },
+ {
+  "issue": 381,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/tui/view.rs:1144 (MAX_PROMPT_HISTORY_ENTRIES=100), view.rs:1184 (navigate_prompt_history), view/tests.rs:2531 (prompt_history_repeats_with_bounds...); docs/qualification/prompt-history-current-candidate.md",
+  "missing": "\u2014",
+  "src": "phase1",
+  "cite": "resolved"
+ },
+ {
+  "issue": 382,
+  "verdict": "partial",
+  "evidence": "docs/issue-evidence/382/v0.7.4-qualification.md:38-47 physical gates all UNRUN; tui/theme.rs:2514 ansi256_diff_surfaces test; tui/theme.rs:2785 fixed-palette test",
+  "missing": "Terminal.app/Ghostty/Ubuntu-SSH visual cells never run",
+  "src": "later",
+  "cite": "resolved"
+ },
+ {
+  "issue": 383,
+  "verdict": "partial",
+  "evidence": "extensions/octet-computer-use/octet_computer_use/policy.py:301 (Scope), policy.py:506 (AuthorizationBinding), main.py:270 (PolicyGate.authorize)",
+  "missing": "host-side scoped authorization missing: no computer_use/browser/desktop refs in crates/octet-coding-agent/src/host/*.rs; CONTRACT.md:10 says main.py wires only policy+protocol; no policy test target",
+  "src": "phase1",
+  "cite": "ambiguous"
+ },
+ {
+  "issue": 384,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-browse/octet_browse/paths.py:13 (PLAYWRIGHT_VERSION 1.57.0), extensions/octet-browse/octet_browse/adapters.py:546 (opt-in PlaywrightConnector + identity proof), extensions/octet-browse/tests/test_playwright_integration.py",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 385,
+  "verdict": "partial",
+  "evidence": "extensions/octet-computer-use/octet_computer_use/backend_macos.py:54, extensions/octet-computer-use/octet_computer_use/macos/native.py:72, extensions/octet-computer-use/tests/test_backend_macos.py:1",
+  "missing": "no unmocked native qualification (tests inject MockNative) and main.py never dispatches a backend",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 386,
+  "verdict": "partial",
+  "evidence": "extensions/octet-computer-use/octet_computer_use/lifecycle.py:2567, extensions/octet-computer-use/octet_computer_use/lifecycle.py:1342, extensions/octet-computer-use/CONTRACT.md:3",
+  "missing": "lifecycle.py is not imported by main.py dispatcher; no lifecycle test target (tests/ has only macOS/Windows/screenshot suites)",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 387,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-computer-use/octet_computer_use/screenshots.py:436 (ScreenshotReference), screenshots.py:291 (ScreenshotLimits), extensions/octet-computer-use/tests/test_screenshots.py:352 (projection selects only fresh explicit comparison refs)",
+  "missing": "\u2014",
+  "src": "phase1",
+  "cite": "resolved"
+ },
+ {
+  "issue": 388,
+  "verdict": "partial",
+  "evidence": "crates/octet-ai/src/responses.rs:185, crates/octet-ai/src/responses.rs:444, crates/octet-agent/src/agent.rs:10460",
+  "missing": "opaque item preservation only: no computer tool declaration, no dispatch of computer_call to computer_call_output",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 389,
+  "verdict": "partial",
+  "evidence": "extensions/octet-computer-use/octet_computer_use/backend_windows.py:909, extensions/octet-computer-use/tests/test_backend_windows.py:161, extensions/octet-computer-use/tests/test_backend_windows.py:194",
+  "missing": "qualification evidence from a real Windows host; suite drives a FixtureSystem double, not the native adapter",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 390,
+  "verdict": "absent",
+  "evidence": "extensions/release-catalog.txt:1 (no computer-use entry), extensions/octet-computer-use/extension.toml:2 (v0.1.0), extensions/octet-computer-use/CONTRACT.md:3",
+  "missing": "no release packaging or parity qualification artifact anywhere",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 391,
+  "verdict": "partial",
+  "evidence": "extensions/octet-computer-use/octet_computer_use/code_runtime.py:231, extensions/octet-computer-use/octet_computer_use/code_runtime.py:1464, extensions/octet-computer-use/octet_computer_use/code_runtime.py:1578",
+  "missing": "module unreferenced by main.py/lifecycle and no code-runtime test target (no containment test)",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 392,
+  "verdict": "partial",
+  "evidence": "docs/qualification/native-scroll-current-candidate.md:30-36 (proposed unrun checks); crates/sexy-tui-rs/src/rich_text/stream.rs:661 (ordinary_preview_start classification); crates/octet-coding-agent/src/tui/view/native_history_tests.rs (native_ordinary_streaming_paragraph_boundaries_do_not_replay)",
+  "missing": "candidate repair only: qualification (emitted VT/ED3, Ghostty/Terminal.app/SSH), and real structural/resize transition coverage still open",
+  "src": "phase1",
+  "cite": "exact"
+ },
+ {
+  "issue": 393,
+  "verdict": "partial",
+  "evidence": "crates/sexy-tui-rs/src/rich_text/render.rs:2148 (AppendOnlyTail), src/rich_text/stream.rs:213 (StreamingMarkdown), crates/sexy-tui-rs/tests/rich_rendering.rs:110; docs/qualification/rich-text-render-full.md",
+  "missing": "deterministic candidate only: physical emulator paint/selection and #393 qualification unverified (docs/design/performance.md:60)",
+  "src": "phase1",
+  "cite": "resolved"
+ },
+ {
+  "issue": 394,
+  "verdict": "partial",
+  "evidence": "apps/macos/Sources/OctetMacOS/OctetMacOSApp.swift:3 @main + views; apps/macos/Tests/OctetMacOSTests/AppPoliciesTests.swift:4; apps/macos/README.md:32",
+  "missing": "source-only: no build/sign/notarize/live run; tests cover notification/backoff policies only",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 395,
+  "verdict": "absent",
+  "evidence": "docs/qualification/serve-backend-lifecycle-full.md:34 independent checks \"intentionally NOT run\"; docs/experimental/octet-serve/web-acceptance.md:3 criteria, \"not a current test result\"",
+  "missing": "no independent Serve+companion audit artifact exists",
+  "src": "later",
+  "cite": "exact"
+ },
+ {
+  "issue": 396,
+  "verdict": "partial",
+  "evidence": "docs/qualification/serve-lifecycle-current-candidate.md:7; extensions/octet-serve/tests/lifecycle_full.rs:126 attach/owner fencing; lifecycle_full.rs:200 stale-generation + cursor-bound replay",
+  "missing": "candidate uncommitted; no reconnect/live acceptance record",
+  "src": "later",
+  "cite": "resolved"
+ },
+ {
+  "issue": 397,
+  "verdict": "partial",
+  "evidence": "crates/octet-coding-agent/src/pi.rs:626 (install with controls: offline/ignore-scripts/network+scripts gating); crates/octet-coding-agent/src/pi/package.rs:1194 (package-manager selection); FAILURES.md:63",
+  "missing": "pi lib test `generated_link_negotiates_runtime_commands_with_the_real_octet_host` fails (extension stdout closed before negotiation); no installed-package/dependency or rollback acceptance run",
+  "src": "providers",
+  "cite": "exact"
+ },
+ {
+  "issue": 414,
+  "verdict": "not-code",
+  "evidence": "BACKLOG.md:180 (epic umbrella), BACKLOG.md:260 (explicitly unscheduled, human decision), docs/themes.md:3",
+  "missing": "epic tracking item; children #415-#420 assessed individually",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 415,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/tui/theme.rs:1598 (bounded discovery), crates/octet-coding-agent/src/resource_resolver.rs:20 (Theme=.toml, 256 KiB), crates/octet-coding-agent/src/tui/theme.rs:2151 (discover/load/dedup test)",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 416,
+  "verdict": "partial",
+  "evidence": "crates/octet-coding-agent/src/tui/theme.rs:24 (compiled-in DEFAULT_THEME_NAME), crates/octet-coding-agent/src/tui/theme_schema.rs:289 (variants.universal/dark overlay), docs/themes.md:1",
+  "missing": "no shipped reference theme file and no published token/role/variant reference; docs/themes.md documents only the three terminal appearances",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 417,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/cli.rs:211 (appearance selector), crates/octet-coding-agent/src/config.rs:419, crates/octet-coding-agent/src/cli.rs:3819 (appearance-env test)",
+  "missing": "\u2014",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 418,
+  "verdict": "partial",
+  "evidence": "crates/octet-coding-agent/src/tui/theme_reload.rs:276 (ThemeReloadEngine), crates/octet-coding-agent/src/tui/mod.rs:12 (theme_reload not declared), docs/qualification/theme-reload-full.md:5",
+  "missing": "engine source is outside the build (no mod declaration), no production caller, no tests",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 419,
+  "verdict": "partial",
+  "evidence": "crates/octet-coding-agent/src/tui/theme_schema.rs:470 (bounded roles), crates/octet-coding-agent/src/tui/theme_schema.rs:873 (extension-namespaced roles test)",
+  "missing": "no extension manifest/resource channel contributes theme resources and no published semantic role vocabulary",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 420,
+  "verdict": "absent",
+  "evidence": "no theme surface in protocol/extension-api-v0.3.schema.json, crates/octet-agent/src/extension_api_v03.rs, sdk/python/octet_extension/api_v03.py; loader is in-process only (crates/octet-coding-agent/src/tui/theme.rs:1892)",
+  "missing": "host-mediated theme-selection capability/method in API 0.3",
+  "src": "computer",
+  "cite": "exact"
+ },
+ {
+  "issue": 424,
+  "verdict": "partial",
+  "evidence": "crates/octet-ai/src/model_metadata.rs:73 (checked-in capability metadata lookup); crates/octet-coding-agent/src/app/bootstrap.rs:1158 (builtin_display_entry imports display_name only); docs/providers.md:14-21 (snapshot capabilities deliberately excluded)",
+  "missing": "no standardized capability self-description: snapshot limits/modalities/tools unused, capability decisions remain declaration/hardcoded-family profiles",
+  "src": "phase1",
+  "cite": "exact"
+ },
+ {
+  "issue": 428,
+  "verdict": "implemented",
+  "evidence": "extensions/octet-web-search/provider.py:1821 (one Deadline across both adapters), provider.py:1875 (fetch takes that deadline), extensions/octet-web-search/tests/test_provider.py:385 `test_search_uses_requested_deadline_for_both_adapters`",
+  "missing": "\u2014",
+  "src": "phase0",
+  "cite": "resolved"
+ },
+ {
+  "issue": 429,
+  "verdict": "implemented",
+  "evidence": "crates/octet-coding-agent/src/tui/keymap.rs:322 (Enter => SlashMenuAction::Select), keymap.rs:615 unit test `slash_enter_selects_the_popup_then_dispatches_after_it_closes`, test target crates/octet-coding-agent/tests/slash_command_pty.rs",
+  "missing": "\u2014",
+  "src": "phase0",
+  "cite": "resolved"
+ },
+ {
+  "issue": 430,
+  "verdict": "implemented",
+  "evidence": "docs/instructions.md:66 (\"The model has no skill-specific search, load, or resource tool\"), docs/design/octet-coding-agent.md:267 (\"No model-facing skill-specific tools are registered\"); docs/tools.md carries no stale names",
+  "missing": "\u2014",
+  "src": "audits",
+  "cite": "exact"
+ }
+]
