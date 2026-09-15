@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "tool": "cargo clippy",
+  "status": "uncollected",
+  "scope": {
+    "rust_msrv": "1.86",
+    "diagnostic_format": "cargo-jsonl",
+    "feature_selection": "all-features",
+    "lint_level": "warning",
+    "target_selection": ["--lib", "--bins"],
+    "target_exclusions": ["test", "example", "bench"],
+    "lint_codes": ["clippy::expect_used", "clippy::unwrap_used"],
+    "production_target_kinds": [
+      "bin",
+      "cdylib",
+      "custom-build",
+      "dylib",
+      "lib",
+      "proc-macro",
+      "staticlib"
+    ]
+  },
+  "findings": []
+}
