@@ -41,6 +41,59 @@ for source-review scope and unrun checks.
 > availability remains account- and endpoint-specific; deterministic checks do
 > not qualify every live provider.
 
+## Endpoint capability self-description (unreleased)
+
+An unchanged build can consume new models on **already declared Chat/Responses
+routes** when the selected endpoint includes an `octet_capabilities` v1 object in
+its ordinary model inventory. Built-in OpenAI-compatible, DeepSeek and OpenRouter
+discovery and custom-registry startup use the same bounded decoder. Static-only
+providers, native Messages/Google/Bedrock/Conversations routes, Codex and Copilot
+retain their existing contracts; this does not create new discovery requests or
+bypass a declaration's model filter. Guided `octet setup` does not yet consume
+this additional object.
+
+Example entry in `GET /models` (`protocol` uses canonical Rust API spelling):
+
+```json
+{
+  "id": "future-model",
+  "octet_capabilities": {
+    "version": 1,
+    "protocol": "open_ai_chat",
+    "context_window": 131072,
+    "max_output_tokens": 16384,
+    "input_modalities": ["text", "image"],
+    "output_modalities": ["text"],
+    "tools": true,
+    "parallel_tool_calls": true,
+    "structured_output": true,
+    "reasoning": {"values": ["none", "low", "high"], "default": "low"}
+  }
+}
+```
+
+`open_ai_responses` is the other supported protocol; it must match the existing
+host-selected route. Version, protocol and positive token limits are required;
+output cannot exceed context. Omitted capability flags are false, omitted
+modalities are text-only, and omitted/null reasoning means no reasoning control.
+Reasoning is an exact effort list, not a guessed range; its optional default must
+be in the list. The host still selects the provider-specific wire encoding.
+
+Each object is limited to 4096 serialized bytes. Unknown keys/versions, malformed
+flags/options, audio or non-text output, parallel calls without tools, and
+unsupported protocol declarations fail closed. This schema cannot enable Lite,
+Ultra/delegation, deferred tools, native budgets/toggles, arbitrary profiles,
+authentication, URLs or transport changes. Explicit legacy endpoint assertions
+(including false/null/unknown) win per field; configured model overrides still
+win over discovery. No capability is borrowed from models.dev. The decoder's
+provenance identifies the host-selected endpoint, returned model and codec,
+never an authority or URL claimed by response data.
+
+Built-in raw caches remain URL/account isolated and are decoded on use without
+persisting synthesized fields. Custom normalized caches advance to version 9 so
+old sparse results cannot hide self-descriptions. These are deterministic source
+contracts, not evidence that any public provider currently emits the extension.
+
 ## Cloud setup
 
 Set the credential variables for the chosen row, then run `octet --model ID`.
@@ -58,6 +111,10 @@ Do not put credentials into prompts or repository configuration.
 | Azure OpenAI | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT`, and either `AZURE_OPENAI_RESOURCE` or `AZURE_OPENAI_ENDPOINT` | `azure-openai/my-gpt-deployment` |
 | Gemini Developer API | `GEMINI_API_KEY`; native Google `generateContent` | `gemini/gemini-2.5-flash` |
 | Vertex AI | ADC, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION` | `vertex/gemini-2.5-flash` |
+| Baseten | `BASETEN_API_KEY`; OpenAI Chat | `baseten/<model-id>` |
+| Qwen Token Plan | `QWEN_TOKEN_PLAN_API_KEY`; OpenAI Chat | `qwen-token-plan/<model-id>` |
+| Qwen Token Plan CN | `QWEN_TOKEN_PLAN_CN_API_KEY`; OpenAI Chat | `qwen-token-plan-cn/<model-id>` |
+| Z.AI Coding CN | `ZAI_CODING_CN_API_KEY`; OpenAI Chat | `zai-coding-cn/<model-id>` |
 
 Bedrock accepts an `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair with an
 optional session token, the selected `AWS_PROFILE`, or ECS/EC2 instance metadata.
@@ -80,6 +137,34 @@ Fireworks AI, NVIDIA, Hugging Face, Moonshot AI, Xiaomi, MiniMax, and OpenCode Z
 The [provider declarations](../crates/octet-coding-agent/src/providers/declarations.json)
 and [compatibility reference](pi-provider-compatibility.md) describe route-specific
 coverage; a preset name is not a promise of every provider API.
+
+## Declarative preset metadata
+
+Presets are data, never provider-name branches. The typed preset surface in
+`octet_ai::declarations` (`ModelPreset`, `RequestOverrides`,
+`ProviderCredentialPreset`, `ChatTemplateValue`) describes the parity-relevant
+per-model and per-provider fields — `samplingParams`, per-model `headers`,
+`vllmPriority`, `supportsMaxOutputTokens`, `thinkingTokenBudgetField`,
+`chatTemplateArgs`/`chatTemplateKwargs` with `{ "$var": "thinking.enabled" |
+"thinking.effort" | "thinking.budget" }` interpolation, the `string-thinking`
+format, and credential environment aliases. Validation is fail-closed: unknown
+`$var` names, malformed headers, empty identifiers and unbounded retry/timeout
+values are rejected. This is declared plumbing; the OpenAI-compatible codecs and
+the streaming client that consume these fields are owned separately, so the
+preset data is described and validated here while codec emission and proxy
+resolution remain tracked gaps (see [providers parity](parity/providers.md)).
+
+Credential aliases recognize Anthropic's `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_OAUTH_TOKEN` (which must be sent as `Authorization: Bearer`) ahead of
+`ANTHROPIC_API_KEY` (sent as `x-api-key`), and Vertex's `GOOGLE_CLOUD_API_KEY`.
+Route presentation currently follows the declaration's static auth presentation;
+selecting bearer-vs-API-key per matched variable is a named gap.
+
+`octet_ai::declarations::proxy` resolves `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/
+`NO_PROXY` for a request target with upstream root-and-subdomain `NO_PROXY`
+semantics (exact host, `.domain`, `*.domain`, optional `:port`, lone `*`), and
+rejects non-http(s) proxies. The streaming client does not yet call it; that
+`reqwest::Proxy` seam is the tracked gap.
 
 ## Codex subscription login
 
@@ -140,6 +225,17 @@ gain login/logout commands or OAuth payload fields. Rust embedders retain the
 This is **source integration, not build/live/native qualification**. See the
 [adapter candidate and unrun fixture matrix](qualification/copilot-host-current-candidate.md)
 for remaining implementation and acceptance gates; #249 is not closed.
+
+## Native Mistral Conversations (unreleased codec)
+
+The native Conversations codec passes its deterministic request/SSE fixtures,
+including rejection of credential-bearing or non-TLS destinations before
+credential resolution (literal loopback HTTP is allowed for local testing).
+Only native completion settles calls: missing `conversation.response.done`
+reports `MissingFinish`, never a synthesized tool-call end or successful reply.
+No POST is replayed. The built-in Mistral preset above still uses Chat;
+Conversations discovery/presets and broader native capabilities remain separate
+work, not implied by these codec repairs.
 
 ## Local and custom endpoints
 

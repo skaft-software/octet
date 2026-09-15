@@ -123,8 +123,10 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 The four executable bundles in this snapshot still declare API 0.2. They are
 legacy implementation references, not API 0.3 authoring examples. New authoring
 uses [Extension API 0.3](extensions/API-0.3-REFERENCE.md); generated Python 0.3
-types alone are not a complete 0.3 `Extension` runtime. A qualified current-API
-end-to-end example remains missing.
+types alone are not a complete 0.3 `Extension` runtime. The
+[API 0.3 minimal example](../examples/extensions/api-v03-minimal/README.md)
+provides a standard-library executable and a real-host conformance test; this
+is deterministic candidate evidence, not installed-release qualification.
 
 ## Container
 

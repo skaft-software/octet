@@ -11,7 +11,7 @@ use octet_agent::{
     analyze_session_cache, analyze_session_cache_stats, CacheStats, EntryValue, Session,
     UsageRecordKind,
 };
-use octet_ai::{AssistantPart, Cost, Message, Model, Usage};
+use octet_ai::{AssistantPart, Cost, Message, Model, Protocol, ResponsesRuntimeProfile, Usage};
 
 /// Parsed in-TUI command. Commands are deliberately separate from shell CLI
 /// options: only editor text beginning with `/` enters this grammar.
@@ -23,6 +23,8 @@ pub enum Command {
     Thinking(Option<String>),
     /// Inspect or change the compiled terminal appearance selector.
     Theme(Option<String>),
+    /// Set, clear, or report the Codex-only fast service tier.
+    Fast(Option<bool>),
     Verbose(Option<bool>),
     /// Request an immediate final answer without exposing tools.
     Answer(Option<String>),
@@ -176,6 +178,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         true
     ),
     slash!(
+        "fast",
+        "/fast [on|off]",
+        "toggle the Codex fast service tier",
+        true
+    ),
+    slash!(
         "verbose",
         "/verbose [on|off]",
         "show or hide raw tool details",
@@ -315,6 +323,26 @@ pub fn help_text(workspace: &Path, topic: Option<&str>) -> String {
 
     text.push_str(&crate::resources::self_documentation_help(workspace));
     text
+}
+
+/// Whether the active endpoint declares the Codex Responses route.
+///
+/// The fast service tier is a Codex-route capability. This gates on the
+/// declared protocol and endpoint runtime profile -- never on a provider name --
+/// so a route that declares the Codex profile is admitted and every other route
+/// is rejected explicitly instead of being silently ignored.
+pub fn codex_fast_tier_endpoint(model: &Model) -> bool {
+    model.spec.protocol == Protocol::OpenAiResponses
+        && model.endpoint.runtime.responses_profile == ResponsesRuntimeProfile::Codex
+}
+
+/// Model label used when reporting a rejected `/fast`.
+pub fn model_route_label(model: &Model) -> &str {
+    model
+        .spec
+        .display_name
+        .as_deref()
+        .unwrap_or(&model.spec.api_name)
 }
 
 /// Suggestions for an editor value while its first token is a slash command.
@@ -473,6 +501,12 @@ pub fn parse(input: &str) -> Command {
             None => Command::Verbose(None),
             Some("on" | "true" | "yes") => Command::Verbose(Some(true)),
             Some("off" | "false" | "no") => Command::Verbose(Some(false)),
+            Some(_) => Command::Unknown(input.to_owned()),
+        },
+        "fast" => match argument.as_deref() {
+            None => Command::Fast(None),
+            Some("on" | "true" | "yes") => Command::Fast(Some(true)),
+            Some("off" | "false" | "no") => Command::Fast(Some(false)),
             Some(_) => Command::Unknown(input.to_owned()),
         },
         "compact" if argument.is_none() => Command::Compact,

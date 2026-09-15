@@ -283,6 +283,10 @@ rereads the active durable session at an idle boundary. See
 
 ## Retained reference topics
 
+[Retained API `0.2` hook enrichments](extensions/HOOK-ENRICHMENT.md) document
+bounded progress decoration, namespaced pre-persistence metadata, and
+PostMutation rescans, including current product integration limits.
+
 The following anchors preserve links from the former combined guide. The linked
 maintenance references retain API `0.1`/`0.2` details without teaching them as
 current authoring interfaces.

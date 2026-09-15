@@ -35,8 +35,14 @@ import {
   sep,
 } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createSemanticUiAdapter } from "./semantic_ui.mjs";
-import { createEditorHandoff } from "./editor_handoff.mjs";
+// The host stages only the executable, not its sibling payloads. Resolve helpers
+// from the host-supplied package directory; direct developer runs use this file.
+// Do not fall back when an explicitly selected package is missing a helper.
+const helperBase = process.env.OCTET_EXTENSION_DIR
+  ? pathToFileURL(join(process.env.OCTET_EXTENSION_DIR, "bridge.mjs"))
+  : import.meta.url;
+const { createSemanticUiAdapter } = await import(new URL("./semantic_ui.mjs", helperBase));
+const { createEditorHandoff } = await import(new URL("./editor_handoff.mjs", helperBase));
 
 const API_VERSION_0_2 = "0.2";
 const API_VERSION_0_3 = "0.3";

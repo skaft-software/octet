@@ -32,13 +32,16 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod assistant_frame;
 pub mod auth;
 pub mod batch;
 pub mod catalog;
 pub mod client;
+pub mod constrained_sampling;
+pub mod declarations;
+pub mod discovery;
 pub mod error;
-pub mod host_transport;
-mod json_repair;
+pub mod host_transport;mod json_repair;
 pub mod model_metadata;
 pub mod pricing;
 pub mod responses;
@@ -50,6 +53,9 @@ mod validate;
 
 pub(crate) mod protocol;
 
+pub use assistant_frame::{
+    reduce_assistant_message_frames, AssistantMessageFrame, AssistantMessageFrameEncoder,
+};
 pub use auth::{
     Auth, AwsCredentials, AwsSigV4Signer, CredentialResolver, CredentialResolverRegistry,
     CredentialScheme, RequestSigner, ResolvedCredential, Secret, SignedRequestHeaders,
@@ -62,6 +68,12 @@ pub use batch::{
 };
 pub use catalog::{AuthConfig, CatalogConfig, EndpointConfig, Model, ModelCatalog, ModelConfig};
 pub use client::{AiClient, PendingResponsesCompact};
+pub use declarations::proxy::{proxy_env_value, resolve_http_proxy, ProxyError};
+pub use declarations::{
+    ChatTemplateValue, ChatTemplateVariable, DeclarationError, ModelPreset,
+    ProviderCredentialPreset, RequestOverrides, ThinkingFormat, ThinkingSelection,
+    ThinkingTokenBudgetField, ThinkingVariable,
+};
 pub use error::{
     AiError, AuthError, ConfigError, DecodeError, Diagnostic, HttpError, PricingError,
     ProviderError, StreamProgress, StreamProtocolError, TransportError, TransportPhase,
@@ -82,7 +94,8 @@ pub use transform::transform_messages;
 pub use types::{
     AgentDelegation, AssistantMessage, AssistantPart, AudioCapabilities, AudioFormat, AudioMedia,
     AudioOutputDelivery, AudioOutputOptions, AudioPayload, AudioVoice, CacheCompatibility,
-    CacheControlFormat, CacheRetention, Capabilities, Endpoint, EndpointId, EndpointTransport,
+    CacheControlFormat, CacheRetention, Capabilities, ConstrainedSampling,
+    ConstrainedSamplingStrict, Endpoint, EndpointId, EndpointTransport, GrammarVariants,
     ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message, Modality, ModalitySet,
     ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OpenAiChatRuntimeProfile,
     OutputFormat, OutputModalities, Protocol, ProviderMediaRef, ProviderPartMetadata,

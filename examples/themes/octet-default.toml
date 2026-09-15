@@ -1,0 +1,253 @@
+# octet default theme — shipped variant reference (roadmap #416)
+#
+# This file mirrors the *shape* of octet's compiled-in `default` theme in the
+# public theme-file format. It is a reference for authors, not the compiled
+# fallback: octet never requires it, and unknown/partial files always fall back
+# to the compiled default. Copy it into a discovery directory to start a theme:
+#
+#   ~/.octet/themes/<name>.toml          (global)
+#   .octet/themes/<name>.toml            (project, needs trust)
+#
+# The format is bounded: no terminal control bytes, no callbacks, and only the
+# typed sections below are accepted. See docs/themes.md.
+#
+# `[variants.universal]` applies to every terminal. `[variants.dark]` and
+# `[variants.light]` overlay it for the detected background profile. Overlays
+# merge recursively, so a variant may override one token without restating the
+# whole table.
+
+[metadata]
+name = "octet default reference"
+description = "Variant reference for octet's compiled default theme"
+author = "octet"
+version = "1"
+terminal = "light-dark"
+# Keep configured RGB values verbatim. Set true to let the loader rebalance
+# RGB foregrounds/surfaces for the detected terminal background.
+adaptive = false
+
+[colors]
+# Base text and neutral chrome.
+foreground = "default"
+muted = "#777777"
+dim = "#777777"
+border = "default"
+border_idle = "default"
+border_focused = "#16876d"
+
+# Semantic status. These are the compiled default's source colours; the
+# compiled theme balances them per background, while this reference keeps the
+# source values so the file is deterministic across profiles.
+accent = "#16876d"
+success = "default"
+info = "default"
+error = "#c74747"
+warning = "#9a6700"
+
+# Transcript identity.
+user_msg_text = "default"
+user_msg_bg = "#16876d"
+assistant_msg_text = "default"
+tool_title = "default"
+tool_output = "default"
+diff_added = "default"
+diff_removed = "default"
+diff_context = "default"
+
+# Markdown chrome.
+md_heading = "default"
+md_link = "default"
+md_code = "#78a9b0"
+md_code_block = "default"
+md_code_border = "default"
+md_code_bg = "#202630"
+md_code_inline_bg = "default"
+md_quote = "default"
+md_quote_border = "default"
+md_hr = "default"
+md_list_bullet = "default"
+
+# Syntax highlighting.
+syntax_comment = "default"
+syntax_keyword = "#815ac0"
+syntax_function = "#287fb8"
+syntax_variable = "#68737d"
+syntax_string = "#00b847"
+syntax_number = "#b26a00"
+syntax_type = "#9b6500"
+syntax_operator = "#b14d7d"
+syntax_punctuation = "#68737d"
+
+# Context-report legend (each category keeps its own channel).
+context_system = "#4aa8c7"
+context_skills = "#d19a35"
+context_tools = "#7f9fd4"
+context_messages = "#d8dee8"
+context_pending = "#d47d3f"
+context_framing = "#73808f"
+context_adjustment = "#a978c5"
+context_tokenizer_adjustment = "#c36f99"
+context_output = "#df6f7c"
+context_free = "#52c878"
+context_buffer = "#8678ba"
+
+# Model accent. `model.use_lab_color = true` lets focused model chrome follow
+# the active model family's lab colour, with `model_accent` as the neutral
+# fallback and `model_assistant` for the assistant name label.
+model_accent = "#16876d"
+model_assistant = "default"
+model.use_lab_color = "true"
+
+# Semantic roles. Any role name matching the published vocabulary is typed;
+# `extension.<namespace>.<role>` is the open, extension-contributed channel.
+[roles.heading]
+bold = true
+
+[roles.strong]
+bold = true
+
+[roles.emphasis]
+italic = true
+
+[roles.quote]
+dim = true
+
+[roles.link]
+underline = true
+
+[roles."extension.example.badge"]
+foreground = "accent"
+bold = true
+
+# Typed structural and status glyphs. ASCII fallbacks are mandatory for
+# conservative terminals and must stay ASCII.
+[glyphs]
+top_left = "╭"
+top_right = "╮"
+bottom_left = "╰"
+bottom_right = "╯"
+horizontal = "─"
+vertical = "│"
+branch = "│"
+last_branch = "└"
+rail = "│"
+prompt = "›"
+shell = "$"
+success = "✓"
+warning = "◇"
+note = "◇"
+error = "×"
+interrupt = "■"
+pending = "·"
+reasoning = "·"
+collapsed = "▸"
+expanded = "▾"
+separator = " · "
+ellipsis = "…"
+bullet = "•"
+wordmark = "octet"
+
+[glyphs_ascii]
+top_left = "+"
+top_right = "+"
+bottom_left = "+"
+bottom_right = "+"
+horizontal = "-"
+vertical = "|"
+branch = "|-"
+last_branch = "`-"
+rail = "|"
+prompt = ">"
+shell = "$"
+success = "+"
+warning = "!"
+note = "*"
+error = "x"
+interrupt = "!"
+pending = "."
+reasoning = "."
+collapsed = "[+]"
+expanded = "[-]"
+separator = " - "
+ellipsis = "..."
+bullet = "*"
+wordmark = "octet"
+
+# Transcript surfaces. The compiled default leaves every surface plain; themes
+# may opt into rails/cards/bands/rules per semantic surface.
+[surfaces.user]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.assistant]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.reasoning]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.tool]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.notice]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.outcome]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.shell]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.compaction]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+# Layout. These are the compiled default's resolved values.
+[layout]
+density = "comfortable"
+show_header = false
+show_footer = true
+show_status_line = true
+show_reasoning = true
+show_panel_borders = true
+prompt_padding = false
+transcript_inset = 2
+composer_padding = 1
+narrow_breakpoint = 64
+narrow_show_header = false
+narrow_show_footer = true
+narrow_show_status_line = true
+narrow_show_reasoning = true
+narrow_show_panel_borders = false
+
+# Variant overlays. The compiled default paints fenced code on a quiet surface
+# that differs by terminal background; this is the canonical variant example.
+[variants.universal.colors]
+md_code_bg = "#202630"
+
+[variants.dark.colors]
+md_code_bg = "#202630"
+
+[variants.light.colors]
+md_code_bg = "#f1f5f4"

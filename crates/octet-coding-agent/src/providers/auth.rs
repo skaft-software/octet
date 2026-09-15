@@ -70,12 +70,26 @@ pub(crate) fn resolve_environment(
     Ok(None)
 }
 
+/// Whether a credential variable carries a bearer token rather than the
+/// provider's ordinary API key.
+///
+/// Anthropic OAuth/subscription tokens must be sent as `Authorization: Bearer`
+/// even on routes whose default presentation is a custom API-key header. This
+/// keys on the credential *variable*, never on a provider name, so a new
+/// provider reusing these variables inherits the behavior without a branch.
+fn bearer_token_variable(variable: &str) -> bool {
+    matches!(variable, "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_OAUTH_TOKEN")
+}
+
 /// Build an endpoint auth strategy without copying the credential into a public
 /// provider contract.
 pub(crate) fn environment_auth(
     route: &ProviderRoute,
     credential: &EnvironmentCredential,
 ) -> anyhow::Result<Auth> {
+    if bearer_token_variable(credential.variable()) {
+        return Ok(Auth::bearer_env(credential.variable()));
+    }
     match route.auth_presentation {
         EndpointAuthPresentation::Bearer => Ok(Auth::bearer_env(credential.variable())),
         EndpointAuthPresentation::ApiKeyHeader => Ok(Auth::header_env(
@@ -109,6 +123,12 @@ pub(crate) fn environment_discovery_headers(
     credential: &EnvironmentCredential,
 ) -> anyhow::Result<http::HeaderMap> {
     let mut headers = http::HeaderMap::new();
+    if bearer_token_variable(credential.variable()) {
+        let mut value = http::HeaderValue::from_str(&format!("Bearer {}", credential.value()))?;
+        value.set_sensitive(true);
+        headers.insert(http::header::AUTHORIZATION, value);
+        return Ok(headers);
+    }
     let (name, value) = match route.auth_presentation {
         EndpointAuthPresentation::Bearer => (
             http::header::AUTHORIZATION,
@@ -651,7 +671,9 @@ pub(crate) fn missing_environment_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::contract::{ANTHROPIC, CLOUDFLARE_AI_GATEWAY, GEMINI, OPENAI};
+    use crate::providers::contract::{
+        ProviderAuthentication, ANTHROPIC, CLOUDFLARE_AI_GATEWAY, GEMINI, OPENAI,
+    };
 
     fn fixture_credentials(label: &str) -> octet_ai::AwsCredentials {
         octet_ai::AwsCredentials::new(
@@ -938,5 +960,52 @@ ignored key = ignored
 
         let google = environment_discovery_headers(&GEMINI.routes[0], &credential).unwrap();
         assert!(google[http::HeaderName::from_static("x-goog-api-key")].is_sensitive());
+    }
+
+    #[test]
+    fn bearer_token_aliases_override_the_route_api_key_header() {
+        // An Anthropic OAuth/subscription alias must be sent as
+        // `Authorization: Bearer` even though the route's default presentation
+        // is the `x-api-key` header. This keys on the credential variable.
+        let auth_token = EnvironmentCredential::for_test("ANTHROPIC_AUTH_TOKEN", "token-value");
+        assert!(matches!(
+            environment_auth(&ANTHROPIC.routes[0], &auth_token).unwrap(),
+            Auth::BearerEnv { .. }
+        ));
+        let headers =
+            environment_discovery_headers(&ANTHROPIC.routes[0], &auth_token).unwrap();
+        let authorization = &headers[http::header::AUTHORIZATION];
+        assert_eq!(authorization.to_str().unwrap(), "Bearer token-value");
+        assert!(authorization.is_sensitive());
+        assert!(headers
+            .get(http::HeaderName::from_static("x-api-key"))
+            .is_none());
+
+        let api_key = EnvironmentCredential::for_test("ANTHROPIC_API_KEY", "key-value");
+        assert!(matches!(
+            environment_auth(&ANTHROPIC.routes[0], &api_key).unwrap(),
+            Auth::HeaderEnv { .. }
+        ));
+        let headers =
+            environment_discovery_headers(&ANTHROPIC.routes[0], &api_key).unwrap();
+        assert_eq!(
+            headers[http::HeaderName::from_static("x-api-key")],
+            "key-value"
+        );
+    }
+
+    #[test]
+    fn anthropic_declaration_lists_bearer_aliases_before_api_key() {
+        match ANTHROPIC.authentication {
+            ProviderAuthentication::Environment { variables } => assert_eq!(
+                variables,
+                &[
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_OAUTH_TOKEN",
+                    "ANTHROPIC_API_KEY"
+                ]
+            ),
+            other => panic!("unexpected authentication {other:?}"),
+        }
     }
 }

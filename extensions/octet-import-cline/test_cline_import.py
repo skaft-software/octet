@@ -105,7 +105,7 @@ class ClineImportTests(unittest.TestCase):
 
     def test_duplicate_json_is_diagnostic_and_not_imported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "cline_settings.json"
             target.write_bytes((ROOT / "fixtures" / "malformed" / "duplicate-settings.json").read_bytes())
             result = import_setup(str(root), ["cline_settings.json"])
@@ -116,7 +116,7 @@ class ClineImportTests(unittest.TestCase):
 
     def test_unsupported_and_nonportable_mcp_data_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "cline_mcp_settings.json").write_text(
                 json.dumps({
                     "mcpServers": {
@@ -139,9 +139,27 @@ class ClineImportTests(unittest.TestCase):
             self.assertIn("unsafe environment command", reasons)
             self.assertNotIn("secret-value", json.dumps(result))
 
+    def test_invalid_mcp_argument_reports_a_bounded_value_free_diagnostic(self) -> None:
+        for argument in (1, False, None, {}, "", "private\x00value"):
+            with self.subTest(argument=argument), tempfile.TemporaryDirectory() as directory:
+                # The adapter rejects lexical symlinks, including macOS /var.
+                root = Path(directory).resolve()
+                (root / MCP_PATH).write_text(
+                    json.dumps({"mcpServers": {"fixture": {"command": "node", "args": [argument]}}}),
+                    encoding="utf-8",
+                )
+                result = import_setup(str(root), [MCP_PATH])
+                self.assertEqual(result["mcp_servers"], [])
+                self.assertIn({
+                    "path": MCP_PATH,
+                    "severity": "warning",
+                    "reason": "An MCP server has invalid or non-string arguments and was not imported.",
+                }, result["diagnostics"])
+                self.assertNotIn("private", json.dumps(result))
+
     def test_read_only_and_oversized_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             config = root / "cline_settings.json"
             config.write_text('{"apiProvider":"OpenAI","apiModelId":"model"}', encoding="utf-8")
             skill = root / ".cline" / "skills" / "large" / "SKILL.md"
@@ -164,7 +182,7 @@ class ClineImportTests(unittest.TestCase):
 
     def test_malformed_source_root_and_config_path_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             with self.assertRaises(AdapterError):
                 detect(str(root / "missing"))
             with self.assertRaises(AdapterError):
@@ -175,8 +193,8 @@ class ClineImportTests(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support is unavailable")
     def test_symlinked_source_and_candidates_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside_directory:
-            root = Path(directory)
-            outside = Path(outside_directory)
+            root = Path(directory).resolve()
+            outside = Path(outside_directory).resolve()
             (outside / "cline_settings.json").write_text('{}', encoding="utf-8")
             link = root / "cline_settings.json"
             try:
@@ -197,8 +215,8 @@ class ClineImportTests(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support is unavailable")
     def test_symlinked_skill_entries_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside_directory:
-            root = Path(directory)
-            outside = Path(outside_directory)
+            root = Path(directory).resolve()
+            outside = Path(outside_directory).resolve()
             target = outside / "skills" / "review" / "SKILL.md"
             target.parent.mkdir(parents=True)
             target.write_text("do not import this", encoding="utf-8")

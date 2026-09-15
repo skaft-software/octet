@@ -3582,6 +3582,7 @@ async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopba
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
+    constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
             parameters: serde_json::json!({"type":"object"}),
@@ -4386,6 +4387,7 @@ async fn pinned_metadata_deepseek_flash_exact_wire_controls_and_required_replay(
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
+    constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
             parameters: serde_json::json!({"type":"object"}),

@@ -239,12 +239,48 @@ fn adapter_rejection_is_explicit_and_leaves_destination_untouched() {
     let linked_source = fixture.root.path().join("pi-link");
     std::os::unix::fs::symlink(&fixture.source, &linked_source).unwrap();
 
-    let output = fixture.import_from(&linked_source, &["--dry-run", "--json"]);
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        error.contains("Pi migration adapter rejected migration/detect"),
-        "unexpected adapter error: {error}"
-    );
-    assert!(!fixture.home.join(".octet").exists());
+    for source in [linked_source.as_path(), Path::new("pi-link")] {
+        let output = fixture.import_from(source, &["--dry-run", "--json"]);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("Pi migration adapter rejected migration/detect"),
+            "unexpected adapter error: {error}"
+        );
+        assert!(!fixture.home.join(".octet").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn default_and_environment_sources_preserve_the_adapter_symlink_boundary() {
+    for use_environment in [false, true] {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.home.join(".pi")).unwrap();
+        let linked_source = fixture.home.join(".pi/agent");
+        std::os::unix::fs::symlink(&fixture.source, &linked_source).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_octet"));
+        command
+            .current_dir(fixture.root.path())
+            .env_clear()
+            .env("HOME", &fixture.home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("LANG", "C.UTF-8")
+            .args([
+                "--offline",
+                "migrate",
+                "import",
+                "pi",
+                "--dry-run",
+                "--json",
+            ]);
+        if use_environment {
+            command.env("PI_CODING_AGENT_DIR", &linked_source);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Pi migration adapter rejected migration/detect"));
+        assert!(!fixture.home.join(".octet").exists());
+    }
 }

@@ -1273,11 +1273,14 @@ fn mark_current_choice(labels: &mut [String], current: Option<usize>) -> usize {
 /// Ask the user to select one model, preserving cancellation for workflows
 /// such as `/logout` that must not mutate credentials until a replacement model
 /// has been chosen.
-pub async fn optional_model_picker(
+pub async fn optional_model_picker<S>(
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     catalog: &ModelCatalog,
-) -> anyhow::Result<Option<ModelId>> {
+) -> anyhow::Result<Option<ModelId>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let selected = pick_model_choice(shell, input, catalog).await?;
     if let Some(id) = &selected {
         if let Err(e) = crate::cli::persist_model(&id.0) {
@@ -1326,11 +1329,14 @@ where
 }
 
 /// Ask the user to select one model from the active catalog.
-pub async fn model_picker(
+pub async fn model_picker<S>(
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     catalog: &ModelCatalog,
-) -> anyhow::Result<ModelId> {
+) -> anyhow::Result<ModelId>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
     optional_model_picker(shell, input, catalog)
         .await?
         .ok_or_else(|| anyhow::anyhow!("model selection cancelled"))

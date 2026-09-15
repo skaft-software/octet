@@ -46,12 +46,21 @@ editor navigation. Multiline editing, bracketed paste, and large-paste chips are
 supported. Explicitly pasted/dropped
 media needs an attachment chip before submission; [typed paths alone are text](media.md#attach-explicitly).
 
-Enter submits or queues a follow-up while work is active. Ctrl+S steers at the
-next model boundary; pending steering is shown above the composer. Escape
-interrupts. Ctrl+C clears a nonempty draft, otherwise aborts active work and does
-nothing while idle. Ctrl+D coordinates close from any input surface, settling
-active work and child-process cleanup first. Shift+Enter inserts a newline when
-the terminal reports enhanced keys. [Full key table](commands.md#keys).
+Enter submits, or queues a local follow-up while work is active. Follow-ups
+dispatch one at a time in FIFO order after normal completion. Ctrl+S instead
+admits live steering at the next model boundary; both kinds of pending input
+share the bounded hint above the composer. Option+Up (Alt+Up) recalls the newest
+local follow-up into an empty composer, preserving attachment/paste chips. It
+never submits or retracts already-admitted steering.
+
+Escape first closes the current panel/slash popup; with the composer focused,
+it interrupts active work and dispatches the oldest queued follow-up **after**
+the run settles. It never submits an unqueued draft. Ctrl+C clears a nonempty
+draft, otherwise aborts active work without dispatch and does nothing while idle.
+Failures and close also leave follow-ups unsubmitted. Ctrl+D coordinates close
+from any input surface, settling active work and child-process cleanup first.
+Shift+Enter inserts a newline when the terminal reports enhanced keys.
+[Full key table](commands.md#keys).
 
 ## Scrolling and rendering
 

@@ -497,17 +497,24 @@ pub(super) fn render_pending_steering(
     width: u16,
     max_rows: usize,
 ) -> Vec<String> {
-    if state.steering_queue.is_empty() || max_rows == 0 {
+    if (state.steering_queue.is_empty() && state.follow_up_queue.is_empty()) || max_rows == 0 {
         return Vec::new();
     }
 
     let max_rows = max_rows.min(crate::tui::layout::MAX_STEERING_PREVIEW_ROWS);
-    let count = state.steering_queue.len();
+    let count = state.steering_queue.len() + state.follow_up_queue.len();
+    let label = if state.follow_up_queue.is_empty() {
+        "Steering"
+    } else if state.steering_queue.is_empty() {
+        "Follow-up"
+    } else {
+        "Input"
+    };
     let heading = if count == 1 {
-        format!("Steering{}queued", semantic_separator(&state.theme))
+        format!("{label}{}queued", semantic_separator(&state.theme))
     } else {
         format!(
-            "Steering{}{} queued",
+            "{label}{}{} queued",
             semantic_separator(&state.theme),
             count
         )
@@ -541,7 +548,12 @@ pub(super) fn render_pending_steering(
         .saturating_sub(visible_width(&plain_prefix))
         .max(1);
     let preview_budget = available.saturating_sub(visible_width(&hidden_suffix));
-    let preview = steering_preview_text(state, &state.steering_queue[0].display);
+    let display = state
+        .steering_queue
+        .first()
+        .map(|entry| entry.display.as_str())
+        .unwrap_or_else(|| state.follow_up_queue[0].transcript_text.as_str());
+    let preview = steering_preview_text(state, display);
     let preview = if visible_width(&preview) > preview_budget {
         clipped_steering_content(state, &preview, preview_budget)
     } else {

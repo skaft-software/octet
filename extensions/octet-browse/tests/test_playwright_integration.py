@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -108,6 +110,13 @@ class PlaywrightIntegrationTests(unittest.TestCase):
                 repeated_launch = worker.call("launch", owner, timeout=25)
                 self.assertEqual(repeated_launch["selected_tab_id"], tab_id)
                 self.assertEqual(repeated_launch["tab_count"], 1)
+                background = worker.call("open_url", owner, self.origin + "/background", None)
+                background_id = background["affected_tab_id"]
+                self.assertNotEqual(background_id, tab_id)
+                self.assertEqual(background["created_tab_ids"], [background_id])
+                observed = worker.call("snapshot", owner, background_id)
+                self.assertIn("Second page", observed["text"])
+                worker.call("close_tab", owner, background_id)
 
                 opened = worker.call("open_url", owner, self.origin + "/", tab_id, timeout=20)
                 self.assertEqual(opened["affected_tab_id"], tab_id)
@@ -185,6 +194,56 @@ class PlaywrightIntegrationTests(unittest.TestCase):
                 worker.call("close", owner)
                 self.assertTrue(profiles.reset())
                 self.assertFalse(profile_paths.profile.exists())
+            finally:
+                worker.shutdown(timeout=2)
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" and os.environ.get("OCTET_BROWSE_FOCUS_TESTS") == "1",
+        "manual opt-in macOS terminal-focus qualification (see QUALIFICATION.md)",
+    )
+    def test_post_launch_operations_retain_explicit_terminal_focus(self) -> None:
+        # This probe reads only the frontmost application PID, never its windows,
+        # browser tabs or content. It never activates any application itself.
+        self.assertTrue(sys.stdin.isatty(), "focus qualification requires a physical terminal")
+        expected_pid = int(os.environ["OCTET_BROWSE_FOCUS_TERMINAL_PID"])
+        self.assertGreater(expected_pid, 0)
+
+        def assert_terminal_focus() -> None:
+            result = subprocess.run(
+                ["/usr/bin/osascript", "-l", "JavaScript", "-e",
+                 "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier"],
+                capture_output=True, text=True, check=True, timeout=3,
+            )
+            self.assertEqual(int(result.stdout.strip()), expected_pid, "terminal lost foreground focus")
+
+        with tempfile.TemporaryDirectory() as home:
+            profiles = ProfileManager(BrowsePaths.for_home(Path(home)))
+            worker = PlaywrightWorker(lambda: BrowserEngine(self.runtime_paths, self.setup, profiles))
+            owner = ResourceOwner("focus-session", "focus-instance", 1)
+            try:
+                worker.call("launch", owner, timeout=25)
+                input("Leave Chromium visible, manually focus this terminal, then press Enter: ")
+                assert_terminal_focus()
+
+                def call(method, *arguments):
+                    assert_terminal_focus()
+                    result = worker.call(method, owner, *arguments)
+                    assert_terminal_focus()
+                    return result
+
+                for _ in range(5):
+                    call("launch")
+                    opened = call("open_url", self.origin + "/background", None)
+                    tab_id = opened["affected_tab_id"]
+                    call("snapshot", tab_id)
+                    call("wait", tab_id, 100)
+                    call("screenshot", tab_id)
+                    call("open_url", self.origin + "/final", tab_id)
+                    call("close_tab", tab_id)
+                self.assertEqual(
+                    input("Did the visible browser flicker, move or briefly take focus? [yes/no]: ").strip().lower(),
+                    "no", "physical flicker/focus observation failed or was not confirmed",
+                )
             finally:
                 worker.shutdown(timeout=2)
 

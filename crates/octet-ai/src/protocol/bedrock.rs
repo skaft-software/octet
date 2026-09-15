@@ -299,19 +299,28 @@ pub(crate) fn build_request(
     }
 
     if !request.tools.is_empty() && request.tool_choice != ToolChoice::None {
-        let tools = request
-            .tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "toolSpec": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "inputSchema": {"json": tool.parameters},
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut tools = Vec::with_capacity(request.tools.len());
+        for tool in &request.tools {
+            // Strict JSON-schema constrained sampling rewrites the input schema
+            // and sets Bedrock's per-tool `strict` flag; otherwise the canonical
+            // schema is sent unchanged.
+            let (parameters, strict) =
+                crate::constrained_sampling::function_tool_parameters(tool, true)?;
+            let input_schema = if strict {
+                parameters
+            } else {
+                tool.parameters.clone()
+            };
+            let mut tool_spec = json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": {"json": input_schema},
+            });
+            if strict {
+                tool_spec["strict"] = json!(true);
+            }
+            tools.push(json!({ "toolSpec": tool_spec }));
+        }
         let tool_choice = match &request.tool_choice {
             ToolChoice::Auto => json!({"auto": {}}),
             ToolChoice::Required => json!({"any": {}}),
@@ -980,7 +989,10 @@ mod tests {
             &json!({"role": "assistant"}),
         );
         let mut decoder = BedrockEventStreamDecoder::new();
-        assert!(decoder.push(&complete[..complete.len() - 1]).unwrap().is_empty());
+        assert!(decoder
+            .push(&complete[..complete.len() - 1])
+            .unwrap()
+            .is_empty());
         assert!(decoder.finish().is_err());
     }
 
@@ -1124,6 +1136,7 @@ mod tests {
                 content: vec![UserPart::Text("hello".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                constrained_sampling: None,
                 name: "echo".into(),
                 description: "fixture".into(),
                 parameters: json!({"type": "object"}),

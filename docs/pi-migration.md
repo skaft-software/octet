@@ -42,7 +42,13 @@ octet migrate import pi --source /path/to/pi/agent --yes
 Without `--source`, import checks `PI_CODING_AGENT_DIR`, then the standard Pi
 agent locations. It uses octet's built-in read-only API `0.3` adapter, not Pi
 package code or a user-selected adapter command. The host owns destinations and
-writes.
+writes. A selected source-directory symlink is rejected by the adapter; the CLI
+preserves that boundary for explicit, environment and default source paths.
+
+The optional [octet-import-pi source package](../extensions/octet-import-pi/README.md)
+provides a thin API `0.3` process entrypoint to the same implementation. It requires
+a matching octet installation, introduces no alternate parser or ingestion path,
+and is neither required by nor able to override `octet migrate import pi`.
 
 | Portable data | Import behavior |
 | --- | --- |

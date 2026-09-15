@@ -78,15 +78,16 @@ extension processes stopped. [Discovery and trust](resources.md).
 
 | Key | Action |
 | --- | --- |
-| Enter | Submit; while active, queue a follow-up. In a picker, select the visible action; in the slash-command popup, invoke the highlighted command. |
+| Enter | Submit; while active, queue an editable follow-up for after the run. In a picker, select the visible action; in the slash-command popup, invoke the highlighted command. |
 | Shift+Enter | Newline when enhanced terminal key events are available. |
 | Ctrl+S | Steer at the next model boundary; in the resume picker, cycle sorting. |
-| Escape | Interrupt active work; close/back out of a panel. |
+| Escape | Interrupt active work, then dispatch the oldest queued follow-up after settlement (never the draft); close/back out of a panel or slash popup first. |
+| Option+Up / Alt+Up | Move the newest queued follow-up into an empty composer for editing; no submission or interruption. |
 | Ctrl+C | Clear a nonempty draft; otherwise abort active work, no-op while idle. |
 | Ctrl+D | Close from any interactive input surface after active-work and child-process cleanup. |
 | Ctrl+O | Globally disclose retained reasoning, compaction, delegated activity, tool commands, tool evidence, and shell output. Cannot recover discarded capture bytes. |
 | PageUp / PageDown | Semantic transcript navigation; PageUp claims the bounded viewport, PageDown returns toward live output. |
-| Up / Down | Select a path or `@` file suggestion while its menu is visible; otherwise move through the editor. |
+| Up / Down | Select a visible path/`@` suggestion; otherwise move through the editor. While idle, Up at cursor 0 recalls sent prompts; Down past the newest restores the draft. |
 | Tab | Complete the selected slash command without invoking it, or insert the selected path/`@` file suggestion. Keep directory completion open; backslash-escape spaces. |
 | `@` | Fuzzy gitignore-aware workspace file mentions; path-prefixed mentions use filesystem completion. |
 
@@ -94,3 +95,11 @@ extension processes stopped. [Discovery and trust](resources.md).
 [subagent navigation](../extensions/octet-subagents/README.md#tui-and-serve-presentation)
 are contextual. Keyboard ownership and native mouse history are explained in
 [terminal scrolling](terminal.md#scrolling-and-rendering).
+
+Follow-ups remain local until dispatch, one per settled run in FIFO order.
+Ctrl+S is different: it admits live steering at the next model boundary and
+cannot be retracted with Option+Up. Failed runs, Ctrl+C cancellation, and close
+do not auto-dispatch follow-ups; retained entries can still be recalled while
+idle. Option+Up never overwrites a nonempty draft. Attachment/paste chips retain
+their payloads when recalled. Held-key repeats do not submit, interrupt, or pop
+queue entries.

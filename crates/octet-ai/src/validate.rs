@@ -96,6 +96,12 @@ pub(crate) fn validate_request(
 ) -> Result<Vec<Diagnostic>, AiError> {
     let mut diagnostics = Vec::new();
 
+    // No codec emits the native load-point schemas/references yet. Accepting
+    // this flag previously hid announced Chat tools without loading them.
+    if caps.deferred_tool_loading {
+        return Err(crate::error::ConfigError::InvalidModel(target_model.clone()).into());
+    }
+
     if req.responses.is_some() && protocol != Protocol::OpenAiResponses {
         return Err(AiError::Unsupported(UnsupportedError::ResponsesOptions));
     }
@@ -1322,11 +1328,24 @@ mod matrix_tests {
         }
     }
 
+    // --- deferred tool loading is not implemented: reject, never hide schemas ---
+    #[test]
+    fn deferred_tool_loading_is_rejected_instead_of_hiding_schemas() {
+        let req = base();
+        let mut c = caps(false, false, false, true, false, false);
+        c.deferred_tool_loading = true;
+        assert!(matches!(
+            run(&req, &c, Protocol::OpenAiChat),
+            Err(AiError::Config(crate::error::ConfigError::InvalidModel(_)))
+        ));
+    }
+
     // --- tools without capability ---
     #[test]
     fn tools_without_capability() {
         let mut req = base();
         req.tools = vec![ToolDef {
+            constrained_sampling: None,
             name: "grep".into(),
             description: "search".into(),
             parameters: serde_json::json!({"type":"object"}),

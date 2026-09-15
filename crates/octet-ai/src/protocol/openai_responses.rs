@@ -31,7 +31,7 @@ struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     context_management: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ResponsesTool>>,
+    tools: Option<Vec<ResponsesToolWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,11 +134,38 @@ struct ResponsesReasoningSummary {
 }
 
 #[derive(Serialize)]
+#[serde(untagged)]
+enum ResponsesToolWire {
+    Function(ResponsesTool),
+    Custom(ResponsesCustomTool),
+}
+
+#[derive(Serialize)]
 struct ResponsesTool {
-    r#type: String,
+    r#type: &'static str,
     name: String,
     description: String,
     parameters: serde_json::Value,
+    /// Present for function tools: `true` only when the caller asked for
+    /// strict JSON-schema sampling and the route could enforce the rewritten
+    /// schema.
+    strict: bool,
+}
+
+/// OpenAI Responses `custom` tool constrained by a Lark/regex grammar.
+#[derive(Serialize)]
+struct ResponsesCustomTool {
+    r#type: &'static str,
+    name: String,
+    description: String,
+    format: ResponsesGrammarFormat,
+}
+
+#[derive(Serialize)]
+struct ResponsesGrammarFormat {
+    r#type: &'static str,
+    syntax: String,
+    definition: String,
 }
 
 #[derive(Serialize)]
@@ -187,21 +214,38 @@ fn opaque_input_item(item: ResponsesInputItem) -> crate::responses::ResponsesIte
 fn map_responses_tools(
     model: &crate::catalog::Model,
     tools: &[ToolDef],
-) -> Option<Vec<ResponsesTool>> {
+) -> Result<Option<Vec<ResponsesToolWire>>, AiError> {
     if tools.is_empty() || !model.spec.capabilities.tools {
-        return None;
+        return Ok(None);
     }
-    Some(
-        tools
-            .iter()
-            .map(|tool| ResponsesTool {
-                r#type: "function".to_owned(),
+    let mut mapped = Vec::with_capacity(tools.len());
+    for tool in tools {
+        // Grammar-constrained tools are caller-opted OpenAI `custom` tools;
+        // every other tool is a strict-resolved function tool.
+        if let Some(grammar) = crate::constrained_sampling::resolve_grammar(tool, true)? {
+            mapped.push(ResponsesToolWire::Custom(ResponsesCustomTool {
+                r#type: "custom",
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
-            })
-            .collect(),
-    )
+                format: ResponsesGrammarFormat {
+                    r#type: "grammar",
+                    syntax: grammar.format.to_owned(),
+                    definition: grammar.definition,
+                },
+            }));
+            continue;
+        }
+        let (parameters, strict) =
+            crate::constrained_sampling::function_tool_parameters(tool, true)?;
+        mapped.push(ResponsesToolWire::Function(ResponsesTool {
+            r#type: "function",
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters,
+            strict,
+        }));
+    }
+    Ok(Some(mapped))
 }
 
 fn map_responses_lite_tools(
@@ -353,18 +397,15 @@ pub(crate) fn build_compact_request(
         || model.spec.cache.session_affinity_format
             == Some(crate::types::SessionAffinityFormat::Codex)
         || responses_lite;
-    let mapped_tools = if responses_lite {
+    let mapped_tools = if responses_lite || !rich_codex_schema {
         None
     } else {
-        rich_codex_schema
-            .then(|| map_responses_tools(model, tools))
-            .flatten()
-            .map(|tools| {
-                tools
-                    .into_iter()
-                    .map(|tool| serde_json::to_value(tool).expect("Responses tool serializes"))
-                    .collect()
-            })
+        map_responses_tools(model, tools)?.map(|tools| {
+            tools
+                .into_iter()
+                .map(|tool| serde_json::to_value(tool).expect("Responses tool serializes"))
+                .collect()
+        })
     };
     let parallel_tool_calls = if responses_lite {
         // The internal Responses Lite route requires an explicit false even
@@ -858,9 +899,11 @@ pub(crate) fn build_request(
 
     // 4. Map tools & tool_choice
     let responses_lite = model.spec.capabilities.responses_lite;
-    let tools_opt = (!responses_lite)
-        .then(|| map_responses_tools(model, &req.tools))
-        .flatten();
+    let tools_opt = if responses_lite {
+        None
+    } else {
+        map_responses_tools(model, &req.tools)?
+    };
 
     let tool_choice_opt = if !model.spec.capabilities.tools {
         None
@@ -1252,6 +1295,54 @@ struct ResponsesOutputTokensDetails {
 // OpenAI Responses is always streamed (design §12.2); there is no non-streaming
 // decode path, so this codec deliberately exposes none.
 
+/// Backfill opaque encrypted reasoning from the authoritative terminal output.
+///
+/// Some Responses-compatible gateways (Azure OpenAI, xAI) omit
+/// `reasoning.encrypted_content` from `response.output_item.done` and provide it
+/// only in `response.completed.response.output`. Without this, `store:false`
+/// multi-turn replay would drop the reasoning continuation for those turns.
+/// Only an existing opaque reasoning state is enriched; a missing item is left
+/// alone rather than inventing one.
+fn backfill_reasoning_signatures(
+    builder: &mut ResponseBuilder,
+    output: &[crate::responses::ResponsesItem],
+) -> Result<(), AiError> {
+    for item in output {
+        let json = item.as_json();
+        if json.get("type").and_then(serde_json::Value::as_str) != Some("reasoning") {
+            continue;
+        }
+        let Some(encrypted) = json
+            .get("encrypted_content")
+            .and_then(serde_json::Value::as_str)
+            .filter(|content| !content.is_empty())
+        else {
+            continue;
+        };
+        let item_id = json.get("id").and_then(serde_json::Value::as_str);
+        let target = builder
+            .reasoning_states
+            .iter()
+            .find_map(|(index, state)| match &state.kind {
+                ReasoningStateKind::OpenAiReasoning {
+                    item_id: stored_id,
+                    encrypted_content,
+                } if encrypted_content.is_none() && stored_id.as_deref() == item_id => Some(*index),
+                _ => None,
+            });
+        let Some(index) = target else { continue };
+        let mut state = builder.reasoning_states[&index].clone();
+        if let ReasoningStateKind::OpenAiReasoning {
+            encrypted_content, ..
+        } = &mut state.kind
+        {
+            *encrypted_content = Some(encrypted.to_owned());
+        }
+        builder.set_reasoning_state(index, state)?;
+    }
+    Ok(())
+}
+
 /// Close any tool-call parts that a provider left open before its terminal
 /// response event. Some Responses-compatible gateways send complete arguments
 /// in `output_item.added` and omit `function_call_arguments.done`; closing here
@@ -1575,7 +1666,12 @@ pub(crate) fn decode_stream_event(
                     )?;
                 }
 
-                if item.encrypted_content.is_some() {
+                // Persist opaque reasoning state for an observed reasoning part
+                // even when `encrypted_content` is absent here: a few gateways
+                // (Azure OpenAI, xAI) send it only in the terminal
+                // `response.completed` output, where `backfill_reasoning_signatures`
+                // merges it into this state for `store:false` replay.
+                if item.encrypted_content.is_some() || had_visible_text {
                     builder.set_reasoning_state(
                         canonical_idx,
                         ReasoningState {
@@ -1635,6 +1731,7 @@ pub(crate) fn decode_stream_event(
             };
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
+                backfill_reasoning_signatures(builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
             }
             close_open_tool_calls(&mut events, builder)?;
@@ -1657,6 +1754,7 @@ pub(crate) fn decode_stream_event(
             };
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
+                backfill_reasoning_signatures(builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
             }
             close_open_tool_calls(&mut events, builder)?;
@@ -1942,6 +2040,7 @@ mod tests {
         req.system = Some("System instructions".to_owned());
         req.reasoning = ReasoningConfig::Effort(crate::types::ReasoningEffort::Ultra);
         req.tools.push(ToolDef {
+            constrained_sampling: None,
             name: "read".to_owned(),
             description: "Read a file".to_owned(),
             parameters: serde_json::json!({
@@ -1992,6 +2091,7 @@ mod tests {
             CompatibilityMode::Strict,
         );
         req.tools.push(ToolDef {
+            constrained_sampling: None,
             name: "read".to_owned(),
             description: "Read a file".to_owned(),
             parameters: serde_json::json!({"type": "object"}),
@@ -2433,6 +2533,7 @@ mod tests {
                 content: vec![UserPart::Text("hello".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                constrained_sampling: None,
                 name: "lookup".to_string(),
                 description: "lookup data".to_string(),
                 parameters: serde_json::json!({"type":"object"}),
@@ -2487,6 +2588,7 @@ mod tests {
             CompatibilityMode::Strict,
         );
         req.tools = vec![crate::types::ToolDef {
+            constrained_sampling: None,
             name: "lookup".to_string(),
             description: "lookup data".to_string(),
             parameters: serde_json::json!({"type":"object"}),
@@ -2760,6 +2862,39 @@ mod fixture_tests {
     }
 
     #[tokio::test]
+    async fn terminal_encrypted_reasoning_backfills_missing_item_payload() {
+        // Azure OpenAI / xAI omit `encrypted_content` from `output_item.done`
+        // and provide it only on `response.completed`. The stored reasoning
+        // state must be enriched from the terminal output for replay.
+        let events = run(fx!("reasoning_backfill.sse"), 0).await.unwrap();
+        let resp = harness::finished(&events);
+        let reasoning = resp
+            .message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                AssistantPart::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("reasoning part");
+        assert_eq!(reasoning.text.as_deref(), Some("Trace it"));
+        match &reasoning.state.as_ref().unwrap().kind {
+            ReasoningStateKind::OpenAiReasoning {
+                item_id,
+                encrypted_content,
+            } => {
+                assert_eq!(item_id.as_deref(), Some("rs_backfill"));
+                assert_eq!(
+                    encrypted_content.as_deref(),
+                    Some("VEVSTUlOQUxfRU5DUllQVEVE")
+                );
+            }
+            other => panic!("expected OpenAiReasoning, got {other:?}"),
+        }
+        assert_eq!(text_of(&events), "done");
+    }
+
+    #[tokio::test]
     async fn reasoning_summary_deltas_stream_and_preserve_state() {
         let events = run(fx!("reasoning_summary.sse"), 0).await.unwrap();
         let resp = harness::finished(&events);
@@ -2815,6 +2950,7 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::OpenAiResponses, None);
         let tools = [ToolDef {
+            constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({

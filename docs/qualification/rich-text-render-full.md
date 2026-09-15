@@ -1,6 +1,6 @@
 # Rich-text render current candidate
 
-**Status:** source-only candidate; not qualified. This note records the bounded append-local rendering repair and its verification boundary. It does not claim a physical #311 ownership refactor, emitted VT bytes, or native-terminal acceptance.
+**Status:** deterministic Rust/VT checks passed on `df5a7e80` plus the current TUI diff; physical-terminal qualification remains open. This note records the bounded append-local rendering repair and its verification boundary. It does not claim a physical #311 ownership refactor, emitted VT bytes, or native-terminal acceptance.
 
 ## Scope
 
@@ -22,8 +22,24 @@ The existing focused coverage exercises:
 - `fence_search_and_literal_preview_copy_are_append_local` in `crates/sexy-tui-rs/src/rich_text/stream.rs`.
 - Rich rendering and native-history tests named by the baseline capsule remain in scope for the verifier; the existing streaming regression gained an operation-count assertion, while no native-history source was changed.
 
-No build, formatter, test, benchmark, native terminal session, SSH journey, or live observation was run. Ghostty, Terminal.app, Ubuntu-over-SSH, native selection/copy, PageUp, scroll position, and emitted-byte acceptance therefore remain unverified. Do not infer those results from source inspection or deterministic frame comparisons.
+At the earlier source-only handoff no build, formatter, test, benchmark, native terminal session, SSH journey, or live observation had run. Current deterministic results follow below. Ghostty, Terminal.app, Ubuntu-over-SSH, native selection/copy, PageUp, scroll position, and emitted-byte acceptance therefore remain unverified. Do not infer those results from source inspection or deterministic frame comparisons.
 
 ## Baseline boundary
 
 The immutable baseline is `a75a41157fa82ff22219b2b312cccf0eadf9e70d`. The native-scroll repair capsule is preserved. Only the permitted rich-text source and this qualification record are changed.
+
+## Current observed checks
+
+- `cargo test --locked -p sexy-tui-rs`: all **167 library tests passed** in
+  102.81 seconds, including the unchanged append-local work-bound oracle. The
+  subsequent image integration fixture failed its incorrect ESC-count assertion;
+  that fixture now checks exact OSC header/payload/ST bytes instead.
+- `cargo test --locked -p sexy-tui-rs --test images_current --test rich_rendering --test pi_tui_render`: **6 + 4 + 27 passed** after that fixture correction.
+- `cargo test --locked -p octet-coding-agent --lib tui::`: **529 passed**, including
+  stable Markdown, theme/colour fallbacks, native history and the new fragmented
+  table/resize and late-reference finalization VT tests.
+
+The expensive library regression deliberately renders a full static oracle for
+every chunk outside measured incremental work; no size or work assertion was
+reduced. [Exact execution evidence](../swarm-audit/EXECUTION-tui.md). These are not
+physical Terminal.app/Ghostty/SSH paint or selection observations.

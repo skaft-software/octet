@@ -84,7 +84,9 @@ arguments.
 
 **Remote Streamable HTTP is blocked by default and unsafe for production,
 privileged networks, or sensitive credentials.** Its process-owner-only
-experimental switch does not resolve the [nine known defects](REFERENCE.md#known-streamable-http-defects).
+experimental switch is not a safety qualification. The [nine-defect remediation
+record and remaining closure gates](REFERENCE.md#known-streamable-http-defects)
+describe the tested safeguards and outstanding qualification work.
 The stock runtime has no remote credential provider. Legacy SSE, OAuth/browser
 authorization, resources, prompts, sampling, elicitation, and ambient discovery
 are unsupported.
@@ -102,7 +104,7 @@ is a retained bundled-runtime contract, not a current SDK authoring guide.
   - <a id="streamable-http-configuration"></a>[Streamable HTTP configuration](REFERENCE.md#streamable-http-configuration).
   - <a id="digest-pinned-trusted-project-configuration"></a>[Digest-pinned trusted project configuration](REFERENCE.md#digest-pinned-trusted-project-configuration).
   - <a id="enforced-default-bounds"></a>[Enforced default bounds](REFERENCE.md#enforced-default-bounds).
-  - <a id="streamable-http-framing-and-recovery"></a>[Streamable HTTP framing and recovery](REFERENCE.md#streamable-http-framing-and-recovery), subject to the known defects.
+  - <a id="streamable-http-framing-and-recovery"></a>[Streamable HTTP framing and recovery](REFERENCE.md#streamable-http-framing-and-recovery), subject to the remaining closure gates.
 - <a id="catalogs-calls-and-results"></a>[Catalogs, calls, and results](REFERENCE.md#catalogs-calls-and-results): epochs, cancellation, schemas, and media.
 - <a id="lifecycle-health-and-recovery"></a>[Lifecycle, health, and recovery](REFERENCE.md#lifecycle-health-and-recovery).
 - <a id="tui-and-serve-presentation"></a>[TUI and Serve presentation](REFERENCE.md#tui-and-serve-presentation): owner-fenced state, not a separate manager.

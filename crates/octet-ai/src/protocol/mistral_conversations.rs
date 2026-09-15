@@ -11,7 +11,7 @@
 use serde_json::{json, Value};
 
 use crate::catalog::Model;
-use crate::error::{AiError, DecodeError, Diagnostic, UnsupportedError};
+use crate::error::{AiError, ConfigError, DecodeError, Diagnostic, UnsupportedError};
 use crate::protocol::sse::SseEvent;
 use crate::protocol::HttpRequestParts;
 use crate::stream::{ResponseBuilder, StreamEvent};
@@ -24,6 +24,27 @@ use crate::types::{
 /// the supplied entries into a new, non-stored conversation; never interpret a
 /// cache session ID as a provider conversation ID.
 pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestParts, AiError> {
+    // Conversations credentials may only leave over TLS. Literal loopback HTTP
+    // remains usable for local fixtures; the generic endpoint contract also
+    // serves custom LAN endpoints and therefore cannot enforce this route rule.
+    let base = &model.endpoint.base_url;
+    let loopback = match base.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    if (base.scheme() != "https" && !(base.scheme() == "http" && loopback))
+        || base.host().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidBaseUrl(
+            "Conversations requires HTTPS (or literal loopback HTTP), without userinfo, query or fragment".into(),
+        )
+        .into());
+    }
     if req.reasoning != ReasoningConfig::Off {
         return Err(UnsupportedError::Reasoning.into());
     }
@@ -63,7 +84,9 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
                                 match part {
                                     ToolResultPart::Text(value) => text.push_str(value),
                                     ToolResultPart::Media(_) => drop_unsupported(
-                                        req, &mut diagnostics, UnsupportedError::ToolResultMedia,
+                                        req,
+                                        &mut diagnostics,
+                                        UnsupportedError::ToolResultMedia,
                                         "dropped_tool_result_media",
                                     )?,
                                 }
@@ -91,7 +114,9 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
                         })),
                         AssistantPart::Reasoning(_) | AssistantPart::ProviderMetadata(_) => {
                             drop_unsupported(
-                                req, &mut diagnostics, UnsupportedError::Reasoning,
+                                req,
+                                &mut diagnostics,
+                                UnsupportedError::Reasoning,
                                 "dropped_reasoning_state",
                             )?;
                         }
@@ -103,7 +128,10 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     }
     if req.output_modalities != OutputModalities::Text {
         drop_unsupported(
-            req, &mut diagnostics, UnsupportedError::AudioOutput, "dropped_audio_output",
+            req,
+            &mut diagnostics,
+            UnsupportedError::AudioOutput,
+            "dropped_audio_output",
         )?;
     }
     let mut body = json!({
@@ -119,13 +147,22 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         body["instructions"] = json!(system);
     }
     if !req.tools.is_empty() && model.spec.capabilities.tools {
-        body["tools"] = Value::Array(req.tools.iter().map(|tool| json!({
-            "type": "function",
-            "function": {
-                "name": tool.name, "description": tool.description,
-                "parameters": tool.parameters,
-            },
-        })).collect());
+        let mut tools = Vec::with_capacity(req.tools.len());
+        for tool in &req.tools {
+            // Strict JSON-schema constrained sampling rewrites the function
+            // parameters into Mistral's enforced subset; otherwise the
+            // canonical schema is sent unchanged.
+            let (parameters, _strict) =
+                crate::constrained_sampling::function_tool_parameters(tool, true)?;
+            tools.push(json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name, "description": tool.description,
+                    "parameters": parameters,
+                },
+            }));
+        }
+        body["tools"] = Value::Array(tools);
     }
     let mut args = serde_json::Map::new();
     if let Some(temperature) = req.temperature {
@@ -168,14 +205,20 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         body["completion_args"] = Value::Object(args);
     }
     let mut headers = http::HeaderMap::new();
-    headers.insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
-    headers.insert(http::header::ACCEPT, http::HeaderValue::from_static("text/event-stream"));
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        http::header::ACCEPT,
+        http::HeaderValue::from_static("text/event-stream"),
+    );
     Ok(HttpRequestParts {
         url: crate::protocol::endpoint_url(&model.endpoint.base_url, "conversations")?,
         headers,
-        body: serde_json::to_vec(&body).map_err(|_| DecodeError::Json(
-            "cannot encode Mistral Conversations request".into(),
-        ))?.into(),
+        body: serde_json::to_vec(&body)
+            .map_err(|_| DecodeError::Json("cannot encode Mistral Conversations request".into()))?
+            .into(),
         streaming: true,
         diagnostics,
     })
@@ -199,7 +242,11 @@ fn drop_unsupported(
     Ok(())
 }
 
-fn drop_media(req: &Request, diagnostics: &mut Vec<Diagnostic>, media: &Media) -> Result<(), AiError> {
+fn drop_media(
+    req: &Request,
+    diagnostics: &mut Vec<Diagnostic>,
+    media: &Media,
+) -> Result<(), AiError> {
     let (error, code) = match media {
         Media::Image(_) => (UnsupportedError::Image, "dropped_image"),
         Media::Audio(_) => (UnsupportedError::Audio, "dropped_audio"),
@@ -222,8 +269,8 @@ pub(crate) fn decode_stream_event(
         return Err(StreamProtocolError::EventAfterFinish.into());
     }
     builder.observe_provider_stream_event()?;
-    let value: Value = serde_json::from_str(&event.data)
-        .map_err(|_| malformed("invalid event JSON"))?;
+    let value: Value =
+        serde_json::from_str(&event.data).map_err(|_| malformed("invalid event JSON"))?;
     let kind = string(&value, "type")?;
     if event.event.as_deref().is_some_and(|name| name != kind) {
         return Err(malformed("SSE event name and data type disagree"));
@@ -233,14 +280,17 @@ pub(crate) fn decode_stream_event(
         // The native error code is an integer, not an HTTP status or retry grant.
         // Do not echo provider prose: it may contain credentials or request data.
         string(&value, "message")?;
-        let code = value["code"].as_i64().ok_or_else(|| malformed("invalid error code"))?;
+        let code = value["code"]
+            .as_i64()
+            .ok_or_else(|| malformed("invalid error code"))?;
         builder.mistral_finished = true;
         return Err(ProviderError {
             code: Some(code.to_string()),
             kind: Some("conversation.response.error".into()),
             message: "Mistral Conversations response failed".into(),
             request_id: None,
-        }.into());
+        }
+        .into());
     }
     if kind != "conversation.response.started" && !builder.started {
         return Err(StreamProtocolError::MissingStart.into());
@@ -252,9 +302,13 @@ pub(crate) fn decode_stream_event(
             }
             let id = nonempty_string(&value, "conversation_id")?;
             builder.reserve_buffered_content(id.len())?;
-            emit_event(&mut events, builder, StreamEvent::Started {
-                response_id: Some(id.to_owned()),
-            })?;
+            emit_event(
+                &mut events,
+                builder,
+                StreamEvent::Started {
+                    response_id: Some(id.to_owned()),
+                },
+            )?;
         }
         "message.output.delta" => {
             if value.get("role").is_some_and(|role| role != "assistant") {
@@ -263,14 +317,20 @@ pub(crate) fn decode_stream_event(
             let output = index(&value, "output_index")?;
             index(&value, "content_index")?;
             track_entry(builder, output, "message", nonempty_string(&value, "id")?)?;
-            let content = value.get("content").ok_or_else(|| malformed("missing content"))?;
+            let content = value
+                .get("content")
+                .ok_or_else(|| malformed("missing content"))?;
             let text = if let Some(text) = content.as_str() {
                 text
             } else {
                 match string(content, "type")? {
                     "text" => string(content, "text")?,
                     "thinking" | "image_url" | "document_url" | "tool_file" | "tool_reference" => {
-                        omit_output(builder, "dropped_mistral_content", "non-text content is unsupported")?;
+                        omit_output(
+                            builder,
+                            "dropped_mistral_content",
+                            "non-text content is unsupported",
+                        )?;
                         return Ok(events);
                     }
                     _ => return Err(malformed("unknown output content type")),
@@ -281,18 +341,30 @@ pub(crate) fn decode_stream_event(
             // interleaved function entry in the canonical response/replay.
             let canonical = part_index(builder, &format!("mistral:text:{output}"))?;
             if !builder.text_buffers.contains_key(&canonical) {
-                emit_event(&mut events, builder, StreamEvent::TextStart { index: canonical })?;
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::TextStart { index: canonical },
+                )?;
             }
             if !text.is_empty() {
-                emit_event(&mut events, builder, StreamEvent::TextDelta {
-                    index: canonical, delta: text.to_owned(),
-                })?;
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::TextDelta {
+                        index: canonical,
+                        delta: text.to_owned(),
+                    },
+                )?;
             }
         }
         "function.call.delta" => {
             let output = index(&value, "output_index")?;
             track_entry(builder, output, "function", nonempty_string(&value, "id")?)?;
-            if value.get("confirmation_status").is_some_and(|status| !status.is_null()) {
+            if value
+                .get("confirmation_status")
+                .is_some_and(|status| !status.is_null())
+            {
                 // No canonical provider-confirmation authority exists. Lossy may
                 // not turn a pending/rejected provider call into local execution.
                 return Err(malformed("function confirmation status is unsupported"));
@@ -309,21 +381,38 @@ pub(crate) fn decode_stream_event(
                 if name.is_empty() || id.is_empty() {
                     return Err(malformed("missing initial function identity"));
                 }
-                if builder.tool_call_builders.values().any(|call| call.id.0 == id) {
+                if builder
+                    .tool_call_builders
+                    .values()
+                    .any(|call| call.id.0 == id)
+                {
                     return Err(malformed("duplicate function call ID"));
                 }
-                emit_event(&mut events, builder, StreamEvent::ToolCallStart {
-                    index: canonical, id: ToolCallId(id.to_owned()), name: name.to_owned(),
-                })?;
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::ToolCallStart {
+                        index: canonical,
+                        id: ToolCallId(id.to_owned()),
+                        name: name.to_owned(),
+                    },
+                )?;
             }
             if !arguments.is_empty() {
-                emit_event(&mut events, builder, StreamEvent::ToolCallArgsDelta {
-                    index: canonical, delta: arguments.to_owned(),
-                })?;
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::ToolCallArgsDelta {
+                        index: canonical,
+                        delta: arguments.to_owned(),
+                    },
+                )?;
             }
         }
         "conversation.response.done" => {
-            let usage = value.get("usage").filter(|value| value.is_object())
+            let usage = value
+                .get("usage")
+                .filter(|value| value.is_object())
                 .ok_or_else(|| malformed("missing terminal usage"))?;
             let usage = decode_usage(builder, usage)?;
             // Validate every call before exposing any ToolCallEnd. A native done
@@ -347,7 +436,10 @@ pub(crate) fn decode_stream_event(
                 let end = if builder.text_buffers.contains_key(&index) {
                     StreamEvent::TextEnd { index }
                 } else {
-                    StreamEvent::ToolCallEnd { index, argument_error: None }
+                    StreamEvent::ToolCallEnd {
+                        index,
+                        argument_error: None,
+                    }
                 };
                 emit_event(&mut events, builder, end)?;
             }
@@ -360,13 +452,26 @@ pub(crate) fn decode_stream_event(
             // Track even omitted entries: their output slots may never become
             // local functions. These are server-side connectors, not ToolCalls.
             let output = index(&value, "output_index")?;
-            track_entry(builder, output, "server_tool", nonempty_string(&value, "id")?)?;
-            omit_output(builder, "dropped_mistral_server_tool", "server tool execution is unsupported")?;
+            track_entry(
+                builder,
+                output,
+                "server_tool",
+                nonempty_string(&value, "id")?,
+            )?;
+            omit_output(
+                builder,
+                "dropped_mistral_server_tool",
+                "server tool execution is unsupported",
+            )?;
         }
         "agent.handoff.started" | "agent.handoff.done" => {
             let output = index(&value, "output_index")?;
             track_entry(builder, output, "handoff", nonempty_string(&value, "id")?)?;
-            omit_output(builder, "dropped_mistral_handoff", "server agent handoff is unsupported")?;
+            omit_output(
+                builder,
+                "dropped_mistral_handoff",
+                "server agent handoff is unsupported",
+            )?;
         }
         // Handled before the start gate, including an error before a started event.
         "conversation.response.error" => unreachable!("native error handled above"),
@@ -380,7 +485,9 @@ fn malformed(message: &str) -> AiError {
 }
 
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, AiError> {
-    value.get(field).and_then(Value::as_str)
+    value
+        .get(field)
+        .and_then(Value::as_str)
         .ok_or_else(|| malformed("missing or invalid string field"))
 }
 
@@ -395,7 +502,9 @@ fn nonempty_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, AiError
 fn index(value: &Value, field: &str) -> Result<u64, AiError> {
     match value.get(field) {
         None => Ok(0), // Pinned SDK default for omitted output/content indices.
-        Some(value) => value.as_u64().ok_or_else(|| malformed("invalid entry index")),
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| malformed("invalid entry index")),
     }
 }
 
@@ -408,7 +517,12 @@ fn part_index(builder: &mut ResponseBuilder, key: &str) -> Result<usize, AiError
     Ok(crate::protocol::get_canonical_index(builder, key))
 }
 
-fn track_entry(builder: &mut ResponseBuilder, output: u64, kind: &str, id: &str) -> Result<(), AiError> {
+fn track_entry(
+    builder: &mut ResponseBuilder,
+    output: u64,
+    kind: &str,
+    id: &str,
+) -> Result<(), AiError> {
     let key = format!("mistral:entry:{output}");
     let identity = format!("{kind}:{id}");
     if let Some(previous) = builder.temp_buffers.get(&key) {
@@ -418,7 +532,10 @@ fn track_entry(builder: &mut ResponseBuilder, output: u64, kind: &str, id: &str)
     } else {
         // Canonical parts retain first-observation order. A new earlier native
         // entry would silently reorder effects; only known entries may interleave.
-        if builder.mistral_last_output_index.is_some_and(|last| output < last) {
+        if builder
+            .mistral_last_output_index
+            .is_some_and(|last| output < last)
+        {
             return Err(malformed("out-of-order native entry is unsupported"));
         }
         if builder.temp_buffers.len() >= crate::stream::MAX_RESPONSE_PARTS {
@@ -434,15 +551,23 @@ fn omit_output(builder: &mut ResponseBuilder, code: &str, message: &str) -> Resu
     if builder.compatibility == CompatibilityMode::Strict {
         return Err(malformed(message));
     }
-    if !builder.diagnostics.iter().any(|diagnostic| diagnostic.code == code) {
+    if !builder
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == code)
+    {
         builder.add_diagnostic(Diagnostic {
-            code: code.to_owned(), message: format!("Mistral Conversations: {message}; omitted in Lossy mode"),
+            code: code.to_owned(),
+            message: format!("Mistral Conversations: {message}; omitted in Lossy mode"),
         });
     }
     Ok(())
 }
 
-fn decode_usage(builder: &mut ResponseBuilder, value: &Value) -> Result<crate::types::Usage, AiError> {
+fn decode_usage(
+    builder: &mut ResponseBuilder,
+    value: &Value,
+) -> Result<crate::types::Usage, AiError> {
     // Cache and reasoning counters are not in ConversationUsageInfo. Never infer
     // them from Chat usage fields, nor relabel connector tokens as model output.
     // Missing model counters default to zero; only connector fields are nullable
@@ -450,7 +575,9 @@ fn decode_usage(builder: &mut ResponseBuilder, value: &Value) -> Result<crate::t
     let count = |field, nullable| match value.get(field) {
         None => Ok(0),
         Some(Value::Null) if nullable => Ok(0),
-        Some(value) => value.as_u64().ok_or_else(|| malformed("invalid usage counter")),
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| malformed("invalid usage counter")),
     };
     let connector_tokens = count("connector_tokens", true)?;
     let connectors = match value.get("connectors") {
@@ -466,7 +593,11 @@ fn decode_usage(builder: &mut ResponseBuilder, value: &Value) -> Result<crate::t
         Some(_) => return Err(malformed("invalid connector usage")),
     };
     if connector_tokens != 0 || connectors {
-        omit_output(builder, "dropped_mistral_connector_usage", "connector usage breakdown is unsupported")?;
+        omit_output(
+            builder,
+            "dropped_mistral_connector_usage",
+            "connector usage breakdown is unsupported",
+        )?;
     }
     Ok(crate::types::Usage {
         input_tokens: count("prompt_tokens", false)?,

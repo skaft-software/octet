@@ -86,6 +86,13 @@ impl SetupServer {
             if thread_stopped.load(Ordering::Acquire) {
                 return;
             }
+            // Accepted sockets can inherit O_NONBLOCK on macOS. The bounded
+            // header reader relies on blocking I/O with a read timeout; otherwise
+            // it can release a response before any request bytes arrive and close
+            // with unread data, intermittently resetting the client connection.
+            stream
+                .set_nonblocking(false)
+                .expect("blocking fixture connection");
             thread_requests.fetch_add(1, Ordering::SeqCst);
             let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
             let request = read_headers(&mut stream);
@@ -624,6 +631,37 @@ fn cli_setup_reports_unreachable_and_auth_failures_without_writing_state() {
     assert_secret_free(&auth);
     assert_no_provider_state(&fixture);
     assert_no_prompt(&auth);
+}
+
+#[test]
+fn setup_fixture_waits_for_complete_request_headers_before_releasing_response() {
+    let (server, observed, release) = SetupServer::delayed(ServerReply::Models);
+    let mut client = TcpStream::connect(server.address).expect("connect delayed fixture");
+    client
+        .set_read_timeout(Some(WAIT))
+        .expect("bounded fixture read");
+    assert!(matches!(
+        observed.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    client
+        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    assert!(matches!(
+        observed.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    client.write_all(b"\r\n").unwrap();
+    observed
+        .recv_timeout(WAIT)
+        .expect("complete headers observed");
+    release.send(()).unwrap();
+    let mut response = String::new();
+    client
+        .read_to_string(&mut response)
+        .expect("fixture response");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(server.request_text().ends_with("\r\n\r\n"));
 }
 
 #[test]

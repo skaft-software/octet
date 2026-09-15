@@ -1456,6 +1456,7 @@ mod tests {
     #[test]
     fn schema_mismatch_marks_the_completed_event_and_retains_normalized_call() {
         let definitions = [ToolDef {
+            constrained_sampling: None,
             name: "strict".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({

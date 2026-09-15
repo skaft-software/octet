@@ -1,6 +1,6 @@
 # Native-scroll current candidate
 
-Status: source candidate only; not qualified. This note covers the reported native-history regression and does not claim the frozen Wave 1/#392 acceptance gate.
+Status: deterministic Rust/VT qualification passed on `df5a7e80` plus the current TUI diff; physical terminal qualification remains open. This note covers the reported native-history regression and does not claim the frozen Wave 1/#392 acceptance gate.
 
 ## Scope and recorded evidence
 
@@ -24,9 +24,9 @@ The diagnosed cause is a mutable display interpretation, not lost transcript dat
 
 No generic TUI, native-scrollback, transcript-cache, host/view, Ghostty preference, or subprocess boundary file was changed by this lane.
 
-## Central verification proposal
+## Earlier central verification proposal
 
-The following focused checks are proposed and remain unrun here because the coding root has no Cargo slot:
+The source-only handoff originally proposed these focused checks (current observed verification follows below):
 
 ```text
 cargo test -p sexy-tui-rs --test rich_rendering ordinary_streaming_paragraph_boundaries_keep_canonical_rows_stable
@@ -44,4 +44,22 @@ Windows qualification is a separate centralized handoff. It needs a Rust compile
 
 ## Acceptance limits
 
-This candidate has not passed controlled Rust tests, cross-compilation, a Windows native runner, the recorded ED3 comparison, or physical Ghostty trackpad scroll/selection verification. Do not mark the installed candidate qualified or claim native selection preservation until those checks are independently observed.
+The current deterministic matrix passed; cross-compilation, a Windows native runner, the installed-binary ED3 comparison, and physical Ghostty trackpad scroll/selection verification remain unrun. Do not mark the installed candidate qualified or claim native selection preservation from renderer tests.
+
+## Current deterministic verification
+
+Base `df5a7e809715961b9344af6b52e43a6ca48f56b3` plus the TUI working-tree diff:
+
+- `cargo test --locked -p octet-coding-agent --lib native_ -- --nocapture`: 32 passed.
+- `cargo test --locked -p octet-coding-agent --lib tui::`: 529 passed.
+- `cargo test --locked -p sexy-tui-rs --test images_current --test rich_rendering --test pi_tui_render`: 6 + 4 + 27 passed after the image fixture's exact-OSC framing correction.
+
+The new fragmented-table fixture verifies 96×18 → 40×8 → 120×30 → 96×18,
+exactly one ED2/ED3 replay at each resize, quiet subsequent frames, source/copy
+fidelity, and exactly-once history. The late-reference fixture requires one
+necessary retrospective replay at canonical finalization, then quiet frames.
+The offscreen roster final-state transition still emits one necessary ED3; it
+is not silently frozen to satisfy an artificial no-clear assertion.
+
+[Execution record and logs](../swarm-audit/EXECUTION-tui.md). No physical paint,
+wheel offset, selection, SSH, or installed-candidate acceptance is inferred.

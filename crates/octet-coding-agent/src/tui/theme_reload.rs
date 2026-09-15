@@ -598,3 +598,298 @@ fn path_len(path: &Path) -> usize {
 fn path_len(path: &Path) -> usize {
     path.to_string_lossy().len()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine(mode: ThemeReloadMode, path: Option<&str>) -> ThemeReloadEngine<u32> {
+        ThemeReloadEngine::new(mode, path.map(PathBuf::from), 1, 9, DEFAULT_DEBOUNCE).unwrap()
+    }
+
+    fn interactive() -> ThemeReloadEngine<u32> {
+        engine(ThemeReloadMode::Interactive, Some("/themes/active.toml"))
+    }
+
+    #[test]
+    fn unrelated_paths_access_and_oversized_events_are_ignored() {
+        let mut engine = interactive();
+        let now = Instant::now();
+        assert!(!engine.observe_path(Path::new("/themes/other.toml"), FileChangeKind::Modify, now));
+        assert!(!engine.observe_path(
+            Path::new("/themes/active.toml"),
+            FileChangeKind::Access,
+            now
+        ));
+        assert!(!engine.observe_path(Path::new("/themes/active.toml"), FileChangeKind::Other, now));
+        assert!(!engine.is_pending());
+
+        // A create/modify/remove/rename on the active path is relevant.
+        assert!(engine.observe_path(
+            Path::new("/themes/active.toml"),
+            FileChangeKind::Modify,
+            now
+        ));
+        assert!(engine.is_pending());
+        assert_eq!(engine.deadline(), Some(now + DEFAULT_DEBOUNCE));
+
+        let oversized = FileChangeEvent::new(
+            PathBuf::from(format!("/themes/{}", "x".repeat(MAX_THEME_PATH_BYTES))),
+            FileChangeKind::Modify,
+        );
+        assert!(!engine.observe(&oversized, now));
+    }
+
+    #[test]
+    fn save_burst_is_coalesced_and_debounced() {
+        let mut engine = interactive();
+        let now = Instant::now();
+        for _ in 0..8 {
+            assert!(engine.observe_path(
+                Path::new("/themes/active.toml"),
+                FileChangeKind::Modify,
+                now
+            ));
+        }
+        assert!(engine.is_pending());
+        // Not due yet.
+        assert!(engine.begin_if_ready(now, ReloadBoundary::Idle).is_none());
+        // Due boundary admits exactly one request and clears the burst.
+        let request = engine
+            .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Idle)
+            .expect("due request");
+        assert_eq!(request.path(), Path::new("/themes/active.toml"));
+        assert!(engine.is_in_flight());
+        assert!(!engine.is_pending());
+        assert!(engine
+            .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Idle)
+            .is_none());
+    }
+
+    #[test]
+    fn busy_boundary_keeps_a_due_request_pending() {
+        let mut engine = interactive();
+        let now = Instant::now();
+        engine.observe_path(
+            Path::new("/themes/active.toml"),
+            FileChangeKind::Modify,
+            now,
+        );
+        assert!(engine
+            .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Busy)
+            .is_none());
+        assert!(engine.is_pending());
+        assert!(engine
+            .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Idle)
+            .is_some());
+    }
+
+    #[test]
+    fn compiled_default_and_non_interactive_modes_stay_inert() {
+        let mut compiled = engine(ThemeReloadMode::Interactive, None);
+        assert!(compiled.watch_spec().is_none());
+        let now = Instant::now();
+        assert!(!compiled.observe_path(
+            Path::new("/themes/active.toml"),
+            FileChangeKind::Modify,
+            now
+        ));
+        assert!(compiled.watch_spec().is_none());
+
+        for mode in [
+            ThemeReloadMode::Print,
+            ThemeReloadMode::Plain,
+            ThemeReloadMode::Rpc,
+        ] {
+            let mut engine = engine(mode, Some("/themes/active.toml"));
+            assert!(engine.watch_spec().is_none());
+            assert!(!engine.observe_path(
+                Path::new("/themes/active.toml"),
+                FileChangeKind::Modify,
+                now
+            ));
+            assert!(engine
+                .begin_if_ready(now + MAX_DEBOUNCE, ReloadBoundary::Idle)
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn interactive_file_theme_exposes_a_nonrecursive_parent_watch() {
+        let engine = interactive();
+        let watch = engine.watch_spec().expect("watch spec");
+        assert_eq!(watch.directory(), Path::new("/themes"));
+        assert!(!watch.recursive());
+        assert_eq!(
+            engine.active_theme_path(),
+            Some(Path::new("/themes/active.toml"))
+        );
+        assert_eq!(engine.debounce(), DEFAULT_DEBOUNCE);
+    }
+
+    #[test]
+    fn changing_the_active_path_cancels_queued_and_in_flight_work() {
+        let mut engine = interactive();
+        let now = Instant::now();
+        engine.observe_path(
+            Path::new("/themes/active.toml"),
+            FileChangeKind::Modify,
+            now,
+        );
+        let request = engine
+            .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Idle)
+            .expect("admitted");
+        let token = request.token();
+        assert!(engine.is_current(token));
+
+        // Switching source invalidates the admitted request.
+        assert!(engine
+            .set_active_theme(Some(PathBuf::from("/themes/next.toml")))
+            .unwrap());
+        assert!(!engine.is_current(token));
+        assert!(!engine.is_in_flight());
+        assert_eq!(
+            engine.watch_spec().unwrap().directory(),
+            Path::new("/themes")
+        );
+
+        // A stale completion is discarded without touching the retained theme.
+        assert!(matches!(
+            engine.finish(token, Ok(42)),
+            ReloadDecision::Cancelled | ReloadDecision::Stale
+        ));
+        assert_eq!(*engine.last_good(), 1);
+    }
+
+    #[test]
+    fn decision_classification_retains_or_falls_back() {
+        let mut engine = interactive();
+        let now = Instant::now();
+        let admit = |engine: &mut ThemeReloadEngine<u32>| {
+            engine.observe_path(
+                Path::new("/themes/active.toml"),
+                FileChangeKind::Modify,
+                now,
+            );
+            engine
+                .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Idle)
+                .expect("admitted")
+                .token()
+        };
+
+        let token = admit(&mut engine);
+        let decision = engine.finish(token, Ok(7));
+        assert!(decision.should_apply());
+        assert!(matches!(decision, ReloadDecision::Applied(7)));
+        assert_eq!(*engine.last_good(), 7);
+
+        let token = admit(&mut engine);
+        let decision = engine.finish(token, Err(ReloadFailureKind::Missing));
+        assert!(matches!(
+            decision,
+            ReloadDecision::FellBackToCompiledDefault(9)
+        ));
+        assert_eq!(*engine.last_good(), 9);
+
+        let token = admit(&mut engine);
+        let decision = engine.finish(token, Err(ReloadFailureKind::Invalid));
+        assert!(matches!(
+            decision,
+            ReloadDecision::RetainedLastGood {
+                failure: ReloadFailureKind::Invalid
+            }
+        ));
+        assert!(!decision.should_apply());
+        assert_eq!(*engine.last_good(), 9);
+    }
+
+    #[test]
+    fn bounded_channel_drops_overflow_and_drains_a_budget() {
+        let (sender, receiver) = theme_change_channel();
+        let mut accepted = 0;
+        for _ in 0..(MAX_QUEUED_CHANGE_EVENTS + 8) {
+            if try_send_change(
+                &sender,
+                FileChangeEvent::new("/themes/active.toml", FileChangeKind::Modify),
+            ) {
+                accepted += 1;
+            }
+        }
+        // The queue is bounded; the writer never blocks.
+        assert_eq!(accepted, MAX_QUEUED_CHANGE_EVENTS);
+        assert!(!try_send_change(
+            &sender,
+            FileChangeEvent::new("/themes/active.toml", FileChangeKind::Modify),
+        ));
+        assert!(!try_send_change(
+            &sender,
+            FileChangeEvent::new(
+                PathBuf::from(format!("/themes/{}", "x".repeat(MAX_THEME_PATH_BYTES + 1))),
+                FileChangeKind::Modify,
+            ),
+        ));
+
+        let mut engine = interactive();
+        let drained = engine.drain_notifications(&receiver, Instant::now());
+        assert_eq!(drained, MAX_DRAINED_CHANGE_EVENTS);
+        assert!(engine.is_pending());
+    }
+
+    #[test]
+    fn mode_switch_out_of_interactive_cancels_and_blocks_reloads() {
+        let mut engine = interactive();
+        let now = Instant::now();
+        engine.observe_path(
+            Path::new("/themes/active.toml"),
+            FileChangeKind::Modify,
+            now,
+        );
+        engine.set_mode(ThemeReloadMode::Rpc);
+        assert_eq!(engine.mode(), ThemeReloadMode::Rpc);
+        assert!(engine.watch_spec().is_none());
+        assert!(!engine.is_pending());
+        assert!(engine
+            .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Idle)
+            .is_none());
+    }
+
+    #[test]
+    fn path_boundary_rejects_unnamed_and_oversized_sources() {
+        assert_eq!(
+            ThemeReloadEngine::new(
+                ThemeReloadMode::Interactive,
+                Some(PathBuf::from("/")),
+                1u32,
+                2u32,
+                DEFAULT_DEBOUNCE,
+            )
+            .unwrap_err(),
+            ThemePathError::MissingFileName
+        );
+        let long = PathBuf::from(format!("/{}", "x".repeat(MAX_THEME_PATH_BYTES)));
+        assert_eq!(
+            ThemeReloadEngine::new(
+                ThemeReloadMode::Interactive,
+                Some(long),
+                1u32,
+                2u32,
+                DEFAULT_DEBOUNCE,
+            )
+            .unwrap_err(),
+            ThemePathError::PathTooLong
+        );
+    }
+
+    #[test]
+    fn debounce_is_clamped_to_the_documented_maximum() {
+        let engine = ThemeReloadEngine::new(
+            ThemeReloadMode::Interactive,
+            Some(PathBuf::from("/themes/active.toml")),
+            1u32,
+            2u32,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(engine.debounce(), MAX_DEBOUNCE);
+    }
+}

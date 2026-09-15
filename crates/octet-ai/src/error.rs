@@ -308,9 +308,16 @@ pub enum UnsupportedError {
     /// Structured output formats are not supported.
     #[error("Structured output format is unsupported")]
     StructuredOutput,
+    /// A required constrained-sampling request cannot be honored.
+    #[error("Constrained sampling: {0}")]
+    ConstrainedSampling(String),
     /// Custom stop sequences are not supported by the target protocol.
     #[error("Stop sequences are unsupported")]
     StopSequences,
+    /// The provider switched to a fallback model after content had already
+    /// streamed, so the response cannot be represented as one assistant turn.
+    #[error("Provider performed an unsupported mid-output model fallback")]
+    MidOutputModelFallback,
     /// Responses continuation/replay options are not supported by other
     /// protocols.
     #[error("Responses request options are unsupported")]

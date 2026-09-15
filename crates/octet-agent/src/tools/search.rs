@@ -29,8 +29,17 @@ struct SearchArgs {
     glob: Option<String>,
     #[serde(default)]
     mode: SearchMode,
+    #[serde(alias = "limit")]
     max_results: Option<usize>,
+    #[serde(default, rename = "ignoreCase")]
+    ignore_case: bool,
+    #[serde(default)]
+    context: usize,
+    #[serde(default = "default_hidden")]
+    hidden: bool,
 }
+
+fn default_hidden() -> bool { true }
 
 #[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -59,6 +68,7 @@ pub struct SearchTool;
 impl Tool for SearchTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            constrained_sampling: None,
             name: "search".to_string(),
             description: "Search local file contents. Prefer paths relative to the workspace; \
                           trusted-local hosts also accept absolute and `~/` paths for intentional \
@@ -86,6 +96,10 @@ impl Tool for SearchTool {
                         "enum": ["literal", "regex"],
                         "description": "Matching mode (default literal)."
                     },
+                    "ignoreCase": {"type":"boolean", "description":"Case-insensitive matching (default false)."},
+                    "context": {"type":"integer", "minimum":0, "maximum":1000, "description":"Surrounding lines per match; not counted against limit."},
+                    "hidden": {"type":"boolean", "description":"Include hidden files (default true); ignore rules still apply."},
+                    "limit": {"type":"integer", "minimum":1, "description":"Alias for max_results; do not combine."},
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
@@ -120,11 +134,11 @@ impl Tool for SearchTool {
         let arguments = arguments
             .as_object()
             .ok_or_else(|| ToolError::new("invalid arguments: expected an object"))?;
-        if arguments.len() > 5
+        if arguments.len() > 9
             || arguments.keys().any(|key| {
                 !matches!(
                     key.as_str(),
-                    "query" | "path" | "glob" | "mode" | "max_results"
+                    "query" | "path" | "glob" | "mode" | "max_results" | "limit" | "ignoreCase" | "context" | "hidden"
                 )
             })
         {
@@ -180,6 +194,12 @@ impl Tool for SearchTool {
                 "invalid arguments: `max_results` must be a positive integer",
             ));
         }
+        for name in ["ignoreCase", "hidden"] {
+            if arguments.get(name).is_some_and(|v| !v.is_boolean()) { return Err(ToolError::new(format!("invalid arguments: {name} must be boolean"))); }
+        }
+        if arguments.get("context").is_some_and(|v| v.as_u64().is_none_or(|n| n > 1000)) { return Err(ToolError::new("invalid arguments: context must be an integer from 0 to 1000")); }
+        if arguments.contains_key("limit") && arguments.contains_key("max_results") { return Err(ToolError::new("invalid arguments: use limit or max_results, not both")); }
+        if arguments.get("limit").is_some_and(|v| v.as_u64().and_then(|n| usize::try_from(n).ok()).is_none_or(|n| n == 0)) { return Err(ToolError::new("invalid arguments: limit must be a positive integer")); }
         // Search currently executes `rg` from PATH as a native child. Treat it
         // as process authority even though its argument construction is fixed.
         Ok(ToolEffect::HostProcess)
@@ -251,6 +271,9 @@ async fn execute_search(
     if args.mode == SearchMode::Literal {
         command.arg("--fixed-strings");
     }
+    if args.ignore_case { command.arg("--ignore-case"); }
+    if args.hidden { command.arg("--hidden"); }
+    if args.context > 0 { command.arg("--context").arg(args.context.to_string()); }
     if let Some(glob) = &args.glob {
         command.args(["--glob", glob]);
     }
@@ -299,7 +322,7 @@ async fn execute_search(
     let byte_budget = ctx.sandbox.max_output_bytes.saturating_sub(128).max(1024);
     let deadline = tokio::time::Instant::now() + ctx.sandbox.bash_timeout;
     let collect = async {
-        let (results, truncated) = collect_rg_stdout(stdout, max_results, byte_budget).await?;
+        let (results, truncated, match_count) = collect_rg_stdout(stdout, max_results, byte_budget).await?;
 
         let status =
             if truncated {
@@ -315,9 +338,14 @@ async fn execute_search(
                     ToolError::new(format!("failed to wait for ripgrep: {error}"))
                 })?)
             };
-        Ok::<_, ToolError>((results, truncated, status))
+        Ok::<_, ToolError>((results, truncated, match_count, status))
     };
-    let (results, truncated, status) = match tokio::time::timeout_at(deadline, collect).await {
+    let collected = tokio::select! {
+        biased;
+        _ = ctx.cancellation.cancelled() => Ok(Err(ToolError::new("search cancelled"))),
+        result = tokio::time::timeout_at(deadline, collect) => result,
+    };
+    let (results, truncated, match_count, status) = match collected {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
             let _ = child.start_kill();
@@ -347,11 +375,11 @@ async fn execute_search(
         return Ok(ToolOutput::new("no matches"));
     }
     let count_line = if truncated {
-        format!("{}+ matches", results.len())
-    } else if results.len() == 1 {
+        format!("{match_count}+ matches")
+    } else if match_count == 1 {
         "1 match".to_string()
     } else {
-        format!("{} matches", results.len())
+        format!("{match_count} matches")
     };
     Ok(ToolOutput::new(format!(
         "{count_line}\n{}\ntruncated={truncated}",
@@ -363,8 +391,9 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
     mut stdout: R,
     max_results: usize,
     byte_budget: usize,
-) -> Result<(Vec<String>, bool), ToolError> {
+) -> Result<(Vec<String>, bool, usize), ToolError> {
     let mut results = Vec::new();
+    let mut match_count = 0usize;
     let mut body_bytes = 0usize;
     let mut event = Vec::with_capacity(8 * 1024);
     let mut chunk = [0u8; 8 * 1024];
@@ -380,13 +409,14 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
                     &event,
                     &mut results,
                     &mut body_bytes,
+                    &mut match_count,
                     max_results,
                     byte_budget,
                 )
             {
-                return Ok((results, true));
+                return Ok((results, true, match_count));
             }
-            return Ok((results, false));
+            return Ok((results, false, match_count));
         }
 
         let mut cursor = 0;
@@ -408,10 +438,11 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
                 &event,
                 &mut results,
                 &mut body_bytes,
+                &mut match_count,
                 max_results,
                 byte_budget,
             ) {
-                return Ok((results, true));
+                return Ok((results, true, match_count));
             }
             event.clear();
             cursor = end + 1;
@@ -423,6 +454,7 @@ fn record_rg_event(
     event: &[u8],
     results: &mut Vec<String>,
     body_bytes: &mut usize,
+    match_count: &mut usize,
     max_results: usize,
     byte_budget: usize,
 ) -> bool {
@@ -432,10 +464,12 @@ fn record_rg_event(
     let Some(rendered) = render_match(event) else {
         return false;
     };
-    if results.len() == max_results || body_bytes.saturating_add(rendered.len()) > byte_budget {
+    let is_match = serde_json::from_str::<serde_json::Value>(event).ok().is_some_and(|v| v["type"] == "match");
+    if (is_match && *match_count == max_results) || body_bytes.saturating_add(rendered.len() + usize::from(!results.is_empty())) > byte_budget {
         return true;
     }
-    *body_bytes += rendered.len();
+    *body_bytes += rendered.len() + usize::from(!results.is_empty());
+    if is_match { *match_count += 1; }
     results.push(rendered);
     false
 }
@@ -444,7 +478,8 @@ fn record_rg_event(
 /// `None` for non-match events (begin/end/summary).
 fn render_match(json_line: &str) -> Option<String> {
     let event: serde_json::Value = serde_json::from_str(json_line).ok()?;
-    if event.get("type")?.as_str()? != "match" {
+    let kind = event.get("type")?.as_str()?;
+    if kind != "match" && kind != "context" {
         return None;
     }
     let data = event.get("data")?;
@@ -456,8 +491,9 @@ fn render_match(json_line: &str) -> Option<String> {
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .trim_end();
+    let separator = if kind == "match" { ":" } else { "-" };
     Some(format!(
-        "{path}:{line_number}  {}",
+        "{path}{separator}{line_number}  {}",
         clip_line(text, MAX_LINE_CHARS)
     ))
 }
@@ -697,12 +733,12 @@ mod tests {
         let input = format!("{first}\n{{not json}}\n{second}");
         let reader =
             tokio::io::BufReader::with_capacity(3, std::io::Cursor::new(input.into_bytes()));
-        let (results, truncated) = collect_rg_stdout(reader, 10, 4 * 1024).await.unwrap();
+        let (results, truncated, _) = collect_rg_stdout(reader, 10, 4 * 1024).await.unwrap();
         assert_eq!(results, vec!["a.rs:1  first", "b.rs:2  second"]);
         assert!(!truncated);
 
         let input = format!("{first}\n{second}\n");
-        let (results, truncated) =
+        let (results, truncated, _) =
             collect_rg_stdout(std::io::Cursor::new(input.into_bytes()), 1, 4 * 1024)
                 .await
                 .unwrap();
@@ -710,7 +746,7 @@ mod tests {
         assert!(truncated);
 
         let input = format!("{first}\n{second}\n");
-        let (results, truncated) = collect_rg_stdout(
+        let (results, truncated, _) = collect_rg_stdout(
             std::io::Cursor::new(input.into_bytes()),
             10,
             "a.rs:1  first".len(),

@@ -84,6 +84,7 @@ pub struct ReadTool;
 impl Tool for ReadTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            constrained_sampling: None,
             name: "read".to_string(),
             description: "Read text, images, or audio. `path` may be a workspace-relative local path, \
                           an absolute/~/ path when trusted-local access is enabled, a local `file://` \
@@ -117,6 +118,14 @@ impl Tool for ReadTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Read file contents")
+    }
+
+    fn prompt_guidelines(&self) -> &[&str] {
+        &["Use read to examine files instead of cat or sed."]
     }
 
     fn effect(

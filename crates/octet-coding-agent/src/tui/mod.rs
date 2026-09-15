@@ -10,5 +10,6 @@ pub mod pickers;
 pub(crate) mod splash;
 pub mod terminal;
 pub mod theme;
+pub mod theme_reload;
 mod theme_schema;
 pub mod view;

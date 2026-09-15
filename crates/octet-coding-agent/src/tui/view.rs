@@ -924,6 +924,9 @@ pub(crate) struct ShellState {
     block_revisions: Vec<u64>,
     /// Steering messages accepted while a run is active but not yet injected.
     steering_queue: Vec<QueuedSteering>,
+    /// Enter-submitted follow-ups remain local and editable until run settlement.
+    follow_up_queue: std::collections::VecDeque<ComposedInput>,
+    follow_up_ready: bool,
     /// Successful prompts retained only by this interactive shell for recall.
     prompt_history: Vec<PromptHistoryEntry>,
     /// Active sent-prompt traversal and the draft captured before it began.
@@ -3383,6 +3386,45 @@ impl InteractiveShell {
         }
     }
 
+    /// Queue an Enter-submitted follow-up without admitting it to the Agent.
+    /// Keeping its typed parts here makes Option+Up genuinely retractable.
+    pub fn queue_follow_up(&mut self, composed: ComposedInput) {
+        if !composed.is_empty() {
+            self.state.borrow_mut().follow_up_queue.push_back(composed);
+        }
+    }
+
+    /// Only authoritative completion or an explicit Escape dispatch arms the
+    /// next queued prompt. Failure, Ctrl+C, and close never auto-retry it.
+    pub fn settle_queued_follow_ups(&mut self, dispatch: bool) {
+        self.state.borrow_mut().follow_up_ready = dispatch;
+    }
+
+    /// Called by the idle owner after the old Run and its children have settled.
+    pub fn take_ready_follow_up(&mut self) -> Option<ComposedInput> {
+        let mut state = self.state.borrow_mut();
+        if !std::mem::take(&mut state.follow_up_ready) {
+            return None;
+        }
+        state.follow_up_queue.pop_front()
+    }
+
+    /// Recall only local, unadmitted input. Never overwrite a draft or pretend
+    /// that steering already handed to RunControl can be retracted.
+    pub fn edit_queued_follow_up(&mut self) {
+        let mut state = self.state.borrow_mut();
+        if !normal_editor_focused(&state) || !state.editor.text().is_empty() {
+            return;
+        }
+        let Some(composed) = state.follow_up_queue.pop_back() else {
+            return;
+        };
+        state.prompt_history_navigation = None;
+        state.editor.set_text(composed.display_text);
+        state.ledger.restore(composed.attachments);
+        invalidate_editor_autocomplete(&mut state);
+    }
+
     /// Keep a steering message in the pending area until the Agent reports
     /// that it has appended the message at the next model-turn boundary.
     pub fn queue_steering(&mut self, composed: &ComposedInput) {
@@ -4157,7 +4199,12 @@ impl InteractiveShell {
     pub fn restore_composed(&mut self, composed: ComposedInput) {
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
-        state.editor.set_text(composed.display_text);
+        let current = state.editor.take_text();
+        state.editor.set_text(if current.is_empty() {
+            composed.display_text
+        } else {
+            format!("{}\n\n{current}", composed.display_text)
+        });
         state.ledger.restore(composed.attachments);
         invalidate_editor_autocomplete(&mut state);
     }

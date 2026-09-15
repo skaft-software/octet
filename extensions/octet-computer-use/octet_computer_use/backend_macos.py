@@ -113,8 +113,9 @@ class MacOSBackend:
                 "backend": "macos-native",
                 "enabled": bool(self.policy.opt_in),
                 "opt_in": bool(self.policy.opt_in),
-                "ready": bool(self.policy.opt_in and report.ready),
-                "input_ready": bool(self.policy.opt_in and self.policy.allow_input and report.ready),
+                "ready": bool(self.policy.opt_in and report.ready and not self._stop_requested.is_set()),
+                "stopped": self._stop_requested.is_set(),
+                "input_ready": bool(self.policy.opt_in and self.policy.allow_input and report.ready and not self._stop_requested.is_set()),
                 "permissions": report.as_dict(),
                 "policy": self.policy.as_dict(),
                 "native_available": self._native_available(),
@@ -216,6 +217,7 @@ class MacOSBackend:
         owner: Any = None,
         confirmation: Any = None,
         cancellation: Any = None,
+        authorization: Any = None,
     ) -> dict[str, Any]:
         """Press one observed AX node or its observed bounded center."""
 
@@ -231,11 +233,14 @@ class MacOSBackend:
             node = context[2]
             point = self._node_point(node, context[1].geometry)
             self._confirm(confirmation, "click", context[0].target, node.ref)
+            self._revalidate_after_confirmation(context)
             self._check_cancel(cancellation)
             try:
                 method = getattr(self.native, "click", None)
                 if not callable(method):
                     raise MacOSBackendError("native_unavailable", "The native adapter cannot click.")
+                if authorization is not None:
+                    authorization()
                 method(
                     context[0].target,
                     node.path,
@@ -256,7 +261,9 @@ class MacOSBackend:
                 self._safe_release_all()
                 raise MacOSBackendError("native_failure", "The native click failed safely.") from error
             finally:
-                self._safe_release_all()
+                if not self._safe_release_all():
+                    self._stop_requested.set()
+                    raise MacOSBackendError("input_release_unverified", "Native input release was not acknowledged; runtime stopped.")
 
     def type_text(
         self,
@@ -268,6 +275,7 @@ class MacOSBackend:
         owner: Any = None,
         confirmation: Any = None,
         cancellation: Any = None,
+        authorization: Any = None,
     ) -> dict[str, Any]:
         """Set one non-sensitive observed editable value without returning it."""
 
@@ -291,6 +299,7 @@ class MacOSBackend:
             bounded_text = validate_text(text, self.policy.max_text_bytes)
             point = self._node_point(node, context[1].geometry)
             self._confirm(confirmation, "type_text", context[0].target, node.ref)
+            self._revalidate_after_confirmation(context)
             self._check_cancel(cancellation)
             try:
                 method = getattr(self.native, "set_text", None)
@@ -298,6 +307,8 @@ class MacOSBackend:
                     method = getattr(self.native, "type_text", None)
                 if not callable(method):
                     raise MacOSBackendError("native_unavailable", "The native adapter cannot type text.")
+                if authorization is not None:
+                    authorization()
                 method(
                     context[0].target,
                     node.path,
@@ -318,7 +329,9 @@ class MacOSBackend:
                 self._safe_release_all()
                 raise MacOSBackendError("native_failure", "The native text input failed safely.") from error
             finally:
-                self._safe_release_all()
+                if not self._safe_release_all():
+                    self._stop_requested.set()
+                    raise MacOSBackendError("input_release_unverified", "Native input release was not acknowledged; runtime stopped.")
 
     def press(
         self,
@@ -330,6 +343,7 @@ class MacOSBackend:
         owner: Any = None,
         confirmation: Any = None,
         cancellation: Any = None,
+        authorization: Any = None,
     ) -> dict[str, Any]:
         """Press one allowlisted key only when focus is observed in the target."""
 
@@ -366,11 +380,14 @@ class MacOSBackend:
                     "Keyboard input to credential or protected controls is refused.",
                 )
             self._confirm(confirmation, "press", context[0].target, node.ref)
+            self._revalidate_after_confirmation(context)
             self._check_cancel(cancellation)
             try:
                 method = getattr(self.native, "press_key", None)
                 if not callable(method):
                     raise MacOSBackendError("native_unavailable", "The native adapter cannot press keys.")
+                if authorization is not None:
+                    authorization()
                 method(bounded_key, cancellation=self._native_cancellation(cancellation))
                 return self._after_action_locked(
                     context[0].target, context[0], "press", owner, cancellation
@@ -382,7 +399,9 @@ class MacOSBackend:
                 self._safe_release_all()
                 raise MacOSBackendError("native_failure", "The native key action failed safely.") from error
             finally:
-                self._safe_release_all()
+                if not self._safe_release_all():
+                    self._stop_requested.set()
+                    raise MacOSBackendError("input_release_unverified", "Native input release was not acknowledged; runtime stopped.")
 
     press_key = press
 
@@ -396,6 +415,7 @@ class MacOSBackend:
         owner: Any = None,
         confirmation: Any = None,
         cancellation: Any = None,
+        authorization: Any = None,
     ) -> dict[str, Any]:
         """Scroll a bounded amount at the exact observed window."""
 
@@ -413,11 +433,14 @@ class MacOSBackend:
                 delta_x, delta_y, self.policy.max_scroll_delta
             )
             self._confirm(confirmation, "scroll", context[0].target, None)
+            self._revalidate_after_confirmation(context)
             self._check_cancel(cancellation)
             try:
                 method = getattr(self.native, "scroll", None)
                 if not callable(method):
                     raise MacOSBackendError("native_unavailable", "The native adapter cannot scroll.")
+                if authorization is not None:
+                    authorization()
                 method(
                     context[0].target,
                     bounded_x,
@@ -434,7 +457,9 @@ class MacOSBackend:
                 self._safe_release_all()
                 raise MacOSBackendError("native_failure", "The native scroll failed safely.") from error
             finally:
-                self._safe_release_all()
+                if not self._safe_release_all():
+                    self._stop_requested.set()
+                    raise MacOSBackendError("input_release_unverified", "Native input release was not acknowledged; runtime stopped.")
 
     def drag(
         self,
@@ -447,6 +472,7 @@ class MacOSBackend:
         owner: Any = None,
         confirmation: Any = None,
         cancellation: Any = None,
+        authorization: Any = None,
     ) -> dict[str, Any]:
         """Drag from an observed node center to a bounded point in its window."""
 
@@ -472,11 +498,14 @@ class MacOSBackend:
                 )
             bounded_duration = validate_drag_duration(duration, self.policy.max_drag_seconds)
             self._confirm(confirmation, "drag", context[0].target, node.ref)
+            self._revalidate_after_confirmation(context)
             self._check_cancel(cancellation)
             try:
                 method = getattr(self.native, "drag", None)
                 if not callable(method):
                     raise MacOSBackendError("native_unavailable", "The native adapter cannot drag.")
+                if authorization is not None:
+                    authorization()
                 method(
                     context[0].target,
                     start,
@@ -494,7 +523,9 @@ class MacOSBackend:
                 self._safe_release_all()
                 raise MacOSBackendError("native_failure", "The native drag failed safely.") from error
             finally:
-                self._safe_release_all()
+                if not self._safe_release_all():
+                    self._stop_requested.set()
+                    raise MacOSBackendError("input_release_unverified", "Native input release was not acknowledged; runtime stopped.")
 
     def screenshot(
         self,
@@ -527,6 +558,7 @@ class MacOSBackend:
         owner: Any = None,
         confirmation: Any = None,
         cancellation: Any = None,
+        authorization: Any = None,
     ) -> Any:
         """Dispatch the stable typed API without accepting native code strings."""
 
@@ -540,15 +572,15 @@ class MacOSBackend:
         target = action.get(_TARGET_KEY)
         observation = action.get("observation")
         if operation == "click":
-            return self.click(target, action.get("ref"), observation=observation, owner=owner, confirmation=confirmation, cancellation=cancellation)
+            return self.click(target, action.get("ref"), observation=observation, owner=owner, confirmation=confirmation, cancellation=cancellation, authorization=authorization)
         if operation == "type_text":
-            return self.type_text(target, action.get("ref"), action.get("text"), observation=observation, owner=owner, confirmation=confirmation, cancellation=cancellation)
+            return self.type_text(target, action.get("ref"), action.get("text"), observation=observation, owner=owner, confirmation=confirmation, cancellation=cancellation, authorization=authorization)
         if operation in {"press", "press_key"}:
-            return self.press(target, action.get("key"), observation=observation, ref=action.get("ref"), owner=owner, confirmation=confirmation, cancellation=cancellation)
+            return self.press(target, action.get("key"), observation=observation, ref=action.get("ref"), owner=owner, confirmation=confirmation, cancellation=cancellation, authorization=authorization)
         if operation == "scroll":
-            return self.scroll(target, action.get("delta_x", 0), action.get("delta_y", 0), observation=observation, owner=owner, confirmation=confirmation, cancellation=cancellation)
+            return self.scroll(target, action.get("delta_x", 0), action.get("delta_y", 0), observation=observation, owner=owner, confirmation=confirmation, cancellation=cancellation, authorization=authorization)
         if operation == "drag":
-            return self.drag(target, action.get("ref"), action.get("to"), observation=observation, duration=action.get("duration", 0.25), owner=owner, confirmation=confirmation, cancellation=cancellation)
+            return self.drag(target, action.get("ref"), action.get("to"), observation=observation, duration=action.get("duration", 0.25), owner=owner, confirmation=confirmation, cancellation=cancellation, authorization=authorization)
         if operation in {"screenshot", "capture_window"}:
             return self.screenshot(target, observation=observation, owner=owner)
         raise MacOSBackendError("invalid_action", "The native operation is not in the bounded action allowlist.")
@@ -559,20 +591,17 @@ class MacOSBackend:
         # Set the event before waiting for the serialization lock so a drag or
         # Unicode loop can observe cancellation while another thread requests
         # the trusted stop.
+        self._owner_key(owner)
         self._stop_requested.set()
-        try:
-            with self._lock:
-                self._owner_key(owner)
-                self._safe_release_all()
-                self._observations.clear()
-                self._selected.clear()
-                return {
-                    "schema": "octet.macos.stop-result.v1",
-                    "stopped": True,
-                    "input_released": True,
-                }
-        finally:
-            self._stop_requested.clear()
+        with self._lock:
+            released = self._safe_release_all()
+            self._observations.clear()
+            self._selected.clear()
+            return {
+                "schema": "octet.macos.stop-result.v1",
+                "stopped": True,
+                "input_released": released,
+            }
 
     def takeover(self, *, owner: Any = None) -> dict[str, Any]:
         """Alias used by hosts when ownership is revoked or replaced."""
@@ -584,7 +613,7 @@ class MacOSBackend:
 
     def _require_ready(self, operation: str) -> None:
         if self._stop_requested.is_set():
-            raise MacOSBackendError("cancelled", "The native backend is stopping safely.")
+            raise MacOSBackendError("stopped", "A stopped backend requires a new owner runtime.")
         if not self.policy.opt_in:
             raise MacOSBackendError(
                 "native_opt_in_required",
@@ -597,7 +626,7 @@ class MacOSBackend:
             )
         report = self._permission_report()
         required = ("accessibility", "screen_recording")
-        if operation in {"click", "type_text", "press", "scroll", "drag"}:
+        if operation in {"input", "click", "type_text", "press", "scroll", "drag"}:
             if not self.policy.allow_input:
                 raise MacOSBackendError(
                     "input_opt_in_required",
@@ -1065,6 +1094,25 @@ class MacOSBackend:
             raise MacOSBackendError("node_required", "This native action requires an observed accessibility node.")
         return stored, current, node
 
+    def _revalidate_after_confirmation(self, context: Any) -> None:
+        self._require_ready("input")
+        current = self._inspect(context[0].target)
+        self._assert_window_unchanged(context[1], current)
+        if self.policy.require_foreground and not current.frontmost:
+            raise MacOSBackendError("foreground_required", "The selected target lost foreground.")
+
+        method = getattr(self.native, "accessibility_tree", None)
+        if not callable(method):
+            raise MacOSBackendError("native_unavailable", "Fresh Accessibility evidence is unavailable.")
+        try:
+            tree = self._coerce_tree(method(current.identity, max_nodes=self.policy.max_nodes,
+                                           max_depth=self.policy.max_depth))
+            tree = self._validate_tree(tree, current)
+        except Exception as error:
+            raise MacOSBackendError("observation_stale", "Accessibility revalidation failed.") from error
+        if tree != context[0].accessibility:
+            raise MacOSBackendError("observation_stale", "Accessibility focus or contents changed during approval.")
+
     @staticmethod
     def _assert_window_unchanged(observed: WindowSnapshot, current: WindowSnapshot) -> None:
         if observed.identity.bundle_id != current.identity.bundle_id or observed.identity.pid != current.identity.pid or observed.identity.window_id != current.identity.window_id:
@@ -1221,17 +1269,18 @@ class MacOSBackend:
             self._safe_release_all()
             raise MacOSBackendError("cancelled", "The native operation was cancelled safely.")
 
-    def _safe_release_all(self) -> None:
+    def _safe_release_all(self) -> bool:
         method = getattr(self.native, "release_all", None)
         if not callable(method):
             method = getattr(self.native, "stop", None)
         if callable(method):
             try:
-                method()
+                return method() is True
             except Exception:
                 # Releasing is best effort here; the public operation remains
                 # failed closed and the native adapter owns its final cleanup.
-                pass
+                return False
+        return False
 
 
 # Public compatibility names are aliases, not separate implementations.

@@ -33,6 +33,7 @@ pub struct WriteTool;
 impl Tool for WriteTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            constrained_sampling: None,
             name: "write".to_string(),
             description: "Create or fully replace one file. Creates missing parent \
                           directories. Pass expected_hash from a prior read to reject \
@@ -59,6 +60,14 @@ impl Tool for WriteTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Create or overwrite files")
+    }
+
+    fn prompt_guidelines(&self) -> &[&str] {
+        &["Use write only for new files or complete rewrites."]
     }
 
     fn effect(

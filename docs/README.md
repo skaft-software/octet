@@ -17,6 +17,7 @@
 - [Models, providers and reasoning](providers.md)
 - [Images and audio](media.md)
 - [Sessions and goals](sessions.md)
+- [Session file format](session-format.md)
 - [Context and compaction](context.md)
 
 ## Configuration
@@ -26,9 +27,14 @@
 - [Instructions, prompt templates and skills](instructions.md)
 - [Resource discovery](resources.md)
 - [Themes](themes.md)
+- [Shell aliases](shell-aliases.md)
+- [tmux setup](tmux.md)
+- [Windows setup](windows.md)
+- [Termux (Android)](termux.md)
 
 ## Integrations
 
+- [Extension packages](packages.md)
 - [Subagents](../extensions/octet-subagents/README.md)
 - [Browser](../extensions/octet-browse/README.md)
 - [Web search](../extensions/octet-web-search/README.md)

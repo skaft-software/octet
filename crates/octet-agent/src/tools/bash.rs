@@ -67,12 +67,13 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            constrained_sampling: None,
             name: "bash".to_string(),
             description: "Run a command through the configured Bash-compatible shell. \
                           Omit cwd to run at the workspace root. Output reports the exit \
                           status and bounded stdout/stderr. Complete streams end with \
                           complete_<stream>=true; truncated_<stream>=... means bytes \
-                          were omitted."
+                          were omitted. Truncated output includes a full_output_path to a private spill file."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -164,6 +165,8 @@ impl Tool for BashTool {
         Ok(ToolEffect::HostProcess)
     }
 
+    fn prompt_snippet(&self) -> Option<&str> { Some("Execute bash commands (ls, grep, find, etc.)") }
+
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -171,7 +174,7 @@ impl Tool for BashTool {
     ) -> Result<ToolOutput, ToolError> {
         #[cfg(windows)]
         {
-            self.execute_windows(args, ctx).await
+            self.execute_windows(args, ctx, false, &super::ShellSessionEnvironment::default()).await
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -182,17 +185,18 @@ impl Tool for BashTool {
         }
         #[cfg(unix)]
         {
-            self.execute_unix(args, ctx).await
+            self.execute_unix(args, ctx, &super::ShellSessionEnvironment::default()).await
         }
     }
 }
 
 #[cfg(unix)]
 impl BashTool {
-    async fn execute_unix(
+    pub(super) async fn execute_unix(
         &self,
         args: serde_json::Value,
         ctx: &ToolContext<'_>,
+        environment: &super::ShellSessionEnvironment,
     ) -> Result<ToolOutput, ToolError> {
         self.effect(&args, ctx)?;
         let args: BashArgs = parse_args(args)?;
@@ -228,6 +232,7 @@ impl BashTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        environment.apply(&mut command)?;
         // Put the child in its own process group so cancellation and timeouts
         // can terminate the whole tree, not just the direct child.
         #[cfg(unix)]
@@ -424,14 +429,15 @@ fn is_legacy_wsl_bash_path(path: &std::path::Path) -> bool {
 
 #[cfg(windows)]
 impl BashTool {
-    async fn execute_windows(
+    pub(super) async fn execute_windows(
         &self,
         args: serde_json::Value,
         ctx: &ToolContext<'_>,
-    ) -> Result<ToolOutput, ToolError> {
+        powershell: bool,
+        environment: &super::ShellSessionEnvironment,    ) -> Result<ToolOutput, ToolError> {
         self.effect(&args, ctx)?;
         let args: BashArgs = parse_args(args)?;
-        let shell = resolve_windows_shell(ctx.sandbox.shell_path.as_deref())?;
+        let shell = if powershell { super::powershell::resolve_shell()? } else { resolve_windows_shell(ctx.sandbox.shell_path.as_deref())? };
         let mut command = tokio::process::Command::new(&shell);
 
         // Honour the per-call timeout when present, bounded by sandbox max.
@@ -462,13 +468,15 @@ impl BashTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        environment.apply(&mut command)?;
         let launch = WindowsProcessLaunch::bash(&mut command).map_err(|error| {
             ToolError::new(format!(
                 "error spawn\nfailed to prepare shell {} for Job Object supervision: {error}",
                 shell.display()
             ))
         })?;
-        command.arg("-c").arg(&args.command);
+        if powershell { super::powershell::configure_command(&mut command, &args.command); }
+        else { command.arg("-c").arg(&args.command); }
 
         let start = Instant::now();
         let mut child = command.spawn().map_err(|error| {
@@ -594,6 +602,9 @@ struct Capture {
     tail: VecDeque<u8>,
     total_bytes: usize,
     truncated: bool,
+    spill: Option<tempfile::NamedTempFile>,
+    spill_path: Option<PathBuf>,
+    spill_error: bool,
 }
 
 #[cfg(any(unix, windows))]
@@ -604,6 +615,9 @@ impl Capture {
             tail: VecDeque::new(),
             total_bytes: 0,
             truncated: false,
+            spill: None,
+            spill_path: None,
+            spill_error: false,
         }
     }
 
@@ -614,6 +628,7 @@ impl Capture {
         if self.total_bytes <= budget {
             self.head.extend(self.tail.drain(..));
             self.truncated = false;
+            self.spill = None;
             return;
         }
 
@@ -624,6 +639,13 @@ impl Capture {
             self.tail.drain(..self.tail.len() - tail_cap);
         }
         self.truncated = true;
+        if let Some(file) = self.spill.take() {
+            if file.as_file().sync_data().is_err() { self.spill_error = true; }
+            match file.keep() {
+                Ok((_file,path)) => self.spill_path = Some(path),
+                Err(_) => self.spill_error = true,
+            }
+        }
     }
 
     /// Renders one output section:
@@ -644,6 +666,17 @@ impl Capture {
     /// truncated_stdout=head:N tail:M omitted_bytes:K
     /// ```
     fn render(&self, name: &str) -> String {
+        let mut text = self.render_capture(name);
+        if self.truncated {
+            if let Some(path) = &self.spill_path {
+                text.push_str(&format!("\n{}_output_path={}", if self.spill_error { "partial" } else { "full" }, path.display()));
+            }
+            if self.spill_error { text.push_str("\nspill_error=true (full output could not be retained)"); }
+        }
+        text
+    }
+
+    fn render_capture(&self, name: &str) -> String {
         if !self.truncated {
             let text = String::from_utf8_lossy(&self.head);
             let text = text.strip_suffix('\n').unwrap_or(&text);
@@ -702,8 +735,19 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(_) => { capture.spill_error = true; break; },
             Ok(n) => {
+                if capture.spill.is_none() && !capture.spill_error {
+                    match tempfile::Builder::new().prefix("octet-bash-").suffix(".log").tempfile() {
+                        Ok(file) => capture.spill = Some(file),
+                        Err(_) => capture.spill_error = true,
+                    }
+                }
+                if let Some(file) = &mut capture.spill {
+                    use std::io::Write;
+                    if file.write_all(&buf[..n]).is_err() { capture.spill_error = true; }
+                }
                 progress.output(stream, Bytes::copy_from_slice(&buf[..n]));
                 capture.total_bytes += n;
                 let mut chunk = &buf[..n];

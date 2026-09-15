@@ -21,7 +21,7 @@ use octet_agent::{
     analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EntryId,
     GoalDecision, GoalStatus, GoalTurnSource, Run, RunControl, Session, ToolProgress,
 };
-use octet_ai::{ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
+use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::app::bootstrap::{
@@ -195,6 +195,8 @@ pub enum PendingIdleAction {
     CheckoutEntry(String),
     Skills(commands::SkillsSubcommand),
     Goal(commands::GoalCommand),
+    /// Extension management that owns the application (menu, reload, actions).
+    Extensions(commands::ExtensionsSubcommand),
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
@@ -413,6 +415,10 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => return Ok(Idle::CycleThinking),
+                    InputAction::EditQueued => {
+                        shell.edit_queued_follow_up();
+                        shell.render();
+                    }
                     InputAction::ClearEditor => {
                         shell.clear_editor();
                         shell.render();
@@ -424,7 +430,10 @@ where
                     InputAction::Submit(_) => return Ok(Idle::Submit(shell.drain_composed())),
                     InputAction::Command(_) => return Ok(Idle::Command(shell.drain_editor())),
                     InputAction::Closed => return Ok(Idle::Quit),
-                    InputAction::Ignore | InputAction::Abort | InputAction::Steer(_) => {}
+                    InputAction::FocusGained => apply_focus_transition(shell, true),
+                    InputAction::FocusLost => apply_focus_transition(shell, false),
+                    InputAction::Ignore | InputAction::Abort | InputAction::DispatchQueued
+                    | InputAction::Queue(_) | InputAction::Steer(_) => {}
                 }
             }
             // Mouse/trackpad events arrive in bursts. Apply every delta to
@@ -732,7 +741,7 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
     }
     let pending = shell.pending();
     match keymap::translate_with_popup(Some(event), true, &pending, shell.slash_popup_open()) {
-        InputAction::Abort => return true,
+        InputAction::Abort | InputAction::DispatchQueued => return true,
         InputAction::Closed => {
             shell.request_close();
             return true;
@@ -749,7 +758,10 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         }
         InputAction::CompleteSlashCommand => shell.complete_slash_command(),
         InputAction::CompletePath => shell.complete_path(),
-        InputAction::Steer(_) | InputAction::Submit(_) | InputAction::Command(_) => {
+        InputAction::Queue(_)
+        | InputAction::Steer(_)
+        | InputAction::Submit(_)
+        | InputAction::Command(_) => {
             // This operation has no RunControl owner. Keep the complete draft
             // rather than pretending Enter delivered it or discarding it.
             shell.notice("operation in progress · draft kept for the next prompt");
@@ -1129,12 +1141,190 @@ async fn logout_custom(
     Ok(app)
 }
 
-fn handle_active_command(
+/// Apply `/fast` to the active model's declared endpoint route.
+///
+/// The fast service tier is a Codex-route capability, so the command is gated
+/// on the declared protocol and endpoint runtime profile rather than a provider
+/// name, and it fails closed: no octet-ai codec emits the Codex `service_tier`
+/// request field yet, so the switch is rejected instead of reporting a change
+/// the wire never made.
+fn apply_fast_command(shell: &mut InteractiveShell, model: &Model, requested: Option<bool>) {
+    if !commands::codex_fast_tier_endpoint(model) {
+        shell.error(format!(
+            "`/fast` requires a Codex Responses endpoint; {} declares {:?} with the {:?} responses profile",
+            commands::model_route_label(model),
+            model.spec.protocol,
+            model.endpoint.runtime.responses_profile,
+        ));
+        return;
+    }
+    let request = match requested {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "status",
+    };
+    shell.error(format!(
+        "`/fast {request}` is unavailable: no octet-ai codec emits the Codex `service_tier` request field"
+    ));
+}
+
+/// Apply a terminal keyboard-focus transition (`?1004` reporting).
+///
+/// A stale press, drag, or hover must not resume when focus returns, and a
+/// returning window must repaint immediately. The shell owns pointer state;
+/// settling a gesture whose pointer is outside the transcript clears the
+/// pending press anchor and the drag flag and creates no selection. An
+/// already-copied selection is a copy buffer, not transient interaction state,
+/// so it survives.
+fn apply_focus_transition(shell: &mut InteractiveShell, gained: bool) {
+    if !gained {
+        shell.begin_transcript_selection(u16::MAX, u16::MAX, false);
+    }
+    shell.render();
+}
+
+/// Read-only application facts a live run may inspect while its own
+/// agent/session borrow is held by `Run`.
+///
+/// An active run owns `&mut Agent`, so the frontend cannot reach
+/// `app.agent.session()`. Session-scoped reports therefore re-open the same
+/// session file read-only by path — the same handle the live `/subagents`
+/// drill-in already uses through the run's delegation binding. Nothing here
+/// mutates the running session or the frozen agent.
+#[derive(Clone)]
+pub struct ActiveRunInspection {
+    workspace: PathBuf,
+    invocation_cwd: PathBuf,
+    session_path: PathBuf,
+    model: Model,
+    catalog: octet_ai::ModelCatalog,
+    sessions: crate::session_store::SessionStore,
+    subagents_available: bool,
+}
+
+impl ActiveRunInspection {
+    /// Snapshot the application facts a run cannot borrow without cancelling it.
+    pub fn capture(app: &App) -> Self {
+        Self {
+            workspace: app.config.workspace.clone(),
+            invocation_cwd: app.config.invocation_cwd.clone(),
+            session_path: app.agent.session().path().to_path_buf(),
+            model: app.model.clone(),
+            catalog: app.catalog.clone(),
+            sessions: app.sessions.clone(),
+            subagents_available: app.subagents_available(),
+        }
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        self.session_path.file_stem().and_then(|stem| stem.to_str())
+    }
+
+    /// Re-read the live session without repairing, truncating, or appending.
+    fn read_only_session(&self) -> anyhow::Result<Session> {
+        Ok(Session::open_read_only(&self.session_path)?)
+    }
+}
+
+/// Immediate `/context` body for an active run.
+///
+/// The styled idle report (`tui::context::ContextReport`) can only be built
+/// from `&App`, which the run holds. The run's own live context snapshot is the
+/// authoritative alternative for the same quantities.
+fn active_context_text(snapshot: &octet_agent::ContextSnapshot, model: &Model) -> String {
+    let breakdown = &snapshot.context;
+    let mut text = format!(
+        "Model: {}\nContext window: {} tokens\nEstimated next request: {} tokens\n\n",
+        model
+            .spec
+            .display_name
+            .as_deref()
+            .unwrap_or(&model.spec.api_name),
+        breakdown.context_limit,
+        breakdown.total_tokens,
+    );
+    for (label, tokens) in [
+        ("Runtime framing and tools", breakdown.system_tokens),
+        ("System instructions", breakdown.instruction_tokens),
+        ("Conversation", breakdown.conversation_tokens),
+        ("Tool results", breakdown.tool_result_tokens),
+        ("Attachments", breakdown.attachment_tokens),
+        ("Compaction summaries", breakdown.compaction_summary_tokens),
+        ("Other", breakdown.other_tokens),
+    ] {
+        text.push_str(&format!("{label}: {tokens} tokens\n"));
+    }
+    if let Some(measured) = breakdown.provider_tokens {
+        text.push_str(&format!("Provider measurement: {measured} tokens\n"));
+    }
+    text
+}
+
+/// Generic counterpart of `pickers::thinking_picker` for an active run.
+///
+/// `thinking_picker` is bound to the concrete terminal input; an active run
+/// drives its own borrowed stream. The panel mechanics are the shared
+/// `pick_list_with_preview` used by every other picker.
+async fn active_thinking_picker<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    levels: &[ThinkingLevel],
+) -> anyhow::Result<Option<ThinkingLevel>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let mut items: Vec<String> = levels.iter().map(|level| level.label().into()).collect();
+    let (_, current) = shell.selected_identity();
+    let initial = match levels.iter().position(|level| level.label() == current) {
+        Some(index) => {
+            items[index].push_str(" (current)");
+            index
+        }
+        None => 0,
+    };
+    let Some(index) = pick_list_with_preview(
+        shell,
+        input,
+        OrdinarySurfaceMetadata::with_purpose(
+            "Select thinking level",
+            "Choose effort for subsequent prompts and the startup default",
+        ),
+        items,
+        vec![None; levels.len()],
+        initial,
+        PanelAction::SelectThinking(levels.to_vec()),
+        |_, _| {},
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(levels[index]))
+}
+
+/// Handle a slash command while the model is running.
+///
+/// Anything observable through [`ActiveRunInspection`] or the run's own context
+/// snapshot renders immediately through the same producers the idle dispatcher
+/// uses. Commands that must *transition* the application (session changes,
+/// model selection, extension reload) still queue a [`PendingIdleAction`], but
+/// they never leave the user with only a "next idle boundary" notice.
+#[allow(clippy::too_many_arguments)]
+async fn handle_active_command<S, F>(
     shell: &mut InteractiveShell,
     command: Command,
+    inspection: &ActiveRunInspection,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    context: &octet_agent::ContextSnapshot,
+    open_delegated: F,
+    input: &mut S,
     queue: &mut VecDeque<PendingIdleAction>,
     quit_requested: &mut bool,
-) {
+) -> anyhow::Result<()>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    F: Fn(&str, &str) -> Result<Option<Session>, AgentError>,
+{
     match command {
         Command::Status => {
             let mut status = shell.status_detail();
@@ -1143,11 +1333,59 @@ fn handle_active_command(
             }
             shell.show_status_text_with_telemetry(status);
         }
-        Command::Cost | Command::Cache => {
-            shell.notice("cost and cache reports are available at the next idle boundary")
-        }
         Command::Changelog => shell.show_changelog(),
-        Command::Update => shell.notice("update checks are available at the next idle boundary"),
+        Command::Help(topic) => shell.show_report_text(
+            "Help",
+            "Browse commands and keyboard shortcuts",
+            commands::help_text(&inspection.workspace, topic.as_deref()),
+        ),
+        Command::Cost => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Cost",
+                "Review session token usage and estimated cost",
+                commands::cost_text(&session, &inspection.model),
+            ),
+            Err(error) => shell.error(format!("cost report unavailable: {error}")),
+        },
+        Command::Cache => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Cache",
+                "Review session cache accounting",
+                commands::cache_text(&session),
+            ),
+            Err(error) => shell.error(format!("cache report unavailable: {error}")),
+        },
+        Command::Tree => match inspection.read_only_session() {
+            Ok(session) => shell.show_overlay_text(session_tree_text(&session)),
+            Err(error) => shell.error(format!("session tree unavailable: {error}")),
+        },
+        Command::Context => shell.show_report_text(
+            "Context",
+            "Review the estimated request context before the next turn",
+            active_context_text(context, &inspection.model),
+        ),
+        Command::Update => {
+            // The check is a bounded local request. Run events buffer until it
+            // settles, exactly like the live `/subagents` panel, and the next
+            // select iteration owns any shutdown the signal arm requests.
+            shell.show_overlay_text("Checking for updates…".into());
+            shell.render();
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                    shell.request_close();
+                }
+                result = crate::update::check() => match result {
+                    Ok(status) => shell.show_overlay_text(match status {
+                        crate::update::UpdateStatus::Available { .. } => {
+                            format!("{status}\n\nRun `octet update` to install.")
+                        }
+                        status => status.to_string(),
+                    }),
+                    Err(error) => shell.error(format!("update check failed: {error}")),
+                },
+            }
+        }
         Command::Verbose(value) => {
             let enabled = value.unwrap_or(!shell.verbose_tools());
             shell.set_verbose_tools(enabled);
@@ -1156,12 +1394,114 @@ fn handle_active_command(
                 if enabled { "enabled" } else { "disabled" }
             ));
         }
-        Command::Extensions(_) => {
-            shell.notice("extension inspection and reload are available at the next idle boundary")
+        Command::Name(name) => match inspection.session_id() {
+            Some(id) => match name {
+                Some(name) => match inspection.sessions.rename(id, &name) {
+                    Ok(metadata) => shell.notice(format!(
+                        "session named {}",
+                        metadata.name.as_deref().unwrap_or("(unnamed)")
+                    )),
+                    Err(error) => shell.error(error.to_string()),
+                },
+                None => match inspection.sessions.load_metadata(id) {
+                    Ok(metadata) => shell.notice(format!(
+                        "session name: {}",
+                        metadata
+                            .name
+                            .as_deref()
+                            .unwrap_or("(derived from first prompt)")
+                    )),
+                    Err(error) => shell.error(error.to_string()),
+                },
+            },
+            None => shell.error("current session has no valid id".into()),
+        },
+        Command::Export(output) => match inspection.session_id() {
+            Some(id) => match crate::session_commands::export_portable(
+                &inspection.sessions,
+                id,
+                output.map(PathBuf::from),
+                &inspection.invocation_cwd,
+                false,
+                false,
+            ) {
+                Ok(report) => shell.show_overlay_text(format!(
+                    "Exported {}\nRedacted {} potentially sensitive values{}",
+                    report.destination.display(),
+                    report.redaction_count,
+                    if report.ignored_torn_tail {
+                        "\nIgnored an interrupted final append; use `octet sessions repair`."
+                    } else {
+                        ""
+                    }
+                )),
+                Err(error) => shell.error(error.to_string()),
+            },
+            None => shell.error("current session has no valid id".into()),
+        },
+        Command::Extensions(commands::ExtensionsSubcommand::Status) => {
+            shell.show_overlay_text(extensions.inspect_text());
         }
-        Command::Help(_) => shell.notice("help is available at the next idle boundary"),
-        Command::Name(_) | Command::Export(_) => {
-            shell.notice("session management commands are available at the next idle boundary")
+        Command::Extensions(commands::ExtensionsSubcommand::Inspect { reference }) => {
+            let principal = extensions.presentation_session_reference_principal(&reference);
+            match principal {
+                Some(principal) => {
+                    match open_delegated(&principal, &reference) {
+                        Ok(Some(session)) => {
+                            let theme = shell.theme();
+                            let width = shell.read_only_document_width();
+                            let verbose_tools = shell.verbose_tools();
+                            match delegated_session_text(&session, &theme, width, verbose_tools) {
+                                Ok(text) => shell.show_styled_overlay_text(
+                                    delegated_session_overlay_text(&text, &theme),
+                                ),
+                                Err(error) => shell
+                                    .error(format!("failed to inspect delegated session: {error}")),
+                            }
+                        }
+                        Ok(None) => shell.error(
+                            "delegated session reference is unavailable for this parent".into(),
+                        ),
+                        Err(error) => {
+                            shell.error(format!("failed to inspect delegated session: {error}"))
+                        }
+                    }
+                }
+                None => shell.error(
+                    "delegated session reference is unavailable, stale, or owned by another extension"
+                        .into(),
+                ),
+            }
+        }
+        Command::Extensions(sub) => {
+            // The management menu, reload, and actions own the application and
+            // its executable extensions, so they still run through the idle
+            // dispatcher — but their current state renders now.
+            shell.show_overlay_text(extensions.inspect_text());
+            push_pending_action(queue, PendingIdleAction::Extensions(sub));
+        }
+        Command::Fast(requested) => apply_fast_command(shell, &inspection.model, requested),
+        Command::Model(None) => {
+            // The picker owns input while it is open, so it runs inline and the
+            // chosen model is applied by the idle transition that already owns
+            // reconfiguration. Cancelling infers no change.
+            if let Some(id) = optional_model_picker(shell, input, &inspection.catalog).await? {
+                push_pending_action(queue, PendingIdleAction::ChangeModel(id));
+                shell.notice("model change queued for the next idle boundary");
+            }
+        }
+        Command::Thinking(None) => {
+            let levels =
+                supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
+            if let Some(level) = active_thinking_picker(shell, input, &levels).await? {
+                let reasoning = thinking_to_reasoning_with_subagents(
+                    level,
+                    &inspection.model,
+                    inspection.subagents_available,
+                )?;
+                push_pending_action(queue, PendingIdleAction::ChangeThinking(reasoning));
+                shell.notice("thinking change queued for the next idle boundary");
+            }
         }
         Command::Quit => *quit_requested = true,
         Command::Unknown(text) => shell.error(format!("unknown command: {text}")),
@@ -1171,6 +1511,7 @@ fn handle_active_command(
         },
     }
     shell.render();
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1227,6 +1568,7 @@ pub async fn drive_active_run<S>(
     cost_warning_microdollars: Option<u64>,
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     made_tool_call: &mut bool,
+    inspection: &ActiveRunInspection,
 ) -> anyhow::Result<HostRunOutcome>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -1237,6 +1579,8 @@ where
     let mut intents = VecDeque::<ControlIntent>::new();
     let mut in_flight: Option<ControlFuture> = None;
     let mut aborting = false;
+    let mut dispatch_queued = false;
+    shell.settle_queued_follow_ups(false);
     let mut input_open = true;
     let mut scroll_dirty = false;
     let mut last_run_cost = 0u64;
@@ -1423,7 +1767,12 @@ where
                             shell.render();
                         }
                     }
-                    InputAction::Abort => {
+                    InputAction::Abort | InputAction::DispatchQueued => {
+                        // A second Escape during settlement must not turn a
+                        // plain Ctrl+C cancellation into an implicit send.
+                        if !aborting {
+                            dispatch_queued = matches!(action, InputAction::DispatchQueued);
+                        }
                         control.abort();
                         // A steer send can be waiting for acknowledgement or
                         // still be only a local intent. Stop dispatching both,
@@ -1435,8 +1784,19 @@ where
                         shell.set_run_preparing(run_id, "cancelling");
                         shell.render();
                     }
+                    InputAction::EditQueued => {
+                        shell.edit_queued_follow_up();
+                        shell.render();
+                    }
                     InputAction::ClearEditor => {
                         shell.clear_editor();
+                        shell.render();
+                    }
+                    InputAction::Queue(_) => {
+                        if !aborting {
+                            let composed = shell.drain_composed();
+                            shell.queue_follow_up(composed);
+                        }
                         shell.render();
                     }
                     InputAction::Steer(_) => {
@@ -1500,12 +1860,24 @@ where
                                 }
                             }
                         }
-                        handle_active_command(
+                        let context = run.context_snapshot();
+                        if let Err(error) = handle_active_command(
                             shell,
                             command,
+                            inspection,
+                            executable_extensions,
+                            &context,
+                            |principal: &str, reference: &str| {
+                                run.open_delegated_session_reference(principal, reference)
+                            },
+                            input,
                             pending_actions,
                             quit_requested,
-                        );
+                        )
+                        .await
+                        {
+                            shell.error(format!("command failed: {error}"));
+                        }
                         if was_quit {
                             control.abort();
                             aborting = true;
@@ -1580,6 +1952,8 @@ where
                         shell.clear_error();
                         shell.render();
                     }
+                    InputAction::FocusGained => apply_focus_transition(shell, true),
+                    InputAction::FocusLost => apply_focus_transition(shell, false),
                     InputAction::Closed => {
                         request_active_close(
                             control,
@@ -1737,6 +2111,11 @@ where
                         // the terminal outcome, and the editor are one atomic
                         // presentation state.
                         shell.restore_queued_steering();
+                        let dispatch = !*quit_requested && !shell.close_requested()
+                            && matches!(&event, AgentEvent::RunFinished { reason, .. }
+                                if matches!(reason, octet_agent::FinishReason::Completed)
+                                    || (dispatch_queued && matches!(reason, octet_agent::FinishReason::Aborted)));
+                        shell.settle_queued_follow_ups(dispatch);
                     }
                     shell.render();
                     if let AgentEvent::RunFinished { reason, .. } = event {
@@ -3471,6 +3850,17 @@ async fn apply_pending_actions(
             PendingIdleAction::Goal(command) => {
                 apply_goal_command(&app, shell, command, goal_deadline)?;
             }
+            PendingIdleAction::Extensions(sub) => {
+                // Reuse the idle dispatcher verbatim so the menu, reload, and
+                // action semantics never diverge from `/extensions` at idle.
+                match run_idle_command(app, shell, input, Command::Extensions(sub), goal_deadline)
+                    .await?
+                {
+                    IdleCommandOutcome::Continue(next)
+                    | IdleCommandOutcome::Quit(next)
+                    | IdleCommandOutcome::Submit { app: next, .. } => app = *next,
+                }
+            }
         }
         request_extension_ui(shell, &mut app);
         shell.render();
@@ -3949,6 +4339,7 @@ async fn run_idle_command(
         Command::Clone => {
             app = clone_session(app, shell, input).await?;
         }
+        Command::Fast(requested) => apply_fast_command(shell, &app.model, requested),
         Command::Model(Some(id)) => {
             app = transition(app, shell, input, Reconfig::Model(ModelId(id))).await?;
         }
@@ -5372,7 +5763,13 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
             shutdown_for_exit(&mut app).await;
             break;
         }
-        let idle = match startup_input.take() {
+        let queued_input = if startup_input.is_none() {
+            shell.take_ready_follow_up()
+        } else {
+            None
+        };
+        let queued_submission = queued_input.is_some();
+        let idle = match startup_input.take().or(queued_input) {
             Some(input) if !input.is_empty() => Idle::Submit(input),
             _ => {
                 wait_for_prompt(
@@ -5474,10 +5871,11 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                 // Shell escapes have the same authority as the model `bash`
                 // tool and executable extensions. Never let this local UX
                 // bypass the product-wide process gate.
-                if let Some(command) = composed
-                    .display_text
-                    .trim()
-                    .strip_prefix('!')
+                // Active-run follow-ups are model input, never delayed local
+                // shell escapes that gain process authority on dispatch.
+                if let Some(command) = (!queued_submission)
+                    .then_some(composed.display_text.as_str())
+                    .and_then(|text| text.trim().strip_prefix('!'))
                     .map(|s| s.trim().to_owned())
                 {
                     if !app.config.sandbox.process_execution_allowed() {
@@ -5753,6 +6151,7 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                 }
 
                 if let Some(message) = cost_limit_message(&app) {
+                    shell.restore_composed(composed);
                     shell.error(message);
                     shell.render();
                     continue;
@@ -5847,6 +6246,9 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                     shell.notice(diagnostic);
                 }
 
+                // Snapshot the read-only application facts the run cannot lend
+                // out (it owns `&mut Agent`), so inspection commands still work.
+                let inspection = ActiveRunInspection::capture(&app);
                 let mut run = {
                     let user_input = composed.into_user_input();
                     let run_result = if answer_only {
@@ -5896,6 +6298,7 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                     app.config.cost_warning_microdollars,
                     &mut app.executable_extensions,
                     &mut made_tool_call,
+                    &inspection,
                 )
                 .await?;
                 drop(run);
@@ -6899,19 +7302,13 @@ mod tests {
         assert!(!shell.slash_popup_open());
     }
 
-    #[test]
-    fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
+    #[tokio::test]
+    async fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
         let mut shell = InteractiveShell::test_shell();
         shell.begin_run("test");
         let before = shell.debug_snapshot();
-        let mut queue = VecDeque::new();
-        let mut quit_requested = false;
-        handle_active_command(
-            &mut shell,
-            Command::Changelog,
-            &mut queue,
-            &mut quit_requested,
-        );
+        let (queue, quit_requested) =
+            run_active_command(&mut shell, Command::Changelog, test_run_inspection()).await;
         assert!(shell.has_overlay());
         assert!(queue.is_empty());
         assert!(!quit_requested);
@@ -6934,20 +7331,60 @@ mod tests {
         );
     }
 
-    #[test]
-    fn active_cost_and_cache_reports_wait_for_the_idle_boundary() {
-        for command in [Command::Cost, Command::Cache] {
+    #[tokio::test]
+    async fn active_inspection_reports_render_without_waiting_for_the_idle_boundary() {
+        let session_dir = tempfile::tempdir().expect("inspection fixture");
+        let inspection = test_run_inspection_with_session(session_dir.path());
+        for command in [
+            Command::Help(None),
+            Command::Context,
+            Command::Tree,
+            Command::Cost,
+            Command::Cache,
+        ] {
             let mut shell = InteractiveShell::test_shell();
-            let mut queue = VecDeque::new();
-            let mut quit_requested = false;
-            handle_active_command(&mut shell, command, &mut queue, &mut quit_requested);
+            shell.begin_run("test");
+            let (queue, quit_requested) =
+                run_active_command(&mut shell, command.clone(), &inspection).await;
 
-            assert!(shell
-                .debug_snapshot()
-                .contains("cost and cache reports are available at the next idle boundary"));
-            assert!(queue.is_empty());
+            assert!(shell.has_overlay(), "{command:?} did not render a report");
+            assert!(queue.is_empty(), "{command:?} must not wait for idle");
             assert!(!quit_requested);
+            assert_eq!(shell.debug_error(), None, "{command:?} reported an error");
         }
+    }
+
+    #[tokio::test]
+    async fn active_session_commands_report_through_the_read_only_session() {
+        let session_dir = tempfile::tempdir().expect("inspection fixture");
+        let inspection = test_run_inspection_with_session(session_dir.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+
+        // `/name` without an argument reports the name stored beside the live
+        // session file; `/export` writes a portable copy of the same records.
+        let (queue, quit_requested) =
+            run_active_command(&mut shell, Command::Name(None), &inspection).await;
+        assert!(queue.is_empty());
+        assert!(!quit_requested);
+        assert!(
+            shell.debug_snapshot().contains("session name:"),
+            "transcript: {}",
+            shell.debug_snapshot()
+        );
+
+        let output = session_dir.path().join("exported.json");
+        let (queue, quit_requested) = run_active_command(
+            &mut shell,
+            Command::Export(Some(output.display().to_string())),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit_requested);
+        assert!(shell.has_overlay(), "export did not render a report");
+        assert!(output.exists(), "export did not write {}", output.display());
+        assert_eq!(shell.debug_error(), None);
     }
 
     #[tokio::test]
@@ -7016,15 +7453,14 @@ mod tests {
         assert!(shell.debug_snapshot().is_empty());
     }
 
-    #[test]
-    fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
+    #[tokio::test]
+    async fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
         for command in [
             Command::Model(Some("gpt-4o-mini".into())),
             Command::Thinking(Some("high".into())),
         ] {
             let mut shell = InteractiveShell::test_shell();
-            let mut queue = VecDeque::new();
-            handle_active_command(&mut shell, command, &mut queue, &mut false);
+            let (queue, _) = run_active_command(&mut shell, command, test_run_inspection()).await;
             assert_eq!(queue.len(), 1);
             assert!(shell
                 .debug_snapshot()
@@ -7032,13 +7468,12 @@ mod tests {
             assert_eq!(shell.debug_error(), None);
         }
         let mut shell = InteractiveShell::test_shell();
-        let mut queue = VecDeque::new();
-        handle_active_command(
+        let (queue, _) = run_active_command(
             &mut shell,
             Command::Thinking(Some("invalid-effort".into())),
-            &mut queue,
-            &mut false,
-        );
+            test_run_inspection(),
+        )
+        .await;
         assert!(queue.is_empty());
         assert!(shell.debug_error().is_some());
         assert!(shell.debug_snapshot().is_empty());
@@ -7116,6 +7551,78 @@ mod tests {
                 timeout: Duration::from_secs(5),
             }),
         }
+    }
+
+    /// Inspection facts for tests that drive `drive_active_run` directly. The
+    /// paths do not exist: only the mechanics tests use this, and none of them
+    /// issue an inspection command.
+    fn test_run_inspection() -> &'static ActiveRunInspection {
+        static INSPECTION: std::sync::OnceLock<ActiveRunInspection> = std::sync::OnceLock::new();
+        INSPECTION.get_or_init(|| {
+            let missing = PathBuf::from("/nonexistent/octet-run-inspection");
+            ActiveRunInspection {
+                workspace: missing.clone(),
+                invocation_cwd: missing.clone(),
+                session_path: missing.join("session.jsonl"),
+                model: scripted_model("http://127.0.0.1:1"),
+                catalog: octet_ai::ModelCatalog::default(),
+                sessions: crate::session_store::SessionStore::new(&missing, &missing),
+                subagents_available: false,
+            }
+        })
+    }
+
+    /// Inspection whose session path is a real, empty session file, so
+    /// session-scoped reports render instead of failing to open.
+    fn test_run_inspection_with_session(dir: &Path) -> ActiveRunInspection {
+        let session_path = dir.join("session.jsonl");
+        let mut created = octet_agent::Session::create(&session_path).expect("inspection session");
+        // `/export` refuses a session with no resumable conversation, so the
+        // fixture carries the smallest resumable turn.
+        created
+            .append(EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text("inspection fixture".into())],
+                },
+            )))
+            .expect("inspection fixture prompt");
+        drop(created);
+        ActiveRunInspection {
+            workspace: dir.to_path_buf(),
+            invocation_cwd: dir.to_path_buf(),
+            session_path,
+            model: scripted_model("http://127.0.0.1:1"),
+            catalog: octet_ai::ModelCatalog::default(),
+            sessions: crate::session_store::SessionStore::new(dir, dir),
+            subagents_available: false,
+        }
+    }
+
+    /// Drive one active-run slash command with the minimum test scaffolding.
+    async fn run_active_command(
+        shell: &mut InteractiveShell,
+        command: Command,
+        inspection: &ActiveRunInspection,
+    ) -> (VecDeque<PendingIdleAction>, bool) {
+        let mut queue = VecDeque::new();
+        let mut quit_requested = false;
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let context = octet_agent::ContextSnapshot::default();
+        handle_active_command(
+            shell,
+            command,
+            inspection,
+            &mut extensions,
+            &context,
+            |_, _| Ok(None),
+            &mut input,
+            &mut queue,
+            &mut quit_requested,
+        )
+        .await
+        .expect("active command");
+        (queue, quit_requested)
     }
 
     async fn scripted_agent_with_delay(
@@ -7499,7 +8006,8 @@ mod tests {
             let ended = tokio::time::timeout(Duration::from_secs(5), async {
                 tokio::select! {
                     result = drive_active_run(&mut run, &control, &mut shell, &mut input,
-                        &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call) => result.unwrap(),
+                        &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call,
+                        test_run_inspection()) => result.unwrap(),
                     _ = &mut stimulus => unreachable!(),
                 }
             }).await.expect("held model request must settle");
@@ -7530,9 +8038,9 @@ mod tests {
         let mut shell = InteractiveShell::test_shell();
         let events = [
             Event::Paste("first queued".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Event::Paste("second queued".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Event::Paste("/answer preserve this instruction".into()),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -7567,6 +8075,7 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
+                test_run_inspection(),
             ),
         )
         .await
@@ -7585,6 +8094,102 @@ mod tests {
             1,
             "undelivered input is not durable or replayed"
         );
+    }
+
+    #[tokio::test]
+    async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement() {
+        use crossterm::event::KeyEvent;
+        for (cancel, dispatch, quit_expected) in [
+            (
+                Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                true,
+                false,
+            ),
+            (
+                Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                false,
+                false,
+            ),
+            (
+                Some(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+                false,
+                true,
+            ),
+            (None, true, false),
+        ] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_millis(10)).await;
+            let mut shell = InteractiveShell::test_shell();
+            let mut events = vec![
+                Event::Paste("queued first".into()),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Paste("queued second".into()),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Paste(" edited".into()),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ];
+            if let Some(cancel) = cancel {
+                events.push(Event::Key(cancel));
+                // Neither repeated Escape nor a second fresh Escape can arm a
+                // Ctrl+C cancellation after settlement has already started.
+                events.push(Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                    KeyEventKind::Repeat,
+                )));
+                events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            }
+            let mut input = tokio_stream::iter(events.into_iter().map(Ok))
+                .chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut quit = false;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(2),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut VecDeque::new(),
+                    &mut quit,
+                    None,
+                    None,
+                    &mut crate::extensions::ExecutableExtensions::default(),
+                    &mut false,
+                    test_run_inspection(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(run.next().await.is_none(), "one terminal event");
+            drop(run);
+            assert_eq!(quit, quit_expected);
+            assert_eq!(
+                ended,
+                if cancel.is_some() {
+                    HostRunOutcome::Aborted
+                } else {
+                    HostRunOutcome::Completed
+                }
+            );
+            assert_eq!(agent.session().checkpoints().len(), 1);
+            assert_eq!(
+                shell
+                    .take_ready_follow_up()
+                    .map(|input| input.transcript_text),
+                dispatch.then(|| "queued first".to_owned())
+            );
+            assert!(shell.take_ready_follow_up().is_none());
+            shell.edit_queued_follow_up();
+            assert_eq!(shell.pending(), "queued second edited");
+        }
     }
 
     struct EndsThenPanics(bool);
@@ -7628,6 +8233,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
         )
         .await
         .unwrap();
@@ -7801,6 +8407,7 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
+                test_run_inspection(),
             ),
         )
         .await
@@ -7882,6 +8489,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
         )
         .await
         .unwrap();
@@ -7983,6 +8591,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
         )
         .await
         .unwrap();
@@ -8050,6 +8659,7 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
         )
         .await
         .unwrap();

@@ -7816,6 +7816,7 @@ struct ProcessTool {
 impl Tool for ProcessTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            constrained_sampling: None,
             name: self.definition.name.clone(),
             description: self.definition.description.clone(),
             parameters: self.definition.parameters.clone(),
@@ -14957,6 +14958,56 @@ confirmations = true
             extension_instance_id: "instance-test".into(),
             process_generation: 1,
         }
+    }
+
+    #[test]
+    fn progress_decoration_dispatch_requires_feature_active_parent_and_safe_bounded_fields() {
+        let (events, mut diagnostics) = broadcast::channel(16);
+        let (state, _frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session")));
+        let (sink, mut progress) = ToolProgressSink::bounded_channel();
+        lock_std_mutex(&state.pending).get_mut(&1).unwrap().progress = Some(sink);
+        let notification = |request_id, sequence, label: String| ExtensionProgressNotification {
+            request_id,
+            sequence,
+            event: ExtensionProgressEvent::Decoration {
+                label,
+                detail: None,
+            },
+        };
+        assert!(dispatch_progress(&state, notification(1, 1, "unnegotiated".into())).is_err());
+        {
+            let mut protocol = write_std_lock(&state.protocol);
+            protocol.version = EXTENSION_API_VERSION_0_2.into();
+            protocol
+                .features
+                .insert(EXTENSION_FEATURE_PROGRESS_DECORATION.into());
+        }
+        dispatch_progress(&state, notification(1, 2, "é".repeat(128))).unwrap();
+        let crate::tool::ToolProgress::Decoration(decoration) = progress.try_recv().unwrap() else {
+            panic!("expected decoration");
+        };
+        assert_eq!(decoration.label().len(), 256);
+        dispatch_progress(&state, notification(1, 2, "duplicate".into())).unwrap();
+        dispatch_progress(&state, notification(99, 1, "foreign".into())).unwrap();
+        assert!(progress.try_recv().is_err());
+        for (sequence, label) in [
+            (3, "é".repeat(129)),
+            (4, "bad\u{001b}[31m".into()),
+            (5, String::new()),
+        ] {
+            assert!(dispatch_progress(&state, notification(1, sequence, label)).is_err());
+            assert!(progress.try_recv().is_err());
+        }
+        lock_std_mutex(&state.pending).remove(&1);
+        dispatch_progress(&state, notification(1, 6, "late".into())).unwrap();
+        assert!(progress.try_recv().is_err());
+        let mut ignored = 0;
+        while let Ok(ExtensionEvent::Diagnostic { .. }) = diagnostics.try_recv() {
+            ignored += 1;
+        }
+        assert_eq!(ignored, 3);
     }
 
     #[test]

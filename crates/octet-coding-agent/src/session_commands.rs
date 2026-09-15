@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use octet_agent::Session;
 use regex::{Captures, Regex};
 use serde::Serialize;
@@ -16,6 +16,13 @@ use crate::session_store::{
     active_branch_title, SessionMeta, SessionStore, SessionUserMetadata, MAX_SESSION_FILE_BYTES,
 };
 use crate::session_tree::render_session_tree;
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum ExportFormat {
+    #[default]
+    Json,
+    Html,
+}
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum SessionCommand {
@@ -36,6 +43,9 @@ pub enum SessionCommand {
         id: String,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Portable JSON (default) or a script-free, self-contained HTML view.
+        #[arg(long, value_enum, default_value = "json")]
+        format: ExportFormat,
         /// Include raw values. Use only when the destination is trusted.
         #[arg(long)]
         include_secrets: bool,
@@ -59,6 +69,7 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
         SessionCommand::Export {
             id,
             output,
+            format,
             include_secrets,
             force,
         } => export_cli(
@@ -68,6 +79,7 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
             &config.invocation_cwd,
             include_secrets,
             force,
+            matches!(format, ExportFormat::Html).then_some(config.theme.as_deref().unwrap_or("dark")),
         ),
         SessionCommand::Delete { id } => delete(&store, &id),
         SessionCommand::Repair { id } => repair(&store, &id),
@@ -234,6 +246,13 @@ pub(crate) fn export_portable(
     include_secrets: bool,
     force: bool,
 ) -> anyhow::Result<SessionExportReport> {
+    export_with_format(store, id, output, cwd, include_secrets, force, None)
+}
+
+fn export_with_format(
+    store: &SessionStore, id: &str, output: Option<PathBuf>, cwd: &Path,
+    include_secrets: bool, force: bool, html_theme: Option<&str>,
+) -> anyhow::Result<SessionExportReport> {
     let path = store.path_by_id(id)?;
     Session::open_read_only(&path)
         .map_err(|error| anyhow::anyhow!("refusing to export corrupt session {id:?}: {error}"))?;
@@ -266,7 +285,7 @@ pub(crate) fn export_portable(
         redact_value(&mut package, None, &mut redaction_count)?;
     }
     package["redaction_count"] = Value::from(redaction_count);
-    let destination = output.unwrap_or_else(|| PathBuf::from(format!("{id}.octet-session.json")));
+    let destination = output.unwrap_or_else(|| PathBuf::from(if html_theme.is_some() { format!("{id}.html") } else { format!("{id}.octet-session.json") }));
     let destination = if destination.is_absolute() {
         destination
     } else {
@@ -278,7 +297,10 @@ pub(crate) fn export_portable(
             destination.display()
         );
     }
-    let payload = serde_json::to_vec_pretty(&package)?;
+    let payload = match html_theme {
+        Some(theme) => crate::modes::export_html::render(&package, theme)?,
+        None => serde_json::to_vec_pretty(&package)?,
+    };
     crate::auth::write_private_atomic(&destination, &payload, ".session-export-")?;
     Ok(SessionExportReport {
         destination,
@@ -295,8 +317,9 @@ fn export_cli(
     cwd: &Path,
     include_secrets: bool,
     force: bool,
+    html_theme: Option<&str>,
 ) -> anyhow::Result<()> {
-    let report = export_portable(store, id, output, cwd, include_secrets, force)?;
+    let report = export_with_format(store, id, output, cwd, include_secrets, force, html_theme)?;
     crate::output::stdout_line(format!(
         "Exported session {id} to {}.",
         report.destination.display()

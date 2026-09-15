@@ -5,6 +5,14 @@
 //! operational facts, not prompts, tool arguments, or tool output.  Hashes are
 //! included where correlation is useful without making a debug run a secret
 //! exfiltration channel.
+//!
+//! The vendor-neutral callback substrate lives in [`spans`] and [`schema`].
+//! Those spans observe; this module's JSONL observer and the durable
+//! [`crate::session`] accounting remain the authoritative accounting path.
+
+pub mod schema;
+pub mod spans;
+pub mod testing;
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};

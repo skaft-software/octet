@@ -39,6 +39,7 @@ from .protocol import (
     McpTransportError,
 )
 from .streamable_http import CredentialProvider, McpStreamableHttpClient
+from .ownership import ResourceOwner
 
 
 @dataclass
@@ -70,6 +71,7 @@ class BridgeManager:
         scratch_directory: Optional[Path] = None,
         config_error: Optional[Mapping[str, Any]] = None,
         credential_provider: Optional[CredentialProvider] = None,
+        resource_owner: Optional[ResourceOwner] = None,
         client_factory: Optional[Callable[..., Any]] = None,
         random_source: Optional[random.Random] = None,
         experimental_streamable_http_mcp: bool = False,
@@ -81,6 +83,7 @@ class BridgeManager:
             os.environ.get("OCTET_EXTENSION_SCRATCH", ".octet-mcp-scratch")
         )
         self.config_error = dict(config_error) if config_error is not None else None
+        self._remote_owner = resource_owner
         self._credential_provider = credential_provider
         self._client_factory = client_factory or self._default_client_factory
         self._random = random_source or random.SystemRandom()
@@ -109,6 +112,20 @@ class BridgeManager:
             server.transport != "streamable-http"
             or self._experimental_streamable_http_mcp
         )
+
+    def _owner_required(self, state: _ServerState) -> None:
+        state.state = "parked"
+        self._set_error(state, "resource_owner_required", "Remote MCP requires a host-owned /mcp command before connecting")
+
+    def _bind_remote_owner(self, context: Mapping[str, Any]) -> bool:
+        owner = ResourceOwner.from_context(context)
+        with self._lock:
+            if owner is None:
+                return False
+            if self._remote_owner is not None:
+                return owner == self._remote_owner
+            self._remote_owner = owner
+        return True
 
     def _executor_for_work(self) -> ThreadPoolExecutor:
         with self._lock:
@@ -147,9 +164,11 @@ class BridgeManager:
                 on_tools_changed=on_tools_changed,
             )
         if config.transport == "streamable-http":
+            assert self._remote_owner is not None
             return McpStreamableHttpClient(
                 config,
                 limits,
+                resource_owner=self._remote_owner,
                 credential_provider=self._credential_provider,
                 on_failure=on_failure,
                 on_tools_changed=on_tools_changed,
@@ -169,6 +188,9 @@ class BridgeManager:
                     continue
                 if not self._streamable_http_allowed(state.config):
                     self._remote_transport_error(state)
+                    continue
+                if state.config.transport == "streamable-http" and self._remote_owner is None:
+                    self._owner_required(state)
                     continue
                 states.append(state)
         for state in states:
@@ -346,16 +368,27 @@ class BridgeManager:
         if not callable(publish):
             return
         try:
-            publish(self.snapshot())
+            if self._remote_owner is not None:
+                publish(self.snapshot(), resource_owner=self._remote_owner.wire())
+            else:
+                publish(self.snapshot())
         except Exception:
             # An older host may not expose the generic presentation primitive.
             # The status and /mcp fallbacks remain available and no MCP domain
             # state is duplicated in a frontend.
             return
 
-    def execute_command(self, arguments: list[str]) -> dict[str, Any]:
+    def execute_command(self, arguments: list[str], context: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
         """Implement `/mcp` narrow/headless fallback and safe actions."""
 
+        # Never retag remote credentials, catalogs or sessions in place. A new
+        # host owner requires a new resident process; tool arguments cannot bind.
+        if any(state.config.transport == "streamable-http" for state in self._servers.values()):
+            if context and ResourceOwner.from_context(context) is not None:
+                if not self._bind_remote_owner(context):
+                    return {"text": "Remote MCP owner mismatch; restart the extension for this host owner."}
+            elif self._remote_owner is not None:
+                return {"text": "Remote MCP requires the matching host resource owner."}
         if not arguments or arguments == ["status"] or arguments == ["list"]:
             text = format_status(self._domain_snapshot())
         elif arguments == ["snapshot"]:
@@ -400,6 +433,9 @@ class BridgeManager:
                 return False
             with self._lock:
                 if self._shutting_down:
+                    return False
+                if state.config.transport == "streamable-http" and self._remote_owner is None:
+                    self._owner_required(state)
                     return False
                 if state.client is not None and state.client.alive:
                     return True
@@ -708,7 +744,10 @@ class BridgeManager:
         arguments: Mapping[str, Any],
         context: Mapping[str, Any],
     ) -> dict[str, Any]:
-        del context  # Resource ownership is host-derived; it is never accepted from arguments.
+        if self._server(binding.server_id).config.transport == "streamable-http":
+            owner = ResourceOwner.from_context(context)
+            if owner is None or owner != self._remote_owner or owner != client.resource_owner:
+                return self._error_result(binding, "Remote MCP call denied: host resource owner mismatch.")
         activity = self.presentation.start_activity(
             binding.server_id, binding.published_name
         )

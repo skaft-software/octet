@@ -13499,3 +13499,69 @@ fn status_render_loop_retry_compaction_and_cancellation_transitions() {
     assert!(!parser.screen().contents().contains("Retrying"));
     shell.stop_renderer();
 }
+
+#[test]
+fn queued_follow_up_editing_preserves_payloads_and_never_overwrites_a_draft() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.begin_run("fixture");
+    shell.queue_follow_up(ComposedInput::from_text("oldest".into()));
+    let large = "queued payload\n".repeat(20);
+    shell.apply_edit(EditAction::Paste(large.clone()));
+    let composed = shell.drain_composed();
+    let display = composed.display_text.clone();
+    shell.queue_follow_up(composed);
+    shell.apply_edit(EditAction::Paste("local draft".into()));
+    shell.edit_queued_follow_up();
+    assert_eq!(shell.pending(), "local draft");
+    assert_eq!(shell.state.borrow().follow_up_queue.len(), 2);
+    shell.clear_editor();
+    shell.edit_queued_follow_up();
+    assert_eq!(shell.pending(), display);
+    assert_eq!(shell.state.borrow().follow_up_queue.len(), 1);
+    assert!(shell.take_ready_follow_up().is_none());
+    let edited = shell.drain_composed();
+    assert!(
+        matches!(edited.parts.as_slice(), [octet_agent::InputPart::Text(text)] if text == &large)
+    );
+    shell.queue_follow_up(edited);
+    shell.settle_queued_follow_ups(true);
+    assert_eq!(
+        shell.take_ready_follow_up().unwrap().transcript_text,
+        "oldest"
+    );
+    assert!(
+        shell.take_ready_follow_up().is_none(),
+        "only one prompt per settled run"
+    );
+    shell.settle_queued_follow_ups(true);
+    assert_eq!(shell.take_ready_follow_up().unwrap().transcript_text, large);
+}
+
+#[test]
+fn failed_queued_submission_restores_its_payload_alongside_the_new_draft() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.apply_edit(EditAction::Paste("queued payload\n".repeat(20)));
+    let queued = shell.drain_composed();
+    shell.apply_edit(EditAction::Paste("new draft\n".repeat(20)));
+    shell.restore_composed(queued);
+    let restored = shell.drain_composed();
+    assert!(
+        matches!(restored.parts.as_slice(), [octet_agent::InputPart::Text(text)]
+        if text == &format!("{}\n\n{}", "queued payload\n".repeat(20), "new draft\n".repeat(20)))
+    );
+}
+
+#[test]
+fn queued_follow_up_preview_is_bounded_and_control_safe() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.queue_follow_up(ComposedInput::from_text(
+        "first\n\x1b[3J hostile".repeat(100),
+    ));
+    shell.queue_follow_up(ComposedInput::from_text("second".into()));
+    for width in [20, 40, 80] {
+        let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| visible_width(row) <= width as usize));
+        assert!(rows.iter().all(|row| !row.contains("\x1b[3J")));
+    }
+}

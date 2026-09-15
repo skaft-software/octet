@@ -1,0 +1,17 @@
+name = "octet-import-pi"
+version = "0.1.0"
+api_version = "0.3"
+requires_octet = "=0.7.6"
+description = "Read-only Pi migration adapter using octet's typed import implementation"
+
+[entrypoint]
+command = "extension.sh"
+
+[capabilities]
+filesystem = "unrestricted"
+process = false
+network = false
+
+[contributes]
+# Migration methods are negotiated, not exposed as model tools.
+tools = []

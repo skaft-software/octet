@@ -454,7 +454,7 @@ class BrowserEngine:
                 created_page: Any = None
                 try:
                     if not self._tabs:
-                        created_page = self._context.new_page()
+                        created_page = self._new_page_without_activation(operation)
                         operation.check()
                         created_tab_id = self._register_page(created_page).tab_id
                     operation.check()
@@ -526,7 +526,7 @@ class BrowserEngine:
             for page in list(context.pages):
                 self._register_page(page)
             if not self._tabs:
-                self._register_page(context.new_page())
+                self._register_page(self._new_page_without_activation(operation))
             self._sync_pages(owner)
             operation.check()
             if self._context is None:
@@ -595,7 +595,7 @@ class BrowserEngine:
                     "The selected connector does not expose creation of a new browser tab.",
                 )
             operation.check()
-            page = self._context.new_page()
+            page = self._new_page_without_activation(operation)
             tab = self._register_page(page)
             created = True
         else:
@@ -1097,6 +1097,74 @@ class BrowserEngine:
             return bool(probe() if callable(probe) else probe)
         except Exception:
             return True
+
+    def _new_page_without_activation(self, operation: OperationContext) -> Any:
+        """Create only an isolated target, without Chromium's foreground-tab default.
+
+        Playwright 1.57's context.new_page() omits CDP's background option.
+        Never use this browser-level session for an external connector, and never
+        fall back to activating creation if the transport fails. Raw CDP and
+        target IDs remain internal; page matching uses the returned exact ID,
+        not the first page event (which could be an unrelated popup).
+        """
+        operation.check()
+        if len(self._tabs) >= MAX_TABS:
+            raise BrowseError("tab_limit", f"The visible browser is limited to {MAX_TABS} tabs.")
+        context = self._context
+        session = None
+        target_id = None
+        try:
+            seen = {id(page) for page in context.pages}
+            session = context.browser.new_browser_cdp_session()
+            operation.check()
+            target_id = session.send(
+                "Target.createTarget", {"url": "about:blank", "background": True}
+            )["targetId"]
+            while True:
+                operation.check()
+                candidates = [page for page in context.pages if id(page) not in seen]
+                if not candidates:
+                    context.wait_for_event("page", timeout=operation.remaining_ms())
+                    continue
+                for page in candidates:
+                    operation.check()
+                    seen.add(id(page))
+                    if page.is_closed():
+                        continue
+                    probe = context.new_cdp_session(page)
+                    try:
+                        info = probe.send("Target.getTargetInfo")["targetInfo"]
+                    finally:
+                        probe.detach()
+                    if info["targetId"] == target_id:
+                        operation.check()
+                        return page
+        except BaseException as error:
+            # A late/cancelled creation must not leave an unreturned tab behind.
+            # If creation's outcome is unknown, close our isolated context rather
+            # than guess which newly observed page belongs to this operation.
+            try:
+                if session is None or target_id is None:
+                    self._degraded = True
+                    self._close_browser(preserve_degraded=True)
+                else:
+                    session.send("Target.closeTarget", {"targetId": target_id})
+                    self._sync_pages()
+            except Exception:
+                self._degraded = True
+                self._close_browser(preserve_degraded=True)
+            if isinstance(error, BrowseError):
+                raise
+            raise BrowseError(
+                "tab_create_failed",
+                "A tab could not be created without activating the browser; inspect fresh browser state.",
+            ) from error
+        finally:
+            if session is not None:
+                try:
+                    session.detach()
+                except Exception:
+                    pass
 
     def _handle_new_page(self, page: Any) -> None:
         try:

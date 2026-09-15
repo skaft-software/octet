@@ -66,9 +66,19 @@ context and do not create a new browser process. A context close/crash is
 reported as degraded closed state and its Playwright/profile resources are
 released when the owner worker observes it. Only a subsequent explicit open
 request can relaunch the visible browser; ordinary browser operations never
-silently relaunch or bring it to the foreground. A launch cancelled before
-admission closes the newly created context instead of leaving a visible helper
-behind.
+silently relaunch it or explicitly request foreground activation. A launch
+cancelled before admission closes the newly created context instead of leaving
+a visible helper behind.
+
+Tool-created isolated tabs request Chromium's non-activating target creation;
+matching is by exact returned target ID, not by the first arriving page. This is
+a fixed internal operation, not a raw CDP/tool escape hatch, and it never applies
+to external connectors. Chromium stays visible with its owned persistent profile.
+There is no headless, offscreen, minimize, or focus-restoration workaround.
+Initial explicit launch and page-created popups can still activate a window.
+Physical focus preservation remains unqualified; the [qualification record and
+opt-in terminal-focus test](QUALIFICATION.md) distinguish these remaining gates
+from dependency-free regression coverage.
 
 The setup runtime is built in a private temporary directory and published only after a complete marker is written and validated. A cross-process lock makes setup idempotent. Interrupted/failed setup is never reported ready. Status points to `~/.octet/browse/install.log` but does not return its potentially environment-specific contents.
 

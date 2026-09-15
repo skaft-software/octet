@@ -76,6 +76,9 @@ impl SetupServer {
                             return;
                         }
                         thread_requests.fetch_add(1, Ordering::SeqCst);
+                        // macOS may inherit O_NONBLOCK from the listener.
+                        // Header/body deadlines below require blocking reads.
+                        stream.set_nonblocking(false).expect("blocking setup socket");
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                         let mut request = Vec::new();
@@ -363,9 +366,16 @@ impl PtyOctet {
         let deadline = Instant::now() + timeout;
         loop {
             self.terminal.read_available();
-            if *consumed < self.terminal.output.len() {
-                parser.process(&self.terminal.output[*consumed..]);
-                *consumed = self.terminal.output.len();
+            // PTY reads can split one synchronized frame after its heading.
+            // Observe only completed frames, like the real terminal, before
+            // asserting that selectable rows or a full receipt are present.
+            if let Some(end) = self.terminal.output[*consumed..]
+                .windows(FRAME_END.len())
+                .rposition(|window| window == FRAME_END)
+                .map(|offset| *consumed + offset + FRAME_END.len())
+            {
+                parser.process(&self.terminal.output[*consumed..end]);
+                *consumed = end;
             }
             let screen = Self::screen_text(parser, columns);
             if predicate(&screen) {
@@ -399,9 +409,16 @@ impl PtyOctet {
         let deadline = Instant::now() + timeout;
         loop {
             self.terminal.read_available();
-            if *consumed < self.terminal.output.len() {
-                parser.process(&self.terminal.output[*consumed..]);
-                *consumed = self.terminal.output.len();
+            // PTY reads can split one synchronized frame after its heading.
+            // Observe only completed frames, like the real terminal, before
+            // asserting that selectable rows or a full receipt are present.
+            if let Some(end) = self.terminal.output[*consumed..]
+                .windows(FRAME_END.len())
+                .rposition(|window| window == FRAME_END)
+                .map(|offset| *consumed + offset + FRAME_END.len())
+            {
+                parser.process(&self.terminal.output[*consumed..end]);
+                *consumed = end;
             }
             let screen = Self::screen_text(parser, columns);
             if self.terminal.output.len() > output_start && predicate(&screen) {
@@ -460,7 +477,7 @@ impl PtyOctet {
                 break status;
             }
             if Instant::now() >= deadline {
-                terminate_child(&mut self.child);
+                terminate_child(&mut self.child, &mut self.terminal);
                 panic!(
                     "octet did not stop after Ctrl-D; output: {}",
                     visible_bytes(&self.terminal.output)
@@ -489,19 +506,37 @@ impl PtyOctet {
     }
 }
 
-fn terminate_child(child: &mut Child) {
+fn terminate_child(child: &mut Child, terminal: &mut PtyTerminal) {
     let pid = child.id() as libc::pid_t;
-    let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
-    if result == -1 {
-        let _ = child.kill();
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    let _ = child.kill();
+    // On macOS an exiting controlling-terminal owner can wait for the PTY
+    // output queue to drain even after SIGKILL. Blocking wait() while retaining
+    // an unread master deadlocks teardown (observed in __wait4 after a panic).
+    let deadline = Instant::now() + SHUTDOWN_WAIT;
+    let mut buffer = [0u8; 8192];
+    loop {
+        for _ in 0..8 {
+            match terminal.master.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "killed setup PTY child did not settle"
+        );
+        thread::sleep(Duration::from_millis(2));
     }
-    let _ = child.wait();
 }
 
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            terminate_child(&mut self.child);
+            terminate_child(&mut self.child, &mut self.terminal);
         }
     }
 }
@@ -942,4 +977,19 @@ fn setup_manual_narrow_ascii_no_color_and_configured_startup_remain_bounded() {
         !has_styling_sgr(&capture.output),
         "configured no-color startup emitted styling SGR"
     );
+}
+
+#[test]
+fn setup_failure_cleanup_drains_a_full_pty_and_reaps_the_child() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut octet = PtyOctet::spawn(REVIEW_COLUMNS, ROWS, "C.UTF-8", true, false);
+    // The wide first frame exceeds the PTY queue. Deliberately do not drain it
+    // before simulating failed-assertion cleanup at that presentation boundary.
+    thread::sleep(Duration::from_millis(200));
+    let started = Instant::now();
+    terminate_child(&mut octet.child, &mut octet.terminal);
+    assert!(started.elapsed() < SHUTDOWN_WAIT);
+    assert!(octet.child.try_wait().unwrap().is_some());
 }

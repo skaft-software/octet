@@ -21,10 +21,14 @@ config without replacing unrelated settings. Use `/theme` later to revisit it;
 Auto. Existing configured installations do not reopen onboarding, and
 print/plain/RPC, redirected, and `TERM=dumb` sessions never open it.
 
-The built-in choices also work with `--theme` and `OCTET_THEME`. Other theme names,
-`--theme-dir`, and arbitrary theme files remain compatibility inputs only. They
-never add a theme loader or marketplace; unrecognized values fall back to the
-compiled default. An explicit
+The built-in choices also work with `--theme` and `OCTET_THEME`. Other theme
+names, `--theme-dir`, and arbitrary theme files are accepted only through the
+bounded file loader: a name that resolves through normal resource discovery
+(global `~/.octet/themes`, a trusted project `.octet/themes`, or `--theme-dir`)
+is loaded at startup when named by `--theme`/`OCTET_THEME`, while the
+interactive `/theme` command still accepts only `auto`, `light`, and `dark`.
+There is no theme marketplace, and an unrecognized or malformed name falls back
+to the compiled default. An explicit
 `OCTET_COLOR_SCHEME` is also treated as an existing terminal-appearance choice,
 so automation and already-configured shells do not get interrupted by
 onboarding.
@@ -54,3 +58,84 @@ Escape and Alt+] remain genuine keys: an incomplete opening header has a 250 ms
 ambiguity timeout. A header fragmented more slowly can still pass through as
 input. Use explicit `--theme dark` or `--theme light` to skip the query on such
 terminals. This is not a guarantee for arbitrary terminal-protocol corruption.
+
+## Variant reference
+
+octet ships a complete reference file for the compiled default theme at
+[`examples/themes/octet-default.toml`](../examples/themes/octet-default.toml).
+It is not read at runtime — the compiled default is always the fallback — but it
+documents the accepted sections in one place and is a valid starting point:
+
+```console
+cp examples/themes/octet-default.toml ~/.octet/themes/mine.toml
+```
+
+A theme file is a bounded TOML document (256 KiB) with these typed sections:
+
+- `[metadata]` — `name`, `description`, `author`, `version`, `terminal`
+  (`light-dark`, `dark`, `light`, or `any`), and optional `adaptive` to rebalance
+  RGB foregrounds and surfaces for the detected terminal background.
+- `[colors]` / `[tokens]` — flat or nested colour/token values. `"default"`
+  means the terminal's own colour.
+- `[roles.<name>]` — per-role `foreground`, `background`, `bold`, `dim`,
+  `italic`, `underline`, `strikethrough`, `inverse`, and `adaptive`.
+- `[glyphs]` / `[glyphs_ascii]` — typed glyphs; every structural glyph is one
+  column and ASCII fallbacks must be ASCII.
+- `[surfaces.<kind>]` — bounded layout recipes for the `user`, `assistant`,
+  `reasoning`, `tool`, `notice`, `outcome`, `shell`, and `compaction` transcript
+  surfaces.
+- `[layout]` — density, shell visibility, and narrow-terminal overrides.
+- `[variants.*]` — background overlays described below.
+
+`[variants.universal]`, `[variants.dark]`, and `[variants.light]` merge
+recursively over the base document using the same section shapes. `universal`
+applies to every terminal; `dark`/`light` then overlay it for the detected
+background profile, so one variant may override a single token without
+restating the whole table. `[variants.unknown]` applies when detection fails.
+
+Theme files reject terminal control bytes, unknown sections and fields, invalid
+role names, non-ASCII ASCII-fallbacks, wide or empty structural glyphs, and
+oversized values. Unknown or partial files fall back to the compiled default
+rather than starting with a broken shell.
+
+## Semantic role vocabulary
+
+`[roles.<name>]` is typed. These names are the published, terminal-independent
+vocabulary that maps onto octet's semantic text roles; the
+`published_semantic_role_vocabulary_is_closed_and_accepted` test in
+`crates/octet-coding-agent/src/tui/theme.rs` keeps this list and
+`SEMANTIC_ROLE_VOCABULARY` in sync:
+
+`text`, `foreground`, `muted`, `subtle`, `dim`, `accent`, `success`, `warning`,
+`error`, `heading`, `md_heading`, `emphasis`, `md_emphasis`, `strong`,
+`md_strong`, `inline_code`, `md_code`, `code`, `md_code_block`, `quote`,
+`md_quote`, `border`, `link`, `md_link`, `list_marker`, `md_list_bullet`,
+`diff_add`, `diff_added`, `diff_remove`, `diff_removed`, `diff_context`,
+`diff_hunk`, `diff_header`, `syntax_comment`, `syntax_keyword`,
+`syntax_function`, `syntax_variable`, `syntax_string`, `syntax_number`,
+`syntax_type`, `syntax_operator`, `syntax_punctuation`.
+
+Alias spellings (`foreground`/`text`, `dim`/`subtle`, `code`/`md_code_block`,
+`diff_add`/`diff_added`, and so on) resolve to the same underlying role.
+
+## Extension-contributed themes and roles
+
+Two channel types are open to extensions:
+
+- **Roles.** Any name of the form `extension.<namespace>.<role>` is accepted in
+  `[roles]` (up to 96 bytes, ASCII alphanumerics plus `_`, `-`, and `.`). The
+  schema is open but typed: an extension may add
+  `[roles."extension.git.branch"]` without a host change, but it cannot inject
+  the same name under a private, unnamespaced key. This is tested by
+  `semantic_extension_roles_are_open_but_typed` in `theme_schema.rs`.
+- **Theme files.** An extension package may ship `themes/<name>.toml`. Install
+  or copy it into a discovery root so the shared resolver can select it:
+  `~/.octet/themes/` (global), `.octet/themes/` (project, requires trust), or a
+  directory passed with `--theme-dir`. Discovered files use the same bounded,
+  no-follow reader as the compiled default and never execute extension code.
+
+A manifest-level `contributes.themes` channel that would register an
+extension's own directory as a theme root is **not implemented**; it requires a
+change in the extension manifest schema and discovery (outside the theme
+module). Until then, publishing a theme file into a discovery root is the
+supported contribution path.

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AiError, ConfigError, DecodeError, ProviderError};
+use crate::error::{AiError, ConfigError, DecodeError, ProviderError, UnsupportedError};
 use crate::protocol::sse::SseEvent;
 use crate::protocol::{
     cache_control, emit_event, get_canonical_index, Base64Bytes, CacheControl, HttpRequestParts,
@@ -234,8 +234,16 @@ enum AnthropicResponseContentBlock {
     // and the extra wire field is simply ignored on deserialize.
     Text {},
     Thinking {},
-    RedactedThinking { data: String },
-    ToolUse { id: String, name: String },
+    RedactedThinking {
+        data: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+    },
+    /// Server-side fallback marker. A pre-content fallback is transparent; a
+    /// mid-output fallback is rejected (see the content block handler).
+    Fallback {},
 }
 
 // Anthropic content_block_delta uses `*_delta` type tags on the wire (see
@@ -530,21 +538,29 @@ pub(crate) fn build_request(
     {
         None
     } else {
-        Some(
-            req.tools
-                .iter()
-                .enumerate()
-                .map(|(index, t)| AnthropicTool {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    input_schema: t.parameters.clone(),
-                    cache_control: (index + 1 == req.tools.len()
-                        && model.spec.cache.supports_cache_control_on_tools)
-                        .then_some(cache_marker)
-                        .flatten(),
-                })
-                .collect(),
-        )
+        let mut built = Vec::with_capacity(req.tools.len());
+        for (index, t) in req.tools.iter().enumerate() {
+            // Strict JSON-schema constrained sampling rewrites the tool input
+            // schema into Anthropic's enforced subset; otherwise the canonical
+            // schema is sent unchanged.
+            let (parameters, strict) =
+                crate::constrained_sampling::function_tool_parameters(t, true)?;
+            let input_schema = if strict {
+                parameters
+            } else {
+                t.parameters.clone()
+            };
+            built.push(AnthropicTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema,
+                cache_control: (index + 1 == req.tools.len()
+                    && model.spec.cache.supports_cache_control_on_tools)
+                    .then_some(cache_marker)
+                    .flatten(),
+            });
+        }
+        Some(built)
     };
 
     let tool_choice_opt = if !model.spec.capabilities.tools {
@@ -678,6 +694,36 @@ pub(crate) fn build_request(
         http::HeaderName::from_static("anthropic-version"),
         http::HeaderValue::from_static("2023-06-01"),
     );
+    // Current Pi treats an explicit caller beta list as authoritative (not
+    // additive to inferred defaults). Normalize repeated/comma-separated values
+    // without dropping caller features or introducing OAuth/provider defaults.
+    let configured_betas = model.endpoint.default_headers.get_all("anthropic-beta");
+    let mut betas = Vec::new();
+    for value in configured_betas.iter() {
+        let value = value
+            .to_str()
+            .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?;
+        for beta in value
+            .split(',')
+            .map(str::trim)
+            .filter(|beta| !beta.is_empty())
+        {
+            if !betas.contains(&beta) {
+                betas.push(beta);
+            }
+        }
+    }
+    if model
+        .endpoint
+        .default_headers
+        .contains_key("anthropic-beta")
+    {
+        headers.insert(
+            http::HeaderName::from_static("anthropic-beta"),
+            http::HeaderValue::from_str(&betas.join(","))
+                .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?,
+        );
+    }
     if model.spec.cache.send_session_affinity_headers {
         if let Some(session_id) = crate::protocol::cache_session_id(&req) {
             let value = http::HeaderValue::from_str(session_id)
@@ -830,6 +876,16 @@ pub(crate) fn decode_stream_event(
                             name,
                         },
                     )?;
+                }
+                AnthropicResponseContentBlock::Fallback {} => {
+                    // A server-side fallback before any content is transparent:
+                    // the replacement model produces the same turn, and the
+                    // marker block carries no content. Once content has already
+                    // streamed, the two models' output cannot be merged into one
+                    // assistant turn, so fail closed instead of corrupting it.
+                    if !builder.observed_indices.is_empty() {
+                        return Err(UnsupportedError::MidOutputModelFallback.into());
+                    }
                 }
             }
         }
@@ -1183,6 +1239,55 @@ mod tests {
     }
 
     #[test]
+    fn caller_anthropic_beta_list_is_authoritative_and_deduplicated() {
+        let mut model = make_test_model(false);
+        {
+            let endpoint = Arc::make_mut(&mut model.endpoint);
+            // Repeated headers and comma-joined values both occur in practice;
+            // the caller's list replaces inferred defaults and is deduplicated.
+            endpoint.default_headers.append(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_static(
+                    "fine-grained-tool-streaming-2025-05-14, interleaved-thinking-2025-05-14",
+                ),
+            );
+            endpoint.default_headers.append(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_static("fine-grained-tool-streaming-2025-05-14"),
+            );
+        }
+        let req = Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("Hello".to_string())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::None,
+            session_id: None,
+        };
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(
+            parts
+                .headers
+                .get("anthropic-beta")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+        );
+    }
+
+    #[test]
     fn cache_retention_controls_anthropic_wire_markers() {
         let model = make_test_model(false);
         let mut req = Request {
@@ -1191,6 +1296,7 @@ mod tests {
                 content: vec![UserPart::Text("stable user".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                constrained_sampling: None,
                 name: "lookup".to_string(),
                 description: "lookup".to_string(),
                 parameters: serde_json::json!({"type":"object"}),
@@ -1516,6 +1622,25 @@ mod fixture_tests {
         assert_eq!(resp.usage.total_tokens, 15);
     }
 
+    // pi anthropic-messages.ts: a `fallback` content block before any content is
+    // transparent; after content it is an unsupported mid-output model switch.
+    #[tokio::test]
+    async fn pre_content_fallback_is_transparent() {
+        let events = run(fx!("fallback_pre_content.sse"), 0).await.unwrap();
+        assert_eq!(text_of(&events), "Hi");
+        let resp = harness::finished(&events);
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    }
+
+    #[tokio::test]
+    async fn mid_output_fallback_is_rejected() {
+        let error = run(fx!("fallback_mid_output.sse"), 0).await.unwrap_err();
+        assert!(matches!(
+            error,
+            AiError::Unsupported(crate::error::UnsupportedError::MidOutputModelFallback)
+        ));
+    }
+
     // f8: final usage merges the cumulative cache buckets and the documented
     // thinking-token subset from `message_delta`, not just `output_tokens`.
     #[tokio::test]
@@ -1624,6 +1749,7 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::AnthropicMessages, None);
         let tools = [ToolDef {
+            constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({

@@ -100,8 +100,10 @@ fn run_import_pi(
 ) -> anyhow::Result<()> {
     let home = migration_home()?;
     let explicit_source = source.is_some();
+    // Preserve the selected source leaf until the read-only adapter validates
+    // it. Canonicalizing here would hide a symlink from its no-follow check.
     let source = match source {
-        Some(source) => absolute_path(&source, invocation_cwd)?,
+        Some(source) => invocation_cwd.join(source),
         None => default_pi_source(&home)?,
     };
     if !source.is_dir() {
@@ -165,7 +167,7 @@ fn migration_home() -> anyhow::Result<PathBuf> {
 
 fn default_pi_source(home: &Path) -> anyhow::Result<PathBuf> {
     if let Some(value) = std::env::var_os("PI_CODING_AGENT_DIR") {
-        return absolute_path(Path::new(&value), &std::env::current_dir()?);
+        return Ok(std::env::current_dir()?.join(value));
     }
 
     let mut candidates = vec![home.join(".pi/agent"), home.join(".config/pi/agent")];
@@ -176,7 +178,7 @@ fn default_pi_source(home: &Path) -> anyhow::Result<PathBuf> {
         .find(|candidate| candidate.is_dir())
         .cloned()
         .unwrap_or_else(|| candidates.remove(0));
-    absolute_path(&selected, &std::env::current_dir()?)
+    Ok(selected)
 }
 
 #[derive(Clone, Debug)]
@@ -2339,6 +2341,40 @@ mod tests {
         let second = build_ingestion_plan(&paths, &setup(), false).unwrap();
         assert!(second.conflicts.is_empty());
         assert!(second.changes.is_empty());
+    }
+
+    #[test]
+    fn failed_apply_rolls_back_prior_writes_without_overwriting_the_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(paths.config.parent().unwrap()).unwrap();
+        let original = b"# existing destination configuration\n";
+        fs::write(&paths.config, original).unwrap();
+        let mut setup = setup();
+        setup.push_model(mapped_model("openai", "gpt-4o-mini")).unwrap();
+        let plan = build_ingestion_plan(&paths, &setup, false).unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(plan.changes[0].target, paths.config);
+        assert_eq!(plan.changes[1].target, paths.mcp);
+        assert_eq!(plan.changes.last().unwrap().target, paths.state);
+
+        // A second writer wins after planning. The production CAS, rather than
+        // a mocked write error, must fail after the first target was committed.
+        let concurrent = b"concurrent writer owns this file\n";
+        fs::write(&paths.mcp, concurrent).unwrap();
+        let error = apply_ingestion_plan(&paths, &plan).unwrap_err().to_string();
+        assert!(error.contains("was rolled back"), "{error}");
+        assert!(error.contains("Backup retained"), "{error}");
+        assert_eq!(fs::read(&paths.config).unwrap(), original);
+        assert_eq!(fs::read(&paths.mcp).unwrap(), concurrent);
+        assert!(!paths.state.exists());
+        assert!(!paths.skills.join("review/SKILL.md").exists());
+        let backups = fs::read_dir(&paths.backups)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].join("manifest.json").is_file());
     }
 
     #[test]

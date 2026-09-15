@@ -331,6 +331,7 @@ async fn compact_responses_lite_uses_advertised_transport_contract() {
         }]
     }))]);
     let tools = [ToolDef {
+        constrained_sampling: None,
         name: "read".into(),
         description: "Read a file".into(),
         parameters: serde_json::json!({"type": "object"}),

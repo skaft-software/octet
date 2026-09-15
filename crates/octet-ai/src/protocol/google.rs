@@ -51,9 +51,10 @@ pub(crate) fn build_request(
     let contents = google_contents(model, &req)?;
     root.insert("contents".to_owned(), Value::Array(contents));
 
-    if let Some(tools) = google_tools(model, &req) {
+    let (tools, use_strict_mode) = google_tools(model, &req)?;
+    if let Some(tools) = tools {
         root.insert("tools".to_owned(), tools);
-        if let Some(tool_config) = google_tool_config(&req.tool_choice) {
+        if let Some(tool_config) = google_tool_config(&req.tool_choice, use_strict_mode) {
             root.insert("toolConfig".to_owned(), tool_config);
         }
     }
@@ -376,44 +377,55 @@ fn push_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
     contents.push(content_value(role, parts));
 }
 
-fn google_tools(model: &crate::catalog::Model, req: &Request) -> Option<Value> {
+fn google_tools(
+    model: &crate::catalog::Model,
+    req: &Request,
+) -> Result<(Option<Value>, bool), AiError> {
     if req.tools.is_empty()
         || !model.spec.capabilities.tools
         || matches!(req.tool_choice, ToolChoice::None)
     {
-        return None;
+        return Ok((None, false));
     }
-    let declarations = req
-        .tools
-        .iter()
-        .map(|tool| {
-            let mut declaration = Map::new();
-            declaration.insert("name".to_owned(), Value::String(tool.name.clone()));
-            if !tool.description.is_empty() {
-                declaration.insert(
-                    "description".to_owned(),
-                    Value::String(tool.description.clone()),
-                );
-            }
-            // `parametersJsonSchema` accepts the canonical JSON Schema directly;
-            // do not silently rewrite it into Google's narrower Schema dialect.
-            declaration.insert("parametersJsonSchema".to_owned(), tool.parameters.clone());
-            Value::Object(declaration)
-        })
-        .collect();
+    let mut use_strict_mode = false;
+    let mut declarations = Vec::with_capacity(req.tools.len());
+    for tool in &req.tools {
+        // Strict JSON-schema constrained sampling rewrites the tool schema into
+        // Google's validated subset; otherwise the canonical JSON Schema is sent
+        // unchanged.
+        let (parameters, strict) =
+            crate::constrained_sampling::function_tool_parameters(tool, true)?;
+        use_strict_mode |= strict;
+        let mut declaration = Map::new();
+        declaration.insert("name".to_owned(), Value::String(tool.name.clone()));
+        if !tool.description.is_empty() {
+            declaration.insert(
+                "description".to_owned(),
+                Value::String(tool.description.clone()),
+            );
+        }
+        declaration.insert("parametersJsonSchema".to_owned(), parameters);
+        declarations.push(Value::Object(declaration));
+    }
     let mut tool = Map::new();
     tool.insert(
         "functionDeclarations".to_owned(),
         Value::Array(declarations),
     );
-    Some(Value::Array(vec![Value::Object(tool)]))
+    Ok((
+        Some(Value::Array(vec![Value::Object(tool)])),
+        use_strict_mode,
+    ))
 }
 
-fn google_tool_config(choice: &ToolChoice) -> Option<Value> {
+fn google_tool_config(choice: &ToolChoice, use_strict_mode: bool) -> Option<Value> {
     let mut function_calling = Map::new();
     match choice {
         ToolChoice::Auto => {
-            function_calling.insert("mode".to_owned(), Value::String("AUTO".to_owned()));
+            // Validated tool-calling mode enforces the declared parameter
+            // schemas; a strict tool request selects it.
+            let mode = if use_strict_mode { "VALIDATED" } else { "AUTO" };
+            function_calling.insert("mode".to_owned(), Value::String(mode.to_owned()));
         }
         ToolChoice::Required => {
             function_calling.insert("mode".to_owned(), Value::String("ANY".to_owned()));

@@ -94,6 +94,13 @@ exactly once. Octet disables shrink-triggered clearing for its renderer; generic
 Pi behavior remains unchanged. Optional dot/shimmer/timer ticks do not invalidate
 headings already above the native live-screen seam.
 
+The current deterministic Shell → Pi → VT matrix also tests fragmented table
+rows through narrow/wide width and height changes, exactly one required replay
+per resize, and late-reference finalization with exactly one historical repair.
+Repeated no-change frames remain quiet; source/copy and exactly-once history
+sentinels remain authoritative. These tests model emitted VT and saved-line
+reset, not a physical emulator's reflow, paint, or native selection.
+
 This closes the tested pending → progress → result/error case, not all of #392.
 Real updates to historical concurrent tools/rosters, retrospective Markdown
 changes, resize, and other structural transitions can still take the replay path
@@ -181,11 +188,12 @@ Live child cost is added to the host-owned cumulative footer only until root
 settlement persists matching `delegated_agent` usage records; idle rendering
 therefore cannot count it twice.
 
-Accepted steering waiting for the next model boundary renders as a compact
-pending-state hint above the composer. It is capped at two rows: a count and one
-clipped preview of the oldest message, with a `+N more` suffix. Explicit
-newlines receive a visible marker; the preview never expands into a second
-transcript.
+Accepted steering waiting for the next model boundary and local queued
+follow-ups share a compact pending-state hint above the composer. It is capped
+at two rows: a count and one clipped preview, with a `+N more` suffix. Admitted
+steering takes preview priority because it is delivered before local follow-ups.
+Explicit newlines receive a visible marker; the preview never expands into a
+second transcript.
 
 `/extensions` opens an interactive installed-bundle activation panel instead.
 The no-argument `/subagents` command supplied by `octet-subagents` opens a
@@ -412,10 +420,24 @@ normal success, and collapsed failures keep a bounded actionable reason.
 
 ## Active-run controls
 
-- Enter queues a follow-up.
-- Ctrl+S steers at the next model boundary.
-- Escape interrupts active work. Ctrl+C first clears a nonempty draft; with an
-  empty draft it interrupts active work and is ignored while idle.
+- Enter queues a local, typed follow-up. Normal completion arms exactly one FIFO
+  dispatch through the idle prompt owner after the old Run and children settle.
+- Ctrl+S admits live steering to RunControl at the next model boundary. Its
+  pending display is removed only by the durable delivery acknowledgement;
+  undelivered steering is restored on settlement.
+- Option+Up/Alt+Up moves the newest local follow-up into an empty composer for
+  editing, preserving attachment/paste payloads. It neither interrupts nor
+  retracts already-admitted steering, and never overwrites a draft.
+- Escape closes the current panel/overlay/slash popup first. At the active
+  composer it interrupts and arms queued dispatch only after authoritative
+  aborted settlement; it never sends the unqueued draft. Repeated Escape while
+  settling cannot arm dispatch after a plain cancellation.
+- Ctrl+C first clears a nonempty draft; with an empty draft it interrupts without
+  dispatch and is ignored while idle. Failure, max-turn limits, stream loss, and
+  close do not automatically retry queued prompts; local entries remain editable.
+- Auto-dispatched prompts use normal composition and persistence, but are never
+  reinterpreted as delayed `!` shell commands. A failed submission restores its
+  chips alongside any newer draft instead of overwriting that draft.
 - Ctrl+D requests a coordinated close from every input owner, including
   pickers, tool prompts, lifecycle waits, and local shell commands. Active work
   is aborted and settled before the process exits.

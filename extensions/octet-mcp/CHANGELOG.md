@@ -9,12 +9,22 @@
   environment, project files, session/host requests, and manifest arguments
   cannot enable it; denied activation fails before credentials, DNS, network, or
   manager workers. Local stdio MCP is unchanged.
-- Document the nine unresolved Streamable HTTP defects and retain the transport
-  as blocked-by-default experimental code rather than presenting it as generally
-  safe.
+- Remediate the nine recorded Streamable HTTP defects with address-pinned TLS,
+  killable/reaped DNS helpers, immutable host-owner fencing, streaming peer
+  dispatch, bounded control workers, cumulative resumption budgets, strict EOF
+  and chunk framing, empty-ID cursor reset, and one startup/catalog deadline.
+- Keep Streamable HTTP blocked-by-default and experimental. Multi-owner catalog
+  visibility/settlement, uncooperative injected callbacks and live/platform
+  qualification remain closure gates. Ownerless remotes now park until an owned
+  `/mcp restart <server>`; foreign owners require a new extension process.
+- Credential adapters now receive the immutable host `ResourceOwner`; there is
+  still no stock credential provider, static auth header or OAuth flow.
 
 ### Added
 
+- Add deterministic nine-defect regressions, including real local TLS verification,
+  DNS-child cleanup, overlapping peer IDs, bounded controls, resumptions and
+  truncated JSON/SSE/chunked streams. No external server or credential is used.
 - Add deterministic configuration, runtime, and product-boundary coverage for
   the gate.
 - Add an explicit, bounded Streamable HTTP transport with negotiated session

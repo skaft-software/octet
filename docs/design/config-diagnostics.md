@@ -4,6 +4,21 @@ octet configuration is compatibility-first: unknown TOML keys are visible, but
 they do not make an otherwise usable configuration fail unless strict mode is
 explicitly enabled.
 
+## Implementation ownership
+
+The private `crates/octet-coding-agent/src/cli/config_diagnostics.rs` module owns
+bounded layer reads, unknown-key collection, source/location formatting,
+suggestions, and warning/strict reporting, with focused tests alongside it.
+`cli.rs` retains argument parsing, `ConfigLayer`, layer selection and merging,
+environment handling, and atomic persistence. The parent chooses which layers
+are trusted and when to report their diagnostics; that ordering is unchanged.
+Only the loader, reporter, and their parent-facing types cross this private
+boundary. The duplicated setting/key inventory remains: this extraction does
+not unify the deserialized fields and diagnostic schema.
+
+Credential-free process coverage and qualification commands are documented in
+[configuration diagnostics qualification](../qualification/configuration-diagnostics-full.md).
+
 ## Sources and trust
 
 Diagnostics retain the source that introduced a key:
@@ -61,7 +76,7 @@ sorted, and deduplicated per source. A diagnostic contains:
 Example:
 
 ```text
-warning: project config /repo/.octet/config.toml:8:1: unknown configuration key "compaction.keep_recent_turn"; did you mean "compaction.keep_recent_tokens"?
+warning: project config /repo/.octet/config.toml:8:1: unknown configuration key "compaction.keep_recent_turn"; did you mean "compaction.keep_recent_turns"?
 ```
 
 Known compatibility aliases are part of the schema and do not warn. These
@@ -93,6 +108,11 @@ strict configuration rejected unknown keys:
   - global config ...: unknown configuration key ...
   - project config ...: unknown configuration key ...
 ```
+
+This is the logical error text. The existing process error boundary adds
+`Error: ` and sanitizes embedded controls; captured, non-terminal stderr renders
+these embedded newlines as literal `<U+000A>` markers. Warning diagnostics are
+emitted individually as stderr lines. The extraction preserves both routes.
 
 Without strict mode, the same diagnostics are warnings and recognized settings
 continue to load. This is intentional for forward and backward compatibility:

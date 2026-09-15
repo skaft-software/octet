@@ -136,6 +136,9 @@ pub enum ArtifactError {
     /// Store limits are internally inconsistent or disable required bounds.
     #[error("invalid artifact store limits")]
     InvalidLimits,
+    /// A durable store root was empty and cannot own artifacts.
+    #[error("invalid artifact store root")]
+    InvalidStoreRoot,
     /// A generation was registered twice without first settling.
     #[error("artifact generation {0} is already active")]
     DuplicateGeneration(u64),
@@ -236,7 +239,27 @@ struct GenerationState {
 struct ArtifactStoreInner {
     generations: Mutex<HashMap<u64, GenerationState>>,
     limits: ArtifactStoreLimits,
-    root: tempfile::TempDir,
+    root: StoreRoot,
+}
+
+/// The host-owned directory a store retains generation scratch trees under.
+///
+/// A temporary root is process-private and removed on drop. A durable root is
+/// a caller-selected directory that survives this process so the host can place
+/// artifacts under session or workspace state instead of an OS temporary
+/// directory; it is created owner-only when missing and never removed on drop.
+enum StoreRoot {
+    Temporary(tempfile::TempDir),
+    Durable(PathBuf),
+}
+
+impl StoreRoot {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Temporary(directory) => directory.path(),
+            Self::Durable(path) => path,
+        }
+    }
 }
 
 /// Host-owned artifact registry shared by one supervised extension process.
@@ -283,9 +306,46 @@ impl ArtifactStore {
             inner: Arc::new(ArtifactStoreInner {
                 generations: Mutex::new(HashMap::new()),
                 limits,
-                root,
+                root: StoreRoot::Temporary(root),
             }),
         })
+    }
+
+    /// Creates a store rooted at a caller-selected directory that survives this
+    /// process, with default bounds.
+    ///
+    /// Use this when the host wants artifact scratch trees under its own
+    /// session/workspace state rather than an OS temporary directory. The
+    /// directory is created owner-only when missing and is never removed when
+    /// the store is dropped; each generation still gets a private scratch tree
+    /// that `settle_generation` removes.
+    pub fn with_root(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
+        Self::with_root_and_limits(root, ArtifactStoreLimits::default())
+    }
+
+    /// Creates a store rooted at a caller-selected directory with explicit bounds.
+    pub fn with_root_and_limits(
+        root: impl Into<PathBuf>,
+        limits: ArtifactStoreLimits,
+    ) -> Result<Self, ArtifactError> {
+        validate_limits(limits)?;
+        let root = root.into();
+        if root.as_os_str().is_empty() {
+            return Err(ArtifactError::InvalidStoreRoot);
+        }
+        create_private_directory_all(&root)?;
+        Ok(Self {
+            inner: Arc::new(ArtifactStoreInner {
+                generations: Mutex::new(HashMap::new()),
+                limits,
+                root: StoreRoot::Durable(root),
+            }),
+        })
+    }
+
+    /// The host-owned root generation scratch trees are created under.
+    pub fn root(&self) -> &Path {
+        self.inner.root.path()
     }
 
     /// Registers a process generation and returns its host-owned scratch path.
@@ -1072,5 +1132,69 @@ mod tests {
         };
         assert!(matches!(audio.payload, AudioPayload::Inline(ref bytes) if bytes.as_ref() == wav));
         assert_eq!(audio.format, AudioFormat::Wav);
+    }
+
+    #[test]
+    fn durable_root_survives_a_new_store_and_clears_generation_scratch() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("assets");
+        let store = ArtifactStore::with_root(&root).unwrap();
+        assert_eq!(store.root(), root.as_path());
+
+        let scratch = store.begin_generation(1).unwrap();
+        assert!(scratch.starts_with(&root));
+        let published = store
+            .publish(
+                1,
+                publication(
+                    ArtifactSource::Inline(Bytes::from_static(PNG)),
+                    PNG,
+                    "image/png",
+                ),
+            )
+            .unwrap();
+        assert!(store.resolve_artifact(1, &published.id).is_ok());
+        assert_eq!(store.settle_generation(1).unwrap().artifacts, 1);
+
+        // The caller-selected root outlives the store; only generation scratch
+        // trees are removed.
+        drop(store);
+        assert!(root.is_dir(), "durable root must survive the store");
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            0,
+            "settled generation scratch is removed"
+        );
+
+        // Reopening the same root starts a clean generation without a collision.
+        let reopened = ArtifactStore::with_root(&root).unwrap();
+        assert!(reopened.begin_generation(1).is_ok());
+    }
+
+    #[test]
+    fn durable_root_rejects_an_empty_path_and_keeps_bounds() {
+        assert!(matches!(
+            ArtifactStore::with_root(PathBuf::new()),
+            Err(ArtifactError::InvalidStoreRoot)
+        ));
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("assets");
+        let limits = ArtifactStoreLimits {
+            max_inline_bytes: 0,
+            ..ArtifactStoreLimits::default()
+        };
+        assert!(matches!(
+            ArtifactStore::with_root_and_limits(&root, limits),
+            Err(ArtifactError::InvalidLimits)
+        ));
+        assert!(!root.exists(), "invalid limits must not create the root");
+    }
+
+    #[test]
+    fn temporary_store_reports_a_live_os_temporary_root() {
+        let store = ArtifactStore::new().unwrap();
+        assert!(store.root().is_dir());
+        assert!(store.root().starts_with(std::env::temp_dir()));
     }
 }

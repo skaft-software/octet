@@ -71,8 +71,9 @@ class MockNative:
     def click(self, target: TargetIdentity, path: tuple[int, ...], point: Point, **kwargs: Any) -> None:
         self.calls.append(("click", (target, path, point)))
 
-    def release_all(self) -> None:
+    def release_all(self) -> bool:
         self.calls.append(("release_all", None))
+        return True  # Synthetic adapter explicitly acknowledges no held input.
 
 
 class MacOSBackendMockedNativeTests(unittest.TestCase):
