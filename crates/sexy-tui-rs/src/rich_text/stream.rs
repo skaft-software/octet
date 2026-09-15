@@ -1465,6 +1465,65 @@ mod tests {
     }
 
     #[test]
+    fn open_paragraph_rows_are_provisional_until_a_following_block_commits_them() {
+        let renderer = RichRenderer::plain();
+        let mut stream = StreamingMarkdown::new();
+        let mut cache = StreamingRenderCache::default();
+        let mut frame = Vec::new();
+
+        stream.push_str("first paragraph has enough words to wrap across rows\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        assert_eq!(update.stable_prefix, 0);
+        frame.extend(update.replacement);
+        assert!(frame.len() >= 2);
+        assert!(stream.committed().blocks.is_empty());
+        assert_eq!(cache.committed_rows(), 0);
+
+        let previous = frame.clone();
+        stream.push_str("continuation adds more words\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        assert!(update.stable_prefix < previous.len());
+        assert_eq!(cache.committed_rows(), 0);
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert_ne!(frame, previous);
+        assert_eq!(
+            frame,
+            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+        );
+
+        // A trailing blank line proves the paragraph boundary, but the
+        // paragraph is not committed until a following block is present.
+        stream.push_str("\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert!(stream.committed().blocks.is_empty());
+        assert_eq!(cache.committed_rows(), 0);
+        assert_eq!(
+            frame,
+            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+        );
+
+        let previous = frame.clone();
+        stream.push_str("next paragraph starts here\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert!(stream.committed().blocks.len() >= 1);
+        assert!(cache.committed_rows() > 0);
+        assert!(cache.committed_rows() <= previous.len());
+        assert_eq!(
+            &frame[..cache.committed_rows()],
+            &previous[..cache.committed_rows()]
+        );
+        assert_eq!(
+            frame,
+            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+        );
+    }
+
+    #[test]
     fn long_plain_and_open_code_layout_work_grows_linearly() {
         for fence in [false, true] {
             for multiline in [false, true] {

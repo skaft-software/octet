@@ -13,12 +13,12 @@ The diagnosed cause is a mutable display interpretation, not lost transcript dat
 - `StreamingMarkdown` keeps raw bytes/text authoritative. `finish()` remains the static Markdown parse of the decoded source; semantic copy remains derived from the canonical document and withheld raw suffix.
 - The ordinary projection stores source lines as `Inline::Raw` text with pending soft-break separators and paragraph-boundary state. It changes display geometry only; it does not rewrite `raw`, `tail`, or transcript source.
 - A parsed structural prefix followed by a proven blank boundary is classified from the ordinary suffix, so a heading or other structural block cannot force the following prose back to literal physical rows (`crates/sexy-tui-rs/src/rich_text/stream.rs`).
-- The existing append-only render cache remains the incremental layout boundary. Structural promotion, resize, hard-break/control input, and finalization retain replacement behavior rather than globally suppressing ED3.
+- The existing append-only render cache remains the incremental layout boundary. Its visual tail prefix is provisional; only `committed_rows()` represents parser-committed rows that may cross a native-scrollback commit boundary. Structural promotion, resize, hard-break/control input, and finalization retain replacement behavior rather than globally suppressing ED3.
 
 ## Source and regression coverage
 
-- `crates/sexy-tui-rs/src/rich_text/stream.rs`: bounded ordinary-prose projection, structural-suffix correction, and parser-threshold geometry assertions.
-- `crates/sexy-tui-rs/tests/rich_rendering.rs`: the exact 48-chunk/96-column sequence compares every incremental frame with static Markdown rows, checks that the prior emitted rows stay equal, finalization, and raw source.
+- `crates/sexy-tui-rs/src/rich_text/stream.rs`: bounded ordinary-prose projection, explicit open/provisional-versus-completed paragraph coverage, structural-suffix correction, and parser-threshold geometry assertions.
+- `crates/sexy-tui-rs/tests/rich_rendering.rs`: the exact 48-chunk/96-column sequence compares every incremental frame with static Markdown rows, compares only the reported `stable_prefix`, distinguishes open-paragraph reflow from parser-committed rows after a blank-line boundary, and checks finalization and raw source.
 - `crates/octet-coding-agent/src/tui/view/native_history_tests.rs`: a 96x18 `NativeReplay` sends the same sequence through the real shell/Pi/VT producer and asserts no additional full redraw, while checking assistant source and copy text.
 - `docs/qualification/native-scroll-current-candidate.md`: this qualification boundary and handoff note.
 
