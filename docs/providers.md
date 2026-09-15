@@ -117,7 +117,16 @@ Do not put credentials into prompts or repository configuration.
 | Z.AI Coding CN | `ZAI_CODING_CN_API_KEY`; OpenAI Chat | `zai-coding-cn/<model-id>` |
 
 Bedrock accepts an `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair with an
-optional session token, the selected `AWS_PROFILE`, or ECS/EC2 instance metadata.
+optional session token, a web-identity role (`AWS_ROLE_ARN` and
+`AWS_WEB_IDENTITY_TOKEN_FILE`, with optional `AWS_ROLE_SESSION_NAME`; one
+bounded STS `AssumeRoleWithWebIdentity` exchange, 3 s and 64 KiB, against
+`sts.<region>.amazonaws.com` or the `AWS_ENDPOINT_URL_STS` override), the
+selected `AWS_PROFILE`, or ECS/EC2 instance metadata — in that order. A
+half-configured web identity (only one of the two required variables) fails
+closed instead of silently resolving a different identity. A Bedrock API key in
+`AWS_BEARER_TOKEN_BEDROCK` is presented as `Authorization: Bearer …` and takes
+precedence over SigV4, so an API-key user never needs or pays for the AWS
+credential chain.
 Model availability depends on account and region. Quote IDs containing shell
 metacharacters, for example
 `octet --model 'bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0'`.
@@ -128,7 +137,8 @@ time out: probing them on every start costs about a second when no metadata
 service is reachable. The metadata sources are consulted only when the local
 environment indicates them, and the first matching indication wins:
 
-1. `AWS_EC2_METADATA_DISABLED=false` — the standard AWS switch, explicitly off.
+1. `AWS_EC2_METADATA_DISABLED=false` — the standard AWS switch set to an
+   explicit `false`, which allows the metadata sources.
 2. `OCTET_AWS_METADATA_CREDENTIALS=1` — octet's explicit opt-in, for an instance
    whose configuration carries no other marker. (`0`, `false`, `no` or `off`
    keep it disabled. An unrecognized value stays closed: unknown state never
@@ -160,6 +170,19 @@ names another hypervisor — keeps the metadata sources disabled, and an
 unrecognized `AWS_EC2_METADATA_DISABLED` value stays
 disabled rather than probing on a typo. Static environment keys and profile keys
 are unaffected: they are local reads and are always consulted first.
+
+The cost this rule removes is measurable: with an unreachable IMDS, `octet
+doctor` was measured at 1,025/1,027 ms, and at 22/19 ms with
+`AWS_EC2_METADATA_DISABLED=true` — the difference is the bounded 1 s metadata
+timeout. The rule is asserted by **request counts, never millisecond
+thresholds** (`crates/octet-coding-agent/src/providers/auth.rs`):
+`unrelated_provider_launch_makes_zero_aws_metadata_requests` and
+`disabled_activation_opens_no_connection_to_a_live_metadata_endpoint` (a live
+loopback listener that drains zero connections) pin the zero-request launch;
+`opt_in_activation_resolves_and_signs_with_live_metadata_credentials`,
+`an_ec2_instance_identity_still_resolves_instance_credentials`, and
+`indicated_metadata_probe_reaches_the_ec2_source` pin that an indicated
+EC2/ECS-backed Bedrock run still resolves and signs.
 
 Azure deployments use Responses. A resource can be `my-resource`, or its endpoint
 `https://my-resource.openai.azure.com/`; the deployment must name your deployment.

@@ -94,7 +94,7 @@ entitled 872K, effective 272K`), never as three bare numbers.
 A user-chosen *lower* window is not a clamp, and an override that was applied is
 not a clamp either: only a deliberate reduction is reported.
 
-### Emission: one note, for the effective session model only
+### Emission: one note, never at startup
 
 `codex_context_session_note(model_id, &window)` is the single user-facing note for
 an *effective* Codex session model. It returns `None` unless that model's window is
@@ -103,19 +103,30 @@ plain user language: no internal API name, no operation id, and the effective
 window is identical in the clamp and above-standard-tier variants (so the 372K
 `gpt-5.6-luna` window never reads as a clamp to 272K).
 
-Catalog construction only *records* notes (`CodexContextNotes`); it never prints.
-A frontend asks `Bootstrap::codex_context_note(&ModelId)` once, when the session's
-model is resolved:
+Startup renders **nothing**: no note, no "starting extensions", no phase text.
+Catalog construction only *records* notes (`CodexContextNotes`, one per model that
+needs one); the recording is not an emission. Delivery is lazy and belongs to the
+frontend that owns the transcript or an on-demand surface:
 
-* print / `--mode json` / `--mode rpc` launch resolution writes the note to stderr;
-* the interactive shell adds it to the transcript via `shell.notice`.
+* interactive TUI / serve: the opened `App` carries the notes
+  (`App::codex_context_notes`). Pull the note with
+  `App::take_codex_context_note()` when the user can act on it — the first
+  assistant turn after readiness — or read it without consuming via
+  `App::codex_context_report()` from `/context`, `/status`, or `/telemetry`. Both
+  accessors always use the effective model only, so a session on another provider
+  shows no Codex note however many Codex models the catalog carries;
+* `Bootstrap::take_codex_context_note(&ModelId)` is the same latch available
+  before `build_app`, kept for frontends that resolve a model without building the
+  `App` yet;
+* print / `--mode json` / `--mode rpc` launch resolution has no transcript to
+  attach to, so the bounded line goes to stderr there.
 
-Consequences: a session whose effective model is not a Codex route prints **no**
-Codex note however many Codex models the catalog carries, and the note cannot be
-repeated per turn because it is emitted at launch resolution, not from the agent
-loop. `CodexContextClampReporter::observe` remains available for a frontend that
-tracks transitions after launch (a model switch mid-session reports again, at most
-once per transition).
+The latch is once-per-session and survives `rebuild_app` (a delivered note stays
+delivered, an undelivered note is carried to the new `App`). `shell.notice` and
+`Bootstrap::codex_context_note` remain available for diagnostics, but no startup
+frame consumes either. `CodexContextClampReporter::observe` remains available for a
+frontend that tracks transitions after launch (a model switch mid-session reports
+again, at most once per transition).
 
 The same launch boundary records uncertainty: `build_app_with_runtime_manager`
 calls `record_codex_context_uncertainty(&mut session, &model)` right after the
@@ -219,7 +230,56 @@ compaction threshold; provider-side enforcement is unchanged.
   window, so an override and its notice are resolved exactly; version 6 caches
   are ignored and refreshed.
 
-## 8. Tests
+## 8. Startup visibility: nothing on screen, everything attributable off screen
+
+Two properties are deliberately separated:
+
+**The screen shows nothing.** The interactive frame, the pre-ready transcript, and
+the extension/model startup path render no Codex note and no startup chatter. The
+one Codex note a session owes is recorded during catalog construction and delivered
+lazily (see §3), never by the startup frame.
+
+**Latency stays attributable off screen.** Every startup boundary calls
+`startup_phase("<name>")` (`crate::app::bootstrap::startup_phase`). It is silent by
+default; with `OCTET_STARTUP_TRACE=1` it writes one line per boundary to stderr:
+
+```
+octet-startup: <phase> elapsed=<micros>us
+```
+
+Stable phase names, in startup order:
+
+| Phase | Covers |
+| --- | --- |
+| `catalog.base` | cheap local availability filter (no network) |
+| `catalog.codex` | selected-route Codex registration |
+| `catalog.copilot` | selected-route Copilot registration |
+| `catalog.fallback` | plan could not name the route; fleet catalog built |
+| `catalog.enrich` | deferred (non-selected) provider inventories, never awaited by readiness |
+| `codex.credentials` | credential load / bounded refresh for the selected route |
+| `codex.inventory` | one bounded inventory request for the selected route |
+| `bootstrap.ready` | catalog + session store + client ready |
+| `session.resolve` | session selection (picker / resume provenance) |
+| `session.replay` | reading the session's model/reasoning provenance |
+| `extensions.provider-preflight` | temporary provider-only extension start |
+| `extensions.prestart` | prestarted extension catalog sync |
+| `extensions.activate` | `ExecutableExtensions` startup (already `join_all`, never serialized) |
+| `app.build` | `App`/agent construction |
+| `history.hydrate` | frontend transcript hydration |
+| `frame.ready` | first interactive frame |
+
+`codex.credentials` and `codex.inventory` are the two halves of the selected
+route's wait: credential refresh has its own 60s HTTP deadline and a bounded
+cross-process refresh-lock wait (`REFRESH_LOCK_WAIT`), and the inventory request
+keeps its 10s deadline. The whole selected-route initialization additionally runs
+under `CODEX_READINESS_ENVELOPE` (10s) through `run_route_readiness`, which signals
+cancellation on timeout and never leaves an indefinitely blocked worker behind; a
+timeout is a typed `RouteReadinessTimeout` that names the phase and the deadline.
+Unrelated configured providers are not part of that envelope at all: readiness
+names only the proven route (plus a configured compaction route), and everything
+else is deferred to `Bootstrap::enrich_catalog`.
+
+## 9. Tests
 
 * `crates/octet-coding-agent/tests/codex_context_window.rs` — cap holds per
   family on a Pro plan, non-entitled plans cannot exceed the cap, acknowledged

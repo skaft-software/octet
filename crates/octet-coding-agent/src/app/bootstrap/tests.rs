@@ -5510,3 +5510,233 @@ fn a_timed_out_route_readiness_worker_releases_the_refresh_lock() {
         }
     }
 }
+
+/// The strongest form of "an unrelated provider cannot delay readiness": the
+/// AWS credential chain is poisoned so that *entering* it fails closed. A
+/// Codex-only plan must complete with the selected route named and zero
+/// consultations of the unrelated provider — a request counter plus a
+/// fail-closed probe, never a wall-clock threshold.
+#[test]
+fn a_poisoned_unrelated_provider_is_never_entered_by_a_narrowed_plan() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = catalog_readiness(&config(directory.path(), Some("codex/gpt-6-astra")));
+    assert_eq!(plan.route_ids(), vec!["codex"]);
+    assert!(plan.includes(crate::providers::CODEX.id));
+
+    let bedrock = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "bedrock")
+        .expect("the AWS declaration is a generated builtin");
+    let poison = ForbiddenReadinessConsultation::new(bedrock.id);
+    // The probe is live: entering the poisoned declaration would panic, so a
+    // narrowed plan that consulted it could not pass this test.
+    assert!(
+        std::panic::catch_unwind(|| declaration_is_configured(bedrock)).is_err(),
+        "the fail-closed probe must fire when the declaration is actually entered"
+    );
+
+    reset_readiness_declarations_consulted();
+    let (_catalog, _notes) = model_catalog_for_readiness(false, &plan).unwrap();
+    drop(poison);
+    let consulted = readiness_declarations_consulted();
+    assert!(
+        consulted.contains(&crate::providers::CODEX.id),
+        "the selected route is consulted: {consulted:?}"
+    );
+    assert!(
+        !consulted.contains(&"bedrock"),
+        "an unrelated configured provider must never be entered: {consulted:?}"
+    );
+}
+
+/// The unit-test (fixture) registration path must not buy determinism by
+/// ignoring a fresh, account- and plan-matched cache: the cache still decides
+/// the inventory, reduced to the conservative contract because it cannot be
+/// revalidated online, and the discovery closure is never called.
+#[test]
+fn a_fixture_registration_honours_a_fresh_cache_without_a_discovery_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fixture-codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+
+    let discovery_requests = std::cell::Cell::new(0_u32);
+    // No cache yet: the checked-in catalog, labelled as the fixture path.
+    let (models, source) = codex_inventory_models(&store, &claims, false, true, |_store| {
+        discovery_requests.set(discovery_requests.get() + 1);
+        anyhow::bail!("the fixture path must never discover")
+    });
+    assert_eq!(source, CodexInventorySource::Fixture);
+    assert_eq!(discovery_requests.get(), 0);
+    assert!(models.iter().any(|model| model.id == "gpt-5.6-sol"));
+
+    let cached = CodexDiscovery {
+        claims: claims.clone(),
+        models: codex_models_from_response(
+            &serde_json::json!({
+                "models": [{
+                    "slug": "cached-fixture-model",
+                    "context_window": 196_000,
+                    "max_output_tokens": 24_000,
+                    "use_responses_lite": true,
+                    "multi_agent_version": "v2",
+                    "supported_reasoning_levels": ["high", "ultra"]
+                }]
+            }),
+            claims.plan.as_ref(),
+        )
+        .unwrap(),
+    };
+    save_codex_model_cache(&store, &cached).unwrap();
+
+    let (models, source) = codex_inventory_models(&store, &claims, false, true, |_store| {
+        discovery_requests.set(discovery_requests.get() + 1);
+        anyhow::bail!("the fixture path must never discover")
+    });
+    assert_eq!(source, CodexInventorySource::FreshCache);
+    assert_eq!(discovery_requests.get(), 0, "no inventory request");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "cached-fixture-model");
+    assert!(
+        !models[0].responses_lite,
+        "the fixture path reduces a cache it cannot revalidate"
+    );
+    assert_eq!(models[0].agent_delegation, None);
+    assert_ne!(models[0].max_effort, octet_ai::ReasoningEffort::Ultra);
+}
+
+/// The recorded note survives catalog construction into the `App` a frontend
+/// holds, is visible to an on-demand surface, is delivered at most once, and
+/// survives a rebuild — while remaining something startup never renders.
+#[test]
+fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
+    let directory = tempfile::tempdir().unwrap();
+    let effective = ModelId("gpt-4o-mini".into());
+    let mut boot = bootstrap(config(directory.path(), Some("gpt-4o-mini"))).unwrap();
+
+    // Build the exact note a catalog would record for this effective model.
+    let mut notes = CodexContextNotes::default();
+    notes.record(
+        effective.clone(),
+        crate::codex_context::codex_context_session_note(
+            "gpt-5.6-luna",
+            &crate::codex_context::resolve_codex_context_window(
+                "gpt-5.6-luna",
+                crate::codex_context::CodexContextTier::Default,
+                372_000,
+                372_000,
+                Some(128_000),
+                crate::codex_context::CodexContextOverride::NONE,
+            )
+            .unwrap(),
+        )
+        .expect("372K is above the standard tier"),
+    );
+    boot.codex_context_notes = notes;
+
+    let launch = LaunchSelection {
+        model: effective.clone(),
+        session: SessionSelection::CreateNew(directory.path().join("note.jsonl")),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+    };
+    let app = build_app(boot, launch, "system".into()).unwrap();
+
+    // On-demand surface: readable without delivering.
+    let report = app.codex_context_report().expect("the note is available").to_owned();
+    assert!(report.starts_with("note: Codex model"), "{report}");
+    assert!(!report.contains("Session::"), "{report}");
+    assert_eq!(app.codex_context_report(), Some(report.as_str()));
+
+    // First assistant turn: delivered exactly once, then silent.
+    assert_eq!(app.take_codex_context_note().as_deref(), Some(report.as_str()));
+    assert_eq!(app.take_codex_context_note(), None);
+    assert_eq!(app.take_codex_context_note(), None);
+    // The peek survives delivery for diagnostics: the once-per-session latch
+    // only governs delivery, never the on-demand report.
+    assert_eq!(app.codex_context_report(), Some(report.as_str()));
+
+    // The latch survives a rebuild: a delivered note stays delivered and no
+    // second delivery can leak into the new App.
+    let app = rebuild_app(app, None, None, None, None).unwrap();
+    assert_eq!(app.take_codex_context_note(), None);
+    assert_eq!(app.codex_context_report(), Some(report.as_str()));
+}
+
+/// Deferring provider inventories must stay an enrichment concern, not an
+/// extension-lifecycle change: a narrowed launch starts no extension host, and
+/// enriching twice rebuilds the catalog at most once with no duplicate provider
+/// registration and no second activation. Extension startup itself is unchanged
+/// (`activate_eager` already fans out with `join_all`); this pins that readiness
+/// and enrichment never enter that path.
+#[test]
+fn deferred_enrichment_does_not_start_extensions_or_duplicate_providers() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path(), Some("codex/gpt-6-astra"));
+    config.extension_paths = vec![directory.path().join("extensions")];
+    config.enabled_extensions = vec!["fixture-extension".into()];
+
+    let mut boot = bootstrap(config).unwrap();
+    assert_eq!(boot.readiness_plan().route_ids(), vec!["codex"]);
+    assert!(
+        boot.prestarted_extensions.borrow().is_none(),
+        "readiness must not start an extension host"
+    );
+
+    boot.enrich_catalog().unwrap();
+    assert!(boot.readiness_plan().is_fleet());
+    assert!(
+        boot.prestarted_extensions.borrow().is_none(),
+        "enrichment must not start an extension host either"
+    );
+    let enriched_models = boot.catalog.models().count();
+    assert!(enriched_models > 0);
+
+    // Idempotent: a second enrichment is a no-op, so a surface may call it
+    // freely without duplicating a provider registration or re-running startup.
+    boot.enrich_catalog().unwrap();
+    assert_eq!(boot.catalog.models().count(), enriched_models);
+}
+
+/// The consumer seam for a narrowed launch: a surface that enumerates every
+/// route calls `App::enrich_catalog` first. The call must move the plan to the
+/// fleet, keep the active model resolvable, and be a true no-op on the second
+/// call so a picker can call it freely.
+#[test]
+fn the_app_enrichment_seam_is_idempotent_and_keeps_the_active_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let effective = ModelId("gpt-4o-mini".into());
+    let boot = bootstrap(config(directory.path(), Some("gpt-4o-mini"))).unwrap();
+    let launch = LaunchSelection {
+        model: effective.clone(),
+        session: SessionSelection::CreateNew(directory.path().join("enrich.jsonl")),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+    };
+    let mut app = build_app(boot, launch, "system".into()).unwrap();
+
+    // Represent the state a deferred plan leaves in the App: the fleet catalog
+    // is already complete here, so the observable contract is that the
+    // completing call changes nothing, disturbs nothing, and never repeats.
+    app.readiness = CatalogReadiness::Routes(vec!["codex"]);
+    let before = app.catalog.models().count();
+    app.enrich_catalog().unwrap();
+    assert!(app.readiness.is_fleet(), "enrichment completes the plan");
+    assert!(
+        app.catalog.resolve(&effective).is_ok(),
+        "the active model stays resolvable after enrichment"
+    );
+    let enriched = app.catalog.models().count();
+    assert_eq!(enriched, before, "no model is dropped or duplicated");
+
+    app.enrich_catalog().unwrap();
+    assert_eq!(
+        app.catalog.models().count(),
+        enriched,
+        "a second enrichment is a no-op"
+    );
+    assert!(app.catalog.resolve(&effective).is_ok());
+}

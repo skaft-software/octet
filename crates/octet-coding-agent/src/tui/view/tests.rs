@@ -10244,7 +10244,10 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
     assert!(activity.contains("Subagents"), "{activity}");
     assert!(activity.contains("read-diffs · using read"), "{activity}");
     assert!(!activity.contains("call"), "{activity}");
-    assert!(activity.contains("↑88.2k ↓99 • $0.209"), "{activity}");
+    // The live row carries real columns: the worker, its tokens, and its cost.
+    assert!(activity.contains("↑88.2k"), "{activity}");
+    assert!(activity.contains("↓99"), "{activity}");
+    assert!(activity.contains("$0.209"), "{activity}");
     assert_eq!(
         shell
             .state
@@ -10490,7 +10493,7 @@ fn subagent_transcript_test_rows(
 }
 
 #[test]
-fn subagent_transcript_rows_nest_and_wrap_without_call_counts() {
+fn subagent_transcript_groups_live_workers_and_collapses_terminal_groups() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 
     for (unicode, color) in [
@@ -10500,25 +10503,8 @@ fn subagent_transcript_rows_nest_and_wrap_without_call_counts() {
     ] {
         let theme =
             crate::tui::theme::test_theme_with(TerminalCapabilities::test(true, unicode, color));
-        let separator = if unicode { " · " } else { " - " };
-        let usage = if unicode {
-            "↑5.6m ↓3.9k"
-        } else {
-            "in 5.6m out 3.9k"
-        };
-        let cost_separator = if unicode { " • " } else { " - " };
         for native in [true, false] {
             let view = subagent_transcript_test_view(native);
-            let reason = if native {
-                format!("{separator}provider request failed: upstream unavailable")
-            } else {
-                String::new()
-            };
-            let expected = vec![
-                format!("Inspect tests failed{separator}{usage}{reason}"),
-                format!("Audit docs completed{separator}{usage}{cost_separator}$0.000"),
-                format!("Read changelog running{separator}{usage}{cost_separator}$0.165"),
-            ];
             for width in [24, 40, 80, 120] {
                 for verbose in [false, true] {
                     let rows = subagent_transcript_test_rows(&view, &theme, width, verbose);
@@ -10535,43 +10521,37 @@ fn subagent_transcript_rows_nest_and_wrap_without_call_counts() {
                             .all(|line| visible_width(line) <= usize::from(width)),
                         "{rows:?}"
                     );
+                    // Call counts stay out of every row in every mode.
                     assert!(!rows.join("\n").contains("call"), "{rows:?}");
                     if !unicode {
+                        // An ASCII profile renders an ASCII transcript: the
+                        // ellipsis, the connectors, and the separators all come
+                        // from the theme's own glyph table.
                         assert!(rows.iter().all(|line| line.is_ascii()), "{rows:?}");
                     }
-                    if width <= 40 {
-                        assert!(rows.len() > 4, "narrow worker details must wrap: {rows:?}");
-                    }
-                    let branch = if unicode { "    ├ " } else { "    +- " };
-                    let last = if unicode { "    └ " } else { "    `- " };
-                    let continuation = if unicode { "      " } else { "       " };
-                    let mut workers = Vec::<String>::new();
-                    let mut last_connectors = 0;
-                    for row in &rows[1..] {
-                        if let Some(text) = row.strip_prefix(branch) {
-                            assert_eq!(last_connectors, 0, "{rows:?}");
-                            workers.push(text.to_owned());
-                        } else if let Some(text) = row.strip_prefix(last) {
-                            last_connectors += 1;
-                            workers.push(text.to_owned());
-                        } else {
-                            let text = row
-                                .strip_prefix(continuation)
-                                .expect("wrapped worker-name column");
-                            let worker = workers.last_mut().expect("continuation follows a worker");
-                            worker.push(' ');
-                            worker.push_str(text);
-                        }
-                    }
-                    assert_eq!(last_connectors, 1, "{rows:?}");
-                    let workers = workers
+                    let joined = rows.join("\n");
+                    // Running stays expanded: the live worker keeps its own row
+                    // in both disclosure modes.
+                    assert!(joined.contains("Read changelog"), "{rows:?}");
+                    // Terminal groups are collapsed behind one counted summary
+                    // each unless the reader expands them.
+                    let summaries = rows
                         .iter()
-                        .map(|worker| worker.split_whitespace().collect::<Vec<_>>().join(" "))
-                        .collect::<Vec<_>>();
-                    assert_eq!(
-                        workers, expected,
-                        "native={native}, width={width}, verbose={verbose}: {rows:?}"
-                    );
+                        .filter(|line| line.contains("ctrl+o shows all"))
+                        .count();
+                    if verbose {
+                        assert_eq!(summaries, 0, "{rows:?}");
+                    } else if width >= 120 {
+                        // The hint shares the row with the count, the reason, and
+                        // the names, so only a wide row carries all of it; the
+                        // count and the reason always survive.
+                        assert_eq!(summaries, 2, "{rows:?}");
+                    }
+                    assert!(joined.contains("running"), "{rows:?}");
+                    assert!(joined.contains("completed"), "{rows:?}");
+                    assert!(joined.contains("failed"), "{rows:?}");
+                    // The event never runs past its own bounded row ceiling.
+                    assert!(rows.len() < 24, "{} rows: {rows:?}", rows.len());
                 }
             }
         }
@@ -10579,7 +10559,7 @@ fn subagent_transcript_rows_nest_and_wrap_without_call_counts() {
 }
 
 #[test]
-fn subagent_transcript_aligns_unicode_names_by_visible_width() {
+fn subagent_transcript_aligns_columns_by_visible_width() {
     let theme = crate::tui::theme::test_theme();
     for native in [true, false] {
         let mut view = subagent_transcript_test_view(native);
@@ -10591,18 +10571,69 @@ fn subagent_transcript_aligns_unicode_names_by_visible_width() {
             activity.summary = name.into();
         }
         let rows = subagent_transcript_test_rows(&view, &theme, 120, false);
-        assert_eq!(rows.len(), 4, "{rows:?}");
-        for ((row, name), state) in
-            rows[1..]
-                .iter()
-                .zip(names.into_iter().rev())
-                .zip(["failed", "completed", "running"])
-        {
-            let name_byte = row.find(name).unwrap();
-            let state_byte = row.find(state).unwrap();
-            assert_eq!(visible_width(&row[..name_byte]), 6, "{row}");
-            assert_eq!(visible_width(&row[..state_byte]), 13, "{row}");
+        // heading, running group heading, column header, the live row, then one
+        // counted summary line for each collapsed terminal group.
+        assert_eq!(rows.len(), 6, "{rows:?}");
+        let header = &rows[2];
+        let live = &rows[3];
+        let cells = |row: &str| {
+            row.split("  ")
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        // The native telemetry source carries every metric column; the
+        // extension presentation source has no elapsed or model field, and the
+        // grid drops a column rather than inventing one.
+        let (header_cells, live_cells) = if native {
+            (
+                ["worker", "state", "elapsed", "model", "turns", "tokens", "cost"].as_slice(),
+                ["審査", "running", "0.5s", "test-model", "0", "↑5.6m ↓3.9k", "$0.165"].as_slice(),
+            )
+        } else {
+            (
+                ["worker", "state", "turns", "tokens", "cost"].as_slice(),
+                ["審査", "running", "0", "↑5.6m ↓3.9k", "$0.165"].as_slice(),
+            )
+        };
+        assert_eq!(cells(header), header_cells, "{rows:?}");
+        let live_row_cells = cells(live);
+        assert!(live_row_cells[0].ends_with("審査"), "{rows:?}");
+        assert_eq!(&live_row_cells[1..], &live_cells[1..], "{rows:?}");
+        // Columns are real: the worker and state cells start at the same visual
+        // column in the header row and in the live worker's row, measured in
+        // visible width rather than bytes.
+        for (header_cell, cell) in [("worker", "審査"), ("state", "running")] {
+            let header_column = visible_width(&header[..header.find(header_cell).unwrap()]);
+            let live_column = visible_width(&live[..live.find(cell).unwrap()]);
+            assert_eq!(header_column, live_column, "{rows:?}");
         }
+        // Every worker row shares that one worker column - the header row's
+        // first cell included - so a wide or accented name cannot shift the
+        // state column below it. Expanded mode opens one row per worker, so all
+        // three names are measured as rows rather than as summary text.
+        let worker_column = visible_width(&live[..live.find("審査").unwrap()]);
+        let expanded = subagent_transcript_test_rows(&view, &theme, 120, true);
+        let mut worker_rows = 0;
+        for row in &expanded {
+            if row.contains("ctrl+o shows all") {
+                continue;
+            }
+            let Some(name) = ["審査", "Review", "e\u{301}xam"]
+                .into_iter()
+                .find(|name| row.contains(name))
+            else {
+                continue;
+            };
+            assert_eq!(
+                visible_width(&row[..row.find(name).unwrap()]),
+                worker_column,
+                "{row} among {expanded:?}"
+            );
+            worker_rows += 1;
+        }
+        assert_eq!(worker_rows, 3, "{expanded:?}");
     }
 }
 
@@ -10614,7 +10645,6 @@ fn subagent_transcript_does_not_invent_missing_activity_metrics() {
         activity.metrics = None;
     }
     let rows = subagent_transcript_test_rows(&view, &theme, 120, false);
-    assert_eq!(rows.len(), 4, "{rows:?}");
     for row in &rows[1..] {
         assert!(!row.contains("call"), "{row}");
         assert!(
@@ -10622,12 +10652,21 @@ fn subagent_transcript_does_not_invent_missing_activity_metrics() {
             "{row}"
         );
     }
+    // The same roster with metrics still prints the tokens and cost columns, so
+    // the absence above is "nothing is invented", not "nothing renders".
+    let measured =
+        subagent_transcript_test_rows(&subagent_transcript_test_view(false), &theme, 120, false);
+    let measured = measured.join("\n");
+    assert!(measured.contains('↑') && measured.contains('↓'), "{measured}");
+    assert!(measured.contains('$'), "{measured}");
 }
 
 #[test]
-fn subagent_transcript_failure_wraps_at_the_worker_indent() {
+fn subagent_transcript_failure_wraps_at_the_group_indent() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 
+    // A spawn that failed before it produced any worker: the reason is the
+    // whole event, so it wraps at the group indent instead of being cut off.
     let view = SubagentActivityView {
         failure_reason: Some("spawn rejected: \x1b[31mworker limit reached\x1b[0m".into()),
         ..SubagentActivityView::default()
@@ -10640,20 +10679,30 @@ fn subagent_transcript_failure_wraps_at_the_worker_indent() {
         ));
         for width in [24, 40, 120] {
             let rows = subagent_transcript_test_rows(&view, &theme, width, false);
-            let prefix = if unicode { "    └ " } else { "    `- " };
-            let continuation = if unicode { "      " } else { "       " };
-            let mut detail = rows[1].strip_prefix(prefix).unwrap().to_owned();
-            for row in &rows[2..] {
-                detail.push(' ');
-                detail.push_str(row.strip_prefix(continuation).unwrap());
-            }
+            assert_eq!(
+                rows[0],
+                if unicode {
+                    "• Subagents"
+                } else {
+                    "* Subagents"
+                }
+            );
+            // Every continuation row keeps the group indent, and the sanitized
+            // reason is complete - no escape sequence and no truncation.
+            let detail = rows[1..]
+                .iter()
+                .map(|row| {
+                    let text = row
+                        .strip_prefix("    ")
+                        .unwrap_or_else(|| panic!("group indent lost: {rows:?}"));
+                    assert!(!text.contains('\x1b'), "{rows:?}");
+                    text
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             assert_eq!(
                 detail.split_whitespace().collect::<Vec<_>>().join(" "),
-                if unicode {
-                    "failed · spawn rejected: worker limit reached"
-                } else {
-                    "failed - spawn rejected: worker limit reached"
-                },
+                "Failed: spawn rejected: worker limit reached",
                 "{rows:?}"
             );
             assert!(
@@ -10861,6 +10910,24 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
             || replayed.trim_end().ends_with("Working"),
         "the new turn's status row must remain the transcript tail: {replayed}"
     );
+    // Nothing below the new prompt belongs to the settled team: the correction
+    // was that EVERY further prompt replayed a completed session roster.
+    let rows = state
+        .rendered_transcript(120)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>();
+    let prompt_row = rows
+        .iter()
+        .position(|row| row.contains("next question"))
+        .expect("the new prompt is a rendered row");
+    let below = rows[prompt_row + 1..].join("\n");
+    for replayed_again in ["Subagents", "Inspect tests", "completed"] {
+        assert!(
+            !below.contains(replayed_again),
+            "the completed roster replayed below the new prompt: {rows:?}"
+        );
+    }
 }
 
 /// The same rule with a live worker: a roster for the *current* turn still
@@ -10961,6 +11028,180 @@ fn live_workers_for_the_current_turn_still_open_a_block() {
         "the new turn gets exactly one additional block: {rendered}"
     );
     assert!(shell.state.borrow().subagent_activity_block.is_some());
+}
+
+/// The settled delegation event is transcript material: it must end up at the
+/// point in the transcript where the delegation happened, between the prompt
+/// that started the turn and the next prompt, and it must stay there after the
+/// run finishes or is interrupted.
+#[test]
+fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
+    use octet_agent::{EntryId, FinishReason};
+
+    let mut shell = InteractiveShell::test_shell();
+    let child = |id: &str, state: &str| octet_agent::DelegationTelemetryChild {
+        child_id: id.into(),
+        task_name: "Inspect tests".into(),
+        profile: Some("explore".into()),
+        model: "test-model".into(),
+        state: state.into(),
+        phase: "using_tool".into(),
+        current_tool: Some("read".into()),
+        tool_use_count: 1,
+        input_tokens: 100,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        output_tokens: 10,
+        reasoning_tokens: 0,
+        total_tokens: 110,
+        cost: None,
+        cost_microdollars: Some(1),
+        elapsed_ms: 500,
+        failure_class: None,
+        failure_reason: None,
+        effective_tool_policy: test_effective_tool_policy(),
+        orchestration_provenance: inherited_delegation_provenance(),
+        session: Some("agent-session:opaque".into()),
+    };
+    let snapshot = |revision: u64, children| octet_agent::DelegationTelemetrySnapshot {
+        revision,
+        captured_at_ms: 1_700_000_000_000 + revision,
+        children,
+        total_cost_microdollars: Some(1),
+        failure_reason: None,
+        failure_class: None,
+    };
+    let subagent_block = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .position(|block| {
+                matches!(
+                    block,
+                    TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some()
+                )
+            })
+            .expect("a settled subagent block")
+    };
+    let prompt_position = |shell: &InteractiveShell, text: &str| {
+        shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .position(|block| matches!(block, TranscriptBlock::User { text: prompt, .. } if prompt == text))
+            .unwrap_or_else(|| panic!("prompt {text} is in the transcript"))
+    };
+
+    // Turn one: the delegation lands inside its own turn.
+    let run_id = shell.begin_run("test-provider");
+    shell.on_prompt_submitted("first question");
+    shell.on_run_event(
+        run_id,
+        &octet_agent::AgentEvent::DelegationUpdated {
+            snapshot: snapshot(1, vec![child("agent-1", "running")]),
+        },
+    );
+    let at_delegation = subagent_block(&shell);
+    assert!(
+        at_delegation > prompt_position(&shell, "first question"),
+        "the block must follow the prompt that opened the turn"
+    );
+
+    // Settlement and the end of the run keep it exactly where it was.
+    shell.on_run_event(
+        run_id,
+        &octet_agent::AgentEvent::DelegationUpdated {
+            snapshot: snapshot(2, vec![child("agent-1", "completed")]),
+        },
+    );
+    assert_eq!(subagent_block(&shell), at_delegation);
+    shell.on_run_event(
+        run_id,
+        &octet_agent::AgentEvent::RunFinished {
+            head: EntryId("head".into()),
+            reason: FinishReason::Aborted,
+        },
+    );
+    assert_eq!(
+        subagent_block(&shell),
+        at_delegation,
+        "an interrupted run must leave the settled block in its own turn"
+    );
+
+    // Turn two republishes the same, already-completed roster. The block stays
+    // in turn one and nothing new is appended below the new prompt.
+    shell.begin_run("test-provider");
+    shell.on_prompt_submitted("second question");
+    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
+        snapshot: snapshot(3, vec![child("agent-1", "completed")]),
+    });
+    let second_prompt = prompt_position(&shell, "second question");
+    assert_eq!(subagent_block(&shell), at_delegation);
+    assert!(
+        subagent_block(&shell) < second_prompt,
+        "the settled block belongs to the turn that produced it"
+    );
+    assert!(
+        shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .skip(second_prompt)
+            .all(|block| !matches!(
+                block,
+                TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some()
+            )),
+        "no subagent block may open below the new prompt"
+    );
+}
+
+/// Maintainer report: "no working indicator or thinking for a bit" after a new
+/// prompt. A submitted prompt leaves the turn's liveness row directly below it,
+/// with nothing active in between.
+#[test]
+fn a_new_prompt_shows_the_working_indicator_immediately() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.begin_run("test-provider");
+    shell.on_prompt_submitted("new question");
+
+    let state = shell.state.borrow();
+    let prompt = state
+        .transcript
+        .iter()
+        .position(|block| matches!(block, TranscriptBlock::User { text, .. } if text == "new question"))
+        .expect("the prompt is in the transcript");
+    let status = state
+        .transcript
+        .iter()
+        .position(|block| {
+            matches!(
+                block,
+                TranscriptBlock::Reasoning(reasoning)
+                    if reasoning.reasoning_heading.as_deref() == Some("Working")
+            )
+        })
+        .expect("the liveness row is open");
+    assert_eq!(
+        status,
+        prompt + 1,
+        "the working indicator must sit directly below the submitted prompt"
+    );
+    drop(state);
+    let rows = shell
+        .state
+        .borrow()
+        .rendered_transcript(120)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>();
+    assert!(
+        rows.last().is_some_and(|row| row.contains("Working")),
+        "the new turn's status row must be the transcript tail: {rows:?}"
+    );
 }
 
 #[test]
@@ -11167,6 +11408,305 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
     shell.toggle_disclosure();
     assert!(shell.verbose_tools());
     assert!(render(&shell).contains("Read release history"));
+}
+
+/// Maintainer screenshot: 32 rows where 22 dead workers buried 8 live ones
+/// ("8 running · 2 done · 8 failed · 14 stopped"). The live workers must stay
+/// visible, every terminal group must collapse to one counted row, and the
+/// event must stay bounded in both disclosure modes.
+#[test]
+fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
+    let mut shell = InteractiveShell::test_shell();
+    let child = |id: &str, task: &str, state: &str, elapsed: u64, reason: Option<&str>| {
+        octet_agent::DelegationTelemetryChild {
+            child_id: id.into(),
+            task_name: task.into(),
+            profile: Some("explore".into()),
+            model: "cerebras-gemma-4-31b".into(),
+            state: state.into(),
+            phase: state.into(),
+            current_tool: (state == "running").then(|| "read".into()),
+            tool_use_count: 2,
+            input_tokens: 1_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens: 100,
+            reasoning_tokens: 0,
+            total_tokens: 1_100,
+            cost: None,
+            cost_microdollars: Some(1),
+            elapsed_ms: elapsed,
+            failure_class: reason.map(|_| "provider_failure".into()),
+            failure_reason: reason.map(str::to_owned),
+            effective_tool_policy: test_effective_tool_policy(),
+            orchestration_provenance: inherited_delegation_provenance(),
+            session: Some("agent-session:opaque".into()),
+        }
+    };
+    let mut children = Vec::new();
+    for index in 0..8 {
+        children.push(child(
+            &format!("live-{index}"),
+            &format!("live worker {index}"),
+            "running",
+            100 + index,
+            None,
+        ));
+    }
+    for index in 0..2 {
+        children.push(child(&format!("done-{index}"), &format!("done worker {index}"), "completed", 500 + index, None));
+    }
+    for index in 0..8 {
+        children.push(child(
+            &format!("failed-{index}"),
+            &format!("failed worker {index}"),
+            "failed",
+            700 + index,
+            Some("provider request failed: upstream unavailable"),
+        ));
+    }
+    for index in 0..14 {
+        children.push(child(&format!("stopped-{index}"), &format!("stopped worker {index}"), "stopped", 900 + index, None));
+    }
+    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
+        snapshot: octet_agent::DelegationTelemetrySnapshot {
+            revision: 1,
+            captured_at_ms: 1_700_000_000_000,
+            children,
+            total_cost_microdollars: Some(1),
+            failure_reason: None,
+            failure_class: None,
+        },
+    });
+
+    let render = |shell: &InteractiveShell, width: u16| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(width)
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+    };
+
+    let collapsed = render(&shell, 120).join("\n");
+    // Every live worker keeps its own row...
+    for index in 0..8 {
+        assert!(
+            collapsed.contains(&format!("live worker {index}")),
+            "live worker {index} is not visible: {collapsed}"
+        );
+    }
+    // ...and each terminal group reports its own displayed count.
+    for summary in ["running · 8", "completed · 2", "failed · 8", "stopped · 14"] {
+        assert!(collapsed.contains(summary), "missing {summary}: {collapsed}");
+    }
+    // The 22 dead workers are three summary rows, not 22 rows of their own: 32
+    // workers render as heading + running group + column header + 8 live rows +
+    // 3 collapsed summaries.
+    let lines = collapsed.lines().collect::<Vec<_>>();
+    let heading = lines
+        .iter()
+        .position(|line| line.contains("Subagents"))
+        .expect("the event heading");
+    let summary_end = lines
+        .iter()
+        .rposition(|line| line.contains("stopped · 14"))
+        .expect("the stopped summary row");
+    assert_eq!(
+        summary_end - heading + 1,
+        14,
+        "the settled event must stay bounded: {collapsed}"
+    );
+    for summary in ["completed · 2", "failed · 8", "stopped · 14"] {
+        let row = lines
+            .iter()
+            .find(|line| line.contains(summary))
+            .unwrap_or_else(|| panic!("missing {summary}: {collapsed}"));
+        // One collapsed group is exactly one row: the connector, the count, and
+        // a bounded list of the workers it hides.
+        assert!(
+            row.trim_start().starts_with('└') || row.trim_start().starts_with("`-"),
+            "{row}"
+        );
+    }
+    // A group that cannot list every hidden worker still names some of them and
+    // marks the cut, rather than overflowing its row.
+    assert!(
+        collapsed.contains("done worker 0") && collapsed.contains("done worker 1"),
+        "{collapsed}"
+    );
+    assert!(collapsed.contains('…') || collapsed.contains("..."), "{collapsed}");
+    // The failure reason survives in the collapsed summary of the failed group.
+    assert!(
+        collapsed.contains("provider request failed: upstream unavailable"),
+        "{collapsed}"
+    );
+
+    // A narrow terminal truncates instead of overflowing.
+    let narrow = render(&shell, 40);
+    assert!(
+        narrow
+            .iter()
+            .all(|row| visible_width(row) <= 40),
+        "{narrow:?}"
+    );
+
+    // Expanding still bounds the row count: the reader never gets an unbounded
+    // list, and the omitted tail is reported instead of silently dropped.
+    shell.toggle_disclosure();
+    let expanded = render(&shell, 120);
+    assert!(expanded.len() <= 28, "{} rows: {expanded:?}", expanded.len());
+    assert!(
+        expanded.iter().any(|row| row.contains("more")),
+        "the bounded tail must be reported: {expanded:?}"
+    );
+    assert!(
+        expanded.join("\n").contains("live worker 0"),
+        "{expanded:?}"
+    );
+}
+
+/// The keyboard controls for the settled event: `ctrl+f` cycles the declared
+/// state narrowing (and carries it to the panel), `ctrl+s` cycles the row
+/// ordering state -> elapsed -> tokens.
+#[test]
+fn subagent_panel_keyboard_cycles_the_state_filter_and_the_row_ordering() {
+    use crossterm::event::KeyModifiers;
+
+    let mut shell = InteractiveShell::test_shell();
+    let child = |id: &str, state: &str, elapsed: u64, tokens: u64| {
+        octet_agent::DelegationTelemetryChild {
+            child_id: id.into(),
+            task_name: id.into(),
+            profile: Some("explore".into()),
+            model: "test-model".into(),
+            state: state.into(),
+            phase: state.into(),
+            current_tool: None,
+            tool_use_count: 1,
+            input_tokens: tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: tokens,
+            cost: None,
+            cost_microdollars: Some(1),
+            elapsed_ms: elapsed,
+            failure_class: None,
+            failure_reason: None,
+            effective_tool_policy: test_effective_tool_policy(),
+            orchestration_provenance: inherited_delegation_provenance(),
+            session: Some("agent-session:opaque".into()),
+        }
+    };
+    // `beta` is the slow worker with few tokens, `alpha` the fast one with many,
+    // so ordered by elapsed and ordered by tokens differ observably.
+    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
+        snapshot: octet_agent::DelegationTelemetrySnapshot {
+            revision: 1,
+            captured_at_ms: 1_700_000_000_000,
+            children: vec![
+                child("alpha", "running", 100, 2_000),
+                child("beta", "running", 900, 10),
+                child("gamma", "completed", 500, 500),
+            ],
+            total_cost_microdollars: Some(1),
+            failure_reason: None,
+            failure_class: None,
+        },
+    });
+    let rows = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(120)
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(rows(&shell).contains("Subagents"), "{}", rows(&shell));
+
+    open_grouped_subagent_panel(&mut shell, 1, 1);
+    let press = |shell: &mut InteractiveShell, character: char| {
+        shell.panel_input(&panel_key_with_modifiers(
+            crossterm::event::KeyCode::Char(character),
+            KeyModifiers::CONTROL,
+        ));
+    };
+
+    // ctrl+f narrows to the first declared group, and the settled event shows
+    // the same narrowing so the two presentations cannot disagree.
+    press(&mut shell, 'f');
+    let filtered = rows(&shell);
+    assert!(filtered.contains("state: running"), "{filtered}");
+    press(&mut shell, 'f');
+    let filtered = rows(&shell);
+    assert!(filtered.contains("state: completed"), "{filtered}");
+    assert!(!filtered.contains("state: running"), "{filtered}");
+    assert!(
+        !filtered.contains("alpha"),
+        "the narrowing must hide the live rows: {filtered}"
+    );
+    press(&mut shell, 'f');
+    press(&mut shell, 'f');
+    press(&mut shell, 'f');
+    let restored = rows(&shell);
+    assert!(!restored.contains("state:"), "the cycle returns to all: {restored}");
+    assert!(restored.contains("alpha"), "{restored}");
+
+    // State order keeps the host's declared order.
+    let alpha = restored.find("alpha").unwrap();
+    let beta = restored.find("beta").unwrap();
+    assert!(alpha < beta, "{restored}");
+
+    // ctrl+s orders by elapsed, largest first: the slow worker moves above the
+    // fast one even though the host declared the opposite order.
+    press(&mut shell, 's');
+    let by_elapsed = rows(&shell);
+    assert!(by_elapsed.contains("order: elapsed"), "{by_elapsed}");
+    assert!(
+        by_elapsed.find("beta").unwrap() < by_elapsed.find("alpha").unwrap(),
+        "{by_elapsed}"
+    );
+
+    // ...then by tokens, largest first: the chatty worker leads again.
+    press(&mut shell, 's');
+    let by_tokens = rows(&shell);
+    assert!(by_tokens.contains("order: tokens"), "{by_tokens}");
+    assert!(
+        by_tokens.find("alpha").unwrap() < by_tokens.find("beta").unwrap(),
+        "{by_tokens}"
+    );
+
+    // ...and back to the declared state order.
+    press(&mut shell, 's');
+    let back = rows(&shell);
+    assert!(!back.contains("order:"), "{back}");
+    assert!(back.find("alpha").unwrap() < back.find("beta").unwrap(), "{back}");
+}
+
+/// Enter confirms the drill-in for the selected worker and Esc closes the
+/// panel without selecting one.
+#[test]
+fn subagent_panel_enter_opens_and_esc_closes() {
+    let mut shell = InteractiveShell::test_shell();
+    open_grouped_subagent_panel(&mut shell, 2, 0);
+    let (result, action) = shell
+        .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+        .expect("enter confirms the selected worker");
+    assert!(matches!(result, PanelResult::Confirm(0)), "{result:?}");
+    assert!(matches!(action, PanelAction::SelectSubagent(_)));
+    assert!(!shell.has_panel());
+
+    open_grouped_subagent_panel(&mut shell, 2, 0);
+    let (result, _) = shell
+        .panel_input(&panel_key(crossterm::event::KeyCode::Esc))
+        .expect("esc closes the panel");
+    assert_eq!(result, PanelResult::Cancel);
+    assert!(!shell.has_panel());
 }
 
 #[test]

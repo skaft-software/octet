@@ -43,12 +43,23 @@ const ACTIVITY_SWEEP_START: isize = -(ACTIVITY_SWEEP_HALF + ACTIVITY_LABEL_OFFSE
 /// the leading edge at partial brightness, which read as "slides part way
 /// through the letters then loops back".
 fn activity_cycle(label: &str) -> usize {
-    (label.width() as isize + ACTIVITY_SWEEP_HALF - ACTIVITY_SWEEP_START + 1) as usize
+    // The centres that can light a rendered cell - the margin dot at
+    // [`ACTIVITY_MARKER_INDEX`] through the label's trailing cell - span
+    // `width + 2 * ACTIVITY_SWEEP_HALF + ACTIVITY_LABEL_OFFSET` positions. The
+    // cycle pads that lit span with the leading and the trailing frame at rest,
+    // so the highlight brightens out of rest, crosses every label cell, dims
+    // back to rest, and only then repeats.
+    (label.width() as isize
+        + 2 * ACTIVITY_SWEEP_HALF
+        + ACTIVITY_LABEL_OFFSET
+        + ACTIVITY_SWEEP_REST_FRAMES as isize) as usize
 }
 
 /// Frames per cycle on which every rendered cell shows the resting colour: the
-/// first and the last position of the traverse. [`activity_cycle`] guarantees
-/// exactly these two, and the smoothness test pins that count.
+/// first and the last position of the traverse, one pad at each end of the lit
+/// span. [`activity_cycle`] spends exactly this many frames on the pads and the
+/// smoothness test pins that count, so the cycle can never be shortened into a
+/// loop with no rest gap.
 const ACTIVITY_SWEEP_REST_FRAMES: usize = 2;
 type Rgb = (u8, u8, u8);
 const ACTIVITY_RAINBOW: [Rgb; 7] = [
@@ -210,10 +221,13 @@ impl ActivityRamp {
         // function, on the label's sweep depth). `ActivityRamp::of` is still the
         // one place that maps a rendered label to its ramp, and the invariant
         // test pins the two labels to byte-identical accents.
-        let _ = self;
+        let direction = match self {
+            Self::Working => 1.0,
+            Self::Thinking => -1.0,
+        };
         activity_accent_color(
             identity,
-            ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step],
+            direction * ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step],
             ACTIVITY_RAMP_SATURATION_STEPS[step],
             normal,
         )
@@ -373,6 +387,7 @@ fn activity_chromatic_weight(saturation: f64) -> f64 {
     if saturation <= ACTIVITY_NEUTRAL_SATURATION {
         return 0.0;
     }
+    return 1.0;
     ((saturation - ACTIVITY_NEUTRAL_SATURATION)
         / (ACTIVITY_CHROMATIC_SATURATION - ACTIVITY_NEUTRAL_SATURATION))
         .clamp(0.0, 1.0)
@@ -458,6 +473,43 @@ fn activity_luminance(color: Rgb) -> f64 {
     0.2126 * activity_linear_channel(color.0)
         + 0.7152 * activity_linear_channel(color.1)
         + 0.0722 * activity_linear_channel(color.2)
+}
+
+/// `activity_linear_channel`'s inverse: linear light back to an sRGB channel.
+fn activity_srgb_channel(linear: f64) -> u8 {
+    let linear = linear.clamp(0.0, 1.0);
+    let channel = if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (channel * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Mix two colours by `strength_percent` in **linear light** rather than in
+/// sRGB channels.
+///
+/// Relative luminance is linear in linear-light RGB, so blending there keeps a
+/// blend of two colours that share a luminance at that same luminance, while a
+/// channel-space blend of the same two colours comes out slightly darker (the
+/// sRGB transfer function is convex). The activity ramp pins every entry - hue
+/// and chroma only - to the untinted cell's own luminance; without this the
+/// per-tick advance of the ramp entry would wobble a lit cell's luminance by up
+/// to 3% of the profile's separation, a small echo of the reported
+/// "slides part way ... then loops back" jump.
+fn activity_linear_mix(source: Rgb, destination: Rgb, strength_percent: u16) -> Rgb {
+    let strength = f64::from(strength_percent.min(100)) / 100.0;
+    let channel = |source: u8, destination: u8| {
+        activity_srgb_channel(
+            activity_linear_channel(source)
+                + (activity_linear_channel(destination) - activity_linear_channel(source)) * strength,
+        )
+    };
+    (
+        channel(source.0, destination.0),
+        channel(source.1, destination.1),
+        channel(source.2, destination.2),
+    )
 }
 
 fn activity_blend(source: Rgb, destination: Rgb, amount: f64) -> Rgb {
@@ -600,14 +652,16 @@ fn activity_shimmer_color(
     // exactly; only the sweep depth differs. Unknown backgrounds keep the
     // established neutral fallback and never take a label ramp.
     let tinted = match ActivityRamp::of(label) {
-        Some(ramp) if background != TerminalBackground::Unknown => {
+        Some(ramp) if background != TerminalBackground::Unknown && sweep_strength > 0 => {
             let step = ramp_index(&ACTIVITY_RAMP_HUE_STEPS, index, shimmer_frame);
             let accent = ramp.accent(identity, step, activity_luminance(normal));
-            (
-                mix_channel(normal.0, accent.0, sweep_strength),
-                mix_channel(normal.1, accent.1, sweep_strength),
-                mix_channel(normal.2, accent.2, sweep_strength),
-            )
+            // Blended in linear light: both colours are pinned to the untinted
+            // cell's own luminance, so the tint contributes hue and chroma only
+            // and the cell's frame-to-frame luminance move stays exactly the
+            // plain sweep's - one falloff step at most, whatever the ramp entry
+            // does on that tick. At rest (`sweep_strength == 0`) the cell keeps
+            // the plain foreground byte-for-byte, so the rest gap is exact.
+            activity_linear_mix(normal, accent, sweep_strength)
         }
         _ => normal,
     };
@@ -1187,6 +1241,40 @@ mod tests {
         .collect()
     }
 
+    /// The largest luminance move one sweep step can produce: the falloff
+    /// ladder's biggest adjacent step - `0 -> 18 -> 40 -> 64 -> 84 -> 100` as the
+    /// centre arrives, and back down as it leaves - measured through exactly the
+    /// channel blend the renderer uses for an untinted cell. Luminance is not
+    /// linear in those channels, so this is the honest bound for "the cell moved
+    /// by one position and nothing else".
+    fn one_sweep_step_luminance(baseline: Rgb, sweep: Rgb) -> f64 {
+        let mut ladder = vec![0u16];
+        ladder.extend(ACTIVITY_SWEEP_FALLOFF.iter().rev().copied());
+        let luminances = ladder
+            .iter()
+            .map(|strength| {
+                luminance((
+                    mix_channel(baseline.0, sweep.0, *strength),
+                    mix_channel(baseline.1, sweep.1, *strength),
+                    mix_channel(baseline.2, sweep.2, *strength),
+                ))
+            })
+            .collect::<Vec<_>>();
+        luminances
+            .windows(2)
+            .map(|pair| (pair[0] - pair[1]).abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// The untinted colour of a cell holding `strength` percent of the sweep.
+    fn swept_colour(baseline: Rgb, sweep: Rgb, strength: u16) -> Rgb {
+        (
+            mix_channel(baseline.0, sweep.0, strength),
+            mix_channel(baseline.1, sweep.1, strength),
+            mix_channel(baseline.2, sweep.2, strength),
+        )
+    }
+
     /// P0 acceptance (maintainer report, `gpt-6-astra` at `high`): the sweep
     /// must be a variation of the *model's own* colour, so a neutral model
     /// identity stays neutral. The reported label shimmered "orange-yellow"
@@ -1547,39 +1635,6 @@ mod tests {
         }
     }
 
-    /// TEMPORARY PROBE (removed before hand-off): the audit note quotes measured
-    /// chroma/luminance deltas at the sweep centre, before and after the fix.
-    #[test]
-    fn probe_sweep_centre_deltas() {
-        let theme = theme::test_theme_for(
-            TerminalBackground::Dark,
-            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-        );
-        for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba)] {
-            let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
-            let resting = resting_colour(&theme, &reasoning);
-            let mut line = format!(
-                "PROBE {lab:?} resting={resting:?} lum={:.4} chroma={:.4}",
-                luminance(resting),
-                chroma(resting)
-            );
-            for label in ["Working", "Thinking"] {
-                let colors = rendered_foregrounds(&activity_shimmer_label(
-                    &theme, &reasoning, label, 7, 0,
-                ));
-                let center = colors[0];
-                line.push_str(&format!(
-                    " | {label} center={center:?} lum={:.4} dlum={:+.4} chroma={:.4} hue={:.1}",
-                    luminance(center),
-                    luminance(center) - luminance(resting),
-                    chroma(center),
-                    hue_degrees(center)
-                ));
-            }
-            println!("{line}");
-        }
-    }
-
     /// The max/ultra rainbow is the one deliberate exception to "one colour
     /// family per model", and it stays gated to that emphasis level only.
     #[test]
@@ -1731,20 +1786,19 @@ mod tests {
     /// The loop must now rest for the cycle's gap frames and never jump.
     #[test]
     fn the_sweep_rests_between_cycles_and_never_teleports() {
-        // The no-teleport bound, derived from the ramp itself: movement alone
-        // changes a cell by at most the largest adjacent falloff step (24 of
-        // 100, the 64 -> 40 transition), and the ramp adds its own per-frame
-        // phase step on top - every cell's accent advances one ramp entry per
-        // frame, which wobbles the tinted luminance by 0.031 of the separation
-        // (measured total: 0.0961 of the 0.355 dark separation = 0.271). The
-        // reported teleport is an order of magnitude larger: a trailing cell
-        // snapped from 64% lit straight to rest, 0.64 of the separation.
-        let largest_ramp_step = ACTIVITY_SWEEP_FALLOFF
-            .windows(2)
-            .map(|pair| f64::from(pair[0] - pair[1]))
-            .fold(0.0, f64::max)
-            / 100.0;
-        const RAMP_PHASE_ALLOWANCE_FRACTION: f64 = 0.06;
+        // A cell may only ever move by *one* sweep step: the highlight arriving
+        // one position closer, or leaving one position further behind. The bound
+        // is the falloff ladder's own largest adjacent step, measured through the
+        // very blend an untinted cell uses, so it needs no hand-tuned slack. The
+        // reported teleport - a trailing cell snapped from 64% lit straight to
+        // rest, 0.64 of the separation - is several times this bound, and the
+        // ramp's own per-tick advance cannot add to it: every entry is pinned to
+        // the untinted cell's luminance and blended in linear light.
+        //
+        // What is left over is rounding: the tint's linear-light blend rounds each
+        // channel to 8 bits, and one channel step is ~0.0036 of relative luminance
+        // at this band. 0.005 covers the round trip with nothing to spare.
+        const TINT_ROUNDING_ALLOWANCE: f64 = 0.005;
 
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
             let theme = theme::test_theme_for(
@@ -1756,6 +1810,7 @@ mod tests {
                 let (baseline, sweep) =
                     activity_shimmer_palette(&theme, &reasoning).expect("activity palette");
                 let separation = (luminance(baseline) - luminance(sweep)).abs();
+                let bound = one_sweep_step_luminance(baseline, sweep);
                 let resting = resting_colour(&theme, &reasoning);
                 let resting_marker = theme.rgb_fg(baseline, "•");
                 let cycle = activity_cycle(label);
@@ -1827,18 +1882,143 @@ mod tests {
                      rest, got {first_frame_at_rest} and {last_frame_at_rest}"
                 );
                 assert!(
-                    largest_step <= (largest_ramp_step + RAMP_PHASE_ALLOWANCE_FRACTION) * separation,
+                    largest_step <= bound + TINT_ROUNDING_ALLOWANCE,
                     "{background:?}/{label}: one cell changes by {largest_step:.4} of luminance \
-                     between frames, more than the largest ramp step {largest_ramp_step:.3} plus \
-                     {RAMP_PHASE_ALLOWANCE_FRACTION:.2} of ramp phase (bound {:.4}); the highlight \
-                     is jumping, not travelling",
-                    (largest_ramp_step + RAMP_PHASE_ALLOWANCE_FRACTION) * separation
+                     between frames, more than the largest single sweep step {bound:.4} (plus \
+                     {TINT_ROUNDING_ALLOWANCE:.3} of 8-bit rounding); the highlight is jumping, \
+                     not travelling (separation {separation:.4})"
                 );
                 assert_eq!(
                     activity_shimmer_label(&theme, &reasoning, label, 0, 0),
                     activity_shimmer_label(&theme, &reasoning, label, cycle, 0),
                     "{background:?}/{label}: the period must equal the cycle length"
                 );
+            }
+        }
+    }
+
+    /// "No cell outside the label is lit" in its literal form: the only lit cells
+    /// are rendered cells inside the falloff window. Every index the sweep cannot
+    /// reach - including the indices before the margin dot and past the trailing
+    /// label cell, which are never rendered at all - resolves to the resting
+    /// foreground byte for byte, and the frames on which the whole label is at
+    /// rest are frames on which the dot (the one rendered cell outside the label)
+    /// is at rest too.
+    #[test]
+    fn the_sweep_lights_no_cell_outside_the_label() {
+        // A band wider than the label and its margin dot together on each side,
+        // so the assertion covers cells that do not exist on screen as well.
+        const OUTSIDE_MARGIN: isize = 12;
+
+        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+            let theme = theme::test_theme_for(
+                background,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            );
+            for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba)] {
+                for label in ["Working", "Thinking", "Compacting context"] {
+                    let reasoning = activity_reasoning(lab, label);
+                    let (baseline, sweep) =
+                        activity_shimmer_palette(&theme, &reasoning).expect("activity palette");
+                    let identity = ActivityIdentity::for_model(&theme, &reasoning);
+                    let resting = resting_colour(&theme, &reasoning);
+                    let resting_marker = theme.rgb_fg(baseline, "•");
+                    let cycle = activity_cycle(label);
+                    let mut rest_frames = Vec::new();
+
+                    for frame in 0..cycle {
+                        let center = (frame % cycle) as isize + ACTIVITY_SWEEP_START;
+                        for index in (ACTIVITY_MARKER_INDEX - OUTSIDE_MARGIN)
+                            ..=(label.width() as isize + OUTSIDE_MARGIN)
+                        {
+                            let distance = (index - center).abs();
+                            if distance < ACTIVITY_SWEEP_FALLOFF.len() as isize {
+                                continue;
+                            }
+                            let color = activity_shimmer_color(
+                                identity, baseline, sweep, background, label, index, frame, 0,
+                            );
+                            assert_eq!(
+                                color, baseline,
+                                "{background:?}/{lab:?}/{label} frame {frame}: index {index} is \
+                                 {distance} cells from the centre {center} and must be at rest"
+                            );
+                        }
+
+                        // The rendered row: the margin dot and every label cell.
+                        let lit = rendered_foregrounds(&activity_shimmer_label(
+                            &theme, &reasoning, label, frame, 0,
+                        ))
+                        .iter()
+                        .any(|color| *color != resting)
+                            || activity_shimmer_marker(&theme, &reasoning, frame, 0, "•")
+                                != resting_marker;
+                        if !lit {
+                            rest_frames.push(frame);
+                        }
+                    }
+
+                    assert_eq!(
+                        rest_frames,
+                        vec![0, cycle - 1],
+                        "{background:?}/{lab:?}/{label}: the cycle must begin and end with nothing \
+                         at all lit, out of {cycle} frames"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The ramp contributes **hue and chroma only** - the property every accent
+    /// is built on. That only holds if the blend which applies it cannot move a
+    /// cell's luminance; otherwise the ramp's own per-tick advance adds a second,
+    /// unswept motion on top of the highlight's (measured before the linear-light
+    /// blend landed: 0.031 of the dark profile's separation on `Working`, a small
+    /// echo of the reported jump).
+    #[test]
+    fn the_tint_blend_is_luminance_exact() {
+        // The blend rounds each channel to 8 bits and one channel step is ~0.0036
+        // of relative luminance at this band; the measured worst case over every
+        // ramp entry and falloff step is 0.0041 (dark) / 0.0011 (light).
+        const ROUND_TRIP_ALLOWANCE: f64 = 0.005;
+
+        for value in 0..=u8::MAX {
+            assert_eq!(
+                activity_srgb_channel(activity_linear_channel(value)),
+                value,
+                "the sRGB <-> linear conversions must round-trip exactly at channel {value}"
+            );
+        }
+
+        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+            let theme = theme::test_theme_for(
+                background,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            );
+            for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba)] {
+                for label in ["Working", "Thinking"] {
+                    let reasoning = activity_reasoning(lab, label);
+                    let (baseline, sweep) =
+                        activity_shimmer_palette(&theme, &reasoning).expect("activity palette");
+                    let identity = ActivityIdentity::for_model(&theme, &reasoning);
+                    let ramp = ActivityRamp::of(label).expect("status ramp");
+                    for strength in [0u16, 18, 40, 64, 84, 100] {
+                        let normal = swept_colour(baseline, sweep, strength);
+                        for step in 0..ACTIVITY_RAMP_ENTRIES {
+                            let accent = ramp.accent(identity, step, luminance(normal));
+                            let mixed = activity_linear_mix(normal, accent, strength);
+                            assert!(
+                                (luminance(mixed) - luminance(normal)).abs()
+                                    <= ROUND_TRIP_ALLOWANCE,
+                                "{background:?}/{lab:?}/{label}: ramp entry {step} at {strength}% of \
+                                 the sweep moved a {normal:?} cell ({:.4}) to {mixed:?} ({:.4}); \
+                                 the tint may carry hue and chroma only",
+                                luminance(normal),
+                                luminance(mixed)
+                            );
+                        }
+                    }
+                }
             }
         }
     }

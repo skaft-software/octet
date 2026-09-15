@@ -10123,6 +10123,331 @@ async fn unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not() {
     );
 }
 
+// ── row 4.8: the live panel's replaceable state is really paced ────────────
+
+/// A real tool that publishes a burst of replaceable decorations plus
+/// append-only output, then finishes.
+///
+/// The burst is far larger than the panel's pace budget and is published
+/// without an await point, so the run path—not the tool—decides what the panel
+/// sees: one immediate state, collapsed intermediates, and the latest state at
+/// the terminal boundary.
+struct PreviewProbe;
+
+#[async_trait::async_trait]
+impl Tool for PreviewProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            name: "preview_probe".into(),
+            description: "Publishes a burst of replaceable panel state".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        ctx.progress
+            .output(OutputStream::Stdout, "probe-output-chunk\n");
+        for step in 0..12 {
+            assert!(
+                ctx.progress
+                    .decoration(format!("step {step}"), Some(format!("detail {step}"))),
+                "decoration {step} is accepted"
+            );
+        }
+        Ok(ToolOutput::new("preview probe finished"))
+    }
+}
+
+/// The run path coalesces replaceable panel state, never collapses append-only
+/// chunks, and settles the latest state before the call is reported finished.
+#[tokio::test]
+async fn live_panel_decorations_are_coalesced_and_settle_the_latest_state() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[("call_preview", "preview_probe", serde_json::json!({}))]),
+                text_turn("preview probe finished"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_path = sessions.path().join("live-preview.jsonl");
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &session_path,
+        Some(4),
+        PreviewProbe,
+    );
+
+    let mut run = agent.prompt("watch the panel").await.unwrap();
+    let mut decorations = Vec::new();
+    let mut chunks = 0usize;
+    let mut finished_after = None;
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        match &event {
+            AgentEvent::ToolProgress {
+                id,
+                progress: octet_agent::ToolProgress::Decoration(decoration),
+            } if id.0 == "call_preview" => decorations.push(decoration.clone()),
+            AgentEvent::ToolProgress {
+                id,
+                progress: octet_agent::ToolProgress::Output { stream, bytes },
+            } if id.0 == "call_preview" && *stream == OutputStream::Stdout => {
+                chunks += 1;
+                assert_eq!(bytes.as_ref(), b"probe-output-chunk\n");
+            }
+            AgentEvent::ToolFinished { id, .. } if id.0 == "call_preview" => {
+                finished_after = Some(decorations.len());
+            }
+            _ => {}
+        }
+        events.push(event);
+    }
+    drop(run);
+
+    assert_eq!(chunks, 1, "the append-only chunk is forwarded exactly once");
+    assert!(
+        !decorations.is_empty(),
+        "the coalescer never drops the whole burst"
+    );
+    assert!(
+        decorations.len() < 12,
+        "the run path actually paced the burst: {} of 12 published",
+        decorations.len()
+    );
+    assert_eq!(
+        decorations[0].label(),
+        "step 0",
+        "the first state after idle is immediate"
+    );
+    assert_eq!(
+        decorations
+            .last()
+            .expect("at least one decoration")
+            .label(),
+        "step 11",
+        "the terminal boundary publishes the latest state, never a stale one"
+    );
+    assert_eq!(
+        finished_after,
+        Some(decorations.len()),
+        "every decoration is published before the call is reported finished"
+    );
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+
+    // Panel state is presentation only: it never becomes durable state or the
+    // model-visible tool result.
+    let durable = std::fs::read_to_string(&session_path).unwrap();
+    assert!(durable.contains("preview probe finished"), "{durable}");
+    assert!(
+        !durable.contains("step 11") && !durable.contains("detail 11"),
+        "a decoration must never be persisted: {durable}"
+    );
+}
+
+// ── row 4.7: the run path publishes bounded partial-output checkpoints ─────
+
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+struct RecordingRunCheckpointSink {
+    snapshots: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(any(unix, windows))]
+impl RecordingRunCheckpointSink {
+    fn snapshots(&self) -> Vec<String> {
+        self.snapshots.lock().unwrap().clone()
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl octet_agent::tool::PartialOutputCheckpointSink for RecordingRunCheckpointSink {
+    fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
+        assert!(
+            snapshot.len() <= octet_agent::tools::BASH_CHECKPOINT_MAX_BYTES,
+            "a checkpoint snapshot is bounded: {} bytes",
+            snapshot.len()
+        );
+        self.snapshots.lock().unwrap().push(snapshot.to_owned());
+        Ok(())
+    }
+}
+
+/// A real tool that streams output across the checkpoint interval before it
+/// returns, so the run path must publish while the call is still live.
+#[cfg(any(unix, windows))]
+struct StreamingProbe;
+
+#[cfg(any(unix, windows))]
+#[async_trait::async_trait]
+impl Tool for StreamingProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            name: "stream_probe".into(),
+            description: "Streams bounded partial output".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        ctx.progress.output(OutputStream::Stdout, "ckpt-alpha\n");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        ctx.progress.output(OutputStream::Stderr, "ckpt-beta\n");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        Ok(ToolOutput::new("stream probe finished"))
+    }
+}
+
+/// Checkpoints land on the live run path, stay bounded and non-terminal, and
+/// are never durable state or a tool result; an unopted agent publishes none.
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn live_run_path_publishes_bounded_partial_output_checkpoints() {
+    let checkpoint_interval = Duration::from_millis(10);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[("call_stream", "stream_probe", serde_json::json!({}))]),
+                text_turn("stream probe finished"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_path = sessions.path().join("checkpointed.jsonl");
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &session_path,
+        Some(4),
+        StreamingProbe,
+    );
+    let sink = Arc::new(RecordingRunCheckpointSink::default());
+    agent.enable_partial_output_checkpoints(
+        "stream_probe",
+        Arc::clone(&sink) as Arc<dyn octet_agent::tool::PartialOutputCheckpointSink>,
+        checkpoint_interval,
+    );
+
+    agent.complete("stream the output").await.unwrap();
+
+    let snapshots = sink.snapshots();
+    assert!(
+        snapshots.len() >= 2,
+        "the live call publishes across the interval: {snapshots:?}"
+    );
+    assert!(
+        snapshots[0].contains("ckpt-alpha"),
+        "the first observation publishes immediately: {snapshots:?}"
+    );
+    let last = snapshots.last().unwrap();
+    assert!(
+        last.contains("ckpt-alpha") && last.contains("ckpt-beta"),
+        "a later checkpoint is a complete replacement snapshot: {last}"
+    );
+    for snapshot in &snapshots {
+        assert!(
+            !snapshot.contains("complete_stdout=true") && !snapshot.contains("complete_stderr=true"),
+            "a checkpoint never claims the command finished: {snapshot}"
+        );
+    }
+    let stats = agent
+        .partial_output_checkpoint_stats()
+        .expect("the consumer is enabled");
+    assert_eq!(stats.published as usize, snapshots.len());
+    assert!(stats.failures == 0);
+
+    // Checkpoints are auxiliary observation data: the durable log carries the
+    // settled result and none of the partial snapshots.
+    let durable = std::fs::read_to_string(&session_path).unwrap();
+    assert!(durable.contains("stream probe finished"), "{durable}");
+    assert!(
+        !durable.contains("ckpt-alpha") && !durable.contains("ckpt-beta"),
+        "a checkpoint must never be persisted: {durable}"
+    );
+
+    // Unopted: the same tool publishes nothing and business output is identical.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[("call_stream", "stream_probe", serde_json::json!({}))]),
+                text_turn("stream probe finished"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut unopted = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &sessions.path().join("unopted.jsonl"),
+        Some(4),
+        StreamingProbe,
+    );
+    let unopted_sink = Arc::new(RecordingRunCheckpointSink::default());
+    let unopted_output = unopted.complete("stream the output").await.unwrap();
+    assert_eq!(unopted_output.text, "stream probe finished");
+    assert!(
+        matches!(unopted_output.reason, FinishReason::Completed),
+        "checkpointing changes no business outcome: {:?}",
+        unopted_output.reason
+    );
+    assert!(unopted_sink.snapshots().is_empty());
+    assert!(unopted.partial_output_checkpoint_stats().is_none());
+}
+
 #[tokio::test]
 async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools() {
     // Row 4.13's prompt consumer: the registered tools' `promptSnippet` /

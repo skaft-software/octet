@@ -24,13 +24,15 @@ recorded in [`../swarm-audit/EXECUTION-parity-tools.md`](../swarm-audit/EXECUTIO
 > 4.1–4.3 are therefore recorded as **withdrawn**, not landed: the history and
 > the reasoning stay below, and the withdrawn modules are gone from the tree.
 
-Rows 4.7, 4.11, 4.12, and 4.14 are landed as **tool-layer primitives** in
+Rows 4.11, 4.12, and 4.14 are landed as **tool-layer primitives** in
 `crates/octet-agent/src/tools/{durability,deferred,summarization}.rs`. Pi stores
 their state in the session's bound-value family; octet's session is an
 append-only JSONL log whose keyed replace/scan API does not exist yet, and
 `session.rs`/`agent.rs` are outside this change's scope, so each module
 implements the row's decision logic behind one owned type and documents the exact
-consumer that still has to be wired in "Recorded gaps" below.
+consumer that still has to be wired in "Recorded gaps" below. Row 4.7's tool-layer
+logic is the same, but its *harness* consumer is wired: `Agent` owns opt-in
+checkpoint publication for one named tool while that call is live.
 
 ## Status matrix
 
@@ -42,8 +44,8 @@ consumer that still has to be wired in "Recorded gaps" below.
 | 4.4 | Bash spilled output path | Landed | `src/tools/bash.rs` (`Capture::{spill,spill_path}`); `bash_truncated_output_spills_the_full_stream_to_a_readable_path`, `bash_untruncated_output_leaks_no_spill_path` |
 | 4.5 | Bash session identity/provider/model/reasoning env + `commandPrefix` | Landed | `src/tools/shell_environment.rs`; `session_shell_exposes_live_identity_metadata_and_host_command_prefix`, `session_shell_clears_inherited_metadata_and_rereads_the_resolver` |
 | 4.6 | Opt-in PowerShell (+ Windows CI evidence) | Opt-in gating landed; Windows execution evidence blocked | `src/tools/powershell.rs`, `src/tools/mod.rs`; `powershell_is_opt_in_and_never_a_bash_fallback` proves the gate, the non-Windows refusal, and the never-a-fallback contract. The Windows execution path is `#[cfg(windows)]` and is **not compiled here**: real Windows CI evidence is blocked on a Windows runner (human/hardware-gated, no primitive available in this environment) |
-| 4.7 | Interval durable partial bash output checkpoints | Landed (tool layer) | `src/tools/bash.rs` (`BashCheckpointPublisher`, `BashCheckpoints`, `CheckpointedBashTool`) + `src/tools/durability.rs` (`DurableInvocationStore`); `bash_checkpoint_publisher_is_interval_bounded_and_dedupes_identical_snapshots`, `bash_checkpoints_land_at_interval_boundaries_and_final_output_is_complete` |
-| 4.8 | Adaptive preview coalescing (interval/rate/single trailing timer) | Landed (tool layer) | `AdaptivePreviewCoalescer` in `src/tool.rs`; `preview_coalescer_paces_both_interval_and_encoded_bytes`. Live-panel consumer pending |
+| 4.7 | Interval durable partial bash output checkpoints | Landed end-to-end (agent run path; host supplies the durable sink) | Tool layer: `src/tools/bash.rs` (`BashCheckpointPublisher`, `BashCheckpoints`, `CheckpointedBashTool`) + `src/tools/durability.rs` (`DurableInvocationStore`); `bash_checkpoint_publisher_is_interval_bounded_and_dedupes_identical_snapshots`, `bash_checkpoints_land_at_interval_boundaries_and_final_output_is_complete`. Run-path consumer: `Agent::enable_partial_output_checkpoints(tool, sink, interval)`/`enable_default_partial_output_checkpoints` -> per-invocation `LivePartialOutput::for_call` in the tool loop, fed by the accepted `ToolProgress::Output` chunks and owning `PartialOutputCheckpointStats`; tests `partial_output_checkpoints_pace_bound_and_never_claim_completion`, `a_refused_checkpoint_is_counted_and_never_becomes_a_tool_result` (unit) and `live_run_path_publishes_bounded_partial_output_checkpoints` (`tests/agent_run.rs`: real HTTP/SSE run, bounded non-terminal snapshots, never durable, unopted publishes none and yields the identical business result). Remaining: the sink is host-supplied, so cross-process durability is the session keyed-value gap below |
+| 4.8 | Adaptive preview coalescing (interval/rate/single trailing timer) | Landed end-to-end | `AdaptivePreviewCoalescer` in `src/tool.rs`; `preview_coalescer_paces_both_interval_and_encoded_bytes` (tool layer). Live-panel consumer: `LivePreviewPacer` + `forward_tool_progress` in the run loop (`src/agent.rs`: per-call pacer, one trailing timer recomputed per wake, terminal settle after the drain and before `ToolFinished`), with append-only `Output`/`Status` chunks forwarded verbatim; tests `live_preview_pacer_publishes_immediately_collapses_and_settles_the_latest` (unit: immediate first state, collapse, deadline publishes the latest, force-once) and `live_panel_decorations_are_coalesced_and_settle_the_latest_state` (`tests/agent_run.rs`: a 12-state burst published through a real tool arrives as fewer than 12 events, first state immediate, last state the latest, nothing persisted) |
 | 4.9 | Original-file nonoverlapping multi-edit + legacy normalization | Landed | `src/tools/edit.rs`; `edit_applies_multiple_edits_against_the_original_file`, `edit_legacy_shapes_are_normalized_into_one_batch` |
 | 4.10 | Unanimous finalized-result batch termination | Landed end-to-end | `ToolOutput::requesting_termination`/`terminates_run` + `batch_requests_termination` in `src/tool.rs`; consumer in the run loop (`src/agent.rs`: per-batch `termination_requests` recorded at the commit path, checked after the abort gate and before `needs_continuation`). Tests: `batch_termination_requires_unanimous_finalized_results` (tool layer) and `unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not` (`tests/agent_run.rs`: unanimous batch -> 1 model request with durable results; one dissenting sibling -> 2 requests with both results carried forward) |
 | 4.11 | Durable invocation memos through replay until outcome known | Landed (tool layer) | `src/tools/durability.rs`; `invocation_memos_survive_replay_until_the_outcome_is_known` |
@@ -71,7 +73,9 @@ consumer that still has to be wired in "Recorded gaps" below.
   idle publishes immediately, writes before the deadline collapse into the
   latest snapshot, at most one trailing timer exists, and a forced publication
   (completion/error/checkpoint) cancels it. Only replaceable snapshots may be
-  coalesced; live append-only byte chunks stay verbatim.
+  coalesced; live append-only byte chunks stay verbatim. The run path owns the
+  pacing (`LivePreviewPacer` + `forward_tool_progress` in `agent.rs`), so a tool
+  publishes state and the harness decides what the panel sees.
 - **4.9** every `edits[].oldText` is matched against the original file, regions
   must be non-overlapping and unique, ambiguity and overlap are rejected before
   any write, and legacy `old`/`new`, `oldText`/`newText`, JSON-string `edits`,
@@ -89,7 +93,10 @@ consumer that still has to be wired in "Recorded gaps" below.
   `BASH_CHECKPOINT_MAX_BYTES = 50 KiB` (the two stream sections share the cap,
   over-long sections keep their newest bytes on a code-point boundary and are
   marked elided), and a checkpoint never emits `complete_<stream>=true`, so a
-  recovery consumer cannot read it as proof the command finished. The durable
+  recovery consumer cannot read it as proof the command finished. The run path
+  consumer is `Agent::enable_partial_output_checkpoints` (opt-in,
+  host-supplied sink, host-chosen interval floored at 10 ms); it publishes only
+  while the named call is live and never persists the snapshot itself. The durable
   value is `pi.pending.tool_output:`*operation*`:`*invocation — one replaceable
   value per invocation, deleted when the outcome becomes known, and a late
   checkpoint after settlement is refused instead of reviving state. A checkpoint
@@ -188,9 +195,14 @@ one-line wiring change, not a missing primitive.
    One-line fix in that owned file: add
    `fn prompt_snippet(&self) -> Option<&str> { Some("Search file contents with ripgrep (rg)") }`
    (plus guidelines if desired).
-2. **4.8 live consumer.** No built-in tool publishes a replaceable preview
-   snapshot through the coalescer yet; the live tool panel is fed by
-   append-only progress chunks, which must stay verbatim.
+2. **4.8 live consumer — closed.** The run path owns the coalescer
+   (`LivePreviewPacer`), so a tool that publishes replaceable panel state is
+   paced by the harness rather than by the tool; append-only progress chunks are
+   still forwarded verbatim. The coding product renders the surviving
+   `ToolProgress::Decoration` (`modes/interactive.rs`, `tui/view.rs`,
+   `modes/rpc.rs`, `host/events.rs`), so the row is end-to-end. No *built-in* tool
+   publishes decorations yet; a tool may opt in through
+   `ToolContext::progress.decoration(..)`.
 3. **lib.rs re-exports.** `ToolPromptContribution`, `PreviewPublication`,
    `AdaptivePreviewCoalescer`, `collect_tool_prompt_contributions`,
    `batch_requests_termination`, and `ToolOutput::requesting_termination` are
@@ -212,20 +224,21 @@ Each of these is a consumer or a cross-process storage binding, not missing tool
 logic; the row behavior itself is implemented and covered by the tests named in
 the matrix.
 
-5. **4.7 cross-process durability + host wiring.**
-   `DurableInvocationStore` is process-durable: it implements Pi's contract
-   (replace one value, fence on `effect_pending`, delete on settlement, hard
-   bounds) but keeps values in memory because `crates/octet-agent/src/session.rs`
-   owns the durable log and has no keyed `setValue`/`scanValues` API yet. The
+5. **4.7 cross-process durability + host wiring.** The harness wiring is done:
+   `Agent::enable_partial_output_checkpoints(tool, sink, interval)` publishes
+   bounded, non-terminal snapshots for one named tool's live calls through a
+   host-supplied `PartialOutputCheckpointSink`, and an unopted agent is
+   byte-identical. What remains is durability: `DurableInvocationStore` is
+   process-durable only, because `crates/octet-agent/src/session.rs` owns the
+   durable log and has no keyed `setValue`/`scanValues` API yet. The
    exact session primitive needed is `setValue(pendingToolOutput(operationId,
    invocationId), snapshot)` as one scalar replacement whose mutation verifies
    the call is still `effect_pending`, plus prefix `scanValues` cleanup for
-   operation-owned families. Wiring is also required for a host to construct
-   `CheckpointedBashTool` (or pass a `PartialOutputCheckpointSink` through a
-   future `ToolContext` field, which today would change every `ToolContext`
-   literal in `agent.rs`); crash recovery must additionally rehydrate the stored
+   operation-owned families; crash recovery must additionally rehydrate the stored
    snapshot as auxiliary observation data and call
-   `DurableInvocationStore::recover_unsafe_orphan`.
+   `DurableInvocationStore::recover_unsafe_orphan`. A host that instead wraps the
+   tool itself (`CheckpointedBashTool`) should not also opt in, so no invocation
+   is published twice.
 6. **4.11 cross-process memos + capability injection.** Same storage gap as 4.7
    for `pi.op.tool_memo`, plus an invocation capability handed to tools
    (`AgentHarnessToolInvocation` in Pi). Until then, a tool that wants memos must

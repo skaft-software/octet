@@ -83,6 +83,52 @@ that only those files can add.
   refusal `stop_details.explanation` errorMessage need the Anthropic compat
   record and `AssistantMessage` fields (1c.10).
 
+### 1c.5 Bedrock auth depth — API key + web identity (partial, landed)
+
+- Upstream: `bedrock-converse-stream.ts` (bearer/API-key presentation, OIDC role
+  configuration); AWS's documented Bedrock alternatives to SigV4.
+- Landed (`crates/octet-coding-agent/src/providers/auth.rs`):
+  - `AWS_BEARER_TOKEN_BEDROCK` selects `Auth::BearerEnv` before the SigV4 chain,
+    so a Bedrock API-key user never resolves (or pays for) AWS credentials. A
+    whitespace-only value is treated as absent rather than disabling a working
+    SigV4 chain.
+  - `AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` (+ optional
+    `AWS_ROLE_SESSION_NAME`, default `octet`) perform one bounded STS
+    `AssumeRoleWithWebIdentity` exchange: 3 s connect+total timeout, no retries,
+    64 KiB token-file and response bounds, `AWS_ENDPOINT_URL_STS` override
+    validated fail-closed (HTTPS, or literal loopback HTTP), and XML parsing that
+    requires `AccessKeyId` + `SecretAccessKey` + `SessionToken` and decodes only
+    the five predefined entities. A half-configured web identity, a missing or
+    oversized token file, and an STS error all fail closed with the provider's
+    error code (never provider prose, never the token).
+  - Chain order is now environment keys → web identity → profile → indicated
+    metadata sources, asserted by call counters.
+- Tests (`cargo test -p octet-coding-agent --lib -- providers::auth`: 40 passed):
+  `bedrock_api_key_takes_precedence_over_the_sigv4_chain`,
+  `blank_bedrock_api_key_falls_back_to_the_sigv4_chain`,
+  `bedrock_without_any_credential_source_offers_no_auth`,
+  `web_identity_requires_both_standard_variables`,
+  `web_identity_without_configuration_makes_no_request`,
+  `web_identity_posts_the_documented_sts_form_and_resolves_credentials` (loopback
+  STS fixture; the resolved credentials sign a SigV4 request),
+  `web_identity_sts_failure_is_reported_and_never_downgraded`,
+  `web_identity_token_file_is_bounded_and_never_empty`,
+  `sts_xml_parsing_requires_every_credential_field`,
+  `sts_endpoint_is_regional_and_validates_overrides_fail_closed`,
+  `role_arn_and_session_name_are_validated_fail_closed`,
+  `aws_chain_precedence_is_ordered_without_metadata_fallback`.
+- Residual gap (not landed, exact primitive): **profile-ARN region resolution and
+  application-inference-profile selection**. `aws_bedrock_region()` has no access
+  to the selected model id; `aws_bedrock_region`/`aws_bedrock_auth`/
+  `aws_bedrock_base_url` are called from `crates/octet-coding-agent/src/app/bootstrap.rs`
+  (`:1971`-adjacent, another worker's file), so deriving the region from an
+  `arn:aws:bedrock:<region>:<account>:application-inference-profile/…` model id
+  requires one plumbed parameter at that call site. Separately, a *declarative*
+  Bedrock bearer/API-key kind would need a new `AuthenticationSpec` variant in
+  `crates/octet-coding-agent/build.rs` (line 122) plus regenerated
+  `contract.rs`; the env-driven presentation landed here is provider-scoped and
+  branch-free in the agent loop, but the declaration cannot yet express it.
+
 ### 1c.8 Mistral Conversations
 
 - Upstream: `mistral-conversations.ts:196-204, 360-380, 510-525, 893-910`
@@ -184,11 +230,11 @@ that only those files can add.
 
 | Row | Missing primitive | Owning file |
 | --- | --- | --- |
-| 1a.2 radius/pi-messages | New `Protocol::PiMessages` codec + client dispatch + catalog registration. Upstream `api/pi-messages.ts`: POST `<base>/messages` `{model,context,options}`, SSE `start/text_*/thinking_*/toolcall_*/done/error`, terminal usage, `rewrite` diagnostics, `providerThinkingLevel`, native block-end replacement. Not an OpenAI alias. | client dispatch lives in `client.rs`; registration in `catalog.rs`/`declarations` |
-| 1c.5 Bedrock profiles | Profile-ARN region resolution, application-inference-profile, web-identity and bearer-token auth | `auth.rs` (not in this worker's paths) |
+| 1a.2 radius/pi-messages | **Blocked by ownership, not design.** The codec itself is unbuilt because `Protocol::PiMessages` cannot be added without arms in four exhaustive matches outside this worker's paths: `crates/octet-agent/src/telemetry.rs:943`, `crates/octet-agent/src/extension_process.rs:9593`, `crates/octet-coding-agent/src/batch.rs:220`, `crates/octet-coding-agent/src/modes/rpc.rs:461` (`rg -n 'Protocol::MistralConversations'` finds them; each has no wildcard arm). A declaration for it additionally needs `"pi_messages" => Some("Protocol::PiMessages")` in `crates/octet-coding-agent/build.rs:320` plus regenerated `contract.rs`. Deliverable once unblocked: upstream `api/pi-messages.ts` — POST `<base>/messages` `{model,context,options}`, SSE `start/text_*/thinking_*/toolcall_*/done/error`, terminal usage, `rewrite` diagnostics, `providerThinkingLevel`, native authoritative block-end replacement, not an OpenAI alias. | `crates/octet-ai/src/protocol/` (new), `client.rs`, `catalog.rs`; arms in `octet-agent`/`batch.rs`/`modes/rpc.rs`; `build.rs` |
+| 1c.5 Bedrock profiles | API key + web identity are landed (see above). Remaining: profile-ARN region / application-inference-profile region derivation needs the selected model id plumbed into `aws_bedrock_region()` from `crates/octet-coding-agent/src/app/bootstrap.rs`; a declarative bearer kind needs `AuthenticationSpec` in `build.rs` | `crates/octet-coding-agent/src/providers/auth.rs` (landed slice); `app/bootstrap.rs`; `build.rs` |
 | 1c.6 Codex transport | Dropped-socket recovery is landed (see above). Still missing: per-request `sse`/`websocket`/`websocket-cached`/`auto` selection, an explicit connect deadline, debug stats, and the `store: true` opt-in that would make cursor resumption reachable in live runs (agent-side builder) | `responses_ws.rs`, `client.rs` (landed); `crates/octet-agent/src/agent.rs` for the `store` opt-in |
 | 1c.7 Azure | Deployment map + per-call deployment/base-URL/resource/API-version overrides | `catalog.rs`, `client.rs` |
-| 1c.9 xAI Responses | encrypted-reasoning replay plumbing for the Responses shared module | `responses.rs` |
+| 1c.9 xAI Responses | The shared-module encrypted-reasoning plumbing is **already landed and verified** (not claimed as a new row): `include: ["reasoning.encrypted_content"]` is emitted for every reasoning-capable Responses model (`protocol/openai_responses.rs:1129`), the terminal output backfills `encrypted_content` into an existing reasoning state (`backfill_reasoning_signatures`, `:1528`, tests `encrypted_reasoning_state_preserved` `:3522` and `terminal_encrypted_reasoning_backfills_missing_item_payload` `:3550`), and canonical replay re-emits the opaque reasoning item with its `encrypted_content` (`:873`). The remaining primitive is the **xAI Responses route**: upstream pi declares the whole xAI provider as `openai-responses` (`packages/ai/src/providers/xai.ts`, `Provider<"openai-responses">`) while octet's declaration is `openai_chat`, so switching it changes the live wire for every xAI user and needs a live acceptance run rather than a type check | `crates/octet-coding-agent/src/providers/declarations.json` (`xai` route) + regenerated `contract.rs`; live acceptance evidence |
 | 1c.10 response metadata | `AssistantMessage.responseModel` / `providerThinkingLevel` / `rawStopReason` / `diagnostics` / `ToolResult.usage` are public `Response` fields consumed across `octet-agent`/`octet-coding-agent`; adding them changes every constructor outside this worker's paths | `types.rs` + downstream crates |
 | 1e.1 faux provider | deferred pending/ready/failed/cancelled handles + deferred stop reason | `client.rs`/new module |
 | 1e.2 frame encoder/reducer | assistant-message frame encode/reduce + durable partial republish | `stream.rs` (candidate, not yet scoped) |

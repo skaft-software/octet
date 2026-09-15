@@ -118,6 +118,18 @@ impl CodexContextNotes {
         }
         Some(note.clone())
     }
+
+    /// Merge notes recorded by a later catalog build (catalog enrichment).
+    ///
+    /// Only missing entries are added: a note already delivered or already
+    /// recorded for this session is never replaced, so enrichment cannot unset
+    /// or rewrite the one note the session owes. The delivery latch is not
+    /// touched.
+    pub fn merge(&mut self, other: Self) {
+        for (model, note) in other.notes {
+            self.notes.entry(model).or_insert(note);
+        }
+    }
 }
 
 impl Bootstrap {
@@ -3074,9 +3086,55 @@ fn readiness_note_declaration(provider_id: &'static str) {
         .push(provider_id);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only fail-closed probe for the readiness plan.
+    ///
+    /// While this is set, consulting that declaration panics. The narrowed plan
+    /// is initialized sequentially on the calling thread, so a thread-local is
+    /// exactly the assertion "this provider was never entered" — the strongest
+    /// form of "an unrelated provider cannot delay readiness", with no timing
+    /// threshold and no cross-test interference.
+    static READINESS_FORBIDDEN_CONSULTATION: std::cell::RefCell<Option<&'static str>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Test-only guard that makes one declaration's consultation fail closed.
+///
+/// See [`READINESS_FORBIDDEN_CONSULTATION`]; dropping the guard restores the
+/// previous value so guards nest safely.
+#[cfg(test)]
+pub(crate) struct ForbiddenReadinessConsultation(Option<&'static str>);
+
+#[cfg(test)]
+impl ForbiddenReadinessConsultation {
+    pub(crate) fn new(provider_id: &'static str) -> Self {
+        READINESS_FORBIDDEN_CONSULTATION
+            .with(|forbidden| Self(forbidden.replace(Some(provider_id))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForbiddenReadinessConsultation {
+    fn drop(&mut self) {
+        READINESS_FORBIDDEN_CONSULTATION.with(|forbidden| {
+            *forbidden.borrow_mut() = self.0;
+        });
+    }
+}
+
 fn declaration_is_configured(declaration: &ProviderDeclaration) -> anyhow::Result<bool> {
     #[cfg(test)]
     readiness_note_declaration(declaration.id);
+    #[cfg(test)]
+    READINESS_FORBIDDEN_CONSULTATION.with(|forbidden| {
+        if forbidden.borrow().as_deref() == Some(declaration.id) {
+            panic!(
+                "readiness consulted `{}` although the plan never named it; an unrelated provider must not be entered",
+                declaration.id
+            );
+        }
+    });
     match declaration.runtime_configuration {
         // The AWS chain includes EC2 instance metadata, which has no local
         // configuration marker. Schedule one bounded private registration job;
@@ -3182,11 +3240,12 @@ fn register_declaration_inventory(
 /// The narrowed plan is normally one entry, so the calls are sequential: a
 /// wait that cannot be attributed to a single route is worse than a slightly
 /// longer one, and the plan already excludes everything the launch cannot use.
+/// A named subscription route (Codex) has no environment credential to probe:
+/// `declaration_is_configured` returns `false` and the route is initialized by
+/// its own catalog-registration branch instead.
 fn register_selected_preset_inventories(catalog: &mut ModelCatalog, routes: &[&'static str]) {
     for route in routes {
-        if let Some(declaration) = BUILTIN_PROVIDER_DECLARATIONS
-            .iter()
-            .find(|declaration| declaration.id == *route)
+        if let Some(declaration) = readiness_declarations().find(|declaration| declaration.id == *route)
         {
             register_declaration_inventory(catalog, declaration);
         }
@@ -4895,7 +4954,11 @@ pub(crate) enum CodexInventorySource {
     /// missing, stale, invalid, or unusable and no discovery could complete:
     /// carries no dynamic capability and keeps the plan's entitlement ceiling.
     ConservativeFallback,
-    /// The unit-test fixture catalog: no ambient HOME, no network.
+    /// The unit-test registration path: no ambient HOME and no network. A
+    /// fresh, account- and plan-matched cache is still authoritative, but it is
+    /// reduced to the conservative contract (see [`conservative_offline_codex_models`]),
+    /// so a test can never advertise dynamic capability that was not
+    /// revalidated online.
     Fixture,
 }
 
@@ -4910,6 +4973,10 @@ pub(crate) enum CodexInventorySource {
 /// * online uses a fresh, account- and plan-matched cache as-is (its dynamic
 ///   capability was validated within the freshness window) and otherwise
 ///   performs exactly one bounded discovery, which also seeds the cache;
+/// * a unit-test (fixture) registration never contacts the provider, but a
+///   fresh account- and plan-matched cache is still authoritative: skipping it
+///   would make the freshness, account-binding and reduction rules untestable
+///   through the real registration path;
 /// * any failure — invalid cache, discovery error, timeout — falls back to the
 ///   checked-in catalog, never to a partly-trusted cache.
 fn codex_inventory_models(
@@ -4919,16 +4986,18 @@ fn codex_inventory_models(
     fixture: bool,
     discover: impl FnOnce(crate::auth::codex::CredentialStore) -> anyhow::Result<CodexDiscovery>,
 ) -> (Vec<DiscoveredCodexModel>, CodexInventorySource) {
-    if fixture {
-        // Unit tests never inspect ambient HOME credentials or contact the
-        // provider; they get the deterministic checked-in catalog.
-        return (
-            fallback_codex_models(initial_claims.plan.as_ref()),
-            CodexInventorySource::Fixture,
-        );
-    }
     let cache = load_codex_model_cache(store, initial_claims);
-    if offline {
+    if fixture || offline {
+        // No provider request on either path. A fresh, account- and
+        // plan-matched cache is still used, reduced to the conservative
+        // contract because it cannot be revalidated online; only a missing or
+        // unusable cache uses the checked-in catalog. The source label keeps
+        // the two paths distinguishable.
+        let fallback_source = if fixture {
+            CodexInventorySource::Fixture
+        } else {
+            CodexInventorySource::ConservativeFallback
+        };
         return match cache {
             Ok(Some(models)) => (
                 conservative_offline_codex_models(models),
@@ -4936,7 +5005,7 @@ fn codex_inventory_models(
             ),
             Ok(None) => (
                 fallback_codex_models(initial_claims.plan.as_ref()),
-                CodexInventorySource::ConservativeFallback,
+                fallback_source,
             ),
             Err(error) => {
                 crate::output::stderr!(
@@ -4944,7 +5013,7 @@ fn codex_inventory_models(
                 );
                 (
                     fallback_codex_models(initial_claims.plan.as_ref()),
-                    CodexInventorySource::ConservativeFallback,
+                    fallback_source,
                 )
             }
         };
@@ -5579,6 +5648,22 @@ impl CatalogReadiness {
     }
 }
 
+/// Declarations the readiness plan may name as a proven route.
+///
+/// The generated [`BUILTIN_PROVIDER_DECLARATIONS`] carries the environment/ADC
+/// built-ins only; the product-owned subscription routes whose credentials are
+/// owned by another module (Codex today) are appended here. Every entry must
+/// have a matching catalog-registration branch in
+/// [`model_catalog_for_readiness`], otherwise naming it would prove a route that
+/// nothing initializes. Copilot is deliberately absent: host-owned integrations
+/// are not nameable by a builtin id, so a Copilot selection stays on the fleet
+/// plan.
+fn readiness_declarations() -> impl Iterator<Item = &'static ProviderDeclaration> {
+    BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .chain([&crate::providers::CODEX])
+}
+
 /// Resolve the builtin declaration that provably owns one selected model id.
 ///
 /// Only an explicit `<declaration-id>/<model>` namespace is trusted. Every
@@ -5588,8 +5673,7 @@ impl CatalogReadiness {
 /// the model actually needs, so ambiguity always falls back to the full path.
 fn builtin_declaration_for_model(model: &ModelId) -> Option<&'static str> {
     let (prefix, _) = model.0.split_once('/')?;
-    BUILTIN_PROVIDER_DECLARATIONS
-        .iter()
+    readiness_declarations()
         .find(|declaration| declaration.id == prefix)
         .map(|declaration| declaration.id)
 }
@@ -5748,7 +5832,14 @@ fn base_model_catalog(offline: bool) -> anyhow::Result<ModelCatalog> {
 }
 
 /// Environment switch for the off-screen startup phase trace.
-const STARTUP_TRACE_ENV: &str = "OCTET_STARTUP_TRACE";
+///
+/// This is the one timing channel every frontend shares for the "startup shows
+/// nothing, but latency must stay attributable" contract: set to a non-empty
+/// value other than `0` and `startup_phase` writes one
+/// `octet-startup: <phase> elapsed=<micros>us` line per boundary to stderr.
+/// Frontends that own a phase boundary (`history.hydrate`, `frame.ready`) call
+/// [`startup_phase`] with their stable name; they never render the trace.
+pub(crate) const STARTUP_TRACE_ENV: &str = "OCTET_STARTUP_TRACE";
 /// Monotonic origin for the phase trace, shared by every phase in this process.
 static STARTUP_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
@@ -5902,7 +5993,7 @@ pub fn model_catalog_without_codex() -> anyhow::Result<ModelCatalog> {
 /// readiness ([`Bootstrap::enrich_catalog`]). A launch that cannot name its
 /// route takes the fleet plan, which is the historical behavior.
 pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
-    let readiness = catalog_readiness(&config);
+    let mut readiness = catalog_readiness(&config);
     let (mut catalog, mut codex_context_notes) =
         model_catalog_for_readiness(config.offline, &readiness)?;
     // The plan is a proof about configuration, not a promise: the selection can
@@ -5920,6 +6011,9 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
             model_catalog_for_readiness(config.offline, &CatalogReadiness::Fleet)?;
         catalog = fleet_catalog;
         codex_context_notes = fleet_notes;
+        // The catalog is already the fleet one, so record that: a later
+        // `enrich_catalog` must not rebuild it a second time.
+        readiness = CatalogReadiness::Fleet;
     }
     let sessions = SessionStore::new(&config.session_dir, &config.workspace);
     // Record the workspace path so cross-workspace browsing can name each
@@ -5966,13 +6060,12 @@ impl Bootstrap {
             return Ok(());
         }
         startup_phase("catalog.enrich");
-        let (catalog, notes) = model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
+        let (catalog, notes) =
+            model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
         self.catalog = catalog;
         // Notes were recorded for the deferred Codex route; merge rather than
         // replace so a note already delivered for this session stays delivered.
-        for (model, note) in notes.notes {
-            self.codex_context_notes.notes.entry(model).or_insert(note);
-        }
+        self.codex_context_notes.merge(notes);
         self.readiness = CatalogReadiness::Fleet;
         Ok(())
     }
@@ -6706,8 +6799,8 @@ pub(crate) fn build_app_with_runtime_manager(
         prestarted_extensions,
         prepared_session,
         modeless: _,
-        codex_context_notes: _,
-        readiness: _,
+        codex_context_notes,
+        readiness,
     } = boot;
     let mut system = system;
     startup_phase("app.build");
@@ -6844,6 +6937,8 @@ pub(crate) fn build_app_with_runtime_manager(
         goal_store,
         goal_driver,
         goal_session_id,
+        codex_context_notes,
+        readiness,
     })
 }
 
@@ -6897,6 +6992,10 @@ pub fn rebuild_app(
     let system = app.system.clone();
     let old_skills = Arc::clone(&app.skills);
     let goal_store = Arc::clone(&app.goal_store);
+    // The note latch survives a rebuild: a note already delivered stays
+    // delivered, and a note still owed is carried to the new App exactly once.
+    let codex_context_notes = app.codex_context_notes.clone();
+    let readiness = app.readiness.clone();
     let compact_model = config
         .compaction
         .compact_model
@@ -7092,6 +7191,8 @@ pub fn rebuild_app(
         goal_store,
         goal_driver,
         goal_session_id,
+        codex_context_notes,
+        readiness,
     })
 }
 

@@ -555,3 +555,143 @@ START 2026-09-15T18:10:03Z ai11 alive (startup latency P0)
 START 2026-09-15T18:21:34Z ai12 alive
 
 START 2026-09-15T18:29:32Z ai12b alive
+
+START 2026-09-15T19:02:45Z ai12c alive
+
+## ai12c — TASK 1 (P0 AWS metadata activation), TASK 2/3 verification, TASK 4 rows
+
+### TASK 1 — adopted wave-11 work, fixed it, proved it (observed output)
+
+The wave-11 rule was in-flight and **broken**: `cargo test -p octet-coding-agent
+--lib -- providers::auth` failed 2/29 before my edits. Fixes:
+- `metadata_endpoint_precedence_is_standard_name_then_alias_then_profile`: the
+  accepted endpoint is normalized with a trailing slash (needed so IMDS path
+  segments append); the test expected un-normalized strings. Test corrected.
+- `opt_in_activation_resolves_and_signs_with_live_metadata_credentials`: resolved
+  the blocking metadata client inside an async test (`Cannot drop a runtime in a
+  context where blocking is not allowed`). Now resolves in `spawn_blocking`,
+  exactly like `AwsBedrockSigner::sign`.
+- `disabled_activation_opens_no_connection_to_a_live_metadata_endpoint`: the
+  live-socket control connection raced a non-blocking `accept` against the TCP
+  handshake and was flaky under parallel load. Rewritten with a blocking accept,
+  an explicit drain barrier, and a bounded wait for the fixture's observation;
+  the behavior assertion is still a request count. Ran 5× consecutively: 5/5 ok.
+
+Observed (`cargo test -p octet-coding-agent --lib -- providers::auth`):
+`test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 1402 filtered out`.
+The zero-request rule is asserted by counters
+(`unrelated_provider_launch_makes_zero_aws_metadata_requests`,
+`disabled_activation_opens_no_connection_to_a_live_metadata_endpoint`, plus the
+pure-function table across `AWS_EC2_METADATA_DISABLED` true/false/absent,
+profile present/absent, static keys present/absent, and the explicit opt-in), and
+the intentional path by
+`opt_in_activation_resolves_and_signs_with_live_metadata_credentials`,
+`an_ec2_instance_identity_still_resolves_instance_credentials`,
+`indicated_metadata_probe_reaches_the_ec2_source`,
+`the_profile_endpoint_activates_and_is_the_probe_target`. No timing threshold is
+used anywhere. Documented in `docs/providers.md` (indication order, fail-closed
+unknown state, measured 1,025/1,027 ms → 22/19 ms, test names).
+
+CHANGELOG-ready: **AWS metadata credentials no longer cost unrelated-provider
+launches ~1 s.** A pure activation rule (`aws_metadata_activation_from`) keeps
+EC2/ECS metadata probes closed unless the local environment positively indicates
+them (standard disable switch off, `OCTET_AWS_METADATA_CREDENTIALS`, container
+URIs, pinned IMDS endpoint, a profile that declares metadata, or local DMI
+markers naming `Amazon EC2`), fails closed on unknown state, and is asserted by
+request counts; indicated EC2/ECS-backed Bedrock runs still resolve and sign.
+
+### TASK 2 — Responses `computer_call` lifecycle: already landed in wave 10, verified
+
+`rg -n computer_call crates/octet-ai/src/responses.rs` is no longer empty: the
+declaration (`ComputerUseTool`, `ResponsesOptions::with_computer_use`), the
+`computer_call` → canonical `computer_use_preview` mapping, and the
+`computer_call_output` dispatch (single `computer_screenshot`, 4 MiB inline cap,
+16 KiB action cap, unknown/absent/oversized actions fail closed) are in
+`crates/octet-ai/src/protocol/openai_responses.rs`, with the scripted SSE fixture
+`crates/octet-ai/tests/fixtures/openai_responses/computer_call.sse`. Observed:
+`cargo test -p octet-ai --lib -- computer` → `13 passed; 0 failed`, including
+`computer_call_round_trips_action_call_id_and_safety_checks`,
+`computer_call_decodes_identically_across_byte_boundaries`,
+`unsupported_computer_action_fails_closed`,
+`computer_call_history_replays_as_computer_call_and_output`. Wire protocol only:
+no desktop/browser backend, no authority to act (#383 host-gated). No code change
+was needed or made by this worker.
+
+### TASK 3 — Codex `service_tier` doc truthfulness
+
+Re-read the builders (`crates/octet-agent/src/agent.rs`): `resolve_service_tier`
+(`:3786`) rejects any tier unless `Protocol::OpenAiResponses` **and**
+`responses_profile.accepts_service_tier()` (Codex only, `types.rs:218`); both
+`durable_responses_options` (`:3750`) and `native_responses_options` (`:3801`)
+route the validated tier through `ResponsesOptions::with_service_tier`
+(`responses.rs:362`); `responses_prewarm_request` (`:5780`) reuses them; the codec
+re-checks the declaration independently
+(`protocol/openai_responses.rs:1154`). `docs/parity/providers.md` updated: stale
+line refs (`set_service_tier` `:6505`, accessor `:6512`, `apply_fast_command`
+`:1651`), the codec-side re-check added, and the two behavioral tests named.
+Residual gap unchanged and now precise: `apply_fast_command`
+(`modes/interactive.rs:1651`) still never calls `Agent::set_service_tier`
+(`rg -n set_service_tier crates/` finds only the definition plus the agent's
+tests), so no live run selects a tier: "agent API ready, UI consumer pending".
+
+### TASK 4 — rows
+
+**1a.2 PiMessages — BLOCKED BY OWNERSHIP (exact primitive).** Adding
+`Protocol::PiMessages` breaks four exhaustive matches with no wildcard arm:
+`crates/octet-agent/src/telemetry.rs:943`,
+`crates/octet-agent/src/extension_process.rs:9593`,
+`crates/octet-coding-agent/src/batch.rs:220`,
+`crates/octet-coding-agent/src/modes/rpc.rs:461` (find them with
+`rg -n Protocol::MistralConversations`). Three of the four are in paths this
+worker must not edit (`crates/octet-agent/**`, `modes/**`); a declarative route
+also needs `"pi_messages"` in `crates/octet-coding-agent/build.rs:320` plus a
+regenerated `contract.rs`. Recorded in `docs/parity/codecs.md`.
+
+**1c.5 Bedrock — API key + web identity landed (this worker).** In
+`crates/octet-coding-agent/src/providers/auth.rs`:
+`AWS_BEARER_TOKEN_BEDROCK` → `Auth::BearerEnv` (before SigV4, blank value falls
+back); `AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` (+ optional
+`AWS_ROLE_SESSION_NAME`) → one bounded STS `AssumeRoleWithWebIdentity` exchange
+(3 s, 64 KiB token cap, no retries, `AWS_ENDPOINT_URL_STS` override validated
+fail-closed, XML parse requires all three credential fields, errors surface the
+STS code and never provider prose or the token); chain order is now env keys →
+web identity → profile → indicated metadata sources. Observed:
+`cargo test -p octet-coding-agent --lib -- providers::auth` → `40 passed; 0
+failed`, including `web_identity_posts_the_documented_sts_form_and_resolves_credentials`
+(loopback STS fixture; the resolved credentials sign a SigV4 request) and
+`web_identity_sts_failure_is_reported_and_never_downgraded`.
+Residual: profile-ARN/application-inference-profile region derivation needs the
+model id plumbed from `app/bootstrap.rs`; a declarative bearer kind needs
+`AuthenticationSpec` in `build.rs`.
+
+CHANGELOG-ready: **Bedrock now accepts `AWS_BEARER_TOKEN_BEDROCK` (API key) and
+web-identity roles** (`AWS_ROLE_ARN`/`AWS_WEB_IDENTITY_TOKEN_FILE`, one bounded
+STS exchange, `AWS_ENDPOINT_URL_STS` override); a half-configured web identity
+fails closed instead of resolving a different identity.
+
+**1c.9 xAI Responses — plumbing verified, route flip deliberately not taken.**
+`include: ["reasoning.encrypted_content"]` (`openai_responses.rs:1129`), the
+terminal backfill (`:1528`, tests `:3522`/`:3550`), and canonical replay of the
+opaque reasoning item (`:873`) are already in-tree and green
+(`cargo test -p octet-ai`). The remaining primitive is the xAI route itself:
+upstream pi declares the whole xAI provider as `openai-responses` while octet
+declares `openai_chat`; flipping it changes the live wire for every xAI user and
+needs a live acceptance run, so it is recorded rather than flipped silently.
+
+**Verified already-landed rows (no code claimed):**
+`cargo test -p octet-ai --lib -- proxy` → `5 passed` (1b.3 root/subdomain
+exclusion incl. `notexample.com`, port/`*` entries);
+`cargo test -p octet-coding-agent --lib -- conditional_inventory` → `5 passed`
+(1b.4 200→304 keeps the last good body and advances `checked_at`; 200 without an
+etag clears the validator; scoped validators; errors preserve the last good
+body).
+
+**Not landed, blocked (unchanged):** 1b.6 `GOOGLE_CLOUD_API_KEY`
+(`AuthenticationSpec` in `build.rs`); 1c.3/1c.10 add public `ModelSpec`/`Response`
+fields whose literal constructors live in `octet-agent`/`octet-coding-agent`
+(constructors this worker does not own); 1c.4 depends on 1c.10; 1c.6 per-request
+transport / 1c.7 per-call Azure overrides need a `Request` field (20+ literal
+constructors outside this worker's paths); 1e.1 deferred handles need
+`AssistantMessage.deferred` (same constructor problem); 1e.3 image generation was
+not started (budget); 1d.1-1d.3 not attempted.
+
