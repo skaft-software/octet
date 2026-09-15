@@ -551,3 +551,7 @@ CHANGELOG-ready bullet (ai11, TASK 1 / roadmap row #388):
   any action may run remains a host-policy decision (roadmap #383).
 
 START 2026-09-15T18:10:03Z ai11 alive (startup latency P0)
+
+START 2026-09-15T18:21:34Z ai12 alive
+
+START 2026-09-15T18:29:32Z ai12b alive

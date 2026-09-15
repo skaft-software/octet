@@ -69,6 +69,11 @@ pub struct Bootstrap {
     /// catalog was built. Catalog enumeration never prints; only the effective
     /// session model's note is ever shown.
     codex_context_notes: CodexContextNotes,
+    /// Which provider inventories readiness initialized for this launch.
+    ///
+    /// Kept so [`Bootstrap::enrich_catalog`] can complete exactly what the plan
+    /// deferred, without re-running the fleet initialization a second time.
+    readiness: CatalogReadiness,
 }
 
 /// The single user-facing Codex context note for every catalog model that needs
@@ -185,6 +190,7 @@ impl Bootstrap {
         let mut catalog = self.catalog.clone();
         extensions.synchronize_provider_catalog(&mut catalog, &self.client);
         *self.prestarted_extensions.borrow_mut() = Some((host, extensions));
+        startup_phase("extensions.provider-preflight");
         Ok(())
     }
 
@@ -3035,7 +3041,42 @@ fn merge_provider_catalog(target: &mut ModelCatalog, source: ModelCatalog) -> an
     Ok(())
 }
 
+/// Declarations whose configuration was consulted while building a catalog.
+///
+/// Test-only observability for the readiness plan: an unrelated provider being
+/// *not consulted at all* is the property under test, and that is a request
+/// count rather than a wall-clock threshold.
+#[cfg(test)]
+pub(crate) fn readiness_declarations_consulted() -> Vec<&'static str> {
+    READINESS_DECLARATIONS_CONSULTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_readiness_declarations_consulted() {
+    READINESS_DECLARATIONS_CONSULTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+#[cfg(test)]
+static READINESS_DECLARATIONS_CONSULTED: std::sync::Mutex<Vec<&'static str>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn readiness_note_declaration(provider_id: &'static str) {
+    READINESS_DECLARATIONS_CONSULTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(provider_id);
+}
+
 fn declaration_is_configured(declaration: &ProviderDeclaration) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    readiness_note_declaration(declaration.id);
     match declaration.runtime_configuration {
         // The AWS chain includes EC2 instance metadata, which has no local
         // configuration marker. Schedule one bounded private registration job;
@@ -3066,6 +3107,92 @@ fn declaration_is_configured(declaration: &ProviderDeclaration) -> anyhow::Resul
     }
 }
 
+/// Spawn one declaration's bounded inventory discovery on its own thread.
+///
+/// A fleet sweep runs all configured providers at once; the narrowed readiness
+/// path runs exactly the route the selection proved, through this same body, so
+/// both initialize a provider identically.
+fn spawn_declaration_inventory(
+    declaration: &'static ProviderDeclaration,
+) -> std::io::Result<std::thread::JoinHandle<anyhow::Result<ModelCatalog>>> {
+    std::thread::Builder::new()
+        .name(format!("octet-{}-catalog", declaration.id))
+        .spawn(move || {
+            let mut provider_catalog = ModelCatalog::default();
+            try_register_declaration(&mut provider_catalog, declaration)?;
+            Ok::<_, anyhow::Error>(provider_catalog)
+        })
+}
+
+/// Merge one provider inventory into the launch catalog.
+///
+/// Discovery is always non-fatal: a provider that cannot authenticate, times
+/// out, or panics must not block the other routes, and the same bounded warning
+/// is reported on every path.
+fn merge_declaration_inventory(
+    catalog: &mut ModelCatalog,
+    declaration: &ProviderDeclaration,
+    outcome: std::thread::Result<anyhow::Result<ModelCatalog>>,
+) {
+    match outcome {
+        Ok(Ok(provider_catalog)) => {
+            if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
+                crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
+            }
+        }
+        Ok(Err(error)) => {
+            crate::output::stderr!("warning: {} unavailable: {error}", declaration.name)
+        }
+        Err(_) => crate::output::stderr!(
+            "warning: {} unavailable: model discovery thread panicked",
+            declaration.name
+        ),
+    }
+}
+
+/// Initialize one declaration's inventory on the readiness path.
+///
+/// Only reached for a route the launch proved it needs (or, below, for one
+/// configured compaction override), so this wait is attributable to the user's
+/// own selection. It is never the fleet sweep: an unrelated configured provider
+/// is not consulted here at all.
+fn register_declaration_inventory(
+    catalog: &mut ModelCatalog,
+    declaration: &'static ProviderDeclaration,
+) {
+    match declaration_is_configured(declaration) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
+            return;
+        }
+    }
+    match spawn_declaration_inventory(declaration) {
+        Ok(handle) => merge_declaration_inventory(catalog, declaration, handle.join()),
+        Err(error) => crate::output::stderr!(
+            "warning: could not start {} model discovery: {error}",
+            declaration.name
+        ),
+    }
+}
+
+/// Initialize exactly the named declarations, in order.
+///
+/// The narrowed plan is normally one entry, so the calls are sequential: a
+/// wait that cannot be attributed to a single route is worse than a slightly
+/// longer one, and the plan already excludes everything the launch cannot use.
+fn register_selected_preset_inventories(catalog: &mut ModelCatalog, routes: &[&'static str]) {
+    for route in routes {
+        if let Some(declaration) = BUILTIN_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|declaration| declaration.id == *route)
+        {
+            register_declaration_inventory(catalog, declaration);
+        }
+    }
+}
+
 /// Discover configured provider catalogs concurrently, then merge them on the
 /// launch thread. A fleet outage therefore costs at most one bounded discovery
 /// interval instead of one interval per configured account.
@@ -3083,14 +3210,7 @@ fn register_configured_presets_parallel(catalog: &mut ModelCatalog) {
                 continue;
             }
         }
-        let declaration = *declaration;
-        match std::thread::Builder::new()
-            .name(format!("octet-{}-catalog", declaration.id))
-            .spawn(move || {
-                let mut provider_catalog = ModelCatalog::default();
-                try_register_declaration(&mut provider_catalog, &declaration)?;
-                Ok::<_, anyhow::Error>(provider_catalog)
-            }) {
+        match spawn_declaration_inventory(declaration) {
             Ok(handle) => jobs.push((declaration, handle)),
             Err(error) => crate::output::stderr!(
                 "warning: could not start {} model discovery: {error}",
@@ -3100,20 +3220,7 @@ fn register_configured_presets_parallel(catalog: &mut ModelCatalog) {
     }
 
     for (declaration, job) in jobs {
-        match job.join() {
-            Ok(Ok(provider_catalog)) => {
-                if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
-                    crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
-                }
-            }
-            Ok(Err(error)) => {
-                crate::output::stderr!("warning: {} unavailable: {error}", declaration.name)
-            }
-            Err(_) => crate::output::stderr!(
-                "warning: {} unavailable: model discovery thread panicked",
-                declaration.name
-            ),
-        }
+        merge_declaration_inventory(catalog, declaration, job.join());
     }
 }
 
@@ -4426,6 +4533,7 @@ struct CodexModelCache {
     models: Vec<DiscoveredCodexModel>,
 }
 
+#[derive(Clone)]
 struct CodexDiscovery {
     claims: crate::auth::codex::SubscriptionClaims,
     models: Vec<DiscoveredCodexModel>,
@@ -4770,6 +4878,136 @@ fn load_codex_model_cache(
     Ok(Some(cache.models))
 }
 
+/// Which source produced the Codex inventory for one registration.
+///
+/// Kept as a typed outcome (not a log line) so the freshness and
+/// account-binding rules can be asserted directly: a fresh, account- and
+/// plan-matched cache must not trigger a discovery request, and a cache that is
+/// stale, invalid, or bound to another account must never be trusted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexInventorySource {
+    /// A fresh, account- and plan-matched cache file. Dynamic capability
+    /// metadata from this source is validated by the freshness boundary.
+    FreshCache,
+    /// One synchronous online discovery, which also seeds the cache.
+    OnlineDiscovery,
+    /// The checked-in conservative fallback catalog. Used when the cache is
+    /// missing, stale, invalid, or unusable and no discovery could complete:
+    /// carries no dynamic capability and keeps the plan's entitlement ceiling.
+    ConservativeFallback,
+    /// The unit-test fixture catalog: no ambient HOME, no network.
+    Fixture,
+}
+
+/// Decide the Codex model inventory for one registration.
+///
+/// The paths deliberately have different freshness behaviour, and this is the
+/// only place that decides which one applies:
+///
+/// * offline never refreshes: a fresh cache is *reduced* to the conservative
+///   contract ([`conservative_offline_codex_models`]), because a cache that
+///   cannot be revalidated must not advertise dynamic capability;
+/// * online uses a fresh, account- and plan-matched cache as-is (its dynamic
+///   capability was validated within the freshness window) and otherwise
+///   performs exactly one bounded discovery, which also seeds the cache;
+/// * any failure — invalid cache, discovery error, timeout — falls back to the
+///   checked-in catalog, never to a partly-trusted cache.
+fn codex_inventory_models(
+    store: &crate::auth::codex::CredentialStore,
+    initial_claims: &crate::auth::codex::SubscriptionClaims,
+    offline: bool,
+    fixture: bool,
+    discover: impl FnOnce(crate::auth::codex::CredentialStore) -> anyhow::Result<CodexDiscovery>,
+) -> (Vec<DiscoveredCodexModel>, CodexInventorySource) {
+    if fixture {
+        // Unit tests never inspect ambient HOME credentials or contact the
+        // provider; they get the deterministic checked-in catalog.
+        return (
+            fallback_codex_models(initial_claims.plan.as_ref()),
+            CodexInventorySource::Fixture,
+        );
+    }
+    let cache = load_codex_model_cache(store, initial_claims);
+    if offline {
+        return match cache {
+            Ok(Some(models)) => (
+                conservative_offline_codex_models(models),
+                CodexInventorySource::FreshCache,
+            ),
+            Ok(None) => (
+                fallback_codex_models(initial_claims.plan.as_ref()),
+                CodexInventorySource::ConservativeFallback,
+            ),
+            Err(error) => {
+                crate::output::stderr!(
+                    "warning: Codex model cache was unusable ({error}); using conservative offline fallback catalog"
+                );
+                (
+                    fallback_codex_models(initial_claims.plan.as_ref()),
+                    CodexInventorySource::ConservativeFallback,
+                )
+            }
+        };
+    }
+    match cache {
+        Ok(Some(models)) => (models, CodexInventorySource::FreshCache),
+        cache_result => match discover(store.clone()) {
+            Ok(discovery) => {
+                if let Err(error) = save_codex_model_cache(store, &discovery) {
+                    crate::output::stderr!(
+                        "warning: could not persist Codex model metadata: {error}"
+                    );
+                }
+                (discovery.models, CodexInventorySource::OnlineDiscovery)
+            }
+            Err(discovery_error) => {
+                if let Err(cache_error) = cache_result {
+                    crate::output::stderr!(
+                        "warning: Codex model cache was unusable ({cache_error}); live discovery also failed ({discovery_error}); using conservative fallback catalog"
+                    );
+                } else {
+                    crate::output::stderr!(
+                        "warning: Codex model auto-discovery failed; using conservative fallback catalog: {discovery_error}"
+                    );
+                }
+                // Discovery may have refreshed a token before the inventory
+                // request failed, so re-read claims for the fallback limits.
+                let current_claims = crate::auth::codex::usable_subscription_claims(store)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| initial_claims.clone());
+                (
+                    fallback_codex_models(current_claims.plan.as_ref()),
+                    CodexInventorySource::ConservativeFallback,
+                )
+            }
+        },
+    }
+}
+
+/// The bounded readiness step for a selected Codex route.
+///
+/// Credential refresh and inventory fetch share one deadline, so the wait the
+/// user sees is the advertised one. A timeout is typed
+/// ([`RouteReadinessTimeout`]) and returns no partial inventory.
+fn discover_codex_models_within_envelope(
+    store: crate::auth::codex::CredentialStore,
+) -> anyhow::Result<CodexDiscovery> {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    run_route_readiness(
+        "codex route readiness",
+        CODEX_READINESS_ENVELOPE,
+        cancel,
+        move |cancel| {
+            discover_codex_models_with(
+                store,
+                cancel,
+                crate::auth::codex::REFRESH_LOCK_WAIT,
+            )
+        },
+    )
+}
+
 fn conservative_offline_codex_models(
     mut models: Vec<DiscoveredCodexModel>,
 ) -> Vec<DiscoveredCodexModel> {
@@ -4816,42 +5054,155 @@ fn codex_models_url() -> anyhow::Result<url::Url> {
     Ok(url)
 }
 
+/// Wall-clock envelope for the SELECTED route's Codex inventory work.
+///
+/// The inventory request is bounded at ten seconds and a token refresh at sixty,
+/// so their sum used to be the real wait even though discovery advertised ten.
+/// Readiness gives the whole selected-route initialization one deadline instead:
+/// a subscription route that cannot become usable inside it is reported as a
+/// timeout and the conservative fallback catalog is used, rather than blocking
+/// the launch on an unrelated wait.
+pub(crate) const CODEX_READINESS_ENVELOPE: Duration = Duration::from_secs(10);
+
+/// Typed, bounded cause for a selected-route wait that did not finish in time.
+///
+/// Carries the phase name and the deadline, never a path or a credential, and
+/// its message is the whole diagnosis a user needs to retry.
+#[derive(Debug)]
+pub(crate) struct RouteReadinessTimeout {
+    pub phase: &'static str,
+    pub waited: Duration,
+}
+
+impl std::fmt::Display for RouteReadinessTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} did not finish within {} ms",
+            self.phase,
+            self.waited.as_millis()
+        )
+    }
+}
+
+impl std::error::Error for RouteReadinessTimeout {}
+
+/// Run one selected-route initialization step under a bounded, cancellable
+/// envelope.
+///
+/// The worker checks `cancel` between its own bounded steps, and every step that
+/// can block is already bounded (the inventory request, the token refresh, and
+/// the cross-process refresh lock via
+/// [`crate::auth::codex::store::REFRESH_LOCK_WAIT`]). A timeout therefore never
+/// abandons an indefinitely blocked worker: the worker either observes the
+/// cancellation or finishes its own bounded step and exits. A timed-out attempt
+/// holds nothing and rotates nothing, so the next launch finds the credential
+/// store exactly as the other owner left it.
+///
+/// The deadline signals cancellation before it returns: without that, a timed-out
+/// envelope would leave the worker's own `cancel` flag clear, so the credential
+/// step could still start an inventory request the launch no longer wants. The
+/// worker is never detached from its bound — it is only ever *asked* to stop
+/// between bounded steps, because interrupting a token refresh in flight can
+/// strand a rotated refresh token.
+pub(crate) fn run_route_readiness<T: Send + 'static>(
+    phase: &'static str,
+    envelope: Duration,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    work: impl FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<T>
+    + Send
+    + 'static,
+) -> anyhow::Result<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker_cancel = std::sync::Arc::clone(&cancel);
+    let worker = std::thread::Builder::new()
+        .name(format!("octet-route-{phase}"))
+        .spawn(move || {
+            let _ = sender.send(work(worker_cancel));
+        })?;
+    match receiver.recv_timeout(envelope) {
+        Ok(result) => {
+            let _ = worker.join();
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::Error::new(RouteReadinessTimeout {
+                phase,
+                waited: envelope,
+            }))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("{phase} worker stopped without reporting a result")
+        }
+    }
+}
+
 fn discover_codex_models(
     store: crate::auth::codex::CredentialStore,
 ) -> anyhow::Result<CodexDiscovery> {
-    std::thread::spawn(move || -> anyhow::Result<CodexDiscovery> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        runtime.block_on(async move {
-            let resolver = crate::auth::codex::CodexResolver::new(store);
-            let (mut headers, claims) = resolver.discovery_headers().await?;
-            let static_headers =
-                crate::providers::public_headers(crate::providers::CODEX.extra_headers)?;
-            for (name, value) in &static_headers {
-                headers.insert(name.clone(), value.clone());
-            }
-            headers.insert(
-                http::header::USER_AGENT,
-                http::HeaderValue::from_str(&codex_user_agent())?,
-            );
+    discover_codex_models_with(
+        store,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        crate::auth::codex::REFRESH_LOCK_WAIT,
+    )
+}
 
-            let url = codex_models_url()?;
-            let response = discovery_client(DISCOVERY_TIMEOUT)?
-                .get(url)
-                .headers(headers)
-                .send()
-                .await
-                .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?
-                .error_for_status()
-                .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?;
-            let body = bounded_discovery_json_async(response, "Codex models").await?;
-            let models = codex_models_from_response(&body, claims.plan.as_ref())?;
-            Ok(CodexDiscovery { claims, models })
-        })
+/// The bounded online discovery body.
+///
+/// `refresh_lock_wait` bounds the cross-process refresh-lock acquisition; it is
+/// a parameter so tests never depend on a production deadline. `cancel` is
+/// observed between the credential step and the inventory request, so a
+/// readiness timeout stops the sequence instead of starting a request the
+/// launch no longer wants.
+fn discover_codex_models_with(
+    store: crate::auth::codex::CredentialStore,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    refresh_lock_wait: Duration,
+) -> anyhow::Result<CodexDiscovery> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        #[cfg(test)]
+        let resolver = crate::auth::codex::CodexResolver::with_refresh_lock_wait(
+            store,
+            refresh_lock_wait,
+        );
+        #[cfg(not(test))]
+        let resolver = {
+            let _ = refresh_lock_wait;
+            crate::auth::codex::CodexResolver::new(store)
+        };
+        let (mut headers, claims) = resolver.discovery_headers().await?;
+        startup_phase("codex.credentials");
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("Codex model discovery cancelled before the inventory request");
+        }
+        let static_headers =
+            crate::providers::public_headers(crate::providers::CODEX.extra_headers)?;
+        for (name, value) in &static_headers {
+            headers.insert(name.clone(), value.clone());
+        }
+        headers.insert(
+            http::header::USER_AGENT,
+            http::HeaderValue::from_str(&codex_user_agent())?,
+        );
+
+        let url = codex_models_url()?;
+        startup_phase("codex.inventory");
+        let response = discovery_client(DISCOVERY_TIMEOUT)?
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?;
+        let body = bounded_discovery_json_async(response, "Codex models").await?;
+        let models = codex_models_from_response(&body, claims.plan.as_ref())?;
+        Ok(CodexDiscovery { claims, models })
     })
-    .join()
-    .map_err(|_| anyhow::anyhow!("Codex model discovery thread panicked"))?
 }
 
 fn codex_user_agent() -> String {
@@ -5013,52 +5364,13 @@ fn register_openai_codex_with_notes(
     // online and reduced to the conservative fallback offline, so dynamic
     // capabilities can never survive past the freshness boundary. A first
     // launch performs one bounded discovery to seed the cache.
-    let models = if offline {
-        match load_codex_model_cache(&store, &initial_claims) {
-            Ok(Some(models)) => conservative_offline_codex_models(models),
-            Ok(None) => fallback_codex_models(initial_claims.plan.as_ref()),
-            Err(error) => {
-                crate::output::stderr!(
-                    "warning: Codex model cache was unusable ({error}); using conservative offline fallback catalog"
-                );
-                fallback_codex_models(initial_claims.plan.as_ref())
-            }
-        }
-    } else if cfg!(test) {
-        fallback_codex_models(initial_claims.plan.as_ref())
-    } else {
-        match load_codex_model_cache(&store, &initial_claims) {
-            Ok(Some(models)) => models,
-            cache_result => match discover_codex_models(store.clone()) {
-                Ok(discovery) => {
-                    if let Err(error) = save_codex_model_cache(&store, &discovery) {
-                        crate::output::stderr!(
-                            "warning: could not persist Codex model metadata: {error}"
-                        );
-                    }
-                    discovery.models
-                }
-                Err(discovery_error) => {
-                    if let Err(cache_error) = cache_result {
-                        crate::output::stderr!(
-                            "warning: Codex model cache was unusable ({cache_error}); live discovery also failed ({discovery_error}); using conservative fallback catalog"
-                        );
-                    } else {
-                        crate::output::stderr!(
-                            "warning: Codex model auto-discovery failed; using conservative fallback catalog: {discovery_error}"
-                        );
-                    }
-                    // Discovery may have refreshed a token before the inventory
-                    // request failed, so re-read claims for the fallback limits.
-                    let current_claims = codex::usable_subscription_claims(&store)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| initial_claims.clone());
-                    fallback_codex_models(current_claims.plan.as_ref())
-                }
-            },
-        }
-    };
+    let (models, _source) = codex_inventory_models(
+        &store,
+        &initial_claims,
+        offline,
+        cfg!(test),
+        discover_codex_models_within_envelope,
+    );
     let resolver = std::sync::Arc::new(codex::CodexResolver::new(store));
 
     let mut default_headers = crate::providers::public_headers(declaration.extra_headers)?;
@@ -5218,9 +5530,125 @@ pub(crate) fn register_offline_openrouter_model(
     Ok(true)
 }
 
+/// The provider inventories a launch must initialize before it is usable.
+///
+/// Readiness is deliberately narrower than discovery. A launch that already
+/// names its route must not wait for unrelated configured providers: an AWS
+/// credential-chain probe, a subscription inventory fetch, or a local-server
+/// probe belongs to a route this launch cannot use. Anything the plan does not
+/// name is still available — the embedded static catalog is built in full and
+/// every skipped inventory can be completed later by
+/// [`Bootstrap::enrich_catalog`] — and the plan falls back to
+/// [`CatalogReadiness::Fleet`] whenever it cannot name the route, so narrowing
+/// is an optimization and never a selector.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogReadiness {
+    /// Nothing could be named (a model-less launch, first-run setup, a resumed
+    /// session whose provenance only the session file knows) or the selection
+    /// may belong to more than one route (an un-namespaced id, a custom
+    /// OpenAI-compatible registry, an extension-provided model). The historical
+    /// full inventory initialization, unchanged.
+    Fleet,
+    /// Exactly these builtin provider declarations participate in readiness,
+    /// in order. Used only when the selection proves the route, so the user's
+    /// chosen model is always initialized before it is resolved.
+    Routes(Vec<&'static str>),
+}
+
+impl CatalogReadiness {
+    /// Whether the plan includes one builtin provider declaration.
+    pub(crate) fn includes(&self, provider_id: &str) -> bool {
+        match self {
+            Self::Fleet => true,
+            Self::Routes(routes) => routes.iter().any(|route| *route == provider_id),
+        }
+    }
+
+    /// Whether this plan is the full historical initialization.
+    pub(crate) fn is_fleet(&self) -> bool {
+        matches!(self, Self::Fleet)
+    }
+
+    /// Route ids named by the plan, for diagnostics and tests.
+    #[cfg(test)]
+    pub(crate) fn route_ids(&self) -> Vec<&'static str> {
+        match self {
+            Self::Fleet => Vec::new(),
+            Self::Routes(routes) => routes.clone(),
+        }
+    }
+}
+
+/// Resolve the builtin declaration that provably owns one selected model id.
+///
+/// Only an explicit `<declaration-id>/<model>` namespace is trusted. Every
+/// other id — un-namespaced, a custom registry, an extension provider, an
+/// unknown namespace — returns `None`, which makes the caller take
+/// [`CatalogReadiness::Fleet`]: a wrong narrowing would silently drop the route
+/// the model actually needs, so ambiguity always falls back to the full path.
+fn builtin_declaration_for_model(model: &ModelId) -> Option<&'static str> {
+    let (prefix, _) = model.0.split_once('/')?;
+    BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == prefix)
+        .map(|declaration| declaration.id)
+}
+
+/// Which provider inventories readiness must initialize for this launch.
+///
+/// Order of guarantees:
+/// 1. an explicit CLI selection always wins and names its own route, even when
+///    a session is resumed (the session's provenance is overridden);
+/// 2. a resumed/continued/forked session without an explicit selection may
+///    carry provenance only the session file knows, so readiness stays full;
+/// 3. a configuration-level selection on a NEW session is the effective
+///    selection (nothing can override it), so it may narrow;
+/// 4. no selection at all needs the fleet: the picker, model-less mode and
+///    first-run setup all enumerate every provider;
+/// 5. a configured compaction route is retained even when the session model is
+///    on another provider, so compaction can never point at a missing route.
+pub(crate) fn catalog_readiness(config: &Config) -> CatalogReadiness {
+    let provenance_possible = !matches!(config.resume, ResumeSelector::New);
+    if provenance_possible && !config.model_explicit {
+        // A session may have stored a model that config cannot see yet.
+        return CatalogReadiness::Fleet;
+    }
+    let Some(selection) = config.model.as_ref() else {
+        // Model-less launch: setup and the picker enumerate every provider.
+        return CatalogReadiness::Fleet;
+    };
+    let Some(provider_id) = builtin_declaration_for_model(selection) else {
+        // Un-namespaced, custom, or extension-provided: ambiguous on purpose.
+        return CatalogReadiness::Fleet;
+    };
+    let mut routes = vec![provider_id];
+    // Native compaction can be pinned to a different provider than the session
+    // model; that route has to exist before the first turn, not after. An
+    // un-namespaced or extension-provided compaction id cannot be proven to be
+    // a builtin route, and `build_app` fails closed when it does not resolve, so
+    // ambiguity here is the fleet rather than a narrowed plan that drops it.
+    if let Some(compaction_model) = config.compaction.compact_model.as_ref() {
+        let Some(compaction_provider) = builtin_declaration_for_model(compaction_model) else {
+            return CatalogReadiness::Fleet;
+        };
+        if !routes.contains(&compaction_provider) {
+            routes.push(compaction_provider);
+        }
+    }
+    CatalogReadiness::Routes(routes)
+}
+
 fn base_model_catalog_with_custom_store(
     offline: bool,
     explicit_custom_store: Option<&crate::auth::custom::CredentialStore>,
+) -> anyhow::Result<ModelCatalog> {
+    base_model_catalog_with_readiness(offline, explicit_custom_store, &CatalogReadiness::Fleet)
+}
+
+fn base_model_catalog_with_readiness(
+    offline: bool,
+    explicit_custom_store: Option<&crate::auth::custom::CredentialStore>,
+    readiness: &CatalogReadiness,
 ) -> anyhow::Result<ModelCatalog> {
     let mut catalog = ModelCatalog::builtin()?;
     // The embedded catalog describes supported integrations, not enabled
@@ -5230,9 +5658,11 @@ fn base_model_catalog_with_custom_store(
     // session behavior without ambient secrets.
     #[cfg(not(test))]
     catalog.retain_configured_models();
-    if cfg!(test) {
+    if cfg!(test) && readiness.is_fleet() {
         // Tests keep the historical deterministic DeepSeek fixture and never
-        // use ambient credentials or contact provider discovery endpoints.
+        // use ambient credentials or contact provider discovery endpoints. A
+        // narrowed plan is exercised through the runtime path so tests assert
+        // the readiness decision itself, not a fixture shortcut.
         let declaration = &crate::providers::DEEPSEEK;
         let credential = crate::providers::EnvironmentCredential::for_test(
             "DEEPSEEK_API_KEY",
@@ -5252,13 +5682,34 @@ fn base_model_catalog_with_custom_store(
             crate::output::stderr!("warning: OpenRouter model cache unavailable: {error}");
         }
     } else {
-        register_configured_presets_parallel(&mut catalog);
+        match readiness {
+            // The historical full initialization: every detected provider.
+            CatalogReadiness::Fleet => register_configured_presets_parallel(&mut catalog),
+            // Only the route the selection proves it needs. The other
+            // declarations are deliberately not touched: their credential
+            // chains, inventory probes and local-server scans cannot serve this
+            // launch, and waiting for one of them is what makes startup slow.
+            CatalogReadiness::Routes(routes) => {
+                register_selected_preset_inventories(&mut catalog, routes)
+            }
+        }
     }
 
     // Explicit custom models remain usable offline; only auto-discovery is skipped.
     // Normal tests never inspect ambient HOME credentials, while provider setup
     // passes its explicit existing store so it can rebuild the same catalog
     // immediately without introducing a second registry or catalog type.
+    //
+    // A narrowed plan skips both registries: a custom OpenAI-compatible model is
+    // never namespaced by a builtin declaration (it would have failed the route
+    // proof in [`catalog_readiness`]), and the caller falls back to the fleet
+    // whenever the selected model still does not resolve.
+    if !readiness.is_fleet() {
+        if !cfg!(test) {
+            catalog.retain_configured_models();
+        }
+        return Ok(catalog);
+    }
     if let Some(store) = explicit_custom_store {
         if let Err(error) =
             register_custom_openai_endpoints_from_store(&mut catalog, store, offline)
@@ -5320,9 +5771,17 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 /// Startup renders nothing, but the latency acceptance criteria still need the
 /// phases to be distinguishable, so `OCTET_STARTUP_TRACE=1` writes one line per
 /// boundary to stderr (`octet-startup: <phase> elapsed=<micros>us`) and the
-/// default (unset) prints nothing and changes no behavior. Stable phase names:
-/// `catalog.base`, `catalog.codex`, `catalog.copilot`, `bootstrap.ready`,
-/// `session.resolve`, `app.build`.
+/// default (unset) prints nothing and changes no behavior.
+///
+/// This trace is the off-screen timing signal every frontend shares; nothing in
+/// it is ever rendered on the startup screen. Stable phase names:
+/// `catalog.base`, `catalog.codex`, `catalog.copilot`, `catalog.fallback`,
+/// `catalog.enrich`, `codex.credentials`, `codex.inventory`, `bootstrap.ready`,
+/// `session.resolve`, `session.replay`, `extensions.provider-preflight`,
+/// `extensions.prestart`, `extensions.activate`, `app.build`,
+/// `history.hydrate`, `frame.ready`. The last two are emitted by the interactive
+/// frontend; `codex.credentials` and `codex.inventory` separate credential
+/// refresh from the inventory request inside one selected-route wait.
 pub(crate) fn startup_phase(phase: &str) {
     if !startup_trace_enabled(std::env::var_os(STARTUP_TRACE_ENV).as_deref()) {
         return;
@@ -5350,12 +5809,34 @@ pub fn model_catalog_with_offline(offline: bool) -> anyhow::Result<ModelCatalog>
 pub fn model_catalog_with_offline_and_codex_notes(
     offline: bool,
 ) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
-    let mut catalog = base_model_catalog(offline)?;
+    model_catalog_for_readiness(offline, &CatalogReadiness::Fleet)
+}
+
+/// Build the catalog for one readiness plan.
+///
+/// The plan decides *which provider inventories are initialized now*:
+/// [`CatalogReadiness::Fleet`] keeps the historical full initialization, while a
+/// narrowed plan touches only the route the selection proved. The embedded
+/// static catalog is built in full either way, so a narrowed plan can never
+/// remove a model that was listed before; it only defers subscription/host
+/// inventories until [`Bootstrap::enrich_catalog`].
+pub(crate) fn model_catalog_for_readiness(
+    offline: bool,
+    readiness: &CatalogReadiness,
+) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
+    let mut catalog = base_model_catalog_with_readiness(offline, None, readiness)?;
     startup_phase("catalog.base");
     let mut notes = CodexContextNotes::default();
-    register_codex_catalog(&mut catalog, offline, &mut notes);
+    if readiness.includes(crate::providers::CODEX.id) {
+        register_codex_catalog(&mut catalog, offline, &mut notes);
+    }
     startup_phase("catalog.codex");
-    register_copilot_catalog(&mut catalog, offline);
+    // Copilot is a host-owned subscription route: no builtin declaration id ever
+    // names it, so a narrowed plan can never include it and it stays on the
+    // historical fleet path (see `catalog_readiness`'s proof rule).
+    if readiness.is_fleet() {
+        register_copilot_catalog(&mut catalog, offline);
+    }
     startup_phase("catalog.copilot");
     Ok((catalog, notes))
 }
@@ -5412,8 +5893,34 @@ pub fn model_catalog_without_codex() -> anyhow::Result<ModelCatalog> {
 }
 
 /// Build bootstrap state from resolved configuration.
+///
+/// Startup order is: (1) cheap local provider availability — the embedded
+/// catalog filtered by which endpoints can already resolve a credential, no
+/// network; (2) the session/model selection this configuration already proves
+/// ([`catalog_readiness`]); (3) initialization of the SELECTED route only; and
+/// (4) optional enrichment of every other provider, later and never awaited by
+/// readiness ([`Bootstrap::enrich_catalog`]). A launch that cannot name its
+/// route takes the fleet plan, which is the historical behavior.
 pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
-    let (catalog, codex_context_notes) = model_catalog_with_offline_and_codex_notes(config.offline)?;
+    let readiness = catalog_readiness(&config);
+    let (mut catalog, mut codex_context_notes) =
+        model_catalog_for_readiness(config.offline, &readiness)?;
+    // The plan is a proof about configuration, not a promise: the selection can
+    // still belong to a route the plan could not name (an extension provider, a
+    // custom registry, an inventory the provider no longer offers). Complete the
+    // catalog instead of failing the launch or switching the user's model.
+    if !readiness.is_fleet()
+        && config
+            .model
+            .as_ref()
+            .is_some_and(|model| catalog.resolve(model).is_err())
+    {
+        startup_phase("catalog.fallback");
+        let (fleet_catalog, fleet_notes) =
+            model_catalog_for_readiness(config.offline, &CatalogReadiness::Fleet)?;
+        catalog = fleet_catalog;
+        codex_context_notes = fleet_notes;
+    }
     let sessions = SessionStore::new(&config.session_dir, &config.workspace);
     // Record the workspace path so cross-workspace browsing can name each
     // session's home. Non-fatal: pickers fall back to directory names.
@@ -5432,7 +5939,43 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         prepared_session: RefCell::new(None),
         modeless: std::cell::Cell::new(false),
         codex_context_notes,
+        readiness,
     })
+}
+
+impl Bootstrap {
+    /// Whether this launch initialized the full provider fleet.
+    #[cfg(test)]
+    pub(crate) fn readiness_plan(&self) -> &CatalogReadiness {
+        &self.readiness
+    }
+
+    /// Complete the catalog with every provider the readiness plan deferred.
+    ///
+    /// This is enrichment, not readiness: nothing the launch needs for its first
+    /// turn waits on it. A frontend calls it before opening a surface that
+    /// enumerates every route (the model picker, `/model`, a status page) — the
+    /// provider inventories skipped at startup are exactly the ones such a
+    /// surface must list, and each keeps its own freshness rules.
+    ///
+    /// Idempotent: a launch that already took the fleet plan (or one that has
+    /// already been enriched) returns immediately, so a second call can never
+    /// duplicate a provider registration or re-run credential refresh.
+    pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
+        if self.readiness.is_fleet() {
+            return Ok(());
+        }
+        startup_phase("catalog.enrich");
+        let (catalog, notes) = model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
+        self.catalog = catalog;
+        // Notes were recorded for the deferred Codex route; merge rather than
+        // replace so a note already delivered for this session stays delivered.
+        for (model, note) in notes.notes {
+            self.codex_context_notes.notes.entry(model).or_insert(note);
+        }
+        self.readiness = CatalogReadiness::Fleet;
+        Ok(())
+    }
 }
 
 /// Resolve model configuration precedence. The caller supplies values from
@@ -5759,6 +6302,7 @@ pub async fn resolve_launch_interactive(
         launch_configuration_parts(&config, &selected_session)
     })
     .await?;
+    startup_phase("session.replay");
     *boot.prepared_session.borrow_mut() = prepared;
     // Provider declarations are only needed before launch when no static model
     // can satisfy the restored/explicit selection. Do not start ordinary
@@ -6032,6 +6576,7 @@ fn configured_extensions_with_runtime_manager(
         runtime_manager,
         provider_runtime,
     );
+    startup_phase("extensions.activate");
     Ok((extensions, executable_extensions))
 }
 
@@ -6162,12 +6707,14 @@ pub(crate) fn build_app_with_runtime_manager(
         prepared_session,
         modeless: _,
         codex_context_notes: _,
+        readiness: _,
     } = boot;
     let mut system = system;
     startup_phase("app.build");
     let mut prestarted_extensions = prestarted_extensions.into_inner();
     if let Some((_, extensions)) = prestarted_extensions.as_mut() {
         extensions.synchronize_provider_catalog(&mut catalog, &client);
+        startup_phase("extensions.prestart");
     }
     // A temporary provider preflight has just enough catalog state to identify
     // the requested model. Keep that snapshot only as an initialization input;

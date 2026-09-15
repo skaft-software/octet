@@ -308,11 +308,19 @@ impl ToolPanel {
     }
 
     fn update_subagent_activity(&mut self, view: &SubagentActivityView) {
-        self.subagent_activity = Some(view.clone());
-        self.finished = !subagent_activity_is_active(view);
-        self.is_error = subagent_activity_has_failure(view);
-        self.failure_reason = subagent_activity_failure_reason(view);
-        self.output = subagent_activity_copy_text(view);
+        let mut next = view.clone();
+        if let Some(previous) = self.subagent_activity.as_ref() {
+            // Display-only controls belong to the reader, not to the roster the
+            // host republishes: a refresh must never reset the ordering or the
+            // narrowing the reader selected.
+            next.sort = previous.sort;
+            next.state_filter = previous.state_filter;
+        }
+        self.finished = !subagent_activity_is_active(&next);
+        self.is_error = subagent_activity_has_failure(&next);
+        self.failure_reason = subagent_activity_failure_reason(&next);
+        self.output = subagent_activity_copy_text(&next);
+        self.subagent_activity = Some(next);
         self.cached_disclosure_sensitive.replace(None);
     }
 
@@ -771,6 +779,54 @@ pub(crate) enum OverlayInputResult {
     Closed,
 }
 
+/// Reader-chosen ordering of the settled delegation rows. Ordering is
+/// display-only: the host keeps reporting one roster and this never changes
+/// what is rendered, only in which order. `State` keeps the declared group
+/// order, so a reader who never touches the control sees exactly today's
+/// layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SubagentActivitySort {
+    #[default]
+    State,
+    Elapsed,
+    Tokens,
+}
+
+impl SubagentActivitySort {
+    fn next(self) -> Self {
+        match self {
+            Self::State => Self::Elapsed,
+            Self::Elapsed => Self::Tokens,
+            Self::Tokens => Self::State,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::State => "state",
+            Self::Elapsed => "elapsed",
+            Self::Tokens => "tokens",
+        }
+    }
+
+    /// Sort key of one row, largest first. `State` has no key: the group order
+    /// already is the state order and rows keep the host's declared order
+    /// inside their group.
+    fn key(self, row: &SubagentRow) -> Option<u128> {
+        match self {
+            Self::State => None,
+            Self::Elapsed => Some(u128::from(row.elapsed_ms.unwrap_or_default())),
+            Self::Tokens => Some(
+                row.tokens
+                    .map(|(input, output)| {
+                        u128::from(input.saturating_add(output))
+                    })
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SubagentActivityView {
     pub(crate) status_label: String,
@@ -779,6 +835,13 @@ pub(crate) struct SubagentActivityView {
     pub(crate) failure_class: Option<String>,
     pub(crate) failure_reason: Option<String>,
     pub(crate) include_cost_in_session_total: bool,
+    /// Reader-chosen row ordering. Carried across refreshes of the same event
+    /// so a republished roster never resets the reader's view.
+    pub(crate) sort: SubagentActivitySort,
+    /// Reader-chosen declared-state narrowing. `None` shows every group. A
+    /// narrowing is explicit, so the filtered group renders expanded even when
+    /// the transcript is in its collapsed disclosure mode.
+    pub(crate) state_filter: Option<SubagentStateGroup>,
 }
 
 impl SubagentActivityView {
@@ -913,6 +976,611 @@ pub(super) fn subagent_activity_copy_text(view: &SubagentActivityView) -> String
         lines.push(format!("failed · {reason}"));
     }
     lines.join("\n")
+}
+
+/// Declared state word for an extension presentation activity. The vocabulary
+/// is the protocol's, so the transcript and the extension never disagree about
+/// how a worker ended.
+pub(super) fn subagent_activity_state_label(
+    state: octet_agent::ExtensionPresentationState,
+) -> &'static str {
+    use octet_agent::ExtensionPresentationState as State;
+    match state {
+        State::Loading => "loading",
+        State::Pending => "pending",
+        State::Active => "active",
+        State::Running => "running",
+        State::Succeeded => "completed",
+        State::Failed => "failed",
+        State::Cancelled => "cancelled",
+        State::Degraded => "degraded",
+        State::Stopped => "stopped",
+        State::Unavailable => "unavailable",
+        State::Empty => "empty",
+    }
+}
+
+/// Canonical state group of one delegated worker. Grouping is display-only:
+/// the declared state word is what the row prints, so a collapsed terminal
+/// group still names exactly the states it hides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubagentStateGroup {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl SubagentStateGroup {
+    /// Render order: live work first, then the terminal groups.
+    const ORDER: [Self; 4] = [Self::Running, Self::Completed, Self::Failed, Self::Stopped];
+
+    fn of_declared_state(state: &str) -> Self {
+        match state {
+            "completed" | "succeeded" => Self::Completed,
+            "failed" | "cancelled" | "timed_out" | "unavailable" => Self::Failed,
+            "stopped" => Self::Stopped,
+            // `pending`, `running`, `queued`, and an unpublished state all mean
+            // "not settled yet", which is the one thing that must never be
+            // hidden behind a collapsed terminal group.
+            _ => Self::Running,
+        }
+    }
+
+    fn of_activity(state: octet_agent::ExtensionPresentationState) -> Self {
+        Self::of_declared_state(subagent_activity_state_label(state))
+    }
+
+    fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    /// Next declared-state narrowing in the cycle `All -> Running -> Completed
+    /// -> Failed -> Stopped -> All`. The cycle is fixed rather than derived
+    /// from the current roster so the control never changes shape mid-run.
+    fn next_filter(self) -> Option<Self> {
+        match self {
+            Self::Running => Some(Self::Completed),
+            Self::Completed => Some(Self::Failed),
+            Self::Failed => Some(Self::Stopped),
+            Self::Stopped => None,
+        }
+    }
+
+    fn filter_label(self) -> &'static str {
+        self.declared()
+    }
+
+    fn declared(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// Bounded row ceiling for the settled delegation event. The host already
+/// bounds a team to eight concurrent workers; this is the defensive ceiling
+/// that keeps a hostile or future-unbounded roster from rendering an unbounded
+/// list into the transcript.
+pub(super) const MAX_SUBAGENT_ACTIVITY_ROWS: usize = 24;
+const SUBAGENT_WORKER_MAX_WIDTH: usize = 26;
+const SUBAGENT_MODEL_MAX_WIDTH: usize = 14;
+
+/// One worker row projected out of either telemetry source, so the renderer
+/// owns exactly one column layout.
+struct SubagentRow {
+    group: SubagentStateGroup,
+    worker: String,
+    state: String,
+    elapsed_ms: Option<u64>,
+    model: String,
+    turns: Option<u64>,
+    tokens: Option<(u64, u64)>,
+    cost_microdollars: Option<u64>,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubagentColumn {
+    Worker,
+    State,
+    Elapsed,
+    Model,
+    Turns,
+    Tokens,
+    Cost,
+}
+
+impl SubagentColumn {
+    fn header(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::State => "state",
+            Self::Elapsed => "elapsed",
+            Self::Model => "model",
+            Self::Turns => "turns",
+            Self::Tokens => "tokens",
+            Self::Cost => "cost",
+        }
+    }
+
+    fn right_aligned(self) -> bool {
+        matches!(self, Self::Elapsed | Self::Turns | Self::Cost)
+    }
+}
+
+fn subagent_rows(view: &SubagentActivityView) -> Vec<SubagentRow> {
+    if !view.telemetry.is_empty() {
+        return view
+            .telemetry
+            .iter()
+            .map(|child| SubagentRow {
+                group: SubagentStateGroup::of_declared_state(&child.state),
+                worker: sanitize_for_terminal(&child.task_name),
+                state: if child.state.is_empty() {
+                    "running".to_owned()
+                } else {
+                    sanitize_for_terminal(&child.state)
+                },
+                elapsed_ms: Some(child.elapsed_ms),
+                model: sanitize_for_terminal(&child.model),
+                turns: Some(child.tool_use_count),
+                tokens: Some((
+                    child
+                        .input_tokens
+                        .saturating_add(child.cache_read_tokens)
+                        .saturating_add(child.cache_write_tokens),
+                    child.output_tokens,
+                )),
+                cost_microdollars: child.cost_microdollars,
+                reason: child
+                    .failure_reason
+                    .as_deref()
+                    .map(sanitize_for_terminal),
+            })
+            .collect();
+    }
+    view.activities
+        .iter()
+        .map(|activity| SubagentRow {
+            group: SubagentStateGroup::of_activity(activity.state),
+            worker: sanitize_for_terminal(&activity.summary),
+            state: subagent_activity_state_label(activity.state).to_owned(),
+            elapsed_ms: activity
+                .started_at_ms
+                .zip(activity.completed_at_ms)
+                .map(|(started, completed)| completed.saturating_sub(started)),
+            model: String::new(),
+            turns: activity.metrics.map(|metrics| metrics.tool_calls),
+            tokens: activity.metrics.map(|metrics| {
+                (
+                    metrics
+                        .input_tokens
+                        .saturating_add(metrics.cache_read_tokens)
+                        .saturating_add(metrics.cache_write_tokens),
+                    metrics.output_tokens,
+                )
+            }),
+            cost_microdollars: activity
+                .metrics
+                .and_then(|metrics| metrics.cost_microdollars),
+            reason: None,
+        })
+        .collect()
+}
+
+fn subagent_tokens_cell(tokens: (u64, u64), unicode: bool) -> String {
+    let (input, output) = tokens;
+    let input = crate::tui::composer_surface::compact_token_count(input);
+    let output = crate::tui::composer_surface::compact_token_count(output);
+    if unicode {
+        format!("↑{input} ↓{output}")
+    } else {
+        format!("in {input} out {output}")
+    }
+}
+
+fn subagent_cell_text(row: &SubagentRow, column: SubagentColumn, unicode: bool) -> String {
+    match column {
+        SubagentColumn::Worker => row.worker.clone(),
+        SubagentColumn::State => row.state.clone(),
+        SubagentColumn::Elapsed => row
+            .elapsed_ms
+            .map(|elapsed| {
+                crate::presentation::formatting::format_duration(Duration::from_millis(elapsed))
+            })
+            .unwrap_or_default(),
+        SubagentColumn::Model => row.model.clone(),
+        SubagentColumn::Turns => row.turns.map(|turns| turns.to_string()).unwrap_or_default(),
+        SubagentColumn::Tokens => row
+            .tokens
+            .map(|tokens| subagent_tokens_cell(tokens, unicode))
+            .unwrap_or_default(),
+        SubagentColumn::Cost => row
+            .cost_microdollars
+            .map(crate::tui::composer_surface::format_microdollars)
+            .unwrap_or_default(),
+    }
+}
+
+fn subagent_cell_role(column: SubagentColumn, group: SubagentStateGroup) -> &'static str {
+    match column {
+        SubagentColumn::Worker => "foreground",
+        SubagentColumn::State if group == SubagentStateGroup::Failed => "error",
+        _ => "muted",
+    }
+}
+
+/// Enabled columns, in reading order, that fit `width` once the indent, the
+/// row connector, and the two-cell gutters are paid for. Worker and state are
+/// mandatory; every metric column yields rather than overflowing the width.
+fn subagent_columns(rows: &[SubagentRow], width: u16, unicode: bool) -> (Vec<SubagentColumn>, Vec<usize>) {
+    let indent = visible_width(ACTIVITY_DETAIL_INDENT) + 2;
+    let width = usize::from(width);
+    let mut columns = vec![SubagentColumn::Worker, SubagentColumn::State];
+    let mut widths = vec![
+        rows.iter()
+            .map(|row| visible_width(&row.worker))
+            .max()
+            .unwrap_or_default()
+            .clamp(6, SUBAGENT_WORKER_MAX_WIDTH),
+        rows.iter()
+            .map(|row| visible_width(&row.state))
+            .max()
+            .unwrap_or("state".len())
+            .max(SubagentColumn::State.header().len()),
+    ];
+    let fits = |columns: &[SubagentColumn], widths: &[usize]| {
+        indent
+            .saturating_add(widths.iter().copied().sum::<usize>())
+            .saturating_add(2 * columns.len().saturating_sub(1))
+            <= width
+    };
+    if !fits(&columns, &widths) {
+        return (columns, widths);
+    }
+    for column in [
+        SubagentColumn::Elapsed,
+        SubagentColumn::Model,
+        SubagentColumn::Turns,
+        SubagentColumn::Tokens,
+        SubagentColumn::Cost,
+    ] {
+        let mut cell_width = column.header().len();
+        let mut present = false;
+        for row in rows {
+            let text = subagent_cell_text(row, column, unicode);
+            if !text.is_empty() {
+                present = true;
+                cell_width = cell_width.max(visible_width(&text));
+            }
+        }
+        if !present {
+            continue;
+        }
+        let cell_width = match column {
+            SubagentColumn::Model => cell_width.min(SUBAGENT_MODEL_MAX_WIDTH),
+            _ => cell_width.min(16),
+        };
+        let mut candidate = columns.clone();
+        let mut candidate_widths = widths.clone();
+        candidate.push(column);
+        candidate_widths.push(cell_width);
+        if fits(&candidate, &candidate_widths) {
+            columns = candidate;
+            widths = candidate_widths;
+        }
+    }
+    (columns, widths)
+}
+
+fn subagent_grid_line(
+    theme: &OctetTheme,
+    elbow: &str,
+    columns: &[SubagentColumn],
+    widths: &[usize],
+    cells: &[(String, SubagentStateGroup)],
+    width: u16,
+) -> String {
+    let mut body = String::new();
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            body.push_str("  ");
+        }
+        let cell = cells
+            .get(index)
+            .map(|(text, _)| text.as_str())
+            .unwrap_or_default();
+        let clipped = sexy_tui_rs::truncate_to_width(cell, widths[index], Some("…"));
+        let padding = widths[index].saturating_sub(visible_width(&clipped));
+        let role = cells
+            .get(index)
+            .map(|(_, group)| subagent_cell_role(*column, *group))
+            .unwrap_or("muted");
+        if column.right_aligned() {
+            body.push_str(&" ".repeat(padding));
+            body.push_str(&subdued_or(theme, role, &clipped));
+        } else {
+            body.push_str(&subdued_or(theme, role, &clipped));
+            body.push_str(&" ".repeat(padding));
+        }
+    }
+    fit_line(
+        &format!("{ACTIVITY_DETAIL_INDENT}{} {body}", theme.fg("muted", elbow)),
+        width,
+    )
+}
+
+/// Style one cell. The theme resolves roles against the active profile, and
+/// the worker/state distinction only survives while both roles exist there.
+fn subdued_or(theme: &OctetTheme, role: &str, text: &str) -> String {
+    theme.fg(role, text)
+}
+
+fn subagent_compact_line(theme: &OctetTheme, row: &SubagentRow, elbow: &str, width: u16) -> Vec<String> {
+    let unicode = theme.unicode();
+    let separator = if unicode { " · " } else { " | " };
+    let prefix = format!("{ACTIVITY_DETAIL_INDENT}{} ", theme.fg("muted", elbow));
+    let continuation = " ".repeat(visible_width(&prefix));
+    let usage = row
+        .tokens
+        .map(|tokens| subagent_tokens_cell(tokens, unicode))
+        .unwrap_or_default();
+    let detail = if usage.is_empty() {
+        format!("{}{separator}{}", row.worker, row.state)
+    } else {
+        format!("{}{separator}{}{separator}{usage}", row.worker, row.state)
+    };
+    wrap_hanging(&theme.fg("foreground", &detail), &prefix, &continuation, width)
+}
+
+/// Header scope for the settled event: which narrowing and ordering the reader
+/// has selected. Defaults print nothing, so an untouched event keeps its
+/// single-word heading exactly as before.
+fn subagent_activity_scope(view: &SubagentActivityView) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(filter) = view.state_filter {
+        parts.push(format!("state: {}", filter.filter_label()));
+    }
+    if view.sort != SubagentActivitySort::State {
+        parts.push(format!("order: {}", view.sort.label()));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// Order rows inside their group. Group order is the declared state order and
+/// stays fixed; the selected key orders the rows a reader compares, largest
+/// first, while a stable sort keeps the host's declared order as the tiebreak.
+fn sort_subagent_rows(rows: &mut [SubagentRow], sort: SubagentActivitySort) {
+    if sort == SubagentActivitySort::State {
+        return;
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse(sort.key(row).unwrap_or_default()));
+}
+
+/// Render the settled delegation event as grouped, column-aligned, bounded
+/// rows. Terminal groups collapse to one counted summary row by default so a
+/// finished team cannot bury the live workers above it; `expanded` (ctrl+o)
+/// opens them into full rows.
+pub(super) fn subagent_activity_render_rows(
+    view: &SubagentActivityView,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+) -> Vec<String> {
+    let unicode = theme.unicode();
+    let separator = if unicode { " · " } else { " | " };
+    let mut rows = subagent_rows(view);
+    // A declared-state narrowing is explicit, so it is applied before the row
+    // ceiling is measured: the reader asked for the failed workers and the
+    // bound then applies to that view, never to the whole roster.
+    if let Some(filter) = view.state_filter {
+        rows.retain(|row| row.group == filter);
+    }
+    sort_subagent_rows(&mut rows, view.sort);
+    let mut heading = "Subagents".to_owned();
+    if let Some(scope) = subagent_activity_scope(view) {
+        heading.push_str(&format!("{separator}{scope}"));
+    }
+    let mut lines = vec![fit_line(
+        &theme.bold(&theme.fg("foreground", &heading)),
+        width,
+    )];
+    if rows.is_empty() {
+        if let Some(reason) = view.failure_reason.as_deref() {
+            lines.push(fit_line(
+                &theme.fg(
+                    "error",
+                    &format!(
+                        "{ACTIVITY_DETAIL_INDENT}Failed: {}",
+                        sanitize_for_terminal(reason)
+                    ),
+                ),
+                width,
+            ));
+        }
+        return lines;
+    }
+
+    let compact = width < 46;
+    let (columns, widths) = subagent_columns(&rows, width, unicode);
+    let grid_fits = columns.len() > 2
+        && !compact
+        && visible_width(ACTIVITY_DETAIL_INDENT)
+            .saturating_add(2)
+            .saturating_add(widths.iter().copied().sum::<usize>())
+            .saturating_add(2 * columns.len().saturating_sub(1))
+            <= usize::from(width);
+    let mut remaining = MAX_SUBAGENT_ACTIVITY_ROWS;
+    let mut rendered_groups = 0;
+    for group in SubagentStateGroup::ORDER {
+        let members: Vec<&SubagentRow> =
+            rows.iter().filter(|row| row.group == group).collect();
+        if members.is_empty() || remaining == 0 {
+            continue;
+        }
+        let collapsed = group.is_terminal() && !expanded && view.state_filter.is_none();
+        if collapsed {
+            // One bounded row names the group, its count, and the workers it
+            // hides, so nothing disappears silently and the live rows above
+            // keep their place. Its declared states are what the row prints.
+            let names = members
+                .iter()
+                .map(|row| row.worker.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let reason = members.iter().find_map(|row| row.reason.as_deref());
+            let mut text = format!(
+                "{} {separator}{} {separator}{names}",
+                group.declared(),
+                members.len()
+            );
+            if let Some(reason) = reason {
+                text.push_str(&format!("{separator}Failed: {reason}"));
+            }
+            let hint = "ctrl+o shows all";
+            let budget = usize::from(width)
+                .saturating_sub(visible_width(ACTIVITY_DETAIL_INDENT) + 2 + visible_width(hint) + 1)
+                .max(8);
+            let names_len = visible_width(&text);
+            if names_len + visible_width(hint) + 1 > budget {
+                text = sexy_tui_rs::truncate_to_width(
+                    &text,
+                    budget.saturating_sub(visible_width(hint) + 1),
+                    Some("…"),
+                );
+                text.push(' ');
+                text.push_str(hint);
+            } else {
+                text.push_str(&format!("{separator}{hint}"));
+            }
+            lines.push(fit_line(
+                &format!(
+                    "{ACTIVITY_DETAIL_INDENT}{} {}",
+                    theme.fg("muted", activity_elbow(theme)),
+                    subdued_text(theme, &text)
+                ),
+                width,
+            ));
+            remaining = remaining.saturating_sub(1);
+            rendered_groups += 1;
+            continue;
+        }
+
+        let heading = format!("{} {separator}{}", group.declared(), members.len());
+        lines.push(fit_line(
+            &theme.bold(&subdued_text(theme, &format!("{ACTIVITY_DETAIL_INDENT}{heading}"))),
+            width,
+        ));
+        remaining = remaining.saturating_sub(1);
+        if grid_fits && remaining > 0 {
+            let header_cells: Vec<(String, SubagentStateGroup)> = columns
+                .iter()
+                .map(|column| (column.header().to_owned(), group))
+                .collect();
+            lines.push(subagent_grid_line(
+                theme,
+                " ",
+                &columns,
+                &widths,
+                &header_cells,
+                width,
+            ));
+            remaining = remaining.saturating_sub(1);
+        }
+        for (index, row) in members.iter().enumerate() {
+            if remaining == 0 {
+                let omitted = members.len() - index;
+                lines.push(fit_line(
+                    &subdued_text(
+                        theme,
+                        &format!(
+                            "{ACTIVITY_DETAIL_INDENT}{}… {omitted} more{separator}ctrl+o shows all",
+                            if unicode { "└" } else { "\\" }
+                        ),
+                    ),
+                    width,
+                ));
+                break;
+            }
+            let elbow = if index + 1 == members.len() { "└" } else { "├" };
+            if grid_fits {
+                let cells: Vec<(String, SubagentStateGroup)> = columns
+                    .iter()
+                    .map(|column| (subagent_cell_text(row, *column, unicode), group))
+                    .collect();
+                lines.push(subagent_grid_line(
+                    theme,
+                    elbow,
+                    &columns,
+                    &widths,
+                    &cells,
+                    width,
+                ));
+            } else {
+                lines.extend(subagent_compact_line(theme, row, elbow, width));
+            }
+            remaining = remaining.saturating_sub(1);
+            if let Some(reason) = row.reason.as_deref() {
+                let text = format!("Failed: {reason}");
+                lines.push(fit_line(
+                    &theme.fg(
+                        "error",
+                        &format!(
+                            "{ACTIVITY_DETAIL_INDENT}  {}",
+                            sexy_tui_rs::truncate_to_width(
+                                &text,
+                                usize::from(width)
+                                    .saturating_sub(visible_width(ACTIVITY_DETAIL_INDENT) + 2)
+                                    .max(8),
+                                Some("…"),
+                            )
+                        ),
+                    ),
+                    width,
+                ));
+                remaining = remaining.saturating_sub(1);
+            }
+        }
+        rendered_groups += 1;
+    }
+    if rendered_groups == 0 {
+        // Every worker sits in a group the reader collapsed, or the active
+        // narrowing matched no worker at all. Either way the event reports the
+        // shape it is hiding instead of claiming there is nothing to show.
+        let summary = rows
+            .iter()
+            .map(|row| row.worker.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = if summary.is_empty() {
+            format!(
+                "{ACTIVITY_DETAIL_INDENT}no {} workers",
+                view.state_filter
+                    .map(SubagentStateGroup::filter_label)
+                    .unwrap_or("declared")
+            )
+        } else {
+            format!("{ACTIVITY_DETAIL_INDENT}{summary}")
+        };
+        lines.push(fit_line(&subdued_text(theme, &text), width));
+    }
+    if let Some(reason) = view.failure_reason.as_deref() {
+        lines.push(fit_line(
+            &theme.fg(
+                "error",
+                &format!(
+                    "{ACTIVITY_DETAIL_INDENT}Failed: {}",
+                    sanitize_for_terminal(reason)
+                ),
+            ),
+            width,
+        ));
+    }
+    lines
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2863,9 +3531,14 @@ impl InteractiveShell {
         // overlay while its first authoritative refresh is still pending.
         state.subagent_activity = None;
         state.subagent_activity_block = None;
-        // A different session has a different delegation team: nothing from the
-        // previous session is "already settled" for this one.
-        state.settled_subagent_workers.clear();
+        // `settled_subagent_workers` is deliberately NOT cleared here. This
+        // boundary is reached by EVERY new prompt, while the delegation team is
+        // scoped to the SESSION: the manager keeps republishing the same
+        // completed roster after the turn that spawned it ended. Clearing the
+        // set per prompt therefore re-armed the replay this set exists to stop -
+        // every new prompt re-opened a block of already-finished workers under
+        // the fresh prompt and displaced the new turn's `Working` row. It is
+        // cleared only when the session itself is replaced.
         state.run_model = Some(state.model.clone());
         state.run_model_lab = state.model_lab;
         state.run_prompt_color = state.prompt_color.clone();
@@ -3410,6 +4083,7 @@ impl InteractiveShell {
                         failure_class: snapshot.failure_class.clone(),
                         failure_reason: snapshot.failure_reason.clone(),
                         include_cost_in_session_total: true,
+                        ..SubagentActivityView::default()
                     });
                 }
             }
@@ -3897,6 +4571,7 @@ impl InteractiveShell {
                 failure_class: None,
                 failure_reason: None,
                 include_cost_in_session_total,
+                ..SubagentActivityView::default()
             })
         });
         let mut state = self.state.borrow_mut();
@@ -3934,6 +4609,7 @@ impl InteractiveShell {
                     failure_class: snapshot.failure_class.clone(),
                     failure_reason: snapshot.failure_reason.clone(),
                     include_cost_in_session_total,
+                    ..SubagentActivityView::default()
                 },
             )
         });
@@ -4825,6 +5501,77 @@ impl InteractiveShell {
     /// Toggle the one global transcript disclosure mode (ctrl+o).
     pub fn toggle_disclosure(&mut self) {
         self.toggle_verbose_tools();
+    }
+
+    /// Cycle the settled delegation event's declared-state narrowing:
+    /// `all -> running -> completed -> failed -> stopped -> all`. Display-only;
+    /// the roster the host reports is untouched, and the settled block stays
+    /// exactly where it happened. Returns the label now in effect (`"all"` when
+    /// no narrowing is active).
+    pub(crate) fn cycle_subagent_activity_filter(&mut self) -> &'static str {
+        let mut state = self.state.borrow_mut();
+        let next = match state
+            .subagent_activity
+            .as_ref()
+            .and_then(|view| view.state_filter)
+            .or_else(|| {
+                state.subagent_activity_block.and_then(|index| {
+                    state.transcript.get(index).and_then(|block| match block {
+                        TranscriptBlock::Tool(panel) => {
+                            panel.subagent_activity.as_ref()?.state_filter
+                        }
+                        _ => None,
+                    })
+                })
+            }) {
+            None => Some(SubagentStateGroup::Running),
+            Some(current) => current.next_filter(),
+        };
+        Self::apply_subagent_activity_controls(&mut state, |view| view.state_filter = next);
+        next.map_or("all", SubagentStateGroup::filter_label)
+    }
+
+    /// Cycle the settled delegation event's row ordering:
+    /// `state -> elapsed -> tokens -> state`. Ordering is display-only and
+    /// survives refreshes of the same event.
+    pub(crate) fn cycle_subagent_activity_sort(&mut self) -> &'static str {
+        let mut state = self.state.borrow_mut();
+        let current = state
+            .subagent_activity
+            .as_ref()
+            .map(|view| view.sort)
+            .unwrap_or_default();
+        let next = current.next();
+        Self::apply_subagent_activity_controls(&mut state, |view| view.sort = next);
+        next.label()
+    }
+
+    /// Apply one display-only control to every live copy of the delegation
+    /// event: the roaming view used by the chrome and the settled transcript
+    /// block. A control that changes nothing visible must not dirty the
+    /// transcript cache, so the block is touched only when a view changed.
+    fn apply_subagent_activity_controls(
+        state: &mut ShellState,
+        apply: impl Fn(&mut SubagentActivityView),
+    ) {
+        let mut changed = false;
+        if let Some(view) = state.subagent_activity.as_mut() {
+            let before = (view.sort, view.state_filter);
+            apply(view);
+            changed |= (view.sort, view.state_filter) != before;
+        }
+        if let Some(index) = state.subagent_activity_block {
+            if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get_mut(index) {
+                if let Some(view) = panel.subagent_activity.as_mut() {
+                    let before = (view.sort, view.state_filter);
+                    apply(view);
+                    changed |= (view.sort, view.state_filter) != before;
+                }
+            }
+            if changed {
+                state.touch_block(index);
+            }
+        }
     }
 
     pub fn show_compaction_summary(&mut self) {

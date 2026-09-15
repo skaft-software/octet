@@ -1232,6 +1232,21 @@ fn count_tool_results(message: &serde_json::Value) -> usize {
         .unwrap_or(0)
 }
 
+/// The exact system prompt text a wire request carried, across the shapes the
+/// Messages and Responses encoders emit (string, or a block list).
+fn wire_system_text(request: &serde_json::Value) -> String {
+    match request.get("system") {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .map(|block| block["text"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Some(other) => panic!("unexpected system encoding: {other}"),
+    }
+}
+
 fn request_has_no_tools(request: &serde_json::Value) -> bool {
     match request.get("tools").and_then(serde_json::Value::as_array) {
         None => true,
@@ -10106,4 +10121,109 @@ async fn unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not() {
         follow_up.contains("batch complete") && follow_up.contains("batch continues"),
         "both finalized sibling results must reach the next request: {follow_up}"
     );
+}
+
+#[tokio::test]
+async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools() {
+    // Row 4.13's prompt consumer: the registered tools' `promptSnippet` /
+    // `promptGuidelines` reach the model request's system prompt through
+    // `collect_tool_prompt_contributions`, and only when a host opts in.
+    let mut default_off = harness(vec![text_turn("answer")], Some(1)).await;
+    default_off.agent.complete("hello").await.unwrap();
+    let requests = wire_requests(default_off.server.as_ref().unwrap()).await;
+    assert_eq!(requests.len(), 1);
+    let default_system = wire_system_text(&requests[0]);
+    assert_eq!(
+        default_system, "You are a scripted test agent.",
+        "the tool section is opt-in: an unopted host keeps a byte-identical prompt"
+    );
+
+    let mut enabled = harness(vec![text_turn("answer")], Some(1)).await;
+    enabled.agent.set_tool_prompt_section_enabled(true);
+    assert!(enabled.agent.tool_prompt_section_enabled());
+    let contributions = enabled.agent.tool_prompt_contributions();
+    let declared = contributions
+        .iter()
+        .map(|contribution| contribution.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declared,
+        vec!["read", "edit", "write", "bash"],
+        "contributions follow wire order for exactly the tools that declare a snippet"
+    );
+    // Recorded gap (not this worker's path): `SearchTool` is registered and
+    // callable but declares no `promptSnippet`, so a rendered section cannot
+    // name it. The renderer never invents an entry for a tool that contributes
+    // nothing, and a registered-but-uncontributed tool must not silently
+    // vanish from the *surface* either.
+    assert!(
+        enabled
+            .agent
+            .registered_tool_names()
+            .iter()
+            .any(|name| name == "search"),
+        "search stays registered"
+    );
+    assert!(
+        !declared.contains(&"search"),
+        "an uncontributing tool is not fabricated into the section"
+    );
+    enabled.agent.complete("hello").await.unwrap();
+    let requests = wire_requests(enabled.server.as_ref().unwrap()).await;
+    assert_eq!(requests.len(), 1);
+    let system = wire_system_text(&requests[0]);
+    assert!(
+        system.starts_with("You are a scripted test agent.\n\nAvailable tools:"),
+        "the section is appended once after the host prompt: {system}"
+    );
+    for contribution in &contributions {
+        let line = format!("- {}: {}", contribution.name, contribution.snippet);
+        assert_eq!(
+            system.matches(&line).count(),
+            1,
+            "each registered tool appears exactly once with its own snippet: {line}"
+        );
+    }
+    assert!(
+        system.contains("- bash: ") && system.contains("ripgrep"),
+        "the bash snippet names rg, not the withdrawn search tools: {system}"
+    );
+    for withdrawn in ["\n- ls:", "\n- find:", "\n- grep:"] {
+        assert!(
+            !system.contains(withdrawn),
+            "a withdrawn tool must never be advertised: {system}"
+        );
+    }
+    // The same composed prompt is what the idle context APIs report, so an
+    // estimate cannot disagree with the request the run actually sends.
+    let disabled_instruction_tokens = default_off
+        .agent
+        .request_context_breakdown()
+        .unwrap()
+        .instruction_tokens;
+    let enabled_breakdown = enabled.agent.request_context_breakdown().unwrap();
+    assert!(
+        enabled_breakdown.instruction_tokens > disabled_instruction_tokens,
+        "the enabled section must be accounted for in the same prompt the request uses: \
+         {} vs {disabled_instruction_tokens}",
+        enabled_breakdown.instruction_tokens
+    );
+
+    // A tool-free run never advertises tools, even with the section enabled.
+    let mut answer_only = harness(vec![text_turn("answer")], Some(1)).await;
+    answer_only.agent.set_tool_prompt_section_enabled(true);
+    let mut run = answer_only.agent.prompt_without_tools("hello").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+    let requests = wire_requests(answer_only.server.as_ref().unwrap()).await;
+    assert_eq!(
+        wire_system_text(&requests[0]),
+        "You are a scripted test agent.",
+        "a run that exposes no tools must not advertise them"
+    );
+    assert!(request_has_no_tools(&requests[0]));
 }

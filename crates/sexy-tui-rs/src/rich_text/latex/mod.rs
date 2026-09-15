@@ -15,6 +15,11 @@
 //! Layout composes *semantic text*, not ANSI. Embedding components decide how
 //! the returned lines are styled, wrapped, or clipped.
 //!
+//! The rich markdown renderer consumes this function: [`super::markdown::parse`]
+//! renders a completed ```` ```latex ```` fence in display mode and falls back to
+//! the original code-block source when the expression is unsupported or
+//! oversized (see [`super::markdown::MAX_DIAGRAM_FENCE_BYTES`]).
+//!
 //! # Supported
 //!
 //! - the upstream symbol tables: greek letters, relations, arrows, operators,

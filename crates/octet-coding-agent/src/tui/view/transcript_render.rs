@@ -24,19 +24,9 @@ use super::{
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
 
 fn extension_activity_state_label(state: octet_agent::ExtensionPresentationState) -> &'static str {
-    match state {
-        octet_agent::ExtensionPresentationState::Loading => "loading",
-        octet_agent::ExtensionPresentationState::Pending => "pending",
-        octet_agent::ExtensionPresentationState::Active => "active",
-        octet_agent::ExtensionPresentationState::Running => "running",
-        octet_agent::ExtensionPresentationState::Succeeded => "completed",
-        octet_agent::ExtensionPresentationState::Failed => "failed",
-        octet_agent::ExtensionPresentationState::Cancelled => "cancelled",
-        octet_agent::ExtensionPresentationState::Degraded => "degraded",
-        octet_agent::ExtensionPresentationState::Stopped => "stopped",
-        octet_agent::ExtensionPresentationState::Unavailable => "unavailable",
-        octet_agent::ExtensionPresentationState::Empty => "empty",
-    }
+    // One owner for the declared vocabulary: the grouped transcript rows print
+    // these exact words, so the fallback presentation path cannot drift from it.
+    super::subagent_activity_state_label(state)
 }
 
 fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<String> {
@@ -93,137 +83,20 @@ fn append_nested_tool_output(
     header.extend(nest_tool_output(rows, theme, width));
 }
 
+/// Grouped, column-aligned, bounded rows for a settled delegation event. The
+/// grouping, collapsing, column selection, and row ceiling live in
+/// `view::subagent_activity_render_rows`, so the transcript and its tests share
+/// one layout; this stays the transcript-block adapter.
 fn render_subagent_activity_panel(
     panel: &ToolPanel,
     theme: &OctetTheme,
     width: u16,
+    expanded: bool,
 ) -> Vec<String> {
     let Some(view) = panel.subagent_activity.as_ref() else {
         return Vec::new();
     };
-    let label = theme.bold(&theme.fg("foreground", "Subagents"));
-    let mut lines = vec![label];
-    // A subagents event is already an owner-bounded roster, so keep every
-    // retained child visible even when ordinary tool output is collapsed.
-    let unicode = theme.unicode();
-    let separator = if unicode { " · " } else { " - " };
-    let render_row = |text: &str, last: bool| {
-        let elbow = match (unicode, last) {
-            (true, true) => "└",
-            (true, false) => "├",
-            (false, true) => "`-",
-            (false, false) => "+-",
-        };
-        // Nest connectors beneath the heading and align wrapped content with
-        // the worker name, including the wider ASCII connector.
-        let prefix = format!("{ACTIVITY_DETAIL_INDENT}{} ", theme.fg("muted", elbow));
-        let continuation = " ".repeat(visible_width(&prefix));
-        wrap_hanging(text, &prefix, &continuation, width)
-    };
-    let usage_detail = |input: u64, output: u64, cost: Option<u64>| {
-        let input = crate::tui::composer_surface::compact_token_count(input);
-        let output = crate::tui::composer_surface::compact_token_count(output);
-        let mut detail = if unicode {
-            format!("{separator}↑{input} ↓{output}")
-        } else {
-            format!("{separator}in {input} out {output}")
-        };
-        if let Some(cost) = cost {
-            detail.push_str(if unicode { " • " } else { " - " });
-            detail.push_str(&crate::tui::composer_surface::format_microdollars(cost));
-        }
-        detail
-    };
-
-    if !view.telemetry.is_empty() {
-        let children = &view.telemetry;
-        let task_width = children
-            .iter()
-            .map(|child| visible_width(&sanitize_for_terminal(&child.task_name)))
-            .max()
-            .unwrap_or_default();
-        for (index, child) in children.iter().rev().enumerate() {
-            let last = index + 1 == children.len();
-            let task = sanitize_for_terminal(&child.task_name);
-            let padding = " ".repeat(task_width - visible_width(&task));
-            let status = if child.state.is_empty() {
-                "running"
-            } else {
-                child.state.as_str()
-            };
-            let mut detail = status.to_owned();
-            // Short child tools belong in the inspector, not between the
-            // compact state and usage columns where they flash in and out.
-            // Input buckets are disjoint; reasoning is already in output.
-            // Tool-call counts remain in telemetry, not the transcript row.
-            let input = child
-                .input_tokens
-                .saturating_add(child.cache_read_tokens)
-                .saturating_add(child.cache_write_tokens);
-            detail.push_str(&usage_detail(
-                input,
-                child.output_tokens,
-                child.cost_microdollars,
-            ));
-            if let Some(reason) = child.failure_reason.as_deref() {
-                detail.push_str(separator);
-                detail.push_str(&sanitize_for_terminal(reason));
-            }
-            lines.extend(render_row(
-                &format!(
-                    "{}{padding} {}",
-                    theme.fg("foreground", &task),
-                    theme.fg("muted", &detail),
-                ),
-                last,
-            ));
-        }
-    } else {
-        let activities = &view.activities;
-        let summary_width = activities
-            .iter()
-            .map(|activity| visible_width(&sanitize_for_terminal(&activity.summary)))
-            .max()
-            .unwrap_or_default();
-        for (index, activity) in activities.iter().rev().enumerate() {
-            let last = index + 1 == activities.len();
-            let summary = sanitize_for_terminal(&activity.summary);
-            let padding = " ".repeat(summary_width - visible_width(&summary));
-            let mut detail = extension_activity_state_label(activity.state).to_owned();
-            if let Some(metrics) = activity.metrics {
-                let input = metrics
-                    .input_tokens
-                    .saturating_add(metrics.cache_read_tokens)
-                    .saturating_add(metrics.cache_write_tokens);
-                detail.push_str(&usage_detail(
-                    input,
-                    metrics.output_tokens,
-                    metrics.cost_microdollars,
-                ));
-            }
-            lines.extend(render_row(
-                &format!(
-                    "{}{padding} {}",
-                    theme.fg("foreground", &summary),
-                    theme.fg("muted", &detail),
-                ),
-                last,
-            ));
-        }
-    }
-
-    if lines.len() == 1 {
-        if let Some(reason) = view.failure_reason.as_deref() {
-            lines.extend(render_row(
-                &theme.fg(
-                    "muted",
-                    &format!("failed{separator}{}", sanitize_for_terminal(reason)),
-                ),
-                true,
-            ));
-        }
-    }
-    finish_transcript_block(lines)
+    super::subagent_activity_render_rows(view, theme, width, expanded)
 }
 
 pub(super) struct RenderedTranscriptBlockUpdate {
@@ -347,7 +220,12 @@ pub(super) fn render_block_planned_with_rainbow(
             rainbow_strength,
         ),
         TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
-            finish_transcript_block(render_subagent_activity_panel(panel, theme, width))
+            finish_transcript_block(render_subagent_activity_panel(
+                panel,
+                theme,
+                width,
+                verbose_tools,
+            ))
         }
         TranscriptBlock::Tool(panel) => {
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")

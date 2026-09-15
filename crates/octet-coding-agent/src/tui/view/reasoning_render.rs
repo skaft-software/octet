@@ -152,21 +152,25 @@ const ACTIVITY_THINKING_SWEEP_DEPTH: f64 = 0.80;
 /// introduce chroma where the model colour has none.
 const ACTIVITY_NEUTRAL_SATURATION: f64 = 0.06;
 
+/// HSV saturation at or above which an identity carries the ramp's **full**
+/// chroma treatment: the whole `ACTIVITY_RAMP_HUE_SPAN` rotation and the whole
+/// `ACTIVITY_RAMP_SATURATION_STEPS` boost. Between this and
+/// [`ACTIVITY_NEUTRAL_SATURATION`] a single kernel - [`activity_chromatic_weight`]
+/// - scales both, so a colour that is only just not grey can never be pushed a
+/// whole hue span away from itself. That is this ramp's version of the reported
+/// warm `Working` shimmer: the defect was a hue set applied *regardless* of the
+/// identity, and a near-neutral identity is the one case where the ramp has no
+/// chroma of its own to spend. Every compiled-in lab colour other than the exact
+/// grey of `OpenAi` resolves to at least 0.37 (`Cohere`) on every terminal
+/// profile, so no shipped model identity loses the treatment.
+const ACTIVITY_CHROMATIC_SATURATION: f64 = 0.25;
+
 impl ActivityRamp {
     fn of(label: &str) -> Option<Self> {
         match label {
             "Working" => Some(Self::Working),
             "Thinking" => Some(Self::Thinking),
             _ => None,
-        }
-    }
-
-    /// Rotating the model hue from the resting colour toward the sweep makes the
-    /// highlight read as "the model colour, lit up".
-    fn hue_direction(self) -> f64 {
-        match self {
-            Self::Working => 1.0,
-            Self::Thinking => -1.0,
         }
     }
 
@@ -189,10 +193,27 @@ impl ActivityRamp {
     /// plain palette already proved contrast-safe, and the luminance falloff -
     /// including the centre-is-the-most-distinct-cell property - stays exactly
     /// the plain one.
+    ///
+    /// Hue rotation and saturation scale are **identical for both labels**: hue
+    /// is deliberately never a cue between the statuses. A per-label direction
+    /// (`Working` rotating one way, `Thinking` the other) put the two ramps up
+    /// to `2 * ACTIVITY_RAMP_HUE_SPAN` apart at the outermost step, so a
+    /// chromatic model shimmered in two hue families - the reported "different
+    /// colored shimmers". The one cue that separates the statuses is the sweep's
+    /// luminance range, [`Self::sweep_depth`]. How much of the rotation and
+    /// boost an identity can carry is decided by its own chroma weight, so a
+    /// near-neutral model colour is rotated by nearly nothing and an exactly
+    /// grey one not at all.
     fn accent(self, identity: ActivityIdentity, step: usize, normal: f64) -> Rgb {
+        // `self` is deliberately unused: the accent must not depend on which
+        // label asked for it, only on the model identity (and, above this
+        // function, on the label's sweep depth). `ActivityRamp::of` is still the
+        // one place that maps a rendered label to its ramp, and the invariant
+        // test pins the two labels to byte-identical accents.
+        let _ = self;
         activity_accent_color(
             identity,
-            self.hue_direction() * ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step],
+            ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step],
             ACTIVITY_RAMP_SATURATION_STEPS[step],
             normal,
         )
@@ -334,6 +355,29 @@ fn activity_grey_at(target: f64) -> Rgb {
     activity_color_at_least((0, 0, 0), target)
 }
 
+/// How much of the ramp's chroma treatment - hue rotation and saturation
+/// boost - an identity with HSV saturation `saturation` may carry, in `[0, 1]`.
+///
+/// The weight comes from the **model colour itself**: whatever
+/// `theme.model_rgb(reasoning.model_lab)` resolved to for this session, never
+/// the model id, the lab name, or the status label. A model switched to a lab
+/// whose theme colour is nearly grey therefore shimmers in nearly pure
+/// luminance, exactly like the compiled-in `OpenAi` grey, without any id being
+/// special-cased.
+///
+/// The scale is linear from zero at [`ACTIVITY_NEUTRAL_SATURATION`] to one at
+/// [`ACTIVITY_CHROMATIC_SATURATION`] so the treatment is continuous at the
+/// neutral boundary: a colour one HSV step above the exact-grey branch rotates
+/// by a fraction of `ACTIVITY_RAMP_HUE_SPAN` instead of jumping to all of it.
+fn activity_chromatic_weight(saturation: f64) -> f64 {
+    if saturation <= ACTIVITY_NEUTRAL_SATURATION {
+        return 0.0;
+    }
+    ((saturation - ACTIVITY_NEUTRAL_SATURATION)
+        / (ACTIVITY_CHROMATIC_SATURATION - ACTIVITY_NEUTRAL_SATURATION))
+        .clamp(0.0, 1.0)
+}
+
 /// The accent for one ramp entry: the model colour's own hue rotated by
 /// `hue_offset`, its own saturation scaled by `saturation_scale`, rendered at
 /// `luminance`.
@@ -344,7 +388,9 @@ fn activity_grey_at(target: f64) -> Rgb {
 /// `#1f1f1f`, and therefore `gpt-6-astra`, or any theme that gives a model a grey
 /// accent) or an unknown lab (`ActivityIdentity { color: None }`) can only
 /// produce a profile grey: no hue can be introduced where there is none, whatever
-/// the rotation.
+/// the rotation. A *nearly* achromatic identity takes the fraction of the
+/// rotation and boost its own chroma earns ([`activity_chromatic_weight`]), so
+/// it moves in luminance far more than in hue.
 fn activity_accent_color(
     identity: ActivityIdentity,
     hue_offset: f64,
@@ -358,8 +404,9 @@ fn activity_accent_color(
     if base.saturation <= ACTIVITY_NEUTRAL_SATURATION {
         return activity_grey_at(luminance);
     }
-    let hue = (base.hue + hue_offset).rem_euclid(360.0);
-    let saturation = (base.saturation * saturation_scale).clamp(0.0, 1.0);
+    let weight = activity_chromatic_weight(base.saturation);
+    let hue = (base.hue + hue_offset * weight).rem_euclid(360.0);
+    let saturation = base.saturation * (1.0 + (saturation_scale - 1.0) * weight);
     let saturation = activity_reachable_saturation(hue, saturation, luminance);
     activity_hsv_color(
         hue,
@@ -1248,8 +1295,7 @@ mod tests {
                                     "{background:?}/{depth:?}/{label}: ramp entry {step} must be an \
                                      exact grey when the session has no model identity, got \
                                      {entry:?} for hue rotation {:.0} degrees",
-                                    ramp.hue_direction() * ACTIVITY_RAMP_HUE_SPAN
-                                        * ACTIVITY_RAMP_HUE_STEPS[step]
+                                    ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step]
                                 );
                             }
                             let most_chromatic = colors
@@ -1300,10 +1346,9 @@ mod tests {
 
     /// Both status labels must read as **one** colour identity per model: the
     /// same hue family as the resting label and as each other. The states are
-    /// separated by a non-chromatic cue instead - the ramp's brightness
-    /// direction (documented on [`ActivityRamp::direction`]) - because hue is
-    /// what made the reported `Working`/`Thinking` pair read as two unrelated
-    /// palettes.
+    /// separated by a non-chromatic cue instead - the sweep's luminance range
+    /// (documented on [`ActivityRamp::sweep_depth`]) - because hue is what made
+    /// the reported `Working`/`Thinking` pair read as two unrelated palettes.
     #[test]
     fn working_and_thinking_share_one_hue_family_and_differ_by_brightness() {
         // Same justification as the neutral test's chroma tolerance: one
@@ -1352,11 +1397,13 @@ mod tests {
                 }
                 let first_hue = hue_degrees(centres[0]);
                 let second_hue = hue_degrees(centres[1]);
-                let between = (first_hue - second_hue).abs().min(360.0 - (first_hue - second_hue).abs());
+                let between =
+                    (first_hue - second_hue).abs().min(360.0 - (first_hue - second_hue).abs());
                 assert!(
-                    between <= 2.0 * (ACTIVITY_RAMP_HUE_SPAN + HUE_TOLERANCE_DEGREES),
-                    "{background:?}/{lab:?}: the two status labels must share one hue family, got \
-                     {first_hue:.1} and {second_hue:.1}"
+                    between <= HUE_TOLERANCE_DEGREES,
+                    "{background:?}/{lab:?}: the two status labels must share one hue family - the \
+                     *same* rotation applied to the model hue, not a mirror of it - got \
+                     {first_hue:.1} and {second_hue:.1}, {between:.1} degrees apart"
                 );
                 let state_delta = (luminance(centres[0]) - luminance(centres[1])).abs();
                 assert!(
@@ -1366,6 +1413,170 @@ mod tests {
                      {state_delta:.4} of luminance (separation {separation:.3})"
                 );
             }
+        }
+    }
+
+    /// The non-chromatic cue, stated as an invariant: at the *same* luminance
+    /// both status ramps must resolve to the exact same colour. Hue is therefore
+    /// never a cue between the two statuses - the only thing that separates them
+    /// is how far [`ActivityRamp::sweep_depth`] carries the highlight from the
+    /// resting colour (its luminance range), so a chromatic model's `Working`
+    /// and `Thinking` share one hue family and a neutral model's stay grey.
+    ///
+    /// Before this invariant held, each label applied the ramp rotation with its
+    /// own sign (`Working` +, `Thinking` -), up to `2 * ACTIVITY_RAMP_HUE_SPAN`
+    /// = 48 degrees apart at the outermost ramp step: two shimmer colours out of
+    /// one model identity, which is precisely the "different colored shimmers"
+    /// report.
+    #[test]
+    fn both_status_ramps_apply_the_same_hue_rotation() {
+        // The cue that *does* separate the statuses is non-chromatic and lives
+        // in the sweep, never in the accent above: `Working` travels the
+        // profile's full proven separation, `Thinking` a shallower one of the
+        // same colour, so the two remain distinguishable even when the identity
+        // is a pure grey that has no hue to differ by.
+        assert_eq!(ActivityRamp::Working.sweep_depth(), 1.0);
+        assert_eq!(
+            ActivityRamp::Thinking.sweep_depth(),
+            ACTIVITY_THINKING_SWEEP_DEPTH
+        );
+        assert!(ActivityRamp::Thinking.sweep_depth() < ActivityRamp::Working.sweep_depth());
+
+        let theme = theme::test_theme();
+        for lab in [
+            Some(ModelLab::Alibaba),
+            Some(ModelLab::Meta),
+            Some(ModelLab::Google),
+            Some(ModelLab::Microsoft),
+            Some(ModelLab::Anthropic),
+        ] {
+            let identity = ActivityIdentity::for_model(
+                &theme,
+                &AssistantBlock::streaming_reasoning("").with_model_lab(lab),
+            );
+            let model = identity.color.expect("chromatic lab identity");
+            for normal in [0.25, 0.5, 0.85] {
+                for step in 0..ACTIVITY_RAMP_ENTRIES {
+                    assert_eq!(
+                        ActivityRamp::Working.accent(identity, step, normal),
+                        ActivityRamp::Thinking.accent(identity, step, normal),
+                        "{lab:?} step {step} at luminance {normal}: both status ramps must apply the \
+                         *same* rotation to the model hue {model:?} (hue {:.1}), not mirrored \
+                         rotations",
+                        hue_degrees(model)
+                    );
+                }
+                assert_ne!(
+                    ActivityRamp::Working.accent(identity, ACTIVITY_RAMP_ENTRIES - 1, normal),
+                    ActivityRamp::Working.accent(identity, 0, normal),
+                    "{lab:?}: the ramp must still travel inside the model's own hue family"
+                );
+            }
+        }
+    }
+
+    /// The chroma-weight half of the same rule: the rotation and saturation
+    /// boost are scaled by the **model colour's own** HSV saturation, so an
+    /// identity that is only just not grey gets only a fraction of the hue span
+    /// - and a themed model colour that is nearly grey, or a future lab colour
+    /// that is, stays nearly luminance-only. Nothing here reads a model id or a
+    /// lab name: the fixture is a custom theme and the weight is read back from
+    /// whatever colour that theme resolves.
+    #[test]
+    fn near_neutral_model_colours_rotate_only_as_far_as_their_own_chroma_allows() {
+        // Equal red/green with a hint of blue: not grey (HSV saturation 0.08 on
+        // the dark profile, 0.13 on the light one) but far from the point where
+        // a full `ACTIVITY_RAMP_HUE_SPAN` rotation is the model's own hue.
+        const NEAR_NEUTRAL_OVERRIDE: &str = "[model]\nopenai = \"#6a6a7a\"\n";
+        // One 8-bit channel step on a near-grey colour is worth several degrees
+        // of measured hue, so the allowance absorbs the encoder only. It is far
+        // below the 24-degree span the defect applied at every ramp entry.
+        const HUE_TOLERANCE_DEGREES: f64 = 5.0;
+
+        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+            let theme = theme::test_theme_source_with(
+                NEAR_NEUTRAL_OVERRIDE,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                background,
+            );
+            let reasoning = AssistantBlock::streaming_reasoning("")
+                .with_model_lab(Some(ModelLab::OpenAi));
+            let model = theme
+                .model_rgb(Some(ModelLab::OpenAi))
+                .expect("the custom theme resolves the lab colour");
+            let saturation = activity_hsv(model).saturation;
+            assert!(
+                saturation > ACTIVITY_NEUTRAL_SATURATION
+                    && saturation < ACTIVITY_CHROMATIC_SATURATION,
+                "{background:?}: the fixture must be near-neutral, got {model:?} with HSV \
+                 saturation {saturation:.3}"
+            );
+            let weight = activity_chromatic_weight(saturation);
+            assert!(
+                weight < 0.5,
+                "{background:?}: a near-neutral colour must carry a small chroma weight, got \
+                 {weight:.3}"
+            );
+
+            let identity = ActivityIdentity::for_model(&theme, &reasoning);
+            assert_eq!(
+                identity.color,
+                Some(model),
+                "the weight must be derived from the colour the session's model resolves to"
+            );
+            let model_hue = hue_degrees(model);
+            let bound = weight * ACTIVITY_RAMP_HUE_SPAN;
+            for label in ["Working", "Thinking"] {
+                let ramp = ActivityRamp::of(label).expect("status ramp");
+                for normal in [0.35, 0.6] {
+                    for step in 0..ACTIVITY_RAMP_ENTRIES {
+                        let accent = ramp.accent(identity, step, normal);
+                        let hue = hue_degrees(accent);
+                        let delta = (hue - model_hue).abs().min(360.0 - (hue - model_hue).abs());
+                        assert!(
+                            delta <= bound + HUE_TOLERANCE_DEGREES,
+                            "{background:?}/{label} step {step} at luminance {normal}: {accent:?} \
+                             has hue {hue:.1}, {delta:.1} degrees from the model hue \
+                             {model_hue:.1}; this identity's chroma weight is {weight:.3}, so it \
+                             may rotate by {bound:.1} of the {} degrees the ramp can reach",
+                            ACTIVITY_RAMP_HUE_SPAN
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// TEMPORARY PROBE (removed before hand-off): the audit note quotes measured
+    /// chroma/luminance deltas at the sweep centre, before and after the fix.
+    #[test]
+    fn probe_sweep_centre_deltas() {
+        let theme = theme::test_theme_for(
+            TerminalBackground::Dark,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        );
+        for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba)] {
+            let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
+            let resting = resting_colour(&theme, &reasoning);
+            let mut line = format!(
+                "PROBE {lab:?} resting={resting:?} lum={:.4} chroma={:.4}",
+                luminance(resting),
+                chroma(resting)
+            );
+            for label in ["Working", "Thinking"] {
+                let colors = rendered_foregrounds(&activity_shimmer_label(
+                    &theme, &reasoning, label, 7, 0,
+                ));
+                let center = colors[0];
+                line.push_str(&format!(
+                    " | {label} center={center:?} lum={:.4} dlum={:+.4} chroma={:.4} hue={:.1}",
+                    luminance(center),
+                    luminance(center) - luminance(resting),
+                    chroma(center),
+                    hue_degrees(center)
+                ));
+            }
+            println!("{line}");
         }
     }
 
@@ -1400,6 +1611,14 @@ mod tests {
                 let at_high = activity_shimmer_label(&theme, &reasoning, "Working", 7, 0);
                 let at_max = activity_shimmer_label(&theme, &reasoning, "Working", 7, 100);
                 assert_ne!(at_high, at_max);
+                // The emphasis is scoped to `Working`: `Thinking` renders its
+                // own model ramp identically with and without the emphasis, so
+                // the pair still reads as one identity at `max`/`ultra`.
+                assert_eq!(
+                    activity_shimmer_label(&theme, &reasoning, "Thinking", 7, 0),
+                    activity_shimmer_label(&theme, &reasoning, "Thinking", 7, 100),
+                    "{background:?}/{lab:?}: the rainbow must never reach Thinking"
+                );
 
                 let rainbow = activity_rainbow_color(background, 0, 7);
                 assert_eq!(
@@ -1443,6 +1662,27 @@ mod tests {
                 let reasoning = activity_reasoning(Some(ModelLab::Alibaba), label);
                 let resting = resting_colour(&theme, &reasoning);
                 let cycle = activity_cycle(label);
+                // The traverse starts before the leading edge and ends past the
+                // trailing edge, with `ACTIVITY_SWEEP_HALF` cells of slack at
+                // both ends for the band to fall off, so the highlight crosses
+                // the whole label instead of "sliding part way through the
+                // letters" and back.
+                let first_center = ACTIVITY_SWEEP_START;
+                let last_center = ACTIVITY_SWEEP_START + cycle as isize - 1;
+                assert!(
+                    first_center + ACTIVITY_SWEEP_HALF < 0,
+                    "{label}: the sweep must begin before the leading edge, got {first_center}"
+                );
+                assert!(
+                    last_center - ACTIVITY_SWEEP_HALF >= label.width() as isize,
+                    "{label}: the sweep must end past the trailing edge, got {last_center}"
+                );
+                assert!(
+                    cycle
+                        >= label.width() + 2 * ACTIVITY_SWEEP_HALF as usize
+                            + ACTIVITY_SWEEP_REST_FRAMES,
+                    "{label}: a {cycle}-frame cycle leaves no rest gap"
+                );
                 let mut peaks = Vec::new();
                 for index in 0..label.width() as isize {
                     let frame = centre_frame(index);
@@ -1491,15 +1731,20 @@ mod tests {
     /// The loop must now rest for the cycle's gap frames and never jump.
     #[test]
     fn the_sweep_rests_between_cycles_and_never_teleports() {
-        // The largest single-frame luminance change one cell may show is the
-        // largest adjacent falloff step (24 of 100, the 64 -> 40 transition) plus
-        // the ramp's own per-frame chroma variation, which is bounded by the
-        // same 0.06 the neutral acceptance test allows an encoder. Measured
-        // 0.0961 of the 0.355 dark separation = 0.271, so 0.30 is the smallest
-        // round bound that admits the ramp itself. The reported teleport moved a
-        // cell from 64% lit straight to rest - 0.64 of the separation - more than
-        // twice this bound, so the test still fails loudly on it.
-        const MAX_FRAME_STEP_FRACTION: f64 = 0.30;
+        // The no-teleport bound, derived from the ramp itself: movement alone
+        // changes a cell by at most the largest adjacent falloff step (24 of
+        // 100, the 64 -> 40 transition), and the ramp adds its own per-frame
+        // phase step on top - every cell's accent advances one ramp entry per
+        // frame, which wobbles the tinted luminance by 0.031 of the separation
+        // (measured total: 0.0961 of the 0.355 dark separation = 0.271). The
+        // reported teleport is an order of magnitude larger: a trailing cell
+        // snapped from 64% lit straight to rest, 0.64 of the separation.
+        let largest_ramp_step = ACTIVITY_SWEEP_FALLOFF
+            .windows(2)
+            .map(|pair| f64::from(pair[0] - pair[1]))
+            .fold(0.0, f64::max)
+            / 100.0;
+        const RAMP_PHASE_ALLOWANCE_FRACTION: f64 = 0.06;
 
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
             let theme = theme::test_theme_for(
@@ -1515,6 +1760,8 @@ mod tests {
                 let resting_marker = theme.rgb_fg(baseline, "•");
                 let cycle = activity_cycle(label);
                 let mut rest_frames = 0;
+                let mut first_frame_at_rest = false;
+                let mut last_frame_at_rest = false;
                 let mut previous: Option<Vec<f64>> = None;
                 let mut first = Vec::new();
                 let mut largest_step: f64 = 0.0;
@@ -1524,11 +1771,34 @@ mod tests {
                         &theme, &reasoning, label, frame, 0,
                     ));
                     let luminances = colors.iter().copied().map(luminance).collect::<Vec<_>>();
-                    if colors.iter().all(|color| *color == resting)
+                    let all_rest = colors.iter().all(|color| *color == resting)
                         && activity_shimmer_marker(&theme, &reasoning, frame, 0, "•")
-                            == resting_marker
-                    {
+                            == resting_marker;
+                    if all_rest {
                         rest_frames += 1;
+                    }
+                    if frame == 0 {
+                        first_frame_at_rest = all_rest;
+                    }
+                    if frame + 1 == cycle {
+                        last_frame_at_rest = all_rest;
+                    }
+                    // Nothing outside the label's own cells may be lit: only
+                    // configured cells are rendered at all, and a lit one must
+                    // sit inside the falloff window of the current centre. (The
+                    // margin dot is the deliberate exception: it shares the
+                    // shimmer's coordinate space and is asserted at rest here
+                    // with the label.)
+                    let center = (frame % cycle) as isize + ACTIVITY_SWEEP_START;
+                    for (cell, color) in colors.iter().enumerate() {
+                        if *color != resting {
+                            let distance = (cell as isize - center).abs();
+                            assert!(
+                                distance < ACTIVITY_SWEEP_FALLOFF.len() as isize,
+                                "{background:?}/{label} frame {frame}: cell {cell} is lit \
+                                 {distance} cells from the centre {center}"
+                            );
+                        }
                     }
                     if let Some(previous) = previous.as_deref() {
                         for (before, after) in previous.iter().zip(&luminances) {
@@ -1552,11 +1822,17 @@ mod tests {
                      colour everywhere; the loop needs a rest gap"
                 );
                 assert!(
-                    largest_step <= MAX_FRAME_STEP_FRACTION * separation,
+                    first_frame_at_rest && last_frame_at_rest,
+                    "{background:?}/{label}: the cycle must open and close with every cell at \
+                     rest, got {first_frame_at_rest} and {last_frame_at_rest}"
+                );
+                assert!(
+                    largest_step <= (largest_ramp_step + RAMP_PHASE_ALLOWANCE_FRACTION) * separation,
                     "{background:?}/{label}: one cell changes by {largest_step:.4} of luminance \
-                     between frames, more than the largest ramp step \
-                     ({:.4}); the highlight is jumping, not travelling",
-                    MAX_FRAME_STEP_FRACTION * separation
+                     between frames, more than the largest ramp step {largest_ramp_step:.3} plus \
+                     {RAMP_PHASE_ALLOWANCE_FRACTION:.2} of ramp phase (bound {:.4}); the highlight \
+                     is jumping, not travelling",
+                    (largest_ramp_step + RAMP_PHASE_ALLOWANCE_FRACTION) * separation
                 );
                 assert_eq!(
                     activity_shimmer_label(&theme, &reasoning, label, 0, 0),

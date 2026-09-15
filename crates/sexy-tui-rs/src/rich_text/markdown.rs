@@ -4,10 +4,10 @@
 //! rendered through the self-contained diagram renderers: `latex` through
 //! [`super::latex::render_latex`] (display mode) and `mermaid`/`graph`/
 //! `flowchart` through [`super::mermaid::render_mermaid`]. Every other fence —
-//! and every diagram body the renderer rejects, is too large, or is not
-//! terminated by a closing fence — stays the original [`CodeBlock`] source, so
-//! unsupported input degrades to a plain code block instead of an empty or
-//! partial diagram. See [`MAX_DIAGRAM_FENCE_BYTES`].
+//! and every diagram body the renderer rejects, renders to nothing, is too
+//! large, or is not terminated by a closing fence — stays the original
+//! [`CodeBlock`] source, so unsupported input degrades to a plain code block
+//! instead of an empty or partial diagram. See [`MAX_DIAGRAM_FENCE_BYTES`].
 //!
 //! Rendering happens here, at parse time, and only for a *complete* fenced
 //! block: the streaming layer shows an open fence as its raw growing source (it
@@ -59,6 +59,12 @@ fn render_diagram_fence(info: &str, code: &str) -> Option<String> {
         }
         _ => return None,
     };
+    // A renderer that succeeds but produces nothing — an empty expression,
+    // `{}`, a header-only graph — is a failed render: the fence must keep its
+    // original source rather than collapse into an empty block.
+    if rendered.trim().is_empty() {
+        return None;
+    }
     rendered.push('\n');
     Some(rendered)
 }
@@ -389,8 +395,9 @@ impl<'a> Builder<'a> {
             } => {
                 // Only a complete fence whose info string names a diagram
                 // language is rendered; every other case (unknown language,
-                // oversized body, renderer failure, unterminated fence) keeps
-                // the original source as a plain code block.
+                // oversized body, renderer failure or empty render,
+                // unterminated fence) keeps the original source as a plain
+                // code block.
                 let diagram = end_range
                     .as_ref()
                     .filter(|range| fence_is_closed(self.source, range))

@@ -17,6 +17,7 @@ mod store;
 pub use login::{login, logout};
 pub(crate) use oauth::{ChatGptPlan, SubscriptionClaims};
 pub use resolver::CodexResolver;
+pub(crate) use store::REFRESH_LOCK_WAIT;
 pub use store::{default_path, CredentialStore};
 
 /// Public OAuth client id of the Codex CLI (not a secret).

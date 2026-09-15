@@ -54,14 +54,26 @@ fn filtered_indices_with_groups(
         .collect()
 }
 
+/// Indices the typed filter matched, before any presentation grouping hides
+/// them. Group counts and collapsed summaries must be measured here: measured
+/// against the already-collapsed set, every collapsed terminal group reports
+/// zero members and the reader is told nothing about the workers it hides.
+pub(super) fn searched_indices_for_action(
+    items: &[String],
+    descriptions: &[Option<String>],
+    action: &PanelAction,
+    filter: &str,
+) -> Vec<usize> {
+    filtered_indices_with_groups(items, descriptions, action.model_provider_groups(), filter)
+}
+
 pub(super) fn filtered_indices_for_action(
     items: &[String],
     descriptions: &[Option<String>],
     action: &PanelAction,
     filter: &str,
 ) -> Vec<usize> {
-    let mut indices =
-        filtered_indices_with_groups(items, descriptions, action.model_provider_groups(), filter);
+    let mut indices = searched_indices_for_action(items, descriptions, action, filter);
     // Terminal subagent groups collapse behind their heading. A typed filter
     // still searches every worker, hidden groups included, so filtering for a
     // finished worker can never look like the worker disappeared.
@@ -1577,6 +1589,9 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
             // have exactly two actions, so they do not need filter chrome or a
             // count in their heading.
             let filtered = filtered_indices_for_action(items, descriptions, action, filter);
+            let searched = action
+                .subagent_panel()
+                .map(|_| searched_indices_for_action(items, descriptions, action, filter));
             let body = filtered.len().max(1);
             let show_purpose = !confirmation && surface.purpose.is_some() && max_panel >= 4;
             let border_min_rows = if show_purpose { 6 } else { 5 };
@@ -1618,7 +1633,33 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                 action.model_provider_groups(),
                 0..filtered.len(),
             );
-            (body * row_height + headings + chrome_rows + border_rows).min(max_panel)
+            // Grouped subagent chrome is budgeted here as well: one heading per
+            // visible state group, one summary row for the collapsed terminal
+            // groups, and the column header. Budgeting the body alone made the
+            // panel claim a height it then could not honour, so the collapse
+            // summaries were sliced off the bottom and every live worker was
+            // pushed out of the window.
+            let subagent_chrome = action
+                .subagent_panel()
+                .zip(searched.as_ref())
+                .map(|(panel, searched)| {
+                    let counts = panel.counts(searched);
+                    let visible = panel
+                        .groups
+                        .iter()
+                        .zip(&counts)
+                        .filter(|(group, count)| {
+                            **count > 0 && !(panel.collapsed && group.collapsible)
+                        })
+                        .count();
+                    let hidden = usize::from(panel.groups.iter().zip(&counts).any(
+                        |(group, count)| panel.collapsed && group.collapsible && *count > 0,
+                    ));
+                    visible + hidden + usize::from(!filtered.is_empty())
+                })
+                .unwrap_or(0);
+            (body * row_height + headings + subagent_chrome + chrome_rows + border_rows)
+                .min(max_panel)
         }
         Panel::SessionPicker { picker } => {
             let body = session_picker_ordering(picker).len().max(1);
@@ -1793,7 +1834,11 @@ fn render_panel_output_with_limit(
             // Chrome is budgeted out of the body so a bounded panel can never
             // render past the row allowance it was given.
             let subagents = action.subagent_panel();
-            let subagent_counts = subagents.map(|panel| panel.counts(&filtered));
+            let searched = subagents
+                .map(|_| searched_indices_for_action(items, descriptions, action, filter));
+            let subagent_counts = subagents
+                .zip(searched.as_ref())
+                .map(|(panel, searched)| panel.counts(searched));
             let hidden_groups: Vec<(String, usize)> =
                 match (subagents, subagent_counts.as_ref()) {
                     (Some(panel), Some(counts)) => panel
