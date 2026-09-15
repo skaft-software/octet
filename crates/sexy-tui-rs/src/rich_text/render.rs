@@ -2182,24 +2182,34 @@ impl AppendOnlyTail {
                     return None;
                 };
                 if self.paragraph_prefix.is_none() {
-                    // The stream owns prefix identity and resets this cache on
-                    // semantic replacement, width/options/theme changes. Never
-                    // hash, clone, or compare the growing paragraph here.
-                    stats.checked_bytes += inline_source_bytes(prefix) as u64;
-                    let runs = renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
-                    stats.copied_bytes += run_bytes(&runs) as u64;
-                    let runs = renderer.expand_run_tabs(&runs);
-                    stats.copied_bytes += run_bytes(&runs) as u64;
-                    let mut offset = 0;
-                    for run in &runs {
-                        prefix_newlines
-                            .extend(run.text.match_indices('\n').map(|(i, _)| offset + i));
-                        offset += run.text.len();
+                    // A canonical prose preview is represented by an empty
+                    // semantic prefix followed by the growing Raw suffix. Do
+                    // not route that empty prefix through rich layout: doing
+                    // so charges a rich-prefix layout (and invites prefix work) even
+                    // though there is no immutable content to flatten.
+                    if prefix.is_empty() {
+                        self.paragraph_prefix_bytes = 0;
+                        self.paragraph_prefix = Some(Vec::new());
+                    } else {
+                        // The stream owns prefix identity and resets this cache on
+                        // semantic replacement, width/options/theme changes. Never
+                        // hash, clone, or compare the growing paragraph here.
+                        stats.checked_bytes += inline_source_bytes(prefix) as u64;
+                        let runs = renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
+                        stats.copied_bytes += run_bytes(&runs) as u64;
+                        let runs = renderer.expand_run_tabs(&runs);
+                        stats.copied_bytes += run_bytes(&runs) as u64;
+                        let mut offset = 0;
+                        for run in &runs {
+                            prefix_newlines
+                                .extend(run.text.match_indices('\n').map(|(i, _)| offset + i));
+                            offset += run.text.len();
+                        }
+                        stats.checked_bytes += offset as u64;
+                        stats.rich_prefix_layouts += 1;
+                        self.paragraph_prefix_bytes = offset;
+                        self.paragraph_prefix = Some(runs);
                     }
-                    stats.checked_bytes += offset as u64;
-                    stats.rich_prefix_layouts += 1;
-                    self.paragraph_prefix_bytes = offset;
-                    self.paragraph_prefix = Some(runs);
                 }
                 (source.as_str(), None)
             }

@@ -27,6 +27,9 @@ pub struct StreamingStats {
     pub preview_copied_bytes: u64,
     /// Newly accepted bytes classified for provisional structural-line visibility.
     pub preview_scanned_bytes: u64,
+    /// Bytes classified while deciding whether a literal preview can be promoted
+    /// to canonical prose.
+    pub preview_classified_bytes: u64,
     /// Bytes covered by lexical blank-boundary searches and marker-prefix checks.
     /// Separate from fence scanning, parser input, and preview copying.
     pub lexical_scanned_bytes: u64,
@@ -226,6 +229,9 @@ pub struct StreamingMarkdown {
     // Raw tail bytes represented by the preview; any withheld suffix remains
     // immediately available to raw and semantic-copy consumers.
     preview_source_len: usize,
+    // Whether the represented source already contains a newline. This keeps
+    // append-local preview classification from rescanning an immutable prefix.
+    preview_source_has_newline: bool,
     // Ordinary prose is previewed with Markdown's soft-break geometry from its
     // first visible line. The source itself remains in `tail`/`raw`; these
     // fields only track the normalized display projection between parser
@@ -370,6 +376,8 @@ impl StreamingMarkdown {
         self.committed = markdown::parse(&self.decoded);
         self.tail.clear();
         self.preview = Document::default();
+        self.preview_source_len = 0;
+        self.preview_source_has_newline = false;
         self.preview_prose = false;
         self.prose_pending_soft_break = false;
         self.prose_at_boundary = false;
@@ -399,12 +407,15 @@ impl StreamingMarkdown {
                     code: String::new(),
                 })]);
                 self.preview_source_len = open.code_start;
+                self.preview_source_has_newline = self.tail[..open.code_start].contains('\n');
                 self.tail_semantic_parsed = true;
             }
             let end = self.presentation_end();
             if let [Block::CodeBlock(code)] = self.preview.blocks.as_mut_slice() {
-                code.code.push_str(&self.tail[self.preview_source_len..end]);
-                self.stats.preview_copied_bytes += (end - self.preview_source_len) as u64;
+                let start = self.preview_source_len;
+                code.code.push_str(&self.tail[start..end]);
+                self.stats.preview_copied_bytes += (end - start) as u64;
+                self.preview_source_has_newline |= self.tail[start..end].contains('\n');
                 self.preview_source_len = end;
             }
             return;
@@ -534,9 +545,16 @@ impl StreamingMarkdown {
             self.preview_prose = false;
             self.prose_pending_soft_break = false;
             self.prose_at_boundary = false;
+            let preview_source_has_newline = if self.preview_source_len <= end {
+                self.preview_source_has_newline
+                    || self.tail[self.preview_source_len..end].contains('\n')
+            } else {
+                self.tail[..end].contains('\n')
+            };
             self.preview_epoch += 1;
             self.preview = preview;
             self.preview_source_len = end;
+            self.preview_source_has_newline = preview_source_has_newline;
             self.tail_semantic_parsed = true;
         } else {
             self.append_preview();
@@ -561,6 +579,7 @@ impl StreamingMarkdown {
         self.next_parse_at = 1024;
         self.tail_semantic_parsed = false;
         self.preview_source_len = 0;
+        self.preview_source_has_newline = false;
         self.preview_prose = false;
         self.prose_pending_soft_break = false;
         self.prose_at_boundary = false;
@@ -591,8 +610,13 @@ impl StreamingMarkdown {
         }
         let start = self.preview_source_len;
         let suffix_len = end - start;
+        let suffix_has_newline = self.tail[start..end].contains('\n');
         if self.preview_prose {
-            if prose_suffix_requires_literal_preview(&self.tail[..start], &self.tail[start..end]) {
+            if prose_suffix_requires_literal_preview(
+                &self.tail[..start],
+                &self.tail[start..end],
+                &mut self.stats.preview_classified_bytes,
+            ) {
                 let source = self.tail[..end].to_owned();
                 self.preview = Document::new(vec![Block::Plain(source)]);
                 self.preview_prose = false;
@@ -611,6 +635,16 @@ impl StreamingMarkdown {
                 );
             }
         } else {
+            // A literal preview cannot be promoted to canonical prose until a
+            // newline proves the current source line. Defer classification while
+            // the accepted suffix has no newline; otherwise every append would
+            // rescan the complete growing candidate.
+            if !suffix_has_newline {
+                self.append_literal_preview(start, end);
+                self.preview_source_len = end;
+                return;
+            }
+
             // A parsed structural prefix (for example, a heading) may still
             // share the mutable tail with an ordinary paragraph. Classify the
             // suffix after that proven block boundary, rather than allowing the
@@ -624,13 +658,19 @@ impl StreamingMarkdown {
                 );
             let candidate_start = if structural_prefix { start } else { 0 };
             let candidate = &self.tail[candidate_start..end];
-            if ordinary_preview_start(candidate) && !prose_requires_literal_preview(candidate) {
+            if ordinary_preview_start(candidate, &mut self.stats.preview_classified_bytes)
+                && !prose_requires_literal_preview(
+                    candidate,
+                    &mut self.stats.preview_classified_bytes,
+                )
+            {
+                let source_has_newline = self.preview_source_has_newline || suffix_has_newline;
                 let replay_plain = !self.preview.is_empty()
-                    && self.tail[..end].contains('\n')
+                    && source_has_newline
                     && matches!(self.preview.blocks.as_slice(), [Block::Plain(_)]);
-                if (self.preview.is_empty() && candidate.contains('\n'))
+                if (self.preview.is_empty() && source_has_newline)
                     || replay_plain
-                    || (structural_prefix && candidate.contains('\n'))
+                    || (structural_prefix && source_has_newline)
                 {
                     let source_start = if replay_plain { 0 } else { start };
                     if replay_plain {
@@ -660,6 +700,7 @@ impl StreamingMarkdown {
                 self.append_literal_preview(start, end);
             }
         }
+        self.preview_source_has_newline |= suffix_has_newline;
         self.preview_source_len = end;
     }
 
@@ -687,12 +728,14 @@ impl StreamingMarkdown {
     }
 }
 
-fn ordinary_preview_start(source: &str) -> bool {
+fn ordinary_preview_start(source: &str, classified: &mut u64) -> bool {
+    *classified = classified.saturating_add(source.len() as u64);
     let line = source.split('\n').next().unwrap_or_default();
     !line.is_empty() && !line.trim().is_empty() && !literal_preview_line(line)
 }
 
-fn prose_requires_literal_preview(source: &str) -> bool {
+fn prose_requires_literal_preview(source: &str, classified: &mut u64) -> bool {
+    *classified = classified.saturating_add(source.len() as u64);
     source.contains(['\t', '\r'])
         || source
             .chars()
@@ -702,7 +745,12 @@ fn prose_requires_literal_preview(source: &str) -> bool {
             .any(|line| literal_preview_line(line) || line_has_hard_break(line))
 }
 
-fn prose_suffix_requires_literal_preview(previous: &str, suffix: &str) -> bool {
+fn prose_suffix_requires_literal_preview(
+    previous: &str,
+    suffix: &str,
+    classified: &mut u64,
+) -> bool {
+    *classified = classified.saturating_add(suffix.len() as u64);
     suffix.contains(['\t', '\r'])
         || suffix
             .chars()
@@ -1394,6 +1442,7 @@ mod tests {
             let stats = stream.stats();
             assert!(stats.fence_scanned_bytes <= 2 * total as u64, "{stats:?}");
             assert!(stats.preview_copied_bytes <= 3 * total as u64, "{stats:?}");
+            assert!(stats.preview_classified_bytes <= 3 * total as u64, "{stats:?}");
             let expected = chunk.repeat(30_000);
             assert_eq!(stream.raw_bytes(), expected.as_bytes());
             if chunk == "word line\n" {
