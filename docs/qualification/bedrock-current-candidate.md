@@ -9,9 +9,12 @@
 The existing Bedrock Converse codec remains the provider boundary. This candidate adds
 focused qualification rather than changing the generic client or bootstrap:
 
-- SigV4 canonical URI handling re-encodes decoded URL path segments once, so a Bedrock
-  model ID such as `...v1:0` is signed as the exact `%3A` path bytes sent on the wire.
-  Canonical query ordering and the exact prepared body hash remain covered.
+- The Bedrock codec serializes the completed route through `Url::set_path` after
+  `path_segments_mut()` construction, so a model ID such as
+  `...v1:0` is prepared as the exact `%3A` path bytes sent on the wire. Existing
+  SigV4 canonical URI handling re-encodes decoded URL path segments once;
+  canonical query ordering and the exact prepared body hash remain covered.
+
 - Bedrock usage now retains `cacheReadInputTokens` and `cacheWriteInputTokens` while
   preserving the existing total-token underflow guard.
 - The private AWS chain is explicit and bounded: environment pair, static profile,
@@ -84,3 +87,22 @@ run, and no physical-network cancellation measurement. Local stream drop proves 
 local HTTP-body cancellation; it does not prove remote generation cancellation or
 zero billing. The candidate also does not claim availability for models absent from
 the existing authenticated/static catalog.
+
+## Wire-path repair delta
+
+The ConverseStream fixture exposed a literal `:0` in the prepared model path, while
+its expected wire route and the existing SigV4 canonical-URI test use `%3A0`. The
+existing `path_segments_mut().push(...)` construction is retained for endpoint-path
+handling; after the route is complete, the codec sends the serialized path through
+`Url::set_path` with literal colons replaced by `%3A`. The URL setter preserves that
+existing escape, avoiding `%253A`.
+
+This keeps the prepared URL and `auth.rs:412-435`'s canonical URI aligned: the URL
+stores `%3A`, `path_segments()` exposes the decoded colon, and the signer encodes it
+once. The fixture's request body, body hash, signing, usage, security-token, and
+accept assertions remain unchanged. This repair does not edit `auth.rs`, the generic
+client, bootstrap, or catalog.
+
+No tests, builds, or other commands were run for this source-only repair, per the
+invocation constraint.
+

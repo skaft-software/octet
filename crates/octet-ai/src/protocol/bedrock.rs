@@ -336,6 +336,12 @@ pub(crate) fn build_request(
         segments.push(&model.spec.api_name);
         segments.push("converse-stream");
     }
+    // The URL path-segment setter leaves `:` as a legal path character. Bedrock
+    // model routes must carry it as `%3A`; `set_path` preserves that existing
+    // escape instead of turning it into `%253A`, keeping the prepared URL equal
+    // to the SigV4 canonical URI.
+    let encoded_path = url.path().replace(':', "%3A");
+    url.set_path(&encoded_path);
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::ACCEPT,
