@@ -342,6 +342,13 @@ pub enum UnsupportedError {
     /// request field.
     #[error("Responses service tier is unsupported on this route")]
     ServiceTier,
+    /// The selected route does not declare the Responses computer-use tool.
+    ///
+    /// The codec carries the protocol only; declaring the tool is an endpoint
+    /// declaration and a route without it fails closed rather than silently
+    /// dropping the caller's declaration.
+    #[error("Responses computer use is unsupported on this route")]
+    ComputerUse,
 }
 
 /// Configuration loading or resolution error.

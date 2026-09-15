@@ -249,6 +249,59 @@ impl ResponsesOutput {
     }
 }
 
+/// Environment a declared Responses computer-use tool controls.
+///
+/// These are the documented `environment` values for the OpenAI Responses
+/// `computer_use_preview` tool. Typed rather than free-form so an unknown
+/// environment fails at the boundary instead of reaching the wire.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerUseEnvironment {
+    /// A provider-hosted browser.
+    Browser,
+    /// A Linux desktop.
+    Linux,
+    /// A macOS desktop.
+    Mac,
+    /// An Ubuntu desktop.
+    Ubuntu,
+    /// A Windows desktop.
+    Windows,
+}
+
+impl ComputerUseEnvironment {
+    /// Exact Responses wire value for this environment.
+    pub const fn wire_value(self) -> &'static str {
+        match self {
+            Self::Browser => "browser",
+            Self::Linux => "linux",
+            Self::Mac => "mac",
+            Self::Ubuntu => "ubuntu",
+            Self::Windows => "windows",
+        }
+    }
+}
+
+/// A caller-declared OpenAI Responses computer-use tool
+/// (`{"type":"computer_use_preview", …}`).
+///
+/// This is the wire declaration only. Declaring it asks the provider's model to
+/// propose computer actions as `computer_call` items; the codec then maps those
+/// items to canonical tool calls and maps the caller's tool result back to a
+/// `computer_call_output` item. Octet performs no desktop or browser action
+/// itself: whether any action may execute is decided by host policy outside
+/// this crate, and the codec fails closed on an action it cannot represent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerUseTool {
+    /// Display width in pixels the model is told to operate against.
+    pub display_width: u32,
+    /// Display height in pixels the model is told to operate against.
+    pub display_height: u32,
+    /// Environment the model is told it controls.
+    pub environment: ComputerUseEnvironment,
+}
+
 /// Responses-specific request state.
 ///
 /// `input` is mutually exclusive with `previous_response_id`: full local
@@ -274,6 +327,13 @@ pub struct ResponsesOptions {
     /// accept the field instead of silently dropping it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<crate::types::ServiceTier>,
+    /// Optional declared Responses computer-use tool.
+    ///
+    /// `None` means the caller declared no computer tool and the codec sends
+    /// none. A codec fails closed when the selected route's declared profile
+    /// does not accept the declaration instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<ComputerUseTool>,
 }
 
 impl ResponsesOptions {
@@ -289,6 +349,7 @@ impl ResponsesOptions {
             context_management: None,
             store: false,
             service_tier: None,
+            computer_use: None,
         }
     }
 
@@ -300,6 +361,17 @@ impl ResponsesOptions {
     /// [`crate::ResponsesRuntimeProfile`] and fails closed.
     pub fn with_service_tier(mut self, tier: crate::types::ServiceTier) -> Self {
         self.service_tier = Some(tier);
+        self
+    }
+
+    /// Returns these options with a declared computer-use tool.
+    ///
+    /// This declares the wire tool only. The codec re-checks the route's
+    /// declared [`crate::ResponsesRuntimeProfile`] and fails closed when the
+    /// endpoint does not declare computer use, rather than dropping the
+    /// declaration silently.
+    pub fn with_computer_use(mut self, tool: ComputerUseTool) -> Self {
+        self.computer_use = Some(tool);
         self
     }
 }

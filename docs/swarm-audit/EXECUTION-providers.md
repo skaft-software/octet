@@ -483,3 +483,71 @@ impossible or the budget is spent — a provider failure still retires and fence
 the pooled session before the consumer can observe it."
 
 ai8: TASK 1 landed; octet-ai fully green (13 targets) with no hang.
+
+START 2026-09-15T17:53:03Z ai9 alive
+
+START 2026-09-15T17:55:34Z ai11 alive
+
+ai11 TASK 1 (#388 Responses computer_call lifecycle) — LANDED (wire protocol only)
+- `crates/octet-ai/src/responses.rs`: public `ComputerUseTool` + `ComputerUseEnvironment` (typed wire declaration) and `ResponsesOptions.computer_use` (`#[serde(default)]`, `skip_serializing_if`) + `ResponsesOptions::with_computer_use`.
+- `crates/octet-ai/src/types.rs`: declarative endpoint gate `ResponsesRuntimeProfile::accepts_computer_use()` (Default profile only; no provider-name branch). `crates/octet-ai/src/error.rs`: `UnsupportedError::ComputerUse` fail-closed error.
+- `crates/octet-ai/src/protocol/openai_responses.rs`: declaration (`{"type":"computer_use_preview","display_width","display_height","environment"}`), decode of `computer_call` -> canonical tool call named `computer_use_preview` with bounded arguments `{"action":…,"pending_safety_checks":…}` (allowlist click/double_click/drag/keypress/move/screenshot/scroll/type/wait; 16 KiB action bound), and dispatch of the canonical tool result back to `computer_call_output` with the single documented `computer_screenshot` object (4 MiB inline screenshot bound) for both canonical and opaque-replay paths.
+- Fail-closed: unknown/absent action, over-bound action, actionless terminal computer call, non-declaring profile, Responses Lite.
+- Fixture `crates/octet-ai/tests/fixtures/openai_responses/computer_call.sse`.
+- No authority added: no desktop/browser backend, no host action path. Remaining primitive for the authority half is #383 (host-gated scoped authorization: `crates/octet-ai/src/protocol/openai_responses.rs` will carry `computer_call_output` but nothing in octet may execute the action; the missing host primitive is an approved-action executor + policy decision in `crates/octet-coding-agent/src/host/policy.rs`, owned elsewhere).
+
+Observed output (`cargo test -p octet-ai --lib computer`):
+```
+running 13 tests
+test protocol::openai_responses::fixture_tests::computer_call_round_trips_action_call_id_and_safety_checks ... ok
+test protocol::openai_responses::fixture_tests::computer_call_decodes_identically_across_byte_boundaries ... ok
+test protocol::openai_responses::fixture_tests::unsupported_computer_action_fails_closed ... ok
+test protocol::openai_responses::fixture_tests::computer_call_without_an_action_fails_closed ... ok
+test protocol::openai_responses::fixture_tests::oversized_computer_action_fails_closed ... ok
+test protocol::openai_responses::fixture_tests::terminal_computer_call_action_is_used_when_added_omits_it ... ok
+test protocol::openai_responses::tests::computer_use_declaration_matches_the_documented_wire_tool ... ok
+test protocol::openai_responses::tests::computer_use_fails_closed_on_a_profile_that_does_not_declare_it ... ok
+test protocol::openai_responses::tests::computer_use_is_absent_unless_the_caller_declares_it ... ok
+test protocol::openai_responses::tests::computer_call_history_replays_as_computer_call_and_output ... ok
+test protocol::openai_responses::tests::computer_call_output_stays_bounded_when_no_screenshot_is_available ... ok
+test protocol::openai_responses::tests::oversized_inline_screenshot_is_not_forwarded ... ok
+test protocol::openai_responses::tests::undocumented_canonical_computer_action_is_not_replayed ... ok
+test protocol::openai_responses::tests::opaque_replay_dispatches_computer_results_by_authoritative_output ... ok
+test result: ok. 13 passed; 0 failed
+```
+(`opaque_replay_dispatches_computer_results_by_authoritative_output` observed item pair:
+`[{"action":{"type":"screenshot"},"call_id":"call_comp_1","id":"cc_1","status":"completed","type":"computer_call"},{"call_id":"call_comp_1","output":{"type":"computer_screenshot"},"type":"computer_call_output"}]`)
+
+Observed `cargo test -p octet-ai --lib`: `test result: ok. 366 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out? -> 353 filtered out` (no hang; `responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded` ok).
+
+ai11 TASK 2 (verifier C2, Codex `service_tier` headline) — ALREADY TRUE IN TREE; no false headline found
+- `docs/parity/providers.md:40` at HEAD `00e3ca3e` reads `## Codex \`service_tier\` (row 1a.1 — field landed; \`/fast\` NOT yet unblocked)`; the body (`:42-48`) and Gap 1 (`:69-75`) already state that the live-run `ResponsesOptions` builders in `crates/octet-agent/src/agent.rs` never set a tier and name the missing primitive (`with_service_tier` at `durable_responses_options` / `native_responses_options`).
+- Evidence the C2 finding is stale: `git diff --stat -- docs/parity/providers.md` is empty (unmodified from HEAD) and `rg -n service_tier crates/octet-agent/src/agent.rs` returns nothing, so the codec field is still inert and the file already says so. `docs/parity/VERIFICATION.md:471` (verifier-owned, not edited here) still quotes the old "landed, unblocks roadmap #175 `/fast`" headline.
+- Added: a status note under the headline recording the re-check, plus the watch condition (`agent10: service_tier plumbed into the live run path` — searched `docs/swarm-audit/EXECUTION-agent3.md`: absent as of now). Gap 1 already names the primitive; no further edit needed.
+
+ai11 TASK 3 rows — state verified in-tree (no code claimed for rows not landed)
+- 1a.2 PiMessages: NOT landed (`rg -l PiMessages crates/` empty). Needs `Protocol::PiMessages` + codec + client dispatch + catalog registration.
+- 1c.5 Bedrock profiles / 1c.6 per-request transport + connect deadline + debug stats / 1c.7 Azure deployment map / 1c.9 xAI encrypted-reasoning replay: NOT landed (`rg -l "profile_arn|application-inference-profile|websocket-cached|connect_deadline|responseModel|providerThinkingLevel|rawStopReason" crates/` empty; `deployment` only in generated provider fixtures/contract).
+- 1b.3 proxy/NO_PROXY: LANDED before this turn in `crates/octet-ai/src/declarations/proxy.rs` with root/subdomain exclusion (`example.com` matches `api.example.com`, not `notexample.com`) and a test table; not re-claimed here.
+- 1b.4 conditional inventory etag: not in `octet-ai`; owning test/impl is `crates/octet-coding-agent/src/providers/conditional_inventory_tests.rs` + `app/bootstrap.rs` (bootstrap.rs is NOT this worker's path).
+- 1b.6 `GOOGLE_CLOUD_API_KEY`: BLOCKED BY PATH OWNERSHIP, not policy. The vertex declaration is `{"kind":"application_default_credentials"}` (`crates/octet-coding-agent/src/providers/declarations.json:636`); a combined env-key-or-ADC kind must be added to the contract generator at `crates/octet-coding-agent/build.rs` (`AuthenticationSpec`, `:125`, `:717`, `:866`, `:1040`) and `crates/octet-coding-agent/src/providers/contract.rs` is generated output — `build.rs` is outside this worker's exclusive paths, and hand-editing a generated artifact is forbidden. Exact primitive: `AuthenticationSpec::ApiKeyOrApplicationDefaultCredentials { env: &[&str] }` in `build.rs` + regenerate `contract.rs`, then fail closed when neither the env key nor ADC is present.
+- 1d.1/1d.2/1d.3 auth depth: not landed in `octet-ai/src/auth.rs` (typed plumbing for `apiKey.check/resolve`, `oauth.login/refresh/logout`, `AuthCheck`, `minOAuthValidityMs`, `isSubscription`, unified credential store) — no host-brokered OAuth/credential POLICY changes were made or proposed.
+- 1c.10 response metadata: BLOCKED BY PATH OWNERSHIP. `Response` literals are constructed outside my paths (`crates/octet-agent/src/context.rs:467`, `crates/octet-ai/src/protocol/openai_chat.rs:1373`), and `ToolResult` literals exist in `crates/octet-agent/**` and `crates/octet-coding-agent/**`; adding public fields breaks those constructors regardless of `#[serde(default)]`. Exact primitive: add `ResponseMetadata { response_model, provider_thinking_level, raw_stop_reason, diagnostics }` + `ToolResult.usage` behind `#[serde(default)]` in `crates/octet-ai/src/types.rs` in the same change as the downstream literals (needs a coordinated multi-owner edit).
+- 1c.3 remainder (OAuth/fine-grained/interleaved/mid-conversation betas): BLOCKED BY PATH OWNERSHIP. It needs a `compat` record on `ModelSpec` (`crates/octet-ai/src/types.rs`), but `ModelSpec { … }` literals exist in `crates/octet-agent/**` and `crates/octet-coding-agent/**` (e.g. `crates/octet-coding-agent/src/app/bootstrap.rs`, `providers/catalog.rs`, `tui/**`), so the one-field change cannot land without breaking constructors this worker does not own. Caller-beta merge is already landed (`caller_anthropic_beta_list_is_authoritative_and_deduplicated`).
+- 1c.4 fallback-model pricing: not landed; coupled to the same `Response` metadata addition above (a tier/fallback-aware `cost_of` needs the echoed response model).
+- 1e.1 faux provider deferred handles / 1e.3 image generation: not started (no budget left this turn).
+
+CHANGELOG-ready bullet (ai11, TASK 1 / roadmap row #388):
+- **OpenAI Responses computer use (wire protocol).** `octet-ai` now declares the
+  provider `computer_use_preview` tool when a caller selects it
+  (`ResponsesOptions::with_computer_use`) and the route's declared
+  `ResponsesRuntimeProfile` accepts it, maps a provider `computer_call` to a
+  canonical tool call named `computer_use_preview` with a bounded action payload
+  (`{"action":…,"pending_safety_checks":…}`, allowlisted action types, 16 KiB
+  cap), and dispatches the caller's result back as a `computer_call_output` item
+  carrying the single documented `computer_screenshot` (4 MiB inline cap).
+  Unknown, absent, or over-bound actions fail closed. No desktop or browser
+  backend is included: nothing in octet executes a computer action, and whether
+  any action may run remains a host-policy decision (roadmap #383).
+
+START 2026-09-15T18:10:03Z ai11 alive (startup latency P0)

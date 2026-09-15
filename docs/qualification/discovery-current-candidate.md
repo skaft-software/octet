@@ -41,12 +41,12 @@ were run during this repair.
 
 ## Source changes and test coverage
 
-[Bootstrap registration](../../crates/octet-coding-agent/src/app/bootstrap.rs)
+Bootstrap registration `crates/octet-coding-agent/src/app/bootstrap.rs`
 filters incompatible native budget tables in both generic and Messages discovery
 registration. The OpenRouter incomplete-route comment now explicitly requires an
 endpoint-supplied completion ceiling.
 
-[Existing bootstrap library tests](../../crates/octet-coding-agent/src/app/bootstrap/tests.rs)
+Existing bootstrap library tests `crates/octet-coding-agent/src/app/bootstrap/tests.rs`
 reconcile all seven named failures with the display/pricing-only contract. Added
 coverage directly checks display-only merging (including explicit name blockers),
 endpoint-positive capabilities, and native budget/output boundaries: equality,

@@ -10738,6 +10738,231 @@ fn hydrating_a_replacement_session_clears_subagent_activity() {
     assert!(shell.state.borrow().subagent_activity_block.is_none());
 }
 
+
+/// Maintainer report: "EVERY new prompt shows the current session's subagents
+/// even if they're completed!" The delegation team is session-scoped, so its
+/// final snapshot keeps being republished after the turn it belongs to has
+/// ended. The settled roster must stay in the transcript at the end of *that*
+/// turn and must never open a second block below the next prompt.
+#[test]
+fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
+    use octet_agent::{EntryId, FinishReason};
+
+    let mut shell = InteractiveShell::test_shell();
+    let child = |id: &str, state: &str| octet_agent::DelegationTelemetryChild {
+        child_id: id.into(),
+        task_name: "Inspect tests".into(),
+        profile: Some("explore".into()),
+        model: "test-model".into(),
+        state: state.into(),
+        phase: "using_tool".into(),
+        current_tool: Some("read".into()),
+        tool_use_count: 1,
+        input_tokens: 100,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        output_tokens: 10,
+        reasoning_tokens: 0,
+        total_tokens: 110,
+        cost: None,
+        cost_microdollars: Some(1),
+        elapsed_ms: 500,
+        failure_class: None,
+        failure_reason: None,
+        effective_tool_policy: test_effective_tool_policy(),
+        orchestration_provenance: inherited_delegation_provenance(),
+        session: Some("agent-session:opaque".into()),
+    };
+    let snapshot = |revision: u64, children: Vec<octet_agent::DelegationTelemetryChild>| {
+        octet_agent::DelegationTelemetrySnapshot {
+            revision,
+            captured_at_ms: 1_700_000_000_000 + revision,
+            children,
+            total_cost_microdollars: Some(1),
+            failure_reason: None,
+            failure_class: None,
+        }
+    };
+    let delegation = |snapshot: octet_agent::DelegationTelemetrySnapshot| {
+        octet_agent::AgentEvent::DelegationUpdated { snapshot }
+    };
+    let transcripts = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(120)
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Turn one: one live worker, then its settlement. Both land in the
+    // transcript where the delegation happened.
+    let run_id = shell.begin_run("test-provider");
+    shell.on_run_event(run_id, &delegation(snapshot(1, vec![child("agent-1", "running")])));
+    shell.on_run_event(
+        run_id,
+        &delegation(snapshot(2, vec![child("agent-1", "completed")])),
+    );
+    let settled = transcripts(&shell);
+    assert!(settled.contains("Subagents"), "{settled}");
+    assert!(settled.contains("completed"), "{settled}");
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::RunFinished {
+            head: EntryId("head".into()),
+            reason: FinishReason::Completed,
+        },
+    );
+    let after_finish = transcripts(&shell);
+    assert!(after_finish.contains("Subagents"), "{after_finish}");
+
+    // Turn two: the endpoint republishes the same, already-completed roster.
+    shell.begin_run("test-provider");
+    shell.on_prompt_submitted("next question");
+    shell.on_agent_event(&delegation(snapshot(3, vec![child("agent-1", "completed")])));
+
+    let state = shell.state.borrow();
+    assert!(
+        state.subagent_activity.is_none(),
+        "a settled roster must not be retained as live state for the new turn"
+    );
+    assert!(
+        state.subagent_activity_block.is_none(),
+        "a settled roster must not open a block in the new turn"
+    );
+    let replayed = state
+        .rendered_transcript(120)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The settled block still exists - exactly once, above the new prompt.
+    assert_eq!(
+        replayed.matches("Subagents").count(),
+        1,
+        "the completed roster must not be rendered again: {replayed}"
+    );
+    let new_prompt = replayed
+        .find("next question")
+        .expect("the new prompt is in the transcript");
+    let settled_block = replayed.find("Subagents").expect("settled block");
+    assert!(
+        settled_block < new_prompt,
+        "the settled block must stay at the point it occurred: {replayed}"
+    );
+    // And the new turn's own status row is still the last thing in the
+    // transcript, so the working indicator is not displaced.
+    assert!(
+        replayed
+            .trim_end()
+            .ends_with("Working (0s • esc to interrupt)")
+            || replayed.trim_end().ends_with("Working"),
+        "the new turn's status row must remain the transcript tail: {replayed}"
+    );
+}
+
+/// The same rule with a live worker: a roster for the *current* turn still
+/// renders, so the fix is attribution and not a blanket suppression.
+#[test]
+fn live_workers_for_the_current_turn_still_open_a_block() {
+    use octet_agent::{EntryId, FinishReason};
+
+    let mut shell = InteractiveShell::test_shell();
+    let live = |id: &str| octet_agent::DelegationTelemetryChild {
+        child_id: id.into(),
+        task_name: "Inspect tests".into(),
+        profile: Some("explore".into()),
+        model: "test-model".into(),
+        state: "running".into(),
+        phase: "using_tool".into(),
+        current_tool: Some("read".into()),
+        tool_use_count: 1,
+        input_tokens: 100,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        output_tokens: 10,
+        reasoning_tokens: 0,
+        total_tokens: 110,
+        cost: None,
+        cost_microdollars: Some(1),
+        elapsed_ms: 500,
+        failure_class: None,
+        failure_reason: None,
+        effective_tool_policy: test_effective_tool_policy(),
+        orchestration_provenance: inherited_delegation_provenance(),
+        session: Some("agent-session:opaque".into()),
+    };
+    let snapshot = |children| octet_agent::DelegationTelemetrySnapshot {
+        revision: 1,
+        captured_at_ms: 1_700_000_000_000,
+        children,
+        total_cost_microdollars: Some(1),
+        failure_reason: None,
+        failure_class: None,
+    };
+
+    // Turn one settles one worker.
+    let run_id = shell.begin_run("test-provider");
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::DelegationUpdated {
+            snapshot: snapshot(vec![live("agent-1")]),
+        },
+    );
+    let settled_child = octet_agent::DelegationTelemetryChild {
+        state: "completed".into(),
+        ..live("agent-1")
+    };
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::DelegationUpdated {
+            snapshot: octet_agent::DelegationTelemetrySnapshot {
+                revision: 2,
+                captured_at_ms: 1_700_000_000_002,
+                ..snapshot(vec![settled_child.clone()])
+            },
+        },
+    );
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::RunFinished {
+            head: EntryId("head".into()),
+            reason: FinishReason::Completed,
+        },
+    );
+
+    // Turn two starts a genuinely new worker: the completed roster from turn
+    // one must not appear again, and the new worker must.
+    shell.begin_run("test-provider");
+    shell.on_agent_event(&AgentEvent::DelegationUpdated {
+        snapshot: octet_agent::DelegationTelemetrySnapshot {
+            revision: 3,
+            captured_at_ms: 1_700_000_000_003,
+            children: vec![settled_child, live("agent-2")],
+            total_cost_microdollars: Some(2),
+            failure_reason: None,
+            failure_class: None,
+        },
+    });
+    let rendered = shell
+        .state
+        .borrow()
+        .rendered_transcript(120)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("agent-2"), "{rendered}");
+    assert_eq!(
+        rendered.matches("Subagents").count(),
+        2,
+        "the new turn gets exactly one additional block: {rendered}"
+    );
+    assert!(shell.state.borrow().subagent_activity_block.is_some());
+}
+
 #[test]
 fn terminal_subagent_snapshots_hide_the_activity_strip() {
     let mut shell = InteractiveShell::test_shell();

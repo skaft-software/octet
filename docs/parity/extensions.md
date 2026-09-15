@@ -27,13 +27,20 @@ Reference (read-only): `earendil-works/pi` at
 
 | Capability | State | Authoritative anchors |
 | --- | --- | --- |
+| `event_bus` / `bus/*` | **Partial**: bounded SDK primitive + host contract landed; host mediation NOT implemented | `docs/extensions/event-bus.md` (bounds, fail-closed matrix, remaining host work); `sdk/python/octet_extension/event_bus.py` (`EventBusKernel`, `TopicRegistry`, `BoundedQueue`, `HostEventBus`); `sdk/python/tests/test_event_bus.py` (28 tests, `Ran 28 tests ... OK`); host anchors still required: `protocol/extension-api-v0.3.schema.json:280`, `crates/octet-agent/src/extension_api_v03.rs:80` (`CAPABILITY_SPECS`) and `:106` (`METHOD_SPECS`) |
 | `theme_selection` / `theme/select` | Landed (host-mediated, extension-namespaced) | `protocol/extension-api-v0.3.schema.json:280` (capability), `:541` (method), `:625` (`theme_selection` scope); `crates/octet-agent/src/extension_api_v03.rs`; `crates/octet-agent/tests/extension_theme_selection.rs` (Rust 13 + 5 tests); `sdk/python/octet_extension/api_v03.py`, `sdk/python/tests/test_theme_selection_api_v03.py` (14 tests); `sdk/typescript/src/api_v03.mjs` |
 
-The capability is granted by the host, keyed by the requesting extension and
-scoped to a host-owned selection; it cannot address another extension's namespace
-or persisted project trust. The authoring contract is documented in
-[docs/extensions/API-0.3-REFERENCE.md](../extensions/API-0.3-REFERENCE.md) and
-[docs/extensions.md](../extensions.md).
+The `theme_selection` capability is granted by the host, keyed by the requesting
+extension and scoped to a host-owned selection; it cannot address another
+extension's namespace or persisted project trust. The authoring contract is
+documented in [docs/extensions/API-0.3-REFERENCE.md](../extensions/API-0.3-REFERENCE.md)
+and [docs/extensions.md](../extensions.md).
+
+The `event_bus` row is honest about its state: publisher-only-owns-topic,
+per-extension bounded queues, unknown-topic/forbidden-field/PII fail-closed
+validation, and queue-pressure errors are implemented and tested in the SDK
+kernel, while the host capability, Rust service, and two-extension end-to-end
+fixture do not exist yet. Nothing in that row is claimed as usable end-to-end.
 
 ## MCP
 
@@ -93,6 +100,21 @@ arguments. Native macOS/Windows qualification (real accessibility trust, UIA,
 human-observed takeover, process-loss release) is **hardware-gated** and no live
 native run is claimed.
 
+### Computer-use authority rows (recorded, never claimed)
+
+| Row | State | Exact primitive still required |
+| --- | --- | --- |
+| [#383](https://github.com/skaft-software/octet/issues/383) host-authorized scoped actions | In-extension policy only; **policy-gated** | A host-brokered automation authorization service: typed `policy/evaluate` capability, host-owned approval, host-owned target selection, owner settlement, feeding `PolicyEvaluator.evaluate_action`. The extension already consumes such a decision; no API `0.3` host method supplies one (`crates/octet-coding-agent/src/host/*` has no computer-use/browser/desktop reference). |
+| [#385](https://github.com/skaft-software/octet/issues/385) macOS native backend qualification | Implemented, **hardware-gated** | A real macOS host with Accessibility/AX trust for a selected window, plus dispatch from `main.py` (currently only the policy/protocol path is wired) and an unmocked native run; the suite injects `MockNative`. |
+| [#389](https://github.com/skaft-software/octet/issues/389) Windows backend/identity/permission qualification | Implemented, **hardware-gated** | A real Windows host running the UIA/Composition adapter end to end; the suite drives a `FixtureSystem` double, not the native adapter. |
+| [#390](https://github.com/skaft-software/octet/issues/390) packaged parity release | **absent / release-gated** | A release-catalog entry for `octet-computer-use` (none exists in `extensions/release-catalog.txt`), a packaged artifact, and release evidence that includes physical human takeover observation and hard process-loss release; none of it can be produced by fixtures. |
+
+None of these rows has a live run, packaging step, or human-observed takeover in
+this record. The in-extension policy, lifecycle, and both backend suites are
+re-run here for regression only: `93 tests ... OK`. Authority stays fail-closed:
+unknown scope denies, a stopped or replaced binding is never reusable, and stop
+and takeover remain trusted entry points rather than tool arguments.
+
 ## Browse
 
 | Row | State | Authoritative anchors |
@@ -120,6 +142,10 @@ capabilities here; neither is claimed.
   `extensions/octet-computer-use` -> `Ran 93 tests ... OK` (includes the unknown/replaced
   scope, stopped-binding and trusted stop/takeover regressions).
 - `python3 scripts/generate-extension-api-v03.py --check` -> exit `0`, no drift.
+- `PYTHONPATH=sdk/python python3 -m unittest discover -s sdk/python/tests` -> `Ran 101 tests ... OK`
+  (28 of them the new `tests/test_event_bus.py` bounded-bus cases).
+- **Not run here:** any host-mediated `bus/*` request (the host capability does not exist), any
+  two-extension end-to-end bus delivery, and any cross-process queue measurement.
 - **Not run here:** any live MCP remote, OAuth server or real credential; any native
   macOS/Windows automation on real hardware; any browser-window focus measurement.
   These remain the gates recorded above and are not compatibility claims.

@@ -18,29 +18,42 @@
 //! # Supported
 //!
 //! - header: `graph <dir>` / `flowchart <dir>` with `TD`, `TB` or `LR`, with an
-//!   optional trailing `;`
+//!   optional trailing `;`; a `;` may also terminate the header and separate
+//!   statements on the same line (`flowchart LR; A --> B; B --> C`)
 //! - node ids (`[A-Za-z0-9_.-]`, stopped at a link token) with or without labels
 //! - shapes `id[label]`, `id(label)`, `id{label}`, `id((label))`, `id([label])`,
 //!   `id[[label]]`, `id{{label}}` — every shape renders as a box (the shape
 //!   outline itself is not modelled)
+//! - quoted labels, including labels containing the closing delimiter
+//!   (`A["a[b]c"]`) and quoted `|link labels|`; the surrounding quotes are
+//!   stripped
+//! - `%%` comments anywhere on a line, outside quoted labels
 //! - `:::class` decorations are ignored, as are `classDef`/`class`/`style`/
-//!   `linkStyle`/`click` directives and `%%` comments
+//!   `linkStyle`/`click` directives
 //! - links `-->`, `->`, `-.->`, `==>` (arrow head) and `---` (no head), each
 //!   with an optional `|label|`; link *styling* is not modelled, so `-.->` and
 //!   `==>` draw the same solid connector as `-->`
-//! - quoted labels, wide (CJK) labels, and disconnected components (rendered as
-//!   separate bands of rows)
+//! - wide (CJK) labels, and disconnected components (rendered as separate
+//!   bands of rows)
 //!
 //! # Fails closed (typed [`MermaidError`], never a panic or unbounded work)
 //!
 //! - any other diagram type (`pie`, `sequenceDiagram`, `stateDiagram`, …)
 //! - `BT`/`RL` layouts (accepted by Mermaid, but mirroring the grid would
 //!   reverse node labels, so they are rejected rather than misrendered)
-//! - subgraphs, `&` node lists, `A -- text --> B` inline link labels, other
-//!   arrow tokens, unbalanced node brackets
+//! - `subgraph`/`end`/`direction` statements, `&` node lists,
+//!   `A -- text --> B` inline link labels, other arrow tokens, unbalanced node
+//!   brackets (or quotes)
 //! - cyclic graphs and any edge that skips a layer (a longer path exists), so
 //!   routing stays inside the gap between two adjacent layers
 //! - inputs over the size limits in this module
+//!
+//! # Not modelled
+//!
+//! Node shapes draw as boxes, link styling is dropped, and HTML entities in
+//! labels (`&amp;`) are emitted literally rather than decoded; upstream's
+//! style-span and warning channels are not returned (see the consumer note
+//! below).
 //!
 //! # Bounds
 //!
@@ -55,9 +68,13 @@
 //! The output is plain text. Upstream returns semantic style spans
 //! (`border`/`text`/`edge`/…) and a warnings channel; theming and the
 //! "unrendered diagram" fallback belong to the embedding component, which this
-//! engine reports through `Err` instead of partially-rendered output. The
-//! embedding component should also map `Err` onto upstream's
-//! "could not render" fallback text.
+//! engine reports through `Err` instead of partially-rendered output.
+//!
+//! The rich markdown renderer consumes this function: [`super::markdown::parse`]
+//! renders a completed ```` ```mermaid ````/```` ```graph ````/```` ```flowchart ````
+//! fence through [`render_mermaid`] and falls back to the original code-block
+//! source on `Err`, on oversized bodies and while a fence is unterminated (see
+//! [`super::MAX_DIAGRAM_FENCE_BYTES`]).
 //!
 //! # Tests
 //!
@@ -220,6 +237,49 @@ fn row_to_line(row: &[char]) -> String {
 
 const LINK_TOKENS: &[&str] = &["-.->", "==>", "-->", "---", "->"];
 const DIRECTIVE_KEYWORDS: &[&str] = &["classdef", "class", "style", "linkstyle", "click"];
+/// Mermaid statements this engine recognises but does not implement. They are
+/// named in the typed error instead of being parsed as node ids.
+const STATEMENT_KEYWORDS_IN_UNSUPPORTED: &[&str] = &["subgraph", "end", "direction"];
+
+/// Drop a `%%` comment, which Mermaid allows anywhere outside a quoted label.
+fn strip_comment(line: &str) -> &str {
+    let mut quoted = false;
+    let mut previous = '\0';
+    for (index, character) in line.char_indices() {
+        match character {
+            '"' if previous != '\\' => quoted = !quoted,
+            '%' if !quoted && previous == '%' => return &line[..index - 1],
+            _ => {}
+        }
+        previous = character;
+    }
+    line
+}
+
+/// Split a line on `;` statement terminators, ignoring semicolons inside quoted
+/// labels and bracket pairs.
+fn split_statements(line: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut quoted = false;
+    let mut depth = 0usize;
+    let mut previous = '\0';
+    for (index, character) in line.char_indices() {
+        match character {
+            '"' if previous != '\\' => quoted = !quoted,
+            '[' | '(' | '{' if !quoted => depth = depth.saturating_add(1),
+            ']' | ')' | '}' if !quoted => depth = depth.saturating_sub(1),
+            ';' if !quoted && depth == 0 => {
+                segments.push(&line[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+        previous = character;
+    }
+    segments.push(&line[start..]);
+    segments
+}
 
 fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>), MermaidError> {
     let mut direction: Option<Direction> = None;
@@ -228,35 +288,49 @@ fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>), MermaidError
 
     for (index, raw_line) in source.lines().enumerate() {
         let line_number = index + 1;
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with("%%") {
+        // `%%` starts a comment anywhere on a line, outside quoted labels.
+        let line = strip_comment(raw_line).trim();
+        if line.is_empty() {
             continue;
         }
-        if direction.is_none() {
-            direction = Some(parse_header(line)?);
-            continue;
-        }
-        let statement = line.trim_end_matches(';').trim();
-        if statement.is_empty() {
-            continue;
-        }
-        let lowered = statement.to_ascii_lowercase();
-        if DIRECTIVE_KEYWORDS
-            .iter()
-            .any(|keyword| lowered.starts_with(keyword) && boundary(&lowered[keyword.len()..]))
-        {
-            continue;
-        }
-        parse_statement(statement, line_number, &mut nodes, &mut edges)?;
-        if nodes.len() > MAX_MERMAID_NODES {
-            return Err(MermaidError::TooLarge {
-                detail: format!("diagram has more than {MAX_MERMAID_NODES} nodes"),
-            });
-        }
-        if edges.len() > MAX_MERMAID_EDGES {
-            return Err(MermaidError::TooLarge {
-                detail: format!("diagram has more than {MAX_MERMAID_EDGES} links"),
-            });
+        // `;` terminates a statement, so the header may share a line with the
+        // first statements (`flowchart LR; A --> B; B --> C`).
+        for statement in split_statements(line) {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            if direction.is_none() {
+                direction = Some(parse_header(statement)?);
+                continue;
+            }
+            let lowered = statement.to_ascii_lowercase();
+            if DIRECTIVE_KEYWORDS
+                .iter()
+                .any(|keyword| lowered.starts_with(keyword) && boundary(&lowered[keyword.len()..]))
+            {
+                continue;
+            }
+            if let Some(keyword) = STATEMENT_KEYWORDS_IN_UNSUPPORTED
+                .iter()
+                .find(|keyword| lowered.starts_with(**keyword) && boundary(&lowered[keyword.len()..]))
+            {
+                return Err(syntax(
+                    line_number,
+                    format!("`{keyword}` statements are not supported"),
+                ));
+            }
+            parse_statement(statement, line_number, &mut nodes, &mut edges)?;
+            if nodes.len() > MAX_MERMAID_NODES {
+                return Err(MermaidError::TooLarge {
+                    detail: format!("diagram has more than {MAX_MERMAID_NODES} nodes"),
+                });
+            }
+            if edges.len() > MAX_MERMAID_EDGES {
+                return Err(MermaidError::TooLarge {
+                    detail: format!("diagram has more than {MAX_MERMAID_EDGES} links"),
+                });
+            }
         }
     }
 
@@ -463,7 +537,7 @@ fn read_link_label(
     }
     let label: String = characters[start..cursor].iter().collect();
     *position = cursor + 1;
-    Ok(Some(label.trim().to_owned()))
+    Ok(Some(unquote(label.trim())))
 }
 
 fn read_label(
@@ -483,6 +557,32 @@ fn read_label(
     };
     let start = *position + open.chars().count();
     let closing: Vec<char> = close.chars().collect();
+    // A quoted label may contain the closing delimiter (`A["a[b]c"]`), so a
+    // leading quote is closed by its matching quote followed by the delimiter.
+    if characters.get(start) == Some(&'"') {
+        let mut quote_end = start + 1;
+        while quote_end < characters.len() && characters[quote_end] != '"' {
+            quote_end += 1;
+        }
+        if quote_end >= characters.len() {
+            return Err(syntax(
+                line,
+                format!("unterminated quoted label opened with `{open}`"),
+            ));
+        }
+        let close_start = quote_end + 1;
+        if characters.len() - close_start < closing.len()
+            || characters[close_start..close_start + closing.len()] != closing[..]
+        {
+            return Err(syntax(
+                line,
+                format!("quoted label opened with `{open}` is not closed by `{close}`"),
+            ));
+        }
+        let raw: String = characters[start + 1..quote_end].iter().collect();
+        *position = close_start + closing.len();
+        return Ok(Some(raw));
+    }
     let mut cursor = start;
     while cursor < characters.len() {
         if characters.len() - cursor >= closing.len()

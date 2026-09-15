@@ -6,8 +6,9 @@ exclusions are retained.
 
 The current methods below cover [optional telemetry](#optional-agent-telemetry),
 [systems measurements](#systems-measurements), and [usability checks](#usability-checks).
-The [Pi runtime fixture](#pi-runtime-fixture-evidence) is hold-only, not a published
-performance result. The [performance philosophy and execution contract](../design/performance.md)
+The [Pi runtime fixture](#pi-runtime-fixture-evidence) is a threshold-scored
+fixture qualification, not a published performance or release result. The
+[performance philosophy and execution contract](../design/performance.md)
 defines work budgets, distinct latency clocks, qualification stages, and the
 remaining ownership work. For project tracking, see the
 [project](https://github.com/orgs/skaft-software/projects/5).
@@ -224,10 +225,15 @@ checked-in, stdlib-only driver for Pi aggregate lifecycle evidence. It runs no
 network/provider/model request, inherits no credentials, uses a temporary home,
 and writes bounded raw resource samples plus a checksum. It measures fixture
 representations of no-extension, legacy-eager, lazy activation, shared-workspace,
-and ordered-Pi-aggregate paths; it is intentionally hold-only until a real API
-0.3 runtime-manager adapter is available. See [Pi runtime evidence
-harness](pi-runtime-evidence.md) for invocation, exact candidate/fixture identity,
-Linux/macOS limits, separate inference/GPU attribution, and publication rules.
+and ordered-Pi-aggregate paths, scores the capture against documented
+fixture-regression thresholds, and writes a self-describing published artifact
+with `--publish` (see the [v0.8 fixture capture](pi-runtime-v0.8-fixture/README.md)).
+The threshold-derived `status` is a measurement verdict; release approval is a
+separate set of unmet gates, so a hermetic fixture capture can never approve a
+release. A real API 0.3 runtime-manager adapter is still required. See [Pi runtime
+evidence harness](pi-runtime-evidence.md) for invocation, exact
+candidate/fixture identity, thresholds, Linux/macOS limits, separate
+inference/GPU attribution, and publication rules.
 
 ## Publication boundary
 

@@ -9649,3 +9649,461 @@ async fn typed_spans_cover_compaction_and_summary_boundaries() {
 }
 #[path = "support/extension_hooks.rs"]
 mod extension_hooks;
+
+// ── roadmap #175: the selected service tier reaches the wire, or is refused ──
+
+/// One scripted one-turn Responses harness; `codex` selects the declared
+/// Codex runtime profile, `false` keeps the plain OpenAI Responses profile.
+async fn tier_harness(
+    codex: bool,
+    name: &str,
+) -> (Agent, MockServer, tempfile::TempDir, tempfile::TempDir) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Script {
+            bodies: vec![responses_text_turn(
+                name,
+                "tier answer",
+                "response.completed",
+                name,
+            )],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let model = if codex {
+        recovery_codex_model(&server.uri())
+    } else {
+        scripted_responses_model(&server.uri())
+    };
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    let session_path = session_dir.path().join("session.jsonl");
+    let agent = build_responses_agent_from_session(
+        model,
+        Session::create(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    (agent, server, workspace_dir, session_dir)
+}
+
+/// `/fast` is only real when the selected tier reaches the provider request.
+#[tokio::test]
+async fn service_tier_reaches_the_request_only_on_a_route_that_declares_it() {
+    // ── Codex route: the tier is selected, then emitted on the wire ────────
+    let (mut agent, server, _workspace, _session) = tier_harness(true, "codex").await;
+    assert_eq!(agent.service_tier(), None, "no tier is sent by default");
+
+    agent
+        .set_service_tier(Some(octet_ai::ServiceTier::Priority))
+        .expect("the Codex profile declares the Responses service_tier field");
+    assert_eq!(
+        agent.service_tier(),
+        Some(octet_ai::ServiceTier::Priority),
+        "the selection is readable by a frontend that renders `/fast`"
+    );
+
+    let output = agent.complete("answer quickly").await.unwrap();
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "the tiered run must complete: {:?}",
+        output.reason
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 1, "one model turn");
+    assert_eq!(
+        requests[0]["service_tier"], "priority",
+        "the requested tier must be on the request: {}",
+        requests[0]
+    );
+
+    // Clearing the selection stops sending the field on the next request.
+    agent.set_service_tier(None).unwrap();
+    agent.complete("answer normally").await.unwrap();
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].get("service_tier").is_none(),
+        "a cleared tier must not linger: {}",
+        requests[1]
+    );
+
+    // ── Non-Codex route: the selection is refused, never sent ─────────────
+    let (mut agent, server, _workspace, _session) = tier_harness(false, "plain").await;
+    let rejection = agent
+        .set_service_tier(Some(octet_ai::ServiceTier::Priority))
+        .expect_err("a route that does not declare the field must fail closed");
+    assert_eq!(
+        rejection.to_string(),
+        "ai error: Unsupported error: Responses service tier is unsupported on this route",
+        "the rejection is the codec's typed unsupported error"
+    );
+    assert_eq!(
+        agent.service_tier(),
+        None,
+        "a refused selection never becomes agent state"
+    );
+
+    let output = agent.complete("answer without a tier").await.unwrap();
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "the untiered run must complete: {:?}",
+        output.reason
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].get("service_tier").is_none(),
+        "an undeclared route must never carry the field: {}",
+        requests[0]
+    );
+}
+
+// ── parity 1e.2 durability half: a killed stream republishes its partial ──
+
+/// A completing Responses turn that streams `text` as two deltas, so a kill
+/// between them leaves a genuine prefix behind.
+fn responses_two_delta_turn(response_id: &str, first: &str, second: &str) -> String {
+    let terminal = serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "output": [{
+                "type": "message",
+                "id": format!("msg_{response_id}"),
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": format!("{first}{second}"), "annotations": []}],
+                "unknown_provider_field": response_id,
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+        },
+    });
+    [
+        serde_json::json!({"type": "response.created", "response": {"id": response_id}}),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id": format!("msg_{response_id}"), "type": "message"},
+        }),
+        serde_json::json!({"type": "response.output_text.delta", "output_index": 0, "delta": first}),
+        serde_json::json!({"type": "response.output_text.delta", "output_index": 0, "delta": second}),
+        serde_json::json!({"type": "response.output_text.done", "output_index": 0}),
+        terminal,
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect()
+}
+
+/// Kills a run mid-stream and proves the durable partial is republished exactly
+/// once on the next start, matching the frame prefix rather than the whole turn.
+#[tokio::test]
+async fn a_killed_stream_republishes_its_partial_assistant_prefix_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Script {
+            bodies: vec![
+                // 1: the attempt that is killed after its first text delta.
+                responses_two_delta_turn("killed", "KILLED-PREFIX ", "KILLED-TAIL"),
+                // 2: the restart's own turn.
+                responses_text_turn("second", "SECOND-TURN", "response.completed", "second"),
+                // 3: the third start, after the second one settled terminally.
+                responses_text_turn("third", "THIRD-TURN", "response.completed", "third"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    let session_path = session_dir.path().join("killed-stream.jsonl");
+    let frames_path = session_dir
+        .path()
+        .join("killed-stream.jsonl.partial-assistant-frames");
+    let model = scripted_responses_model(&server.uri());
+
+    // ── 1. Kill the run after the first streamed delta ────────────────────
+    let mut first = build_responses_agent_from_session(
+        model.clone(),
+        Session::create(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    let mut run = first.prompt("first prompt").await.unwrap();
+    let mut observed_prefix = String::new();
+    while let Some(event) = run.next().await {
+        if let AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text,
+        } = &event
+        {
+            observed_prefix.push_str(text);
+            break;
+        }
+    }
+    drop(run);
+    drop(first);
+    assert_eq!(
+        observed_prefix, "KILLED-PREFIX ",
+        "the killed attempt streamed only its first delta"
+    );
+    assert!(
+        frames_path.exists(),
+        "a killed attempt must leave its durable frame journal behind"
+    );
+    assert!(
+        !std::fs::read_to_string(&session_path)
+            .unwrap()
+            .contains("KILLED-TAIL"),
+        "an unsettled attempt is never committed to the session log"
+    );
+
+    // ── 2. Restart: the partial frame prefix is republished first ─────────
+    let mut second = build_responses_agent_from_session(
+        model.clone(),
+        Session::open(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    let mut run = second.prompt("second prompt").await.unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        events.push(event);
+    }
+    drop(run);
+    drop(second);
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.starts_with(&observed_prefix),
+        "the restart must republish the frame prefix first: {text:?}"
+    );
+    assert!(
+        !text.contains("KILLED-TAIL"),
+        "a partial must never grow into the whole killed turn: {text:?}"
+    );
+    assert!(
+        text.contains("SECOND-TURN"),
+        "the restart still produced its own turn: {text:?}"
+    );
+    assert!(
+        !frames_path.exists(),
+        "a republished partial is consumed exactly once"
+    );
+
+    // ── 3. A settled turn is never republished as progress ────────────────
+    let mut third = build_responses_agent_from_session(
+        model,
+        Session::open(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    let mut run = third.prompt("third prompt").await.unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        events.push(event);
+    }
+    drop(run);
+    drop(third);
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text, "THIRD-TURN",
+        "a terminally settled turn leaves no partial to republish"
+    );
+}
+
+// ── row 4.10: the run loop consumes the batch termination request ─────────
+
+/// A real tool that asks the run to stop once its work is complete.
+struct TerminateProbe;
+
+#[async_trait::async_trait]
+impl Tool for TerminateProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            name: "terminate_probe".into(),
+            description: "Requests run termination when `stop` is true".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"stop": {"type": "boolean"}},
+                "required": ["stop"],
+                "additionalProperties": false
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let output = ToolOutput::new(if args["stop"].as_bool().unwrap_or(false) {
+            "batch complete"
+        } else {
+            "batch continues"
+        });
+        Ok(if args["stop"].as_bool().unwrap_or(false) {
+            output.requesting_termination()
+        } else {
+            output
+        })
+    }
+}
+
+/// A unanimous batch ends the run with the results already durable; one
+/// sibling that did not ask to stop keeps the batch going.
+#[tokio::test]
+async fn unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not() {
+    // ── Unanimous single-call batch: no second model turn ─────────────────
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[(
+                    "call_done",
+                    "terminate_probe",
+                    serde_json::json!({"stop": true}),
+                )]),
+                text_turn("SHOULD-NOT-BE-REQUESTED"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &sessions.path().join("unanimous-termination.jsonl"),
+        Some(4),
+        TerminateProbe,
+    );
+
+    let output = agent.complete("finish the work").await.unwrap();
+
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "a unanimous termination completes the run: {:?}",
+        output.reason
+    );
+    assert!(
+        !output.text.contains("SHOULD-NOT-BE-REQUESTED"),
+        "the loop must not open another model turn: {}",
+        output.text
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one model turn for a unanimous batch"
+    );
+    let durable = serde_json::to_string(&agent.session().context().unwrap()).unwrap();
+    assert!(
+        durable.contains("batch complete"),
+        "the finalized result is durable before the run ends: {durable}"
+    );
+    let replayed = serde_json::to_string(&requests[0]).unwrap();
+    assert!(
+        replayed.contains("terminate_probe"),
+        "the probe was really called: {replayed}"
+    );
+
+    // ── Non-unanimous batch: one stop request cannot discard a sibling ────
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[
+                    (
+                        "call_stop",
+                        "terminate_probe",
+                        serde_json::json!({"stop": true}),
+                    ),
+                    (
+                        "call_keep",
+                        "terminate_probe",
+                        serde_json::json!({"stop": false}),
+                    ),
+                ]),
+                text_turn("CONTINUED-WITH-BOTH-RESULTS"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &sessions.path().join("mixed-termination.jsonl"),
+        Some(4),
+        TerminateProbe,
+    );
+
+    let output = agent.complete("finish the work").await.unwrap();
+
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "the batch continues to a normal completion: {:?}",
+        output.reason
+    );
+    assert!(
+        output.text.contains("CONTINUED-WITH-BOTH-RESULTS"),
+        "a lone stop request must not end the run early: {}",
+        output.text
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "a non-unanimous batch keeps going to the next model turn"
+    );
+    let follow_up = serde_json::to_string(&requests[1]).unwrap();
+    assert!(
+        follow_up.contains("batch complete") && follow_up.contains("batch continues"),
+        "both finalized sibling results must reach the next request: {follow_up}"
+    );
+}

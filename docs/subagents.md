@@ -86,13 +86,15 @@ independently of the parent.
   binary) are found with a read-only `PATH` lookup; if one is missing, the command
   refuses with an actionable message. octet never downloads or installs a
   multiplexer.
-- **Running workers only.** `done`/`failed`/`limit_reached`/`stopped`/`timed_out`
-  workers get no pane; the parent always gets one. A worker that is still owned
-  by the session but not attached to any run — or parked at the host approval
-  boundary — gets no pane either, and is **named in the report** with the
-  reattach/approve step: a detached worker is alive and reattachable, so dropping
-  its row silently would be wrong, and opening a stale pane for it would target
-  the wrong session.
+- **Host-launchable workers only.** A pane is planned for the parent plus each
+  worker the host reports as launchable (`launchable` / `launch_blocked` on every
+  `agent/list` row: settled, detached, or reattached work). A worker that is still
+  live in the owning process, parked at the host approval boundary, or whose
+  transcript is gone is not launchable — one session has one writer, and opening a
+  parked worker would be unattended mutation — so it gets no pane, and is **named
+  in the report** with the approve/reattach step: a detached worker is alive and
+  reattachable, so dropping its row silently would be wrong, and opening a stale
+  pane for it would target the wrong session.
 - **Bounded.** At most nine panes (the eight-worker fleet cap plus the parent);
   above that the whole request is refused before anything is created.
 - **Shell-safe.** Every session id, path, and flag is a separate `argv` element,
@@ -107,28 +109,50 @@ independently of the parent.
 - **Ownership.** herdr's documented agent guardrail requires `HERDR_ENV=1`, so
   open-all refuses to drive a herdr session it does not own.
 
-The parent pane resumes the host session id directly. A worker's only
-host-published handle is the opaque, one-way `agent-session:<sha256>` reference,
-which names a transcript inside the owner-private delegation directory. The
-session store resolves an id only as `<session-dir>/<id>.jsonl`
-(`crates/octet-coding-agent/src/session_store.rs` `path_by_id`), so
-`octet --resume <reference>` cannot open it; and the resolver inside the owning
-process (`crates/octet-coding-agent/src/extensions/serve.rs`
-`driver_for_delegated_session`) hands back a **read-only, locked inspection**
-session reachable inside the owning process, not a launchable interactive one.
+The parent pane resumes the host session id directly. A worker pane resumes the
+opaque, path-free `agent-session:<sha256>` handle the host publishes on each
+`agent/list` row (`octet_agent::delegated_session_reference`), and
+`octet --resume agent-session:<sha256>` resolves it end to end:
 
-The host half of that primitive has landed:
-`octet_agent::resolve_launchable_child_session(session_directory, reference)`
-resolves the opaque handle from the session-owned durable roster with no live
-agent, `Agent::session_delegation()` does the same in-process with the
-process-local liveness the roster cannot carry, and every `agent/list` row
-carries the token plus `launchable` / `launch_blocked` (a live in-process
-worker, a worker parked at the approval boundary, and a vanished transcript all
-fail closed with a bounded reason). The remaining primitive is CLI-side wiring:
-`path_by_id` must accept the reference and hand the resolved host-only child
-path to the launcher. Until that lands the pane is reported **blocked**,
-naming that exact missing wiring, rather than fabricating a resume. The normal
-read-only parent-controlled mode is unaffected.
+- `SessionStore::path_by_id` recognizes the handle
+  (`crates/octet-coding-agent/src/session_store.rs`) and resolves it through
+  `octet_agent::delegation::resolve_launchable_child_session(session_directory,
+  reference)` — no live agent, no credential, no network. The resolved host-only
+  transcript path is handed to the launcher, so the pane opens **that child's own
+  session**: its own history is replayed and appended, never the parent's and never
+  a stale transcript.
+- The `agent-session:` prefix is reserved in the `--resume` namespace. A handle is
+  either a strict `agent-session:` + 64 lowercase hex token that resolves to a
+  launchable child, or a refusal; it is never reinterpreted as an ordinary session
+  id, and an unlaunchable handle never falls back to another session.
+- The token is validated **before any filesystem work**, so a shell
+  metacharacter, a control byte, or a path component (`..`, `/`) can never reach a
+  path join. The resolved path is then confined to the session store's private
+  `.delegation/team-*/` directory, so a forged or copied roster entry that hashes
+  to the same handle cannot escape it.
+- Every refusal is typed (`DelegatedHandleRefusal`), bounded, actionable, and
+  free of credentials, paths, and session secrets:
+  `malformed_worker_handle`, `delegation_roster_unavailable`, `unknown_worker_handle`,
+  `worker_awaiting_approval`, `worker_live_in_owning_process`,
+  `worker_transcript_missing`, `worker_handle_outside_delegation`. Nothing panics,
+  and nothing silently opens a different session. A worker parked at the approval
+  boundary is specifically not openable for unattended mutation.
+- Ordinary `--resume <session-id>` and the session picker are unchanged: an
+  ordinary id keeps exactly its previous `<session-dir>/<id>.jsonl` resolution, and
+  the picker remains a flat, non-recursive view that never offers a delegated
+  child.
+
+The extension half of the pane plan still needs its one-line policy flip, and it
+lives in the `octet-subagents` bundle (recorded here because that bundle is
+versioned separately): `launcher.py::resolve_worker_pane` currently hardcodes
+`resolvable=False` with `WORKER_PANE_BLOCKED_REASON`, and `plan_open_all` plans
+only `active` workers. With the handle resolved, it should instead read the host's
+`launchable` / `launch_blocked` from the `agent/list` row (today the extension's
+`Worker` model drops both), set `resolvable=True` for a launchable worker, carry
+`launch_blocked` as the bounded blocked reason otherwise, and plan a pane for every
+host-launchable worker rather than only for a running one. Until that flip lands,
+the worker pane is reported **blocked**, naming that exact reason, rather than
+fabricating a resume. The normal read-only parent-controlled mode is unaffected.
 
 ## Session-scoped delegation
 
@@ -163,11 +187,12 @@ The extension models the gap as **detached, not dead**:
   renders the bounded `awaiting approval` state. `subagent_continue` refuses it
   with `worker_awaiting_approval`, because queueing work into a parked worker
   would be unattended mutation; `subagent_stop` still stops it explicitly.
-- `open-all` composes with the same contract: only workers the host currently
-  reports as running are planned, each through the host's opaque session
-  reference, so a pane never targets a stale session. A detached or parked worker
-  is excluded **and named** in the report with its reattach/approve step, and a
-  worker reattached by `/subagents wait` is planned again on the next run.
+- `open-all` composes with the same contract: only workers whose host row is
+  `launchable` are planned, each through the host's opaque `agent-session:<sha256>`
+  handle, so a pane never targets a stale session and `octet --resume` refuses the
+  same rows the host does. A detached or parked worker is excluded **and named** in
+  the report with its reattach/approve step, and a worker reattached by
+  `/subagents wait` is planned again on the next run.
 
 ## Where the rest lives
 

@@ -41,7 +41,7 @@ honest gap records rather than compatibility claims:
 
 | Artifact | Location |
 | --- | --- |
-| Agent conventions | [`AGENTS.md`](../../AGENTS.md) |
+| Agent conventions | [`docs/maintainers/conventions.md`](../maintainers/conventions.md) (tracked mirror; root `AGENTS.md` is `.gitignore`d local state) |
 | Maintainer index | [docs/maintainers/README.md](../maintainers/README.md) |
 | Changelog audit prompt | [docs/maintainers/prompts/cl.md](../maintainers/prompts/cl.md) |
 | Issue analysis prompt | [docs/maintainers/prompts/is.md](../maintainers/prompts/is.md) |
@@ -51,9 +51,10 @@ honest gap records rather than compatibility claims:
 | Add-provider skill | [docs/maintainers/skills/add-provider/SKILL.md](../maintainers/skills/add-provider/SKILL.md) |
 | Interactive-testing skill | [docs/maintainers/skills/interactive-testing/SKILL.md](../maintainers/skills/interactive-testing/SKILL.md) |
 
-`.octet/` is gitignored (local agent state), so the tracked copies under
-`docs/maintainers/` are the source of truth; maintainers copy them into
-`.octet/prompts/` and `.octet/skills/`. The prompts use only octet's supported
+`.octet/` and the root `AGENTS.md` are gitignored (local agent state), so the
+tracked copies under `docs/maintainers/` are the source of truth; maintainers
+copy prompts into `.octet/prompts/` and skills into `.octet/skills/`, and read
+[`conventions.md`](../maintainers/conventions.md) for the agent conventions. The prompts use only octet's supported
 expansion syntax (`${@:-default}`, `${@:start:len}`, `$N`), verified against
 `crates/octet-coding-agent/src/prompts.rs:589`.
 
@@ -85,6 +86,25 @@ Already owned by `scripts/changelog.py` (`parseChangelog`,
 
 ## Verification status
 
+### 6.1 / 6.2 observed run (`2026-09-15`, candidate `00e3ca3e`)
+
+- Every topic in the `6.1` table resolves to a real page: a relative-link check over the
+  twelve topic pages plus `docs/README.md`, `docs/maintainers/**`, and this page resolved
+  **239 relative links with 0 unresolved targets**.
+- The maintainer prompts use only expansion syntax supported by
+  `crates/octet-coding-agent/src/prompts.rs:589` (`${@:-default}`, `${@:start:len}`, `$N`):
+  all four prompts use `${@:-…}` and nothing else.
+- The three skills carry `name`/`description` front matter and are 60, 63, and 77 lines.
+- Defect found while verifying: the row cited the root `AGENTS.md`, which `.gitignore`
+  keeps local-only, so a fresh clone had a broken link and no tracked conventions
+  artifact. `docs/maintainers/conventions.md` is now the tracked mirror (root file still
+  local), and the references here and in `docs/maintainers/README.md` point at it.
+- Defect still open, outside these rows: `scripts/test-packaged-docs.py` requires every
+  tracked file under `docs/`, `examples/`, and `sdk/` to be listed in
+  `docs/package-assets.txt`, and the tree currently lists far fewer (parity, qualification,
+  swarm-audit, examples, and SDK test files are all missing). The `6.1`/`6.2` pages added
+  here are inventoried; the rest of the drift belongs to those rows' owners. Reproduce with
+  `python3 scripts/test-packaged-docs.py`.
 - `scripts/diff-model-catalog.py` and its regressions were run (see 6.3).
 - Extension/import tests were run separately (`#156`).
 - All new/edited docs were link-checked (21 files, 0 missing relative links).

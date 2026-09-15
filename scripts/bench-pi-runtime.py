@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import platform
 import queue
+import re
 import shutil
 import signal
 import statistics
@@ -31,10 +32,51 @@ from typing import Any
 
 SCHEMA = "octet.pi.runtime.evidence.v1"
 DRIVER_SCHEMA = "octet.pi.runtime.benchmark-driver.v1"
+DECISION_SCHEMA = "octet.pi.runtime.decision.v1"
 PROFILES = ("no_extension", "legacy_eager", "lazy", "shared_workspace", "pi_aggregate")
 MAX_REPETITIONS = 31
 MAX_RESOURCE_SAMPLES = 256
 MAX_STDERR_BYTES = 16 * 1024
+MIN_DECISION_REPETITIONS = 5
+
+# Documented, bounded release thresholds. Every metric is derived from the
+# profiles above; a metric that cannot be measured on this platform is
+# `unavailable` (decision `incomplete`), never estimated. Override an
+# individual limit with `--threshold NAME=VALUE`.
+THRESHOLD_DEFAULTS: dict[str, dict[str, Any]] = {
+    "aggregate_startup_overhead_median_ms": {
+        "limit": 250.0,
+        "unit": "ms",
+        "about": "pi_aggregate median startup readiness minus no_extension median startup readiness",
+    },
+    "aggregate_startup_readiness_p95_ms": {
+        "limit": 1000.0,
+        "unit": "ms",
+        "about": "pi_aggregate startup readiness p95",
+    },
+    "aggregate_first_activation_p95_ms": {
+        "limit": 1500.0,
+        "unit": "ms",
+        "about": "pi_aggregate first activation p95",
+    },
+    "aggregate_warm_call_p95_ms": {
+        "limit": 250.0,
+        "unit": "ms",
+        "about": "pi_aggregate warm call p95",
+    },
+    "aggregate_restart_readiness_p95_ms": {
+        "limit": 1500.0,
+        "unit": "ms",
+        "about": "pi_aggregate process-replacement readiness p95",
+    },
+    "aggregate_peak_rss_delta_kib": {
+        "limit": 262144.0,
+        "unit": "KiB",
+        "about": "pi_aggregate minus no_extension p95 peak RSS in the active-extension phase",
+    },
+}
+RELEASE_ADAPTER = "runtime_manager"
+PUBLISH_ROOT = Path("docs/benchmarks")
 
 
 class EvidenceError(RuntimeError):
@@ -179,17 +221,45 @@ def linux_process_tree(root_pid: int) -> dict[str, int | float | None]:
     }
 
 
+# Darwin `ps` field support varies by release: macOS 27 (Darwin 27) rejects the
+# `thcount` keyword outright. Probe once, cache the result, and keep RSS/CPU/
+# process fields measured even when the thread column is unsupported.
+MAC_PS_FORMATS: tuple[tuple[str, bool], ...] = (
+    ("pid=,ppid=,rss=,pcpu=,thcount=", True),
+    ("pid=,ppid=,rss=,pcpu=", False),
+)
+_MAC_PS_FORMAT: tuple[str, bool] | None = None
+
+
+def mac_ps_format() -> tuple[str, bool] | None:
+    global _MAC_PS_FORMAT
+    if _MAC_PS_FORMAT is None:
+        for fields, has_threads in MAC_PS_FORMATS:
+            if command_output(["ps", "-axo", fields]) is not None:
+                _MAC_PS_FORMAT = (fields, has_threads)
+                break
+    return _MAC_PS_FORMAT
+
+
 def mac_process_tree(root_pid: int) -> dict[str, int | float | None]:
-    output = command_output(["ps", "-axo", "pid=,ppid=,rss=,pcpu=,thcount="])
+    selected_format = mac_ps_format()
+    if selected_format is None:
+        return unavailable_resource_sample()
+    fields, has_threads = selected_format
+    output = command_output(["ps", "-axo", fields])
     if output is None:
         return unavailable_resource_sample()
-    records: dict[int, tuple[int, int, float, int]] = {}
+    records: dict[int, tuple[int, int, float, int | None]] = {}
     for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != len(fields.split(",")):
+            continue
         try:
-            pid, ppid, rss, cpu, threads = line.split()
-            records[int(pid)] = (int(ppid), int(rss), float(cpu), int(threads))
+            pid, ppid, rss, cpu = (int(parts[0]), int(parts[1]), int(parts[2]), float(parts[3]))
+            threads = int(parts[4]) if has_threads else None
         except ValueError:
             continue
+        records[pid] = (ppid, rss, cpu, threads)
     descendants = {root_pid}
     changed = True
     while changed:
@@ -199,13 +269,14 @@ def mac_process_tree(root_pid: int) -> dict[str, int | float | None]:
                 descendants.add(pid)
                 changed = True
     selected = [records[pid] for pid in descendants if pid in records]
+    thread_values = [record[3] for record in selected if record[3] is not None]
     return {
         "rss_kib": sum(record[1] for record in selected),
         "pss_kib": None,
         "cpu_ticks": None,
         "cpu_percent_snapshot": safe_float(sum(record[2] for record in selected)),
         "processes": len(selected),
-        "threads": sum(record[3] for record in selected),
+        "threads": sum(thread_values) if thread_values else None,
         "fd_count": None,
     }
 
@@ -651,29 +722,179 @@ def aggregate_profile_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def summary_point(profiles: dict[str, Any], profile: str, measurement: str, point: str) -> float | None:
+    block = profiles.get(profile, {}).get("summary", {}).get(measurement) or {}
+    value = block.get(point)
+    return None if value is None else float(value)
+
+
+def active_peak_rss_series(profiles: dict[str, Any], profile: str) -> list[float]:
+    values: list[float] = []
+    for run in profiles.get(profile, {}).get("runs", []):
+        peak = ((run.get("agent") or {}).get("active_extension_process") or {}).get("peak_rss_kib")
+        if isinstance(peak, (int, float)):
+            values.append(float(peak))
+    return values
+
+
+def measured_metric(profiles: dict[str, Any], metric: str) -> float | None:
+    """Return the measured value for one threshold metric, or None (unavailable)."""
+    if metric == "aggregate_startup_overhead_median_ms":
+        baseline = summary_point(profiles, "no_extension", "startup_readiness_ms", "median")
+        aggregate = summary_point(profiles, "pi_aggregate", "startup_readiness_ms", "median")
+        return None if baseline is None or aggregate is None else aggregate - baseline
+    if metric == "aggregate_startup_readiness_p95_ms":
+        return summary_point(profiles, "pi_aggregate", "startup_readiness_ms", "p95")
+    if metric == "aggregate_first_activation_p95_ms":
+        return summary_point(profiles, "pi_aggregate", "first_activation_ms", "p95")
+    if metric == "aggregate_warm_call_p95_ms":
+        return summary_point(profiles, "pi_aggregate", "warm_call_ms", "p95")
+    if metric == "aggregate_restart_readiness_p95_ms":
+        return summary_point(profiles, "pi_aggregate", "process_restart_readiness_ms", "p95")
+    if metric == "aggregate_peak_rss_delta_kib":
+        aggregate = percentile(active_peak_rss_series(profiles, "pi_aggregate"), 0.95)
+        baseline = percentile(active_peak_rss_series(profiles, "no_extension"), 0.95)
+        if aggregate is None or baseline is None:
+            return None
+        return float(aggregate) - float(baseline)
+    raise EvidenceError(f"unknown threshold metric {metric}")
+
+
+def threshold_settings(overrides: list[str]) -> dict[str, dict[str, Any]]:
+    settings = {name: dict(spec) for name, spec in THRESHOLD_DEFAULTS.items()}
+    for override in overrides:
+        name, separator, raw = override.partition("=")
+        if not separator or name not in settings:
+            raise EvidenceError(
+                f"--threshold must be NAME=VALUE with a known metric, got {override!r}; "
+                f"known: {', '.join(sorted(settings))}"
+            )
+        try:
+            value = float(raw)
+        except ValueError as error:
+            raise EvidenceError(f"--threshold {name} needs a numeric value, got {raw!r}") from error
+        if not math.isfinite(value) or value < 0:
+            raise EvidenceError(f"--threshold {name} needs a finite non-negative value, got {raw!r}")
+        settings[name]["limit"] = value
+    return settings
+
+
+def threshold_observations(profiles: dict[str, Any], thresholds: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    for metric in sorted(thresholds):
+        spec = thresholds[metric]
+        observed = measured_metric(profiles, metric)
+        if observed is None:
+            status = "unavailable"
+        elif observed > spec["limit"]:
+            status = "fail"
+        else:
+            status = "pass"
+        observations.append(
+            {
+                "metric": metric,
+                "about": spec["about"],
+                "unit": spec["unit"],
+                "observed": safe_float(observed),
+                "limit": spec["limit"],
+                "status": status,
+            }
+        )
+    return observations
+
+
 def release_decision(
-    profiles: dict[str, Any], startup_budget_ms: float | None, inference_included: bool
+    profiles: dict[str, Any],
+    thresholds: dict[str, dict[str, Any]],
+    repetitions: int,
+    adapter: str,
+    inference_included: bool,
 ) -> dict[str, Any]:
-    baseline = profiles["no_extension"]["summary"]["startup_readiness_ms"]["median"]
-    aggregate = profiles["pi_aggregate"]["summary"]["startup_readiness_ms"]["median"]
-    overhead = None if baseline is None or aggregate is None else safe_float(aggregate - baseline)
+    """Derive the decision from measured thresholds plus explicit evidence gates.
+
+    `status` is a measurement verdict: `fail` when any threshold is exceeded,
+    `incomplete` when a required metric or repetition count is missing, else
+    `pass`. `release_approval` is separate and stays false while an evidence
+    gate is unmet, so a hermetic fixture can never approve a release.
+    """
+    observations = threshold_observations(profiles, thresholds)
+    failed = [row["metric"] for row in observations if row["status"] == "fail"]
+    unavailable = [row["metric"] for row in observations if row["status"] == "unavailable"]
+    gates: list[dict[str, Any]] = []
+    if adapter != RELEASE_ADAPTER:
+        gates.append(
+            {
+                "gate": "runtime_manager_adapter",
+                "satisfied": False,
+                "observed": adapter,
+                "required": "a checked-in adapter backed by the real aggregate plan/evidence seam",
+            }
+        )
+    if not inference_included:
+        gates.append(
+            {
+                "gate": "inference_attribution",
+                "satisfied": False,
+                "observed": "no inference process was launched or sampled",
+                "required": "separately retained inference server identity and resources",
+            }
+        )
+    if repetitions < MIN_DECISION_REPETITIONS:
+        gates.append(
+            {
+                "gate": "repetitions",
+                "satisfied": False,
+                "observed": repetitions,
+                "required": f"at least {MIN_DECISION_REPETITIONS} per-profile repetitions",
+            }
+        )
+    if failed:
+        status = "fail"
+    elif unavailable or repetitions < MIN_DECISION_REPETITIONS:
+        status = "incomplete"
+    else:
+        status = "pass"
+
     reasons = [
-        "HOLD: checked-in driver is a hermetic Pi bridge fixture, not an actual candidate runtime-manager adapter.",
-        "HOLD: Linux and macOS candidate runs must both be reviewed before a release decision.",
-        "HOLD: no inference server was launched; agent and inference resources remain intentionally separate."
-        if not inference_included
-        else "HOLD: external inference-process snapshots are separate from agent process-tree measurements.",
+        f"threshold {row['metric']} exceeded: measured {row['observed']} {row['unit']} > limit {row['limit']} {row['unit']}"
+        for row in observations
+        if row["status"] == "fail"
     ]
-    if startup_budget_ms is not None and aggregate is not None and aggregate > startup_budget_ms:
-        reasons.append(f"FAIL: aggregate median startup {aggregate} ms exceeds configured budget {startup_budget_ms} ms.")
+    reasons.extend(
+        f"threshold {row['metric']} unavailable on this platform: no measured value was recorded"
+        for row in observations
+        if row["status"] == "unavailable"
+    )
+    if repetitions < MIN_DECISION_REPETITIONS:
+        reasons.append(
+            f"{repetitions} repetition(s) recorded; {MIN_DECISION_REPETITIONS} are required before a decision"
+        )
+    if adapter != RELEASE_ADAPTER:
+        reasons.append(
+            f"adapter {adapter!r} is a hermetic fixture, not a candidate runtime-manager adapter"
+        )
+    if not inference_included:
+        reasons.append("no inference server was launched; agent and inference resources stay separate")
+    reasons.append("Linux and macOS candidate runs must both be reviewed before any release approval")
+    if not reasons or status == "pass":
+        reasons.insert(0, "all measured thresholds are within their documented limits")
+
     return {
-        "status": "hold",
+        "schema": DECISION_SCHEMA,
+        "status": status,
+        "thresholds": observations,
+        "repetitions": repetitions,
+        "min_repetitions": MIN_DECISION_REPETITIONS,
         "baseline_attribution": {
             "baseline_profile": "no_extension",
             "pi_aggregate_profile": "pi_aggregate",
-            "startup_median_overhead_ms": overhead,
+            "startup_median_overhead_ms": safe_float(measured_metric(profiles, "aggregate_startup_overhead_median_ms")),
         },
         "reasons": reasons,
+        "release_approval": {
+            "approved": status == "pass" and not gates,
+            "gates": gates,
+        },
     }
 
 
@@ -786,6 +1007,133 @@ def write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def measured_summary(profiles: dict[str, Any], profile: str, measurement: str) -> str:
+    block = profiles.get(profile, {}).get("summary", {}).get(measurement) or {}
+    median = block.get("median")
+    p95 = block.get("p95")
+    if median is None and p95 is None:
+        return "unavailable"
+    return f"{median} / {p95}"
+
+
+def publication_readme(artifact: dict[str, Any], command: str) -> str:
+    decision = artifact["release_decision"]
+    metadata = artifact["metadata"]
+    inputs = artifact["inputs"]
+    lines = [
+        f"# Pi runtime fixture evidence — {metadata['candidate']}",
+        "",
+        "Bounded, offline, credential-free capture from",
+        "[`scripts/bench-pi-runtime.py`](../../../scripts/bench-pi-runtime.py). It runs the checked-in",
+        "Pi compatibility fixture only: no model or provider request, no network call, no inherited",
+        "credentials, and a temporary HOME. These are fixture representations of the lifecycle",
+        "profiles, not a production runtime-manager measurement.",
+        "",
+        "## Reproduction",
+        "",
+        "```console",
+        command,
+        "```",
+        "",
+        "The method is deterministic (fixed profiles, fixed fixture identities, bounded samples);",
+        "wall-clock timings still vary per run and host, so the recorded numbers are one capture.",
+        "",
+        "## Measured thresholds",
+        "",
+        "| Metric | Observed | Limit | Unit | Status |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in decision["thresholds"]:
+        observed = "unavailable" if row["observed"] is None else row["observed"]
+        lines.append(f"| `{row['metric']}` | {observed} | {row['limit']} | {row['unit']} | {row['status']} |")
+    lines += [
+        "",
+        f"`status: {decision['status']}` over {decision['repetitions']} repetition(s) per profile",
+        f"(minimum {decision['min_repetitions']}); release approval",
+        f"`{'approved' if decision['release_approval']['approved'] else 'blocked'}`.",
+        "",
+        "## Release gates",
+        "",
+    ]
+    for gate in decision["release_approval"]["gates"]:
+        lines.append(f"- `{gate['gate']}` (unmet): observed {gate['observed']!r}; requires {gate['required']}.")
+    lines += [
+        "",
+        "## Profiles",
+        "",
+        "| Profile | Startup median/p95 ms | First activation median/p95 ms | Warm call median/p95 ms | Restart readiness median/p95 ms | Active peak RSS p95 KiB |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for profile in artifact["collection"]["profiles"]:
+        rss = percentile(active_peak_rss_series(artifact["profiles"], profile), 0.95)
+        lines.append(
+            f"| `{profile}` | {measured_summary(artifact['profiles'], profile, 'startup_readiness_ms')} | "
+            f"{measured_summary(artifact['profiles'], profile, 'first_activation_ms')} | "
+            f"{measured_summary(artifact['profiles'], profile, 'warm_call_ms')} | "
+            f"{measured_summary(artifact['profiles'], profile, 'process_restart_readiness_ms')} | "
+            f"{'unavailable' if rss is None else rss} |"
+        )
+    lines += [
+        "",
+        "## Method and limits",
+        "",
+        f"- Driver: `{artifact['driver']['name']}` (reload semantics: `{artifact['driver']['reload_semantics']}`).",
+        f"- API evidence version: `{artifact['api']['version']}`; bridge SHA-256 `{inputs['bridge']['sha256'][:16]}…`.",
+        f"- Pi runtime: `{inputs['pi_runtime']['kind']}` {inputs['pi_runtime']['name']} {inputs['pi_runtime']['version']}.",
+        f"- Platform: {metadata['platform']['system']} {metadata['platform']['release']} {metadata['platform']['machine']}.",
+        f"- Samples: interval {artifact['collection']['resource_sample_interval_ms']} ms, at most",
+        f"  {artifact['collection']['max_resource_samples_per_process']} per process, raw samples bounded.",
+        "- Linux records `/proc` RSS/PSS/CPU ticks/threads/FDs. Darwin uses `ps` for RSS, an",
+        "  instantaneous CPU percent and, where the local `ps` supports the keyword, threads; PSS and",
+        "  FD count stay unavailable rather than estimated.",
+        "- Agent process trees are always separate from inference resources; this capture launched no",
+        "  inference server, so no GPU or model-server claim is present.",
+        f"- Sanitization: {metadata['publication']['note']}.",
+        "- Nothing here approves a release or claims production lazy activation, cross-workspace",
+        "  sharing, reload policy, FD limits or multi-session governance.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def publish_artifact(output: Path, artifact: dict[str, Any], command: str) -> None:
+    publish_root = (repository_root() / PUBLISH_ROOT).resolve()
+    if not (output == publish_root or publish_root in output.parents):
+        raise EvidenceError(f"--publish requires an output directory inside {PUBLISH_ROOT}/")
+    results = output / "results.json"
+    if results.exists():
+        raise EvidenceError(f"refusing to overwrite existing evidence at {results}")
+    metadata = artifact["metadata"]
+    metadata["hardware"]["cpu_model"] = None
+    metadata["publication"] = {
+        "sanitized": True,
+        "omitted": ["hardware.cpu_model"],
+        "note": "nonessential CPU brand string omitted; measured samples, thresholds and limits unchanged",
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    write_json(results, artifact)
+    readme = output / "README.md"
+    readme.write_text(publication_readme(artifact, command) + "\n", encoding="utf-8")
+    sums = [(sha256_file(results), "results.json"), (sha256_file(readme), "README.md")]
+    (output / "SHA256SUMS").write_text(
+        "".join(f"{digest}  {name}\n" for digest, name in sums), encoding="utf-8"
+    )
+
+
+def reproduction_command(arguments: argparse.Namespace, output: Path) -> str:
+    parts = [
+        "python3 scripts/bench-pi-runtime.py",
+        f"--candidate {arguments.candidate}",
+        f"--repetitions {arguments.repetitions}",
+        f"--sample-interval-ms {arguments.sample_interval_ms}",
+        f"--max-resource-samples {arguments.max_resource_samples}",
+    ]
+    parts.extend(f"--threshold {override}" for override in arguments.threshold)
+    parts.append("--publish")
+    parts.append(f"--output {output}")
+    return " ".join(parts)
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", required=True, help="Exact candidate revision or immutable build identifier.")
@@ -793,7 +1141,21 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--repetitions", type=int, default=5, help=f"Per-profile repetitions (1-{MAX_REPETITIONS}).")
     parser.add_argument("--sample-interval-ms", type=int, default=20)
     parser.add_argument("--max-resource-samples", type=int, default=64)
-    parser.add_argument("--startup-budget-ms", type=float, default=None)
+    parser.add_argument(
+        "--threshold",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Override one documented threshold limit, e.g. aggregate_warm_call_p95_ms=200.",
+    )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help=(
+            "Write a publication-safe, self-describing evidence directory (results.json, README.md, "
+            f"SHA256SUMS) below {PUBLISH_ROOT}/; refuses to overwrite existing evidence."
+        ),
+    )
     parser.add_argument(
         "--inference-pid",
         type=int,
@@ -815,6 +1177,11 @@ def main() -> int:
         raise EvidenceError("--candidate must be a non-empty immutable identifier")
     if arguments.inference_pid is not None and arguments.inference_pid <= 0:
         raise EvidenceError("--inference-pid must be positive")
+    thresholds = threshold_settings(arguments.threshold)
+    if arguments.publish and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", arguments.candidate):
+        raise EvidenceError(
+            "--publish requires a full lowercase 40-character commit or 64-character build digest candidate"
+        )
     root = repository_root()
     identity = load_identity_helpers(root)
     node = command_output([shutil.which("node") or "node", "--version"])
@@ -840,13 +1207,14 @@ def main() -> int:
                 all_runs[profile].append(compact_raw(run, arguments.max_resource_samples))
 
     profiles = {profile: aggregate_profile_runs(runs) for profile, runs in all_runs.items()}
+    inputs = fixture_inputs(root, identity)
     inference = inference_evidence(arguments.inference_pid)
     artifact = {
         "schema": SCHEMA,
         "schema_version": 1,
         "api": {"version": "0.3", "schema": "octet.extension.api/0.3"},
         "driver": {"schema": DRIVER_SCHEMA, "name": "hermetic_fixture", "reload_semantics": "process_restart"},
-        "inputs": fixture_inputs(root, identity),
+        "inputs": inputs,
         "metadata": system_metadata(arguments.candidate, node),
         "collection": {
             "profiles": list(PROFILES),
@@ -859,14 +1227,33 @@ def main() -> int:
         "inference_server": inference,
         "release_decision": release_decision(
             profiles,
-            arguments.startup_budget_ms,
+            thresholds,
+            arguments.repetitions,
+            inputs["adapter"],
             bool(inference["included"]),
         ),
     }
-    write_json(output / "results.json", artifact)
+    if arguments.publish:
+        try:
+            relative_output = output.relative_to(root)
+        except ValueError:
+            raise EvidenceError(f"--publish requires an output directory inside {PUBLISH_ROOT}/") from None
+        publish_artifact(output, artifact, reproduction_command(arguments, relative_output))
+    else:
+        write_json(output / "results.json", artifact)
+        digest = hashlib.sha256((output / "results.json").read_bytes()).hexdigest()
+        (output / "SHA256SUMS").write_text(f"{digest}  results.json\n", encoding="utf-8")
     digest = hashlib.sha256((output / "results.json").read_bytes()).hexdigest()
-    (output / "SHA256SUMS").write_text(f"{digest}  results.json\n", encoding="utf-8")
-    print(json.dumps({"output": str(output), "sha256": digest, "decision": artifact["release_decision"]["status"]}))
+    print(
+        json.dumps(
+            {
+                "output": str(output),
+                "sha256": digest,
+                "decision": artifact["release_decision"]["status"],
+                "release_approval": artifact["release_decision"]["release_approval"]["approved"],
+            }
+        )
+    )
     return 0
 
 

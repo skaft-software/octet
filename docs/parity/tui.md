@@ -104,3 +104,30 @@ attachment and large-paste classification match a terminal paste.
 
 **Clipboard image capture remains excluded** by this document and by the
 delivery brief.
+
+## Activity shimmer — one model-adaptive colour family, smooth traverse
+
+The `Working`/`Thinking` status shimmer is a variation of the **model's own colour identity**
+(`theme.model_rgb(model_lab)`, the same colour the resting label uses). Reported regressions fixed here:
+
+- The sweep used to be tinted by fixed hue sets (`Working` 0°..45°, `Thinking` 190°..262°) at every reasoning
+  level, so a neutral model shimmered orange-yellow instead of its own grey. Both labels now share ONE ramp
+  derived from the model colour: hue rotations of at most `ACTIVITY_RAMP_HUE_SPAN = 24°` around the model hue and
+  saturation multipliers of the model's own HSV saturation. A model whose colour is achromatic (`ModelLab::OpenAi`
+  is `#1f1f1f`, i.e. `gpt-6-astra`), or a session with no model identity (`ModelLab::Unknown`/no lab), gets an
+  exact profile grey: luminance movement only, zero hue rotation.
+- The two statuses no longer differ by hue. They differ by the documented non-chromatic cue
+  `ACTIVITY_THINKING_SWEEP_DEPTH = 0.80`: `Thinking` travels 80% of the luminance separation `Working` travels,
+  the same colour family at a shallower depth (0.07 of relative luminance on the dark profile, 0.016 on the light
+  one).
+- The highlight now completes a full traverse before looping. It enters before the margin dot, crosses every
+  label cell, exits past the trailing edge, and the first and last position of a cycle leave every rendered cell
+  at the resting colour (`ACTIVITY_SWEEP_REST_FRAMES = 2`, cycle = label width + 12). Previously the ramp was
+  only `width + 4` long, so the trailing cells were still lit when the next cycle began - the reported "slides
+  part way through the letters then loops back".
+- The max/ultra rainbow is unchanged and remains gated to that emphasis level only: `status_rainbow_strength` is
+  non-zero only for the `max`/`ultra` reasoning levels inside the two-second emphasis window, so no lower level
+  can reach it.
+- Contrast is unchanged (`ACTIVITY_DARK_SWEEP_LUMINANCE = 0.50`, `ACTIVITY_LIGHT_SWEEP_LUMINANCE = 0.09`): every
+  cell is still foreground-only, and the tint is built at the cell's own luminance so it adds hue and chroma
+  without moving any cell outside the band the profile already proved contrast-safe.

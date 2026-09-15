@@ -170,7 +170,7 @@ impl Tool for BashTool {
         Ok(ToolEffect::HostProcess)
     }
 
-    fn prompt_snippet(&self) -> Option<&str> { Some("Execute bash commands (ls, grep, find, etc.)") }
+    fn prompt_snippet(&self) -> Option<&str> { Some("Execute bash commands (prefer rg/ripgrep for file and content search)") }
 
     async fn execute(
         &self,

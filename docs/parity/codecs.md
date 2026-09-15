@@ -146,6 +146,40 @@ that only those files can add.
   selection today is endpoint-declared (`EndpointTransport::WebSocketPreferred`),
   not per request.
 
+### Responses computer use (roadmap #388) — wire protocol landed, no authority
+
+- Upstream anchors: `docs/research/apidocs/openai-responses/02-create.md:1598`
+  (`ComputerUsePreview` tool declaration), `:986-1025` (`ComputerCallOutput`,
+  `computer_call_output` with a single `computer_screenshot`), `:490-560`
+  (`ComputerCall` action union: `click`, `double_click`, `drag`, `keypress`,
+  `move`, `screenshot`, `scroll`, `type`, `wait`).
+- Landed: `responses.rs` public `ComputerUseTool` / `ComputerUseEnvironment`
+  plus `ResponsesOptions::with_computer_use`; `types.rs`
+  `ResponsesRuntimeProfile::accepts_computer_use` (declarative endpoint gate,
+  no provider-name branch); `openai_responses.rs` emits the
+  `computer_use_preview` declaration, decodes a provider `computer_call` into a
+  canonical tool call named `computer_use_preview` with bounded arguments
+  (`{"action":…,"pending_safety_checks":…}`, 16 KiB cap), and dispatches the
+  canonical tool result back to `computer_call_output` (one
+  `computer_screenshot`, 4 MiB inline cap) on both the canonical and the opaque
+  replay path.
+- Fail-closed: unknown or absent action, action over the bound, an actionless
+  terminal computer call, a profile that does not declare the tool, and
+  Responses Lite (which cannot carry tools) all fail closed with a typed error
+  rather than surfacing an unvetted action or dropping the declaration.
+- Tests: `cargo test -p octet-ai --lib computer` (13 passed), including
+  `computer_call_round_trips_action_call_id_and_safety_checks`,
+  `unsupported_computer_action_fails_closed`,
+  `computer_use_fails_closed_on_a_profile_that_does_not_declare_it`,
+  `computer_call_history_replays_as_computer_call_and_output`, and
+  `opaque_replay_dispatches_computer_results_by_authoritative_output`. Fixture:
+  `crates/octet-ai/tests/fixtures/openai_responses/computer_call.sse`.
+- **Authority half is not landed and is not in this crate.** No desktop/browser
+  backend, no execution path, no host action surface. The remaining primitive
+  is a policy-gated action executor outside `octet-ai` (roadmap #383:
+  approved-action execution plus the host policy decision), which this codec
+  will feed a validated action but never perform.
+
 ## Blocked rows (exact missing primitive)
 
 | Row | Missing primitive | Owning file |

@@ -19,6 +19,10 @@ pub struct CodexResolver {
     /// Serializes token refreshes so racing requests don't stampede the token
     /// endpoint (the inner re-check makes it a proper double-checked lock).
     refresh_lock: Mutex<()>,
+    /// Bound on the cross-process refresh-lock wait, shared with the store's
+    /// non-blocking acquisition. It is a field so tests can inject a short wait
+    /// instead of depending on a production deadline.
+    refresh_lock_wait: std::time::Duration,
 }
 
 impl CodexResolver {
@@ -28,6 +32,18 @@ impl CodexResolver {
             http: super::http_client(),
             token_url: TOKEN_URL.to_owned(),
             refresh_lock: Mutex::new(()),
+            refresh_lock_wait: super::store::REFRESH_LOCK_WAIT,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_refresh_lock_wait(
+        store: CredentialStore,
+        refresh_lock_wait: std::time::Duration,
+    ) -> Self {
+        Self {
+            refresh_lock_wait,
+            ..Self::new(store)
         }
     }
 
@@ -45,11 +61,21 @@ impl CodexResolver {
         // refresh-token rotation across octet processes using the same store.
         // Re-check the file after both waits because another owner may already
         // have persisted a fresh token.
+        //
+        // The cross-process wait is bounded *inside* the blocking worker, not by
+        // dropping this future: the worker always returns within the configured
+        // deadline, so a contended lock can neither wedge startup nor leave an
+        // indefinitely blocked lock worker behind. A timed-out acquisition takes
+        // nothing and rotates nothing, so the credential file is left exactly as
+        // the other owner had it.
         let _task_guard = self.refresh_lock.lock().await;
         let lock_store = self.store.clone();
-        let process_guard = tokio::task::spawn_blocking(move || lock_store.lock_refresh())
-            .await
-            .context("refresh-lock worker failed")??;
+        let refresh_lock_wait = self.refresh_lock_wait;
+        let process_guard = tokio::task::spawn_blocking(move || {
+            lock_store.lock_refresh_within(refresh_lock_wait)
+        })
+        .await
+        .context("refresh-lock worker failed")??;
         let cred = self
             .store
             .load_while_refresh_locked(&process_guard)?
@@ -266,6 +292,76 @@ mod tests {
         assert_eq!(persisted.tokens.refresh_token, "rotated-refresh");
         assert_eq!(persisted.tokens.access_token, new_access);
         assert!(persisted.expires_at > now_unix());
+    }
+
+    /// A peer holding the cross-process refresh lock cannot wedge resolution:
+    /// the wait is bounded, nothing is rotated while it is refused, and the
+    /// rotation it gates still works the moment the peer releases the lock.
+    #[tokio::test]
+    async fn a_held_refresh_lock_bounds_resolution_and_rotation_still_works() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let new_access = jwt_with_account("acct_refreshed");
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": new_access,
+                "refresh_token": "rotated-refresh",
+                "expires_in": 3600,
+            })))
+            .mount(&server)
+            .await;
+
+        let (_dir, store) = store_with(now_unix().saturating_sub(10));
+        // Another octet process owns the rotation lock.
+        let held = store.lock_refresh().unwrap();
+
+        let mut resolver = CodexResolver::with_refresh_lock_wait(
+            store.clone(),
+            std::time::Duration::from_millis(20),
+        );
+        resolver.token_url = format!("{}/token", server.uri());
+
+        let error = resolver
+            .resolve()
+            .await
+            .err()
+            .expect("a held refresh lock must refuse the resolution");
+        assert!(matches!(error, AuthError::Resolve));
+        // The refused attempt rotated nothing: no token request reached the
+        // endpoint, and the credential file is exactly as its owner left it.
+        assert!(
+            server.received_requests().await.unwrap_or_default().is_empty(),
+            "a refused lock must not rotate a token"
+        );
+        let unchanged = store.load().unwrap().unwrap();
+        assert_eq!(unchanged.tokens.refresh_token, "r");
+        assert_eq!(unchanged.tokens.access_token, jwt_with_account("acct_9"));
+
+        // The timed-out worker left no phantom holder behind, so the owner's
+        // release is the only release and the same resolver now rotates.
+        held.finish().unwrap();
+        let cred = resolver.resolve().await.unwrap();
+        assert_eq!(
+            cred.extra_headers
+                .get("chatgpt-account-id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "acct_refreshed"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "exactly one rotation request, after the lock was released"
+        );
+        assert_eq!(
+            store.load().unwrap().unwrap().tokens.refresh_token,
+            "rotated-refresh",
+            "refresh-token rotation still persists the rotated secret"
+        );
     }
 
     #[tokio::test]

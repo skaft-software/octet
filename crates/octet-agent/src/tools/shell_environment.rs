@@ -82,7 +82,7 @@ impl PowerShellTool {
 impl Tool for SessionShellTool {
     fn definition(&self)->octet_ai::ToolDef { if self.powershell { PowerShellTool.definition() } else { BashTool.definition() } }
     fn prompt_snippet(&self) -> Option<&str> {
-        if self.powershell { Some("Execute PowerShell commands") } else { Some("Execute bash commands (ls, grep, find, etc.)") }
+        if self.powershell { Some("Execute PowerShell commands") } else { BashTool.prompt_snippet() }
     }
     fn prompt_guidelines(&self) -> &[&str] {
         // Mirrors Pi's `exposeSessionEnvironment && promptGuidelines` gate: only

@@ -37,15 +37,26 @@ route/discovery/credential declaration is landed; the static catalog needs a
 models.dev generation pass. Deterministic checks here do not qualify live
 provider availability.
 
-## Codex `service_tier` (row 1a.1 — field landed; `/fast` NOT yet unblocked)
+## Codex `service_tier` (row 1a.1 — landed end-to-end; `/fast` reaches the wire)
 
-`/fast` (roadmap #175) stays **inert**: the codec field is landed, but no live
-run selects a tier, so no request carries `service_tier` today. `octet-agent`'s
-`ResponsesOptions` builders (`crates/octet-agent/src/agent.rs`,
-`durable_responses_options` / `native_responses_options`) only ever construct
-`ResponsesOptions::full_replay(...)`, which leaves `service_tier` unset;
-`apply_fast_command` (`crates/octet-coding-agent/src/modes/interactive.rs`)
-correctly fails loudly instead of pretending the flag took effect.
+Headline status (verified against this tree, agent11, after
+`agent10: service_tier plumbed into the live run path`): the agent-side caller
+landed, so `/fast` now changes the request instead of reporting a dependency. The
+independent verifier's C2 row (`docs/parity/VERIFICATION.md:471`) described an
+earlier revision; both the earlier over-claim and the later "NOT yet unblocked"
+heading are superseded by this one.
+
+`/fast` (roadmap #175) is **live on a Codex route**: `Agent::set_service_tier`
+(`crates/octet-agent/src/agent.rs`) selects the tier, and both live-run
+`ResponsesOptions` builders (`durable_responses_options`,
+`native_responses_options`) — plus `responses_prewarm_request` — emit it. The
+field is sent only where the route declares the capability; every other route
+fails closed with the codec's typed `UnsupportedError::ServiceTier` rather than
+silently dropping a billing-changing control.
+`apply_fast_command` (`crates/octet-coding-agent/src/modes/interactive.rs`) still
+prints its "inert" message until its owner switches it to the new setter (see the
+consumer contract in `../swarm-audit/EXECUTION-agent3.md`): that is the one
+remaining step, and it is a UI edge, not a request-path gap.
 
 Upstream anchors: `packages/ai/src/api/openai-responses.ts:105`, `:321`
 (`params.service_tier = options.serviceTier`), `:362-389`
@@ -66,20 +77,35 @@ Behavioral tests: `service_tier_is_absent_unless_the_caller_requests_it`,
 `service_tier_fails_closed_on_a_profile_that_does_not_declare_it`
 (`cargo test -p octet-ai --lib service_tier` -> 3 passed).
 
-Gap 1 (blocks `/fast`, outside the `octet-ai` boundary): the live-run
-`ResponsesOptions` builders in `crates/octet-agent/src/agent.rs`
-(`durable_responses_options`, `native_responses_options`) never call
-`with_service_tier`, so the field is never set on a real request. Named missing
-primitive: set `ResponsesOptions::service_tier = Some(ServiceTier::Priority)`
-for `on` (and leave it unset for `off`) at those builders, after checking
-`model.endpoint.runtime.responses_profile.accepts_service_tier()`.
+Outcome (live-run caller landed, agent11): `Agent::set_service_tier` /
+`Agent::service_tier` and `resolve_service_tier` gate the selection on
+`protocol == OpenAiResponses && responses_profile.accepts_service_tier()`, the
+tier is threaded through both builders, and a requested tier survives a session
+with no route-affine replay window (tier-only options replay canonically exactly
+as `None` would). Behavioral tests:
+`service_tier_reaches_the_request_only_on_a_route_that_declares_it`
+(`cargo test -p octet-agent --test agent_run --locked service_tier` -> 1 passed:
+`"service_tier":"priority"` observed in the captured request body on the Codex
+route, absent after clearing it, and the plain route rejected with
+`ai error: Unsupported error: Responses service tier is unsupported on this
+route` while sending no field) and
+`a_requested_service_tier_is_gated_by_the_route_and_never_silently_dropped`
+(`cargo test -p octet-agent --lib --locked service_tier` -> 1 passed).
+
+Gap: the selection is process-scoped (`Agent::set_service_tier`), so a resumed
+session starts with no tier until the frontend re-applies it, and
+`apply_fast_command` must call the setter to stop reporting the dependency. Named
+primitive for the second: the consumer contract in
+`docs/swarm-audit/EXECUTION-agent3.md` (tui11's row).
 
 Gap 2: `applyServiceTierPricing` (usage-cost multiplier 0.5 flex, 2 priority,
 2.5 for `gpt-5.5` priority) is not applied to `Response.cost`. Named missing
 primitive: thread the requested/echoed tier into
 `ResponseBuilder::finish` (`crates/octet-ai/src/stream.rs:809-822`, the only
 `cost_of` call on the Responses streaming path). Until then octet reports the
-catalog-rate cost and never a fabricated tier-adjusted one.
+catalog-rate cost and never a fabricated tier-adjusted one. Also unscheduled:
+`service_tier` is not persisted per session (no session entry carries it), so a
+`/fast on` selection does not survive a restart.
 
 ## 1b.1 — per-request overrides
 
@@ -266,10 +292,40 @@ and PKCE) that the existing `octet-agent` policy drives; adding RFC8628/PKCE
 helpers in `octet-ai` without that host seam would either be dead code or a
 policy bypass.
 
+## Computer use (roadmap #388 — wire protocol landed, authority host-gated)
+
+Upstream anchors: `packages/ai/src/api/openai-responses.ts` computer-use tool
+declaration and `computer_call` handling (paired with the OpenAI apidocs
+anchors in [`codecs.md`](codecs.md)).
+
+Outcome (landed, protocol only): octet:`crates/octet-ai/src/responses.rs`
+exports the typed `ComputerUseTool` / `ComputerUseEnvironment` declaration and
+`ResponsesOptions::with_computer_use`; octet:`crates/octet-ai/src/types.rs`
+adds the declarative endpoint gate
+`ResponsesRuntimeProfile::accepts_computer_use()` (public Responses profile
+only — no provider-name branch anywhere in the codec or agent loop). The codec
+emits `{"type":"computer_use_preview",…}`, maps a provider `computer_call` to a
+canonical tool call named `computer_use_preview` with a bounded action payload,
+and dispatches the caller's result back as `computer_call_output` carrying the
+single documented `computer_screenshot`. Behavioral tests:
+`cargo test -p octet-ai --lib computer` (13 passed, including fail-closed cases
+for an unknown action, a missing action, an over-bound action, a non-declaring
+profile and Responses Lite).
+
+Gap (authority, not protocol): octet performs no computer action. There is no
+desktop/browser backend, no screenshot capture, and no host action surface
+behind this codec, so the row cannot be closed from `octet-ai`. Named missing
+primitive: a policy-gated approved-action executor outside the codec (roadmap
+#383, host-owned) that consumes the validated action and produces the
+screenshot this codec sends back. Until that exists, callers receive a
+canonical computer tool call they must refuse; the codec never fabricates a
+screenshot and never forwards an unbounded payload.
+
 ## Rows landed as code + test in this pass
 
 | Row | Code | Test (command) |
 | --- | --- | --- |
+| #388 computer use (protocol half) | `octet-ai`: `responses.rs` (`ComputerUseTool`, `with_computer_use`), `types.rs` (`accepts_computer_use`), `protocol/openai_responses.rs` (declaration + `computer_call`/`computer_call_output` round trip) | `cargo test -p octet-ai --lib computer` (13 passed) |
 | 1a.1 | declarations.json + contract test | `cargo test -p octet-coding-agent --lib token_plan_and_coding_provider_declarations_are_declared` |
 | 1b.2/1b.5 (declared) | octet-ai `declarations` module | `cargo test -p octet-ai --lib declarations::tests` |
 | 1b.3 (core) | octet-ai `declarations/proxy.rs` | `cargo test -p octet-ai --lib declarations::proxy` |

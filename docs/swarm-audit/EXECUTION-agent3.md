@@ -279,3 +279,365 @@ CONTRACT FOR THE EXTENSION (openall4) — exact host surface to call:
 agent6: session-scoped delegation lifetime landed
 
 START 2026-09-15T17:42:57Z agent9 alive
+
+START 2026-09-15T17:53:01Z agent10 alive
+START 2026-09-15T17:55:32Z agent11 alive
+
+START-of-directed-work 2026-09-15T17:56:07Z agent11 — MAINTAINER DIRECTIVE: remove ls/find/grep tools; priority above #175
+Ownership grant received: crates/octet-agent/src/tools/**, src/tool.rs, tests/parity_tools.rs, tests/read_concurrency_current.rs
+
+
+## agent11 MAINTAINER DIRECTIVE work — step 1 (tool surface)
+
+- Deleted `crates/octet-agent/src/tools/{ls,find,grep}.rs` (git rm).
+- `src/tools/mod.rs`: removed `mod ls/find/grep`, their `pub use`, and the three
+  `host.tool(...)` registrations. `register` is now exactly v0.7.6 parity:
+  ReadTool, EditTool, WriteTool, BashTool, SearchTool (+ `#[cfg(windows)]` opt-in
+  PowerShellTool). Module doc states the narrow surface + rg default.
+- `src/tools/bash.rs:173` snippet: "Execute bash commands (ls, grep, find, etc.)"
+  -> "Execute bash commands (prefer rg/ripgrep for file and content search)".
+- `src/tools/shell_environment.rs:85`: the non-PowerShell snippet now delegates to
+  `BashTool.prompt_snippet()` so the two cannot drift.
+- `tests/parity_tools.rs`: deleted the 4.1/4.2/4.3 test block (7 tests) plus the
+  now-unused `binary_available`/`run_with_path` helpers; 4.13 test updated for the
+  new surface and bash snippet; NEW regression guard
+  `core_tools_register_exactly_the_narrow_maintainer_surface` asserts the
+  registered `CoreTools` surface is exactly {bash, edit, read, search, write}
+  (+ powershell on Windows) and that ls/find/grep are absent.
+
+Build blocker (NOT mine, in flight): `cargo check -p octet-ai --lib --locked`
+currently fails at `crates/octet-ai/src/protocol/openai_responses.rs:863` with
+`E0425: cannot find function canonical_computer_action` — another worker is
+mid-edit in `crates/octet-ai`. `cargo check --workspace --all-targets --locked`
+was green before that edit; I will re-run after it settles and report both ways.
+
+### agent11 tool-surface removal — observed output ($(date -u +%Y-%m-%dT%H:%M:%SZ))
+
+```
+$ cargo check -p octet-agent --all-targets --locked
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 00s
+
+$ cargo test -p octet-agent --test parity_tools --locked
+running 17 tests
+test bash_checkpoint_publisher_is_interval_bounded_and_dedupes_identical_snapshots ... ok
+test deferred_suspension_requires_a_valid_handle_and_rejects_every_mismatch ... ok
+test deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or_foreign_handles ... ok
+test batch_termination_requires_unanimous_finalized_results ... ok
+test core_tools_register_exactly_the_narrow_maintainer_surface ... ok
+test invocation_memos_survive_replay_until_the_outcome_is_known ... ok
+test preview_coalescer_paces_both_interval_and_encoded_bytes ... ok
+test powershell_is_opt_in_and_never_a_bash_fallback ... ok
+test summarization_retries_are_distinct_from_compaction_failures_without_duplicate_durable_state ... ok
+test tool_prompt_contributions_match_pi_snippets_and_guidelines ... ok
+test bash_untruncated_output_leaks_no_spill_path ... ok
+test edit_applies_multiple_edits_against_the_original_file ... ok
+test bash_truncated_output_spills_the_full_stream_to_a_readable_path ... ok
+test edit_legacy_shapes_are_normalized_into_one_batch ... ok
+test bash_checkpoints_land_at_interval_boundaries_and_final_output_is_complete ... ok
+test session_shell_clears_inherited_metadata_and_rereads_the_resolver ... ok
+test session_shell_exposes_live_identity_metadata_and_host_command_prefix ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+```
+
+Workspace check at the time of writing: `cargo check --workspace --all-targets --locked`
+currently fails **outside my paths** in another worker's in-flight edit
+(`crates/octet-coding-agent/src/tui/view/reasoning_render.rs:1345` and `:1383`,
+E0061 `activity_shimmer_color` takes 8 args, 7 supplied). Before that edit the
+same command was reported green by this worker's predecessor; `octet-agent` and
+`octet-ai` both compile now. I will re-run the workspace check at the end and
+report the result verbatim.
+
+CHANGELOG-ready bullet (for root to land in CHANGELOG.md):
+- **feat(octet-agent): the built-in tool surface is four tools plus ripgrep.**
+  `ls`, `find`, and `grep` are withdrawn from `CoreTools` on the maintainer's
+  decision: octet offers `read`, `write`, `edit`, `bash`, and the pre-existing
+  ripgrep-backed `search` tool (registered for embedders and explicit allowlists
+  exactly as in v0.7.6; the coding product leaves `search` out of its default
+  allowlist). File discovery and content search go through `rg` — `search`, or
+  `bash` — and bash's tool-prompt snippet now says so. A regression guard
+  (`core_tools_register_exactly_the_narrow_maintainer_surface`) fails if any of
+  the three tools is re-registered, and the parity ledger records rows 4.1–4.3 as
+  **withdrawn by maintainer decision** rather than landed, including the two
+  behaviours `search` genuinely does not cover (directory listing, filename-only
+  discovery).
+
+## agent11 TASK 1 — roadmap #175 `/fast`: `service_tier` plumbed into the live run path
+
+agent10: service_tier plumbed into the live run path
+
+### What landed (crates/octet-agent/src/agent.rs)
+- `Agent::set_service_tier(Option<ServiceTier>) -> Result<(), AgentError>` and
+  `Agent::service_tier() -> Option<ServiceTier>`; the field defaults to `None`
+  (no tier), so default behavior is unchanged.
+- `resolve_service_tier(&Model, Option<ServiceTier>)` gates the selection on the
+  route's declared capability: a tier is accepted only when the protocol is
+  `OpenAiResponses` **and** `endpoint.runtime.responses_profile.accepts_service_tier()`
+  (Codex today). Every other route returns the codec's typed
+  `AiError::Unsupported(UnsupportedError::ServiceTier)` — never a silent drop,
+  and never a provider-name branch.
+- Both live-run builders now take the tier: `durable_responses_options(session,
+  model, system, tier) -> Result<Option<ResponsesOptions>, AgentError>` and
+  `native_responses_options(..., tier)`. Called from the run loop's request
+  construction (`agent.rs` ~6.9k) and from `responses_prewarm_request`, so the
+  prewarmed websocket carries the same tier as the following live request.
+- The gate is re-applied inside the builders, so a route change after
+  `set_service_tier` still cannot leak the field.
+- A requested tier is **never** dropped even when the session has no route-affine
+  replay window: the builder then returns tier-only Responses options, which the
+  codec replays canonically exactly as it would with `None` (asserted in the unit
+  test below). With no tier the historical `None` is preserved untouched.
+
+### Consumer contract for tui11 (crates/octet-coding-agent/src/modes/interactive.rs)
+`apply_fast_command` can now drop its "inert" branch and call, on the agent it
+already owns:
+```rust
+match agent.set_service_tier(Some(ServiceTier::Priority)) { Ok(()) => notice("`/fast on` ..."), Err(e) => error(...) }
+agent.set_service_tier(None)   // `/fast off`
+agent.service_tier()           // render current state
+```
+`Some(bool)`/`None` semantics stay as they are: `off` -> `None`, `on` ->
+`Some(Priority)`. The existing `commands::codex_fast_tier_endpoint(model)` gate is
+the same declared-capability check (`set_service_tier` re-checks it and returns
+the typed error, so a UI that skips the pre-check still fails closed).
+Not persisted across processes: a resumed session starts with no tier until the
+frontend re-applies it (recorded as a remaining primitive, not claimed).
+
+### Behavioral evidence (observed)
+```
+$ cargo test -p octet-agent --test agent_run --locked service_tier
+running 1 test
+test service_tier_reaches_the_request_only_on_a_route_that_declares_it ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+$ cargo test -p octet-agent --lib --locked service_tier
+running 1 test
+test agent::tests::a_requested_service_tier_is_gated_by_the_route_and_never_silently_dropped ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 543 filtered out; finished in 0.02s
+```
+What the integration test asserts against the real HTTP/SSE path (wiremock
+captures the actual request bodies):
+1. Codex route + `set_service_tier(Some(Priority))` -> the request body carries
+   `"service_tier":"priority"`, and the run completes.
+2. `set_service_tier(None)` -> the next request has no `service_tier` key at all.
+3. Plain OpenAI Responses route -> `set_service_tier(Some(Priority))` returns
+   `ai error: Unsupported error: Responses service tier is unsupported on this
+   route`, `service_tier()` stays `None`, and the run's request has no
+   `service_tier` key.
+4. Unit test additionally pins the `OpenAiChat` protocol gate (a Codex profile bit
+   on a non-Responses protocol still refuses) and the no-replay-window path.
+
+CHANGELOG-ready bullet:
+- **feat(octet-agent): `/fast` now reaches the wire (roadmap #175).**
+  `Agent::set_service_tier`/`service_tier` select the Responses `service_tier`
+  for live runs, and both live-run `ResponsesOptions` builders (durable replay and
+  native compact, plus the websocket prewarm) emit it. The field is sent only to
+  a route whose declared runtime profile accepts it (Codex); every other route
+  fails closed with the codec's typed unsupported error, so the switch can never
+  report success while changing nothing. A requested tier survives a session with
+  no route-affine replay window, and clearing it removes the field again.
+
+## agent11 TASK 2 — parity 1e.2 durability half: verified end-to-end (already landed; test added)
+
+The encoder/reducer and the durable journal are already at HEAD
+(`crates/octet-ai/src/assistant_frame.rs`, `Session::begin_assistant_frame_journal`
+/ `take_partial_assistant` at `session.rs:3010/3037`, the republish block at
+`agent.rs:6400`, the per-attempt encode at `agent.rs:7130`). The only gap was
+evidence: the sole test was a session-level unit test. New end-to-end test in
+`crates/octet-agent/tests/agent_run.rs`:
+
+`a_killed_stream_republishes_its_partial_assistant_prefix_once`
+1. A scripted Responses turn streams `"KILLED-PREFIX "` then `"KILLED-TAIL"`; the
+   test polls the real `Run` stream, stops at the first text delta and drops the
+   run (a mid-stream kill). It then asserts the durable journal file
+   `session.jsonl.partial-assistant-frames` exists and the session log does **not**
+   contain the tail (an unsettled attempt is never committed).
+2. A second `Agent` over `Session::open` republishes the frame prefix first: the
+   concatenated text starts with `"KILLED-PREFIX "`, never contains
+   `"KILLED-TAIL"`, and still contains its own `"SECOND-TURN"`; the journal is
+   gone afterwards (consumed exactly once).
+3. A third start after the second turn settled terminally observes exactly
+   `"THIRD-TURN"` — a terminal turn is never republished as progress.
+
+Observed:
+```
+$ cargo test -p octet-agent --test agent_run --locked a_killed_stream_republishes
+running 1 test
+test a_killed_stream_republishes_its_partial_assistant_prefix_once ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+```
+
+CHANGELOG-ready bullet:
+- **test(octet-agent): parity 1e.2 durability is proven end-to-end.** A run killed
+  between assistant deltas leaves a durable frame journal; the next start
+  republishes exactly the frame prefix once (never the whole killed turn, never a
+  terminally settled turn) and removes the journal.
+
+## agent11 TASK 3 (partial) — row 4.10 loop consumer landed
+
+The tool-layer primitive `batch_requests_termination` had no consumer. It now has
+one in the run loop (`crates/octet-agent/src/agent.rs`):
+- per assistant batch, `termination_requests: Vec<bool>` records
+  `ToolOutput::terminates_run()` for every finalized result, pushed exactly at the
+  commit path (before the durable append, so a skipped/failed/aborted call — which
+  has no `ToolOutput` — is recorded as `false` and can never sponsor termination);
+- immediately after the abort check and *before* `needs_continuation` (so a
+  unanimous batch never appends a continuation prompt), the loop calls
+  `batch_requests_termination(termination_requests.iter().copied())` and breaks
+  with `FinishReason::Completed`.
+
+Behavioral test (`crates/octet-agent/tests/agent_run.rs`,
+`unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not`) uses a real
+tool (`terminate_probe`) through the scripted HTTP/SSE path:
+- unanimous single-call batch -> exactly **1** model request (the second scripted
+  body `SHOULD-NOT-BE-REQUESTED` is never fetched), run reasons `Completed`, and
+  the finalized result is durable in the session context before the run ends;
+- two-call batch where only one sibling requests termination -> **2** requests,
+  the run continues, and the follow-up request carries BOTH sibling results
+  (`batch complete` and `batch continues`), proving a lone stop request cannot
+  discard a sibling result.
+
+Observed:
+```
+$ cargo test -p octet-agent --test agent_run --locked unanimous_tool_termination
+running 1 test
+test unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+```
+
+CHANGELOG-ready bullet:
+- **feat(octet-agent): a tool batch can end the run, unanimously.** The run loop
+  now consumes `ToolOutput::requesting_termination()` through
+  `batch_requests_termination`: the run finishes as soon as every finalized result
+  of the assistant batch requested termination (never before its results are
+  durable, never from a failed/skipped call, and never on a lone request that
+  would discard a sibling result).
+
+### Still-open §4 consumers — exact required changes (recorded, not done)
+
+- **4.7 bash checkpoint publisher.** `CheckpointedBashTool` /
+  `BashCheckpointPublisher` (`src/tools/bash.rs`) and `DurableInvocationStore`
+  (`src/tools/durability.rs`) need a `PartialOutputCheckpointSink` in the live
+  tool path. The blocker is the seam, not the logic: `ToolContext`
+  (`src/tool.rs`) has no sink field, and adding one breaks every `ToolContext`
+  literal — including `crates/octet-agent/src/delegation.rs` (out of bounds for
+  this worker) and the coding product. Required change: add
+  `PartialOutputCheckpointSink`/handle to `ToolContext` (or construct
+  `CheckpointedBashTool` in `Agent`'s extension host) as one coordinated edit
+  across `tool.rs`, `agent.rs`, `delegation.rs`, and the product's literals, then
+  route the snapshot into `Session`'s durable value family (4.11's keyed
+  replace/scan API, still missing).
+- **4.8 live preview coalescer.** No built-in tool publishes a *replaceable*
+  snapshot: the live panel is fed append-only `ToolProgress` chunks
+  (`ToolProgressSink::live`), which must stay verbatim, so
+  `AdaptivePreviewCoalescer` has no producer. Required change: a
+  `ToolProgressSink::replaceable(...)` publication channel (tool-layer, mine) plus
+  the panel consumer in `crates/octet-coding-agent`'s live tool panel (not mine).
+- **4.13 prompt consumer.** `collect_tool_prompt_contributions` (`src/tool.rs`)
+  must be called by the model-visible tool-section assembly, which lives in the
+  coding product (`crates/octet-coding-agent/src/resources.rs`, prompt assembly),
+  not in `crates/octet-agent`. Required change there: build the section from
+  `collect_tool_prompt_contributions(host.tools())` in registration order, keeping
+  `prompt_snippet == None` tools absent (so the list can never widen an
+  allowlist).
+
+## agent11 TASK 4 — #265 and #264 verified (real tests already exist; no new code needed)
+
+**#265 namespaced pre-persistence turn-metadata enrichment: VERIFIED LANDED.**
+The enrichment runs through the real agent path: `ExtensionHost::persistence_metadata_hook`
+(`src/extension.rs:836`) registers a typed namespace, `collect_persistence_metadata`
+(`src/agent.rs:~3250`) aggregates before the atomic append, and the metadata rides
+the same `Session::append_with_metadata` boundary as the assistant turn
+(`src/session.rs` entry metadata), so it is set *before* persistence and can
+never be rewritten afterwards (append-only log). The end-to-end test is
+`agent_run.rs`'s `#[path = "support/extension_hooks.rs"] mod extension_hooks`
+test `before_persistence_metadata_is_namespaced_durable_and_never_model_context`
+(`crates/octet-agent/tests/support/extension_hooks.rs:30`): it drives two real
+`agent.complete(...)` turns with three hooks (private, public, invalid), asserts
+the durable entry carries exactly the two valid namespaces with correct
+provenance, that neither sentinel reaches any provider request, and that a
+reopened `Session` shows the same metadata on both turns.
+
+Observed:
+```
+$ cargo test -p octet-agent --test agent_run --locked before_persistence_metadata
+running 2 tests
+test extension_hooks::before_persistence_metadata_timeout_is_non_veto_and_uses_one_aggregate_budget ... ok
+test extension_hooks::before_persistence_metadata_is_namespaced_durable_and_never_model_context ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+```
+Remaining nit (not a gap in this row): the roadmap row is not restated in
+`docs/parity/README.md`, which root owns.
+
+**#264 bounded tool-progress presentation enrichment: VERIFIED LANDED.**
+`ExtensionProgressEvent::Decoration` -> `ToolProgressDecoration::new` ->
+`ToolProgress::Decoration` (`src/extension_process.rs:14449`),
+with bounds in `src/tool.rs` (`MAX_PROGRESS_DECORATION_LABEL_BYTES` = 256,
+`MAX_PROGRESS_DECORATION_DETAIL_BYTES` = 4 KiB, control characters and empty
+labels rejected). The test
+`extension_process::tests::progress_decoration_dispatch_requires_feature_active_parent_and_safe_bounded_fields`
+proves feature negotiation (undecorated protocol -> error), the byte-truncation
+bound (`"é" * 128` -> 256-byte label), duplicate-sequence and foreign-request
+suppression, and the exact refusals (129 chars, ESC control char, empty label).
+
+Observed:
+```
+$ cargo test -p octet-agent --lib --locked progress_decoration_dispatch
+running 1 test
+test extension_process::tests::progress_decoration_dispatch_requires_feature_active_parent_and_safe_bounded_fields ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 543 filtered out; finished in 0.00s
+```
+
+## agent11 FINAL STATUS (honest)
+
+Landed with code + run test in this session:
+1. **Maintainer directive — `ls`/`find`/`grep` withdrawn.** 3 modules deleted, 3
+   registrations removed, bash snippet now names rg, `search` kept (v0.7.6
+   parity), 7 obsolete tests removed, 1 new registration-surface guard added,
+   `docs/parity/tools.md` rows 4.1–4.3 marked withdrawn with an honest list of
+   what `search` does *not* cover.
+2. **#175 `service_tier` plumbed** (see the exact `agent10: ...` line above).
+3. **Parity 1e.2 durability** — verified end-to-end, new kill/restart test.
+4. **Row 4.10 loop consumer** — code + test.
+5. **Row 4.13 / 4.8 / 4.7 consumers** — NOT landed; exact required changes
+   recorded above (all three need the coding-product prompt/panel seam or a
+   `ToolContext` widening that would break `delegation.rs`, which is out of
+   bounds for this worker).
+
+Test state observed at the end of this session:
+```
+$ cargo test -p octet-agent --lib --locked                      -> 543 passed; 0 failed; 1 ignored
+$ cargo test -p octet-agent --test agent_run --locked -- --skip websocket --skip qualified_codex_ws --skip native_compaction_calls_bound_reopening
+                                                                -> 139 passed; 0 failed; 3 filtered out
+$ cargo test -p octet-agent --test parity_tools --locked        -> 17 passed; 0 failed
+$ cargo check -p octet-agent --all-targets --locked             -> Finished (green)
+$ cargo check -p octet-ai --lib --locked                        -> Finished (green)
+```
+`cargo check --workspace --all-targets --locked` is **red outside my paths**:
+`crates/sexy-tui-rs/src/rich_text/markdown.rs` is mid-edit by another worker
+(`E0061 Builder::build` arity, `E0271 OffsetIter` item type, `E0063/E0027
+Frame::Code` missing `info`) and `crates/sexy-tui-rs` is modified in the shared
+tree by that worker. I did not touch it. Earlier in this session the same command
+was also red in `crates/octet-coding-agent/src/tui/view/reasoning_render.rs`
+(E0061 `activity_shimmer_color`) — also another worker's in-flight edit, since
+resolved. Nothing in my paths is implicated.
+
+Telemetry gates untouched: no change to the `--telemetry` JSONL path, to
+`has_uncertain_usage`, or to any NOOP/InMemory accounting behavior (my edits touch
+tool registration, the Responses request builder, the tool-batch termination
+check, tests, and docs only). Bounded-by-default and no-provider-name-branching
+hold: the tier gate is the endpoint's declared `accepts_service_tier()`
+capability, not a provider identity.
+
+### agent11 addendum (final)
+
+- `src/tools/shell_environment.rs:84` now delegates the non-PowerShell snippet to
+  `BashTool.prompt_snippet()` instead of carrying its own copy of the old
+  "ls, grep, find" text, so the session shell and bash cannot drift. Re-ran after
+  the change: `cargo test -p octet-agent --test parity_tools --locked` -> 17
+  passed; `cargo test -p octet-agent --lib --locked` -> 543 passed, 1 ignored.
+- `cargo check --workspace --all-targets --locked` is still red **only** in
+  `crates/octet-coding-agent` (lib test) from another worker's in-flight edits
+  (`app/bootstrap.rs`, `auth/codex/*`, `session_store.rs`, `tui/*`; 8 errors,
+  E0063 among them). `crates/sexy-tui-rs` was red earlier in the same session and
+  is no longer in the error list. No error in my paths.

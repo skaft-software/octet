@@ -1,12 +1,103 @@
 //! CommonMark/GFM parsing into the reusable rich-document model.
+//!
+//! Completed fences whose info string explicitly names a diagram language are
+//! rendered through the self-contained diagram renderers: `latex` through
+//! [`super::latex::render_latex`] (display mode) and `mermaid`/`graph`/
+//! `flowchart` through [`super::mermaid::render_mermaid`]. Every other fence —
+//! and every diagram body the renderer rejects, is too large, or is not
+//! terminated by a closing fence — stays the original [`CodeBlock`] source, so
+//! unsupported input degrades to a plain code block instead of an empty or
+//! partial diagram. See [`MAX_DIAGRAM_FENCE_BYTES`].
+//!
+//! Rendering happens here, at parse time, and only for a *complete* fenced
+//! block: the streaming layer shows an open fence as its raw growing source (it
+//! builds that preview itself) and publishes the diagram once, when the closing
+//! fence arrives, so a partially received body is never half-drawn.
 
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use super::{
+    latex::{render_latex, RenderLatexOptions},
+    mermaid::render_mermaid,
     Block, CodeBlock, Document, Inline, List, ListItem, ListKind, Table, TableAlignment, TableCell,
 };
+
+/// Largest fenced body eligible for diagram rendering.
+///
+/// Larger bodies stay plain code blocks: a fence must never turn into an
+/// unbounded layout, and neither renderer is a general-purpose typesetter.
+/// Mermaid additionally bounds its own source and output size
+/// (`mermaid::MAX_MERMAID_*`).
+pub const MAX_DIAGRAM_FENCE_BYTES: usize = 16 * 1024;
+
+/// Render a completed fence into diagram text when its info string explicitly
+/// names a supported diagram language. `None` keeps the original code block —
+/// for every other language, for oversized bodies, and whenever the renderer
+/// fails closed.
+fn render_diagram_fence(info: &str, code: &str) -> Option<String> {
+    if code.len() > MAX_DIAGRAM_FENCE_BYTES {
+        return None;
+    }
+    let name = info.split_whitespace().next()?.to_ascii_lowercase();
+    let mut rendered = match name.as_str() {
+        "latex" => render_latex(code.trim(), RenderLatexOptions::display())?,
+        "mermaid" => render_mermaid(code).ok()?.plain(),
+        // ```` ```graph TD ```` / ```` ```flowchart LR ```` fences carry the
+        // diagram header in the info string; the body is the graph. A body that
+        // already starts with its own header is left alone.
+        "graph" | "flowchart" => {
+            let body = if code.trim_start().starts_with("graph")
+                || code.trim_start().starts_with("flowchart")
+            {
+                code.to_owned()
+            } else {
+                format!("{info}\n{code}")
+            };
+            render_mermaid(&body).ok()?.plain()
+        }
+        _ => return None,
+    };
+    rendered.push('\n');
+    Some(rendered)
+}
+
+/// Whether the fenced block at `range` is terminated by a valid closing fence
+/// line. An unterminated fence at end of input stays literal, matching the
+/// streaming preview.
+fn fence_is_closed(source: &str, range: &Range<usize>) -> bool {
+    let Some(slice) = source.get(range.clone()) else {
+        return false;
+    };
+    let mut lines = slice.lines();
+    let Some((marker, opening_count)) = lines.next().and_then(fence_marker) else {
+        return false;
+    };
+    let Some((closing_marker, closing_count)) = lines.next_back().and_then(fence_marker) else {
+        return false;
+    };
+    closing_marker == marker && closing_count >= opening_count
+}
+
+/// The fence marker and run length of a line, after any blockquote `>` prefixes
+/// and indentation. Pulldown reports a container-nested block's range with the
+/// surrounding container syntax still attached, so the raw line is stripped
+/// here rather than in the caller.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let mut rest = line;
+    loop {
+        let candidate = rest.trim_start_matches([' ', '\t']);
+        let Some(after) = candidate.strip_prefix('>') else {
+            rest = candidate;
+            break;
+        };
+        rest = after.strip_prefix(' ').unwrap_or(after);
+    }
+    let marker = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let count = rest.chars().take_while(|c| *c == marker).count();
+    (count >= 3).then_some((marker, count))
+}
 
 /// Parser options chosen for rich terminal prose. Footnotes and raw HTML
 /// semantics are intentionally not enabled; HTML-like input remains visible
@@ -21,8 +112,8 @@ pub fn parser_options() -> Options {
 /// Parse Markdown into semantic content. Input is retained as text values and
 /// is sanitized only when rendered, so logging/debugging can keep the original.
 pub fn parse(source: &str) -> Document {
-    let parser = Parser::new_ext(source, parser_options());
-    Builder::new().build(parser)
+    let parser = Parser::new_ext(source, parser_options()).into_offset_iter();
+    Builder::new(source).build(parser)
 }
 
 /// Top-level block starts used by the bounded streaming parser.
@@ -101,6 +192,8 @@ enum Frame {
     Heading(u8, Vec<Inline>),
     Quote(Vec<Block>),
     Code {
+        /// Full info string (empty for indented blocks).
+        info: String,
         language: Option<String>,
         code: String,
     },
@@ -141,25 +234,27 @@ enum InlineKind {
     Strikethrough,
 }
 
-struct Builder {
+struct Builder<'a> {
     stack: Vec<Frame>,
+    source: &'a str,
 }
 
-impl Builder {
-    fn new() -> Self {
+impl<'a> Builder<'a> {
+    fn new(source: &'a str) -> Self {
         Self {
             stack: vec![Frame::Root(Vec::new())],
+            source,
         }
     }
 
-    fn build<'a>(mut self, parser: impl Iterator<Item = Event<'a>>) -> Document {
-        for event in parser {
-            self.event(event);
+    fn build<'p>(mut self, parser: impl Iterator<Item = (Event<'p>, Range<usize>)>) -> Document {
+        for (event, range) in parser {
+            self.event(event, Some(range));
         }
         // Pulldown guarantees balanced events, but keeping this recovery path
         // makes the adapter robust to future parser extensions.
         while self.stack.len() > 1 {
-            self.close_top();
+            self.close_top(None);
         }
         match self.stack.pop() {
             Some(Frame::Root(blocks)) => Document::new(blocks),
@@ -167,10 +262,10 @@ impl Builder {
         }
     }
 
-    fn event(&mut self, event: Event<'_>) {
+    fn event(&mut self, event: Event<'_>, range: Option<Range<usize>>) {
         match event {
             Event::Start(tag) => self.start(tag),
-            Event::End(_) => self.close_top(),
+            Event::End(_) => self.close_top(range),
             Event::Text(text) => {
                 if let Some(Frame::Code { code, .. } | Frame::Html(code)) = self.stack.last_mut() {
                     code.push_str(&text);
@@ -213,15 +308,17 @@ impl Builder {
             Tag::Heading { level, .. } => Frame::Heading(heading_level(level), Vec::new()),
             Tag::BlockQuote(_) => Frame::Quote(Vec::new()),
             Tag::CodeBlock(kind) => {
-                let language = match kind {
-                    CodeBlockKind::Indented => None,
-                    CodeBlockKind::Fenced(info) => info
-                        .split_whitespace()
-                        .next()
-                        .filter(|language| !language.is_empty())
-                        .map(str::to_owned),
+                let info = match kind {
+                    CodeBlockKind::Indented => String::new(),
+                    CodeBlockKind::Fenced(info) => info.trim().to_owned(),
                 };
+                let language = info
+                    .split_whitespace()
+                    .next()
+                    .filter(|language| !language.is_empty())
+                    .map(str::to_owned);
                 Frame::Code {
+                    info,
                     language,
                     code: String::new(),
                 }
@@ -276,7 +373,7 @@ impl Builder {
         self.stack.push(frame);
     }
 
-    fn close_top(&mut self) {
+    fn close_top(&mut self, end_range: Option<Range<usize>>) {
         let Some(frame) = self.stack.pop() else {
             return;
         };
@@ -285,7 +382,22 @@ impl Builder {
             Frame::Paragraph(content) => self.append_block(Block::Paragraph(content)),
             Frame::Heading(level, content) => self.append_block(Block::Heading { level, content }),
             Frame::Quote(blocks) => self.append_block(Block::BlockQuote(blocks)),
-            Frame::Code { language, code } => {
+            Frame::Code {
+                info,
+                language,
+                mut code,
+            } => {
+                // Only a complete fence whose info string names a diagram
+                // language is rendered; every other case (unknown language,
+                // oversized body, renderer failure, unterminated fence) keeps
+                // the original source as a plain code block.
+                let diagram = end_range
+                    .as_ref()
+                    .filter(|range| fence_is_closed(self.source, range))
+                    .and_then(|_| render_diagram_fence(&info, &code));
+                if let Some(rendered) = diagram {
+                    code = rendered;
+                }
                 self.append_block(Block::CodeBlock(CodeBlock { language, code }))
             }
             Frame::Html(html) => self.append_block(Block::Plain(html)),

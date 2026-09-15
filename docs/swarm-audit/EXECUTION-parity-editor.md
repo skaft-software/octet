@@ -148,6 +148,13 @@ Observed commands and per-item status are appended below as they are run.
   `grok-mermaid` package (`render` -> `MermaidArt`); nothing equivalent exists
   in the workspace.
 
+> **SUPERSEDED 2026-09-15 (editor5–editor11).** Both 2c.3 and 2c.4 are landed
+> and tested; see the editor8/editor11 sections below and the landed sections
+> in `docs/parity/editor.md` (2c.3 at line ~142, 2c.4 at line ~187 at HEAD
+> `00e3ca3e`). The two bullets above are kept only as the original editor3
+> record and must not be quoted as current status. A verifier reading this
+> file's older line numbers should treat them as history.
+
 START 2026-09-15T15:43:44Z editor5 alive
 
 ## editor5 ROW 2c.3 LaTeX port — LANDED (in progress notes)
@@ -463,3 +470,280 @@ Still open for someone else: no UI consumer calls
 (the markdown/rich renderer path in `crates/octet-coding-agent` owns the
 `$$…$$`/```` ```mermaid ```` fences), and row 2b.5 needs the view wiring
 described above.
+
+START 2026-09-15T17:53:09Z editor9 alive
+
+START 2026-09-15T17:55:33Z editor11 alive
+
+## editor11 — row 2c.3 completion pass (in progress)
+
+2026-09-15T17:55Z → (editor11). Scope: `crates/sexy-tui-rs/**`,
+`docs/parity/editor.md`, this file.
+
+Adoption notes: the briefing's C3 item (`docs/parity/editor.md:125-141` still
+says 2c.3/2c.4 "Blocked") is already **fixed at HEAD `00e3ca3e`** — that text
+only survives in this audit file's editor3 "Row status" block (lines ~142-149,
+superseded below) and in `docs/parity/README.md:93-94` ("In progress", not an
+editor-owned path). `docs/parity/editor.md` now has "Landed" sections at
+lines 142 and 187 with module paths and test names; no stale claim remains in
+the owned doc. I re-verified the code/tests rather than trusting that.
+
+### Complete-by-construction differential sweep (new, this pass)
+
+Built a corpus that mechanically enumerates *every* entry of the upstream
+tables in `packages/tui/src/latex.ts` (read from the local upstream checkout at
+`/Users/achumukundan/github/earendil-works/pi` @ `8a7b0c03`):
+224 symbols, 88 relation commands, 32 named operators, 11 limit operators, 16
+display-limit symbols, 30 negated symbols, 18 accents, 30 plain wrappers, 12
+spacing commands, 4 negative-spacing commands, 6 ignored commands, 12 size
+commands, 7 blackboard letters — each in inline and display mode, plus every
+matrix/align/cases/equation environment with 1..3 columns, 1..3 rows, empty
+cells, CJK cells, fractions/roots inside cells, nested environments, composed
+`\left...\right`, and 36 malformed/fail-closed inputs.
+
+Observed (scratch harnesses under `/tmp/ed11`, not committed):
+- upstream oracle: `node --experimental-strip-types /tmp/ed8/oracle.ts
+  /tmp/ed11/cases_gap.json /tmp/ed11/expected_gap.json`
+- Rust probe: `cargo test -p sexy-tui-rs --test _latex_ed11_probe -- --nocapture`
+- compare: `node /tmp/ed8/compare2.mjs ...` => `total=1061 divergences=0`
+- per-table-entry corpus (403 cases): `total=403 divergences=0` — the three
+  `a\negmedspaceb` / `a\negthickspaceb` / `a\negthinspaceb` inputs are `None`
+  in *both* (the command name runs into the following `b`, so the reference
+  refuses them); every other entry renders its reference glyph.
+
+New committed behavioral test: `tests/latex_render.rs::TABLE_GOLDENS` (407
+goldens: one per table entry + 7 spacing edge cases) asserted by
+`every_symbol_table_entry_renders_its_reference_glyph`; the three malformed
+negative-spacing inputs joined `UNSUPPORTED_COMMANDS`. Observed:
+
+    cargo test -p sexy-tui-rs --test latex_render
+    running 17 tests
+    ...
+    test every_symbol_table_entry_renders_its_reference_glyph ... ok
+    test result: ok. 17 passed; 0 failed; 0 ignored; 0 filtered out
+
+Box-drawing output re-observed this pass (`_latex_ed11_demo.rs`, deleted after
+capture):
+
+    x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}  =>
+        -b ± √(b²-4ac)
+    x = ──────────────
+              2a
+    \sum_{i=1}^{n} i = \frac{n(n+1)}{2} =>
+     n      n(n+1)
+     ∑  i = ──────
+    i=1       2
+    \lim_{x \to 0} \frac{\sin x}{x} = 1 =>
+         sin x
+    lim  ───── = 1
+    x→0    x
+    \begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix} =>
+    ⎛ 1 │ 2 │ 3 ⎞
+    ⎜ 4 │ 5 │ 6 ⎟
+    ⎝ 7 │ 8 │ 9 ⎠
+    \begin{cases}x^2 & x \ge 0 \\ -x & x < 0\end{cases} =>
+    ⎧ x² if x ≥ 0
+    ⎩ -x if x < 0
+    \begin{pmatrix}界&a\\b&c\end{pmatrix} =>
+    ⎛ 界 │ a ⎞
+    ⎝ b  │ c ⎠
+    \cfrac{1}{x} => None  (typed fail-closed; upstream `undefined`)
+
+## editor11 — final verification, Mermaid completion, doc/CHANGELOG evidence
+
+2026-09-15T17:55Z → 2026-09-15. Finished LaTeX first, then Mermaid.
+
+### Row 2c.3 LaTeX — final state (no production-code change needed this pass)
+
+The port already implements every command the upstream reference implements; the
+only addition this pass is coverage: `tests/latex_render.rs` now has 17 tests
+including `TABLE_GOLDENS` (407 goldens, one per upstream table entry) asserted
+by `every_symbol_table_entry_renders_its_reference_glyph`, and three malformed
+`\negmedspace`-style inputs joined `UNSUPPORTED_COMMANDS`. `docs/parity/editor.md`
+2c.3 updated with the sweep + counts. No claimed gap is left open; unsupported
+syntax returns `None` (upstream `undefined`) exactly as listed in the module docs.
+
+### Row 2c.4 Mermaid — production-code completion this pass
+
+`crates/sexy-tui-rs/src/rich_text/mermaid.rs`:
+- `%%` comments are stripped anywhere on a line (outside quoted labels), not
+  only at line start.
+- `;` separates statements on one line and may share the header line
+  (`flowchart LR; A --> B; B --> C`).
+- quoted node labels may contain the closing delimiter (`A["a[b]c"]`,
+  `A["100%% done"]`, `A["a;b"]`); quoted `|link labels|` lose their quotes.
+- `subgraph`/`end`/`direction` now return the named typed error
+  (`` `subgraph` statements are not supported ``) instead of being parsed as
+  node ids; module docs gained the new Supported/Fails-closed rows and a
+  "Not modelled" note (HTML entities are not decoded).
+- `tests/mermaid_render.rs`: 10 -> 11 tests (7 new supported goldens, 4 new
+  fail-closed messages, `random_token_soup_never_panics_and_stays_within_limits`
+  = 1500 deterministic inputs that must not panic or exceed the documented caps).
+- Scratch probe (`_mermaid_ed11_probe.rs`) deleted; no `_*.rs` scratch file was
+  added to git.
+
+Observed output (from the committed goldens; full run pasted below):
+
+    flowchart LR; A[One] --> B[Two]; B --> C[Three]
+    ┌─────┐    ┌─────┐    ┌───────┐
+    │ One ├───▶│ Two ├───▶│ Three │
+    └─────┘    └─────┘    └───────┘
+
+    graph LR
+      A[Alpha] --> B[Beta]
+      A --> C[Gamma]
+      B --> D[Delta]
+      C --> D
+    ┌───────┐    ┌──────┐     ┌───────┐
+    │ Alpha ├───▶│ Beta ├────▶│ Delta │
+    └───────┘│   └──────┘ │   └───────┘
+             │            │
+             │   ┌───────┐│
+             └──▶│ Gamma ├┘
+                 └───────┘
+                  (committed `lr_diamond` golden, 7 rows)
+
+### HARD GATES
+
+- No network access, no new dependency: the Mermaid engine is unchanged in that
+  respect (self-contained; `grok-mermaid` deliberately not added).
+- No unbounded work: LaTeX bounded by `MAX_LATEX_NESTING_DEPTH` (64) and the
+  early unsupported-exit; Mermaid bounded by `MAX_MERMAID_*` plus the 1500-case
+  token-soup test.
+- Clipboard/OAuth/trust/CBOR/unix-socket gates untouched; no changes outside
+  `crates/sexy-tui-rs/**`, `docs/parity/editor.md`,
+  `docs/swarm-audit/EXECUTION-parity-editor.md`.
+- No git write commands run (no commit/branch/reset/stash/checkout). Scratch
+  probes lived under `/tmp/ed11` and `tests/_*.rs` were deleted.
+
+### 2b.5 view-side change (recorded, NOT edited — view/ is another worker's path)
+
+Unchanged from the note in `docs/parity/editor.md:114-131`, re-verified against
+HEAD `00e3ca3e`: `crates/octet-coding-agent/src/tui/view.rs:4350` is
+`pub fn scroll`, `:4392` is `pub fn scroll_lines`, and
+`crates/octet-coding-agent/src/tui/view/viewport.rs:46`/
+`view/transcript_cache.rs:147` are the `max_scroll_from_bottom`/
+`rendered_transcript` anchors. Exact change needed: (1) build
+`PromptZones::scan(&*transcript_lines(state, width))` whenever the row cache is
+rebuilt and keep it on `ShellState`; (2) add
+`scroll_to_previous_prompt`/`scroll_to_next_prompt` next to `scroll`/
+`scroll_lines` that convert `PromptZones::previous_prompt`/`next_prompt` for the
+current visible top/bottom row into `scroll_from_bottom` with the existing clamp;
+(3) bind the actions in `tui/keymap.rs`. `sexy-tui-rs` side is landed and tested
+(`text_editor/prompt_zones.rs`, 5 tests).
+
+### Out of this worker's paths (hand-off)
+
+- `docs/parity/README.md:93-94` still lists 2c.3/2c.4 as "In progress" — a
+  second stale ledger copy (not in the editor-owned path list). Someone who
+  owns `docs/parity/README.md` should flip both rows to "Landed" with the
+  module paths.
+- No UI consumer calls `render_latex`/`render_mermaid` yet; the markdown/rich
+  renderer in `crates/octet-coding-agent` owns the `$$…$$`/```` ```mermaid ````
+  fences.
+
+### CHANGELOG-ready bullets
+
+- Cover every upstream LaTeX symbol/relation/operator/accent/wrapper table entry
+  with captured goldens (`TABLE_GOLDENS`, 407 cases) and verify the port against
+  the reference renderer over a complete-by-construction sweep of 1061 inputs
+  with zero divergences (`cargo test -p sexy-tui-rs --test latex_render`:
+  17 passed).
+- Extend the self-contained Mermaid renderer with Mermaid-compatible statement
+  handling: `%%` comments anywhere on a line, `;`-separated statements
+  (including on the header line), quoted labels containing the closing
+  delimiter, and quoted link labels; `subgraph`/`end`/`direction` now fail
+  closed with a named typed error (`cargo test -p sexy-tui-rs --test
+  mermaid_render`: 11 passed, incl. a 1500-input token-soup robustness test).
+- Document rows 2c.3/2c.4 as landed-with-evidence in `docs/parity/editor.md`
+  (module paths, test names, oracle sweeps, observed box-drawing output).
+
+### Final observed runs (this pass)
+
+    $ cargo test -p sexy-tui-rs          # log /tmp/ed11/crate_test.log
+    EXIT=0
+    unittests src/lib.rs        -> test result: ok. 190 passed; 0 failed
+    tests/_latex_debug.rs       -> ok. 1 passed
+    tests/_latex_diff.rs        -> ok. 1 passed
+    tests/_latex_probe.rs       -> ok. 1 passed
+    tests/_latex_stress.rs      -> ok. 5 passed
+    tests/_mermaid_debug.rs     -> ok. 1 passed
+    tests/images_current.rs     -> ok. 6 passed
+    tests/latex_render.rs       -> ok. 17 passed
+    tests/mermaid_render.rs     -> ok. 11 passed
+    tests/pi_tui_render.rs      -> ok. 27 passed
+    tests/rich_rendering.rs     -> ok. 4 passed
+    Doc-tests sexy_tui_rs       -> ok. 1 passed
+
+    $ cargo check --workspace --all-targets --locked   # log /tmp/ed11/workspace_check.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 32.75s
+    EXIT=0       # the only warning is pre-existing: octet-coding-agent test
+                 # "host_ownership_full" `missing_docs` (not this worker's file)
+
+    $ cargo check -p sexy-tui-rs --all-targets
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.39s
+
+### Mermaid — observed output for the newly supported syntax (probe transcript)
+
+From `tests/_mermaid_ed11_probe.rs` (scratch, deleted after capture; the same
+strings are asserted in the committed goldens):
+
+    == two_statement_semicolon: OK
+    ┌─────┐    ┌─────┐    ┌───────┐
+    │ One ├───▶│ Two ├───▶│ Three │
+    └─────┘    └─────┘    └───────┘
+    == inline_comment: OK            (flowchart LR\n  A[One] --> B[Two] %% trailing comment)
+    ┌─────┐    ┌─────┐
+    │ One ├───▶│ Two │
+    └─────┘    └─────┘
+    == label_with_brackets: OK       (A["a[b]c"] --> B[Two])
+    ┌───────┐    ┌─────┐
+    │ a[b]c ├───▶│ Two │
+    └───────┘    └─────┘
+    == quoted_two_word_link_label: OK (A -->|"two words"| B)
+    ┌───┐two words  ┌───┐
+    │ A ├──────────▶│ B │
+    └───┘           └───┘
+    == multi_branch: OK
+    ┌───────┐
+    │ Start │
+    └───┬───┘
+        │
+        │
+        ▼
+    ┌───────┐
+    │ Check │
+    └───┬───┘
+        │ yes
+        │──────────┐
+        ▼          ▼
+    ┌──────┐   ┌──────┐
+    │ Save │   │ Drop │
+    └───┬──┘   └───┬──┘
+        │          │
+        └┐─────────┘
+         ▼
+    ┌────────┐
+    │ Report │
+    └────────┘
+    == subgraph_after: ERR dropped, line 3: `subgraph` statements are not supported
+    == direction_stmt:  ERR dropped, line 2: `direction` statements are not supported
+    == end_statement:   ERR dropped, line 3: `end` statements are not supported
+    == unterminated_quoted_label: ERR dropped, line 2: unterminated quoted label opened with `[`
+    == quoted_label_mismatch:    ERR dropped, line 2: quoted label opened with `[` is not closed by `]`
+    == self_loop: ERR dropped, cycle through node "A"
+    == html_entity: OK (emitted literally — see "Not modelled")
+    ┌───────────┐    ┌─────┐
+    │ a &amp; b ├───▶│ Two │
+    └───────────┘    └─────┘
+
+### Final runs after every edit (fresh logs)
+
+    $ cargo test -p sexy-tui-rs                 # /tmp/ed11/crate_test_final.log
+    EXIT=0 : lib 190, latex_render 17, mermaid_render 11, pi_tui_render 27,
+             rich_rendering 4, images_current 6, doc-tests 1, _latex_stress 5,
+             _latex_debug/_latex_diff/_latex_probe/_mermaid_debug 1 each
+    $ cargo check --workspace --all-targets --locked   # /tmp/ed11/workspace_check_final.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.82s, EXIT=0
+
+START 2026-09-15T18:10:41Z editor11 alive (followup: fence wiring)

@@ -484,8 +484,14 @@ evaluation/harbor/config.py
 evaluation/harbor/requirements.txt
 extensions/octet-browse/README.md
 extensions/octet-browse/REFERENCE.md
+extensions/octet-browse/CONNECTORS.md
+extensions/octet-browse/QUALIFICATION.md
 extensions/octet-mcp/README.md
 extensions/octet-mcp/REFERENCE.md
+extensions/octet-mcp/fixtures/tls/README.md
+extensions/octet-import-aider/README.md
+extensions/octet-import-cline/README.md
+extensions/octet-import-pi/README.md
 extensions/octet-pi-compat/COMPATIBILITY.md
 extensions/octet-pi-compat/README.md
 extensions/octet-pi-compat/profiles/0.84.4.json
