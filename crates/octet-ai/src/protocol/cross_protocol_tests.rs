@@ -267,10 +267,32 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
                     .body,
             )
             .unwrap(),
-            Protocol::OpenAiChat | Protocol::BedrockConverse => unreachable!(),
+            Protocol::OpenAiChat | Protocol::BedrockConverse | Protocol::MistralConversations => {
+                unreachable!()
+            }
         };
         let serialized = body.to_string();
-        assert!(serialized.contains("call_missing"));
+        if protocol == Protocol::GoogleGenerativeAi {
+            // This fixture's generic Google model does not advertise call IDs.
+            // Check native name-based pairing and the inserted error's position
+            // instead of requiring an unsupported wire field.
+            assert_eq!(
+                body["contents"],
+                serde_json::json!([
+                    {"role": "model", "parts": [
+                        {"functionCall": {"name": "lookup", "args": {}}}
+                    ]},
+                    {"role": "user", "parts": [
+                        {"functionResponse": {"name": "lookup", "response": {
+                            "error": "Tool execution result was not supplied by the caller."
+                        }}}
+                    ]},
+                    {"role": "model", "parts": [{"text": "continued"}]}
+                ])
+            );
+        } else {
+            assert!(serialized.contains("call_missing"));
+        }
         assert!(serialized.contains("Tool execution result was not supplied"));
     }
 }

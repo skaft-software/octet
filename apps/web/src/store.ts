@@ -41,6 +41,18 @@ import {
   SessionProjectionReplacementRequiredError,
   SessionSequenceGapError,
 } from "./reducer";
+import {
+  isReasoningEffortSupported,
+  isWellFormedReasoningEffort,
+  normalizeModelPreferences,
+  preferredReasoningForModel,
+  resolveReasoningForModel,
+  serializeModelPreferences,
+  supportedReasoningEfforts,
+  createBrowserModelPreferenceStorage,
+  type ModelPreferenceStorage,
+  type ModelPreferences,
+} from "./model-preferences";
 import { isUntitledSession } from "./session-title";
 import type { TransportConnectionState, OctetTransport } from "./transport";
 
@@ -345,6 +357,11 @@ function contiguousDeferredEvents(
   return replay;
 }
 
+export interface OctetStoreOptions {
+  /** Optional host-backed persistence for per-model reasoning choices. */
+  modelPreferenceStorage?: ModelPreferenceStorage;
+}
+
 export class OctetStore {
   private state: OctetState = initialState;
   private listeners = new Set<() => void>();
@@ -361,15 +378,137 @@ export class OctetStore {
   private initializationGeneration = 0;
   private goalRevision = 0;
   private disposed = false;
+  private modelPreferences: ModelPreferences = normalizeModelPreferences({});
+  private readonly modelPreferenceStorage: ModelPreferenceStorage | null;
+  private readonly modelPreferenceLoad: Promise<void>;
+  private modelPreferenceWriteTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly transport: OctetTransport) {}
+  constructor(
+    private readonly transport: OctetTransport,
+    options: OctetStoreOptions = {},
+  ) {
+    this.modelPreferenceStorage =
+      options.modelPreferenceStorage ?? createBrowserModelPreferenceStorage();
+    this.modelPreferenceLoad = this.loadModelPreferences();
+  }
 
   getSnapshot = (): OctetState => this.state;
+
+  getModelPreferences = (): ModelPreferences => this.modelPreferences;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
+
+  private async loadModelPreferences(): Promise<void> {
+    if (!this.modelPreferenceStorage) return;
+    try {
+      this.modelPreferences = normalizeModelPreferences(
+        await this.modelPreferenceStorage.load(),
+      );
+      if (!this.disposed) this.publish({ ...this.state });
+    } catch {
+      // A preference file is optional. The endpoint remains authoritative when
+      // it is unavailable or malformed.
+      this.modelPreferences = normalizeModelPreferences({});
+    }
+  }
+
+  private async persistModelPreferences(): Promise<void> {
+    if (!this.modelPreferenceStorage) return;
+    const snapshot = serializeModelPreferences(this.modelPreferences);
+    const write = this.modelPreferenceWriteTail.then(() =>
+      this.modelPreferenceStorage!.save(snapshot),
+    );
+    this.modelPreferenceWriteTail = write.catch(() => undefined);
+    await write;
+  }
+
+  private modelForId(modelId: string) {
+    return this.state.bootstrap?.models.find((model) => model.id === modelId);
+  }
+
+  getModelReasoningPreference(modelId: string): string | undefined {
+    const model = this.modelForId(modelId);
+    return model
+      ? preferredReasoningForModel(model, this.modelPreferences)
+      : undefined;
+  }
+
+  getModelReasoningOptions(
+    modelId: string,
+    includeAuxiliaryOff = false,
+  ): string[] {
+    const model = this.modelForId(modelId);
+    return model ? supportedReasoningEfforts(model, includeAuxiliaryOff) : [];
+  }
+
+  getModelReasoningResolution(modelId: string) {
+    return resolveReasoningForModel(
+      this.modelForId(modelId),
+      this.modelPreferences,
+    );
+  }
+
+  async rememberModelReasoning(
+    modelId: string,
+    reasoning: string,
+  ): Promise<boolean> {
+    await this.modelPreferenceLoad;
+    const model = this.modelForId(modelId);
+    if (
+      !model ||
+      !isWellFormedReasoningEffort(reasoning) ||
+      !isReasoningEffortSupported(reasoning, model)
+    ) {
+      return false;
+    }
+
+    const previous = this.modelPreferences;
+    this.modelPreferences = normalizeModelPreferences({
+      ...this.modelPreferences,
+      [modelId]: reasoning,
+    });
+    this.publish({ ...this.state });
+    try {
+      await this.persistModelPreferences();
+      return true;
+    } catch {
+      this.modelPreferences = previous;
+      this.publish({ ...this.state });
+      return false;
+    }
+  }
+
+  async setModelReasoningPreference(
+    modelId: string,
+    reasoning: string,
+  ): Promise<boolean> {
+    return this.rememberModelReasoning(modelId, reasoning);
+  }
+
+  async clearModelReasoningPreference(modelId: string): Promise<boolean> {
+    await this.modelPreferenceLoad;
+    if (!Object.prototype.hasOwnProperty.call(this.modelPreferences, modelId)) {
+      return false;
+    }
+    const next: Record<string, string> = Object.create(null);
+    for (const [storedModelId, effort] of Object.entries(this.modelPreferences)) {
+      if (storedModelId !== modelId) next[storedModelId] = effort;
+    }
+    const previous = this.modelPreferences;
+    this.modelPreferences = normalizeModelPreferences(next);
+    this.publish({ ...this.state });
+    try {
+      await this.persistModelPreferences();
+      return true;
+    } catch {
+      this.modelPreferences = previous;
+      this.publish({ ...this.state });
+      return false;
+    }
+  }
 
   private isCurrentInitialization(generation: number): boolean {
     return !this.disposed && generation === this.initializationGeneration;
@@ -1139,6 +1278,8 @@ export class OctetStore {
       }) ?? null;
 
     try {
+      await this.modelPreferenceLoad;
+      if (!this.isCurrentInitialization(generation)) return;
       const routedSessionId = sessionIdFromPathname(window.location.pathname);
       const projectCatalog = await this.transport.getProjectCatalog();
       if (!this.isCurrentInitialization(generation)) return;
@@ -1641,19 +1782,31 @@ export class OctetStore {
   }
 
   private async createSessionNow(): Promise<void> {
+    await this.modelPreferenceLoad;
     const bootstrap = this.state.bootstrap;
     if (!bootstrap) return;
     const selected = this.selectedSession;
+    const modelId = selected?.modelId ?? bootstrap.models[0]?.id ?? "default";
+    const model = bootstrap.models.find((candidate) => candidate.id === modelId);
+    const remembered = model
+      ? preferredReasoningForModel(model, this.modelPreferences)
+      : undefined;
+    const selectedReasoning =
+      selected?.modelId === modelId &&
+      isWellFormedReasoningEffort(selected.reasoning) &&
+      (model === undefined ||
+        isReasoningEffortSupported(selected.reasoning, model))
+        ? selected.reasoning
+        : undefined;
+    const resolved = model
+      ? resolveReasoningForModel(model, this.modelPreferences).reasoning
+      : undefined;
     const command: ClientCommand = {
       id: commandId(),
       type: "session.create",
       projectId: selected?.projectId ?? bootstrap.projects[0]?.id ?? "default",
-      modelId: selected?.modelId ?? bootstrap.models[0]?.id ?? "default",
-      reasoning:
-        selected?.reasoning ??
-        bootstrap.models[0]?.defaultReasoning ??
-        bootstrap.models[0]?.reasoning[0] ??
-        "off",
+      modelId,
+      reasoning: selectedReasoning ?? remembered ?? resolved ?? "off",
       authority: sessionAuthorityDefaults(
         bootstrap,
         selected?.authority ?? null,
@@ -1837,14 +1990,55 @@ export class OctetStore {
     reasoning?: ReasoningEffort;
     authority?: AuthorityProfile;
   }): Promise<void> {
+    await this.modelPreferenceLoad;
     const session = this.selectedSession;
     if (!session) return;
-    await this.sendCommand({
-      id: commandId(),
-      type: "session.configure",
-      sessionId: session.sessionId,
-      ...patch,
-    });
+
+    const sessionId = session.sessionId;
+    const sendSetting = async (
+      setting:
+        | { modelId: string }
+        | { reasoning: ReasoningEffort }
+        | { authority: AuthorityProfile },
+    ): Promise<boolean> => {
+      const ack = await this.sendCommand({
+        id: commandId(),
+        type: "session.configure",
+        sessionId,
+        ...setting,
+      });
+      return ack.accepted;
+    };
+
+    if (patch.modelId !== undefined) {
+      if (!(await sendSetting({ modelId: patch.modelId }))) return;
+
+      // HttpTransport uses the snapshot to refresh the exact model identity
+      // used when encoding the following reasoning command. The host event is
+      // still authoritative and will reconcile the store projection.
+      await this.transport.getSession(sessionId);
+
+      if (patch.reasoning !== undefined) {
+        if (!(await sendSetting({ reasoning: patch.reasoning }))) return;
+      } else {
+        const targetModel = this.modelForId(patch.modelId);
+        const remembered = targetModel
+          ? preferredReasoningForModel(targetModel, this.modelPreferences)
+          : undefined;
+        if (
+          remembered !== undefined &&
+          !(await sendSetting({ reasoning: remembered }))
+        ) {
+          return;
+        }
+      }
+    } else if (patch.reasoning !== undefined) {
+      if (!(await sendSetting({ reasoning: patch.reasoning }))) return;
+    }
+
+    if (patch.authority !== undefined) {
+      await sendSetting({ authority: patch.authority });
+    }
   }
 
   async rename(title: string): Promise<void> {

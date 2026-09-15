@@ -8,7 +8,7 @@ use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use octet_ai::{
-    AiClient, AiError, Auth, Capabilities, CacheCompatibility, CacheRetention,
+    AiClient, AiError, Auth, CacheCompatibility, CacheRetention, Capabilities,
     CompatibilityMode::Strict, Endpoint, EndpointId, EndpointTransport, Message, ModalitySet,
     Model, ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities, Protocol,
     ReasoningConfig, ReasoningMode, Request, Response, StreamEvent, ToolChoice, ToolDef,
@@ -44,7 +44,10 @@ fn fixture_model(base_url: &str) -> Model {
         endpoint: Arc::new(Endpoint {
             id: EndpointId("google-current".to_owned()),
             base_url: url::Url::parse(base_url).expect("fixture endpoint URL"),
-            auth: Auth::header(http::HeaderName::from_static("x-goog-api-key"), "fixture-key"),
+            auth: Auth::header(
+                http::HeaderName::from_static("x-goog-api-key"),
+                "fixture-key",
+            ),
             default_headers: http::HeaderMap::new(),
             transport: EndpointTransport::Http,
             runtime: Default::default(),
@@ -112,7 +115,10 @@ async fn gemini_current_request_tool_stream_signature_and_usage_fixture() {
         .await;
 
     let response: Response = AiClient::new()
-        .complete(&fixture_model(&format!("{}/v1beta/", server.uri())), fixture_request())
+        .complete(
+            &fixture_model(&format!("{}/v1beta/", server.uri())),
+            fixture_request(),
+        )
         .await
         .expect("Gemini current loopback fixture");
 
@@ -122,7 +128,10 @@ async fn gemini_current_request_tool_stream_signature_and_usage_fixture() {
     assert_eq!(response.usage.output_tokens, 6);
     assert_eq!(response.usage.reasoning_tokens, 1);
     assert_eq!(response.usage.total_tokens, 18);
-    assert!(matches!(response.stop_reason, octet_ai::StopReason::ToolUse));
+    assert!(matches!(
+        response.stop_reason,
+        octet_ai::StopReason::ToolUse
+    ));
     assert!(response.message.content.iter().any(|part| matches!(
         part,
         octet_ai::AssistantPart::ProviderMetadata(
@@ -157,7 +166,26 @@ async fn gemini_current_error_and_drop_cancellation_fixtures() {
         )
         .await
         .expect_err("provider error must not become a successful response");
-    assert!(matches!(error, AiError::Provider(_)));
+    let AiError::StreamFailure { inner, progress } = error else {
+        panic!("expected annotated Google stream failure");
+    };
+    assert!(matches!(
+        inner.as_ref(),
+        AiError::Provider(provider)
+            if provider.code.as_deref() == Some("400")
+                && provider.kind.as_deref() == Some("INVALID_ARGUMENT")
+                && provider.message == "fixture rejection"
+                && provider.request_id.as_deref() == Some("error-1")
+    ));
+    assert_eq!(progress.provider_events, 1);
+    assert_eq!(progress.decoded_events, 0);
+    assert_eq!(progress.content_bytes, 0);
+    assert_eq!(progress.buffered_bytes, 0);
+    assert!(progress.first_body_seen);
+    let last_event_ms = progress
+        .last_event_ms
+        .expect("provider error must retain stream timing metadata");
+    assert!(progress.elapsed_ms >= last_event_ms);
 
     let cancel_server = MockServer::start().await;
     Mock::given(method("POST"))

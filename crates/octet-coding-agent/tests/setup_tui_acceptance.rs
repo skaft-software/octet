@@ -710,13 +710,16 @@ fn setup_discovery_reaches_normal_prompt_and_records_secret_free_receipt() {
         "a setup secret appeared in the TUI transcript"
     );
 
-    // Confirm the reviewed transaction and wait until the review surface has
-    // been replaced by the ordinary model/composer startup path.
+    // Confirm the reviewed transaction and wait for both the display label and
+    // the ordinary composer. Canonical identity is checked in the saved config
+    // below; the startup surface intentionally renders the model's display name.
     octet.terminal.write_input(b"\r");
     let ready = octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
-        screen.contains("custom/custom/fixture-model") && !screen.contains("Review provider setup")
+        screen.contains("Fixture Model")
+            && screen.lines().any(|line| line.trim() == "›")
+            && !screen.contains("Review provider setup")
     });
-    assert!(ready.contains("custom/custom/fixture-model"));
+    assert!(ready.contains("Fixture Model"));
     let capture = octet.shutdown();
     assert!(capture.status.success(), "Ctrl-D exit: {}", capture.status);
     assert!(capture.termios_restored);

@@ -1125,14 +1125,6 @@ fn has_metadata_assertion(entry: &serde_json::Value, names: &[&str]) -> bool {
     })
 }
 
-const CONTEXT_FIELDS: &[&str] = &[
-    "context_window",
-    "context_length",
-    "max_model_len",
-    "max_context_tokens",
-    "limit/context",
-];
-const OUTPUT_FIELDS: &[&str] = &["max_output_tokens", "max_completion_tokens", "limit/output"];
 const MODALITY_FIELDS: &[&str] = &[
     "architecture",
     "input_modalities",
@@ -1160,47 +1152,17 @@ const REASONING_FIELDS: &[&str] = &[
     "interleaved",
 ];
 
-fn enriched_builtin_entry(
+/// The pinned catalog is supplemental display/pricing data only. Functional
+/// limits and capability flags must come from the discovered endpoint (or a
+/// declaration-owned standardized surface), never from a snapshot record.
+fn builtin_display_entry(
     entry: &serde_json::Value,
     snapshot: &serde_json::Value,
 ) -> serde_json::Value {
     let mut result = entry.clone();
-    for (aliases, target, value) in [
-        (
-            &["display_name", "name"][..],
-            "display_name",
-            snapshot.get("name"),
-        ),
-        (
-            CONTEXT_FIELDS,
-            "context_window",
-            snapshot.pointer("/limit/context"),
-        ),
-        (
-            OUTPUT_FIELDS,
-            "max_output_tokens",
-            snapshot.pointer("/limit/output"),
-        ),
-        (TOOL_FIELDS, "tools", snapshot.get("tool_call")),
-        (
-            &[
-                "structured_output",
-                "supports_structured_output",
-                "supported_parameters",
-            ][..],
-            "structured_output",
-            snapshot.get("structured_output"),
-        ),
-        (
-            MODALITY_FIELDS,
-            "input_modalities",
-            snapshot.pointer("/modalities/input"),
-        ),
-    ] {
-        if !has_metadata_assertion(entry, aliases) {
-            if let Some(value) = value {
-                result[target] = value.clone();
-            }
+    if !has_metadata_assertion(entry, &["display_name", "name"]) {
+        if let Some(name) = snapshot.get("name") {
+            result["display_name"] = name.clone();
         }
     }
     result
@@ -1233,122 +1195,17 @@ fn has_reasoning_assertion(entry: &serde_json::Value) -> bool {
         })
 }
 
-fn builtin_discovery_reasoning(
-    entry: &serde_json::Value,
-    declaration: Option<&ProviderDeclaration>,
-    id: &str,
-    snapshot: Option<&serde_json::Value>,
-) -> anyhow::Result<DiscoveredReasoning> {
+/// Decode endpoint reasoning metadata without importing semantic controls from
+/// the pinned catalog. Declaration-owned profiles are applied later, only when
+/// the endpoint did not assert an unknown or malformed reasoning surface.
+fn builtin_discovery_reasoning(entry: &serde_json::Value) -> anyhow::Result<DiscoveredReasoning> {
     let mut metadata = decode_reasoning_metadata(entry)?;
-    if declaration.is_none() {
-        return Ok(metadata);
-    }
-    if !has_reasoning_assertion(entry) {
-        if let (Some(declaration), Some(snapshot)) = (declaration, snapshot) {
-            if let Some(route) = declaration.route_for_model(id) {
-                if let Some(supplement) =
-                    snapshot_reasoning_metadata(declaration, route.protocol, id, snapshot)
-                {
-                    return Ok(supplement);
-                }
-                if has_metadata_assertion(snapshot, REASONING_FIELDS) {
-                    metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
-                }
-            }
-        }
-    } else if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent {
+    if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent
+        && has_reasoning_assertion(entry)
+    {
         metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
     }
     Ok(metadata)
-}
-
-/// models.dev describes semantic controls, not a universal compatible encoding.
-/// Only declaration-owned, implemented wire profiles may consume its reasoning
-/// supplement. Custom/Codex routes never call this boundary.
-fn snapshot_reasoning_metadata(
-    declaration: &ProviderDeclaration,
-    protocol: Protocol,
-    id: &str,
-    snapshot: &serde_json::Value,
-) -> Option<DiscoveredReasoning> {
-    let known = sparse_route_reasoning(declaration, protocol, id)
-        .or_else(|| declaration.static_reasoning_for(id, protocol));
-    let toggle_profile = protocol == Protocol::OpenAiChat
-        && (matches!(declaration.id, "deepseek" | "openrouter" | "together")
-            || known.as_ref().is_some_and(|capability| {
-                matches!(
-                    capability.openai_chat_mode,
-                    OpenAiChatReasoningMode::DeepSeekThinking
-                        | OpenAiChatReasoningMode::DeepSeekToggle
-                        | OpenAiChatReasoningMode::OpenRouter
-                        | OpenAiChatReasoningMode::Together { .. }
-                )
-            }));
-    let supported_profile = toggle_profile
-        || (protocol == Protocol::OpenAiChat && declaration.id == "cerebras")
-        || (protocol == Protocol::OpenAiResponses && declaration.id == "openai")
-        || known.is_some();
-    if !supported_profile {
-        return None;
-    }
-    let mut metadata = decode_reasoning_metadata(snapshot).ok()?;
-    if metadata.supported == Some(false) {
-        return Some(metadata);
-    }
-    if protocol == Protocol::AnthropicMessages
-        && known.is_some()
-        && snapshot
-            .get("reasoning")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-    {
-        // Preserve an existing declaration-owned native contract when only its
-        // semantic source supplement is present. A catalog boolean did not
-        // create this codec profile; explicit endpoint assertions bypass here.
-        metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
-        metadata.supported = Some(true);
-        metadata.options = None;
-        metadata.control = None;
-        return Some(metadata);
-    }
-    let toggle = snapshot
-        .get("reasoning_options")?
-        .as_array()?
-        .iter()
-        .any(|option| option.get("type").and_then(serde_json::Value::as_str) == Some("toggle"));
-    if declaration.id == "deepseek"
-        && snapshot
-            .pointer("/interleaved/field")
-            .and_then(serde_json::Value::as_str)
-            != Some("reasoning_content")
-    {
-        return None;
-    }
-    if toggle && toggle_profile {
-        let options = metadata
-            .options
-            .get_or_insert_with(|| octet_ai::types::ReasoningOptions {
-                values: vec!["default".into()],
-                default: None,
-            });
-        if !options.choices().contains(&ReasoningConfig::Off) {
-            options.values.insert(0, "none".into());
-        }
-        metadata.control.get_or_insert(ReasoningControl::Toggle);
-        metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
-        metadata.supported = Some(true);
-    }
-    // Preserve separately documented route defaults only when the refreshed
-    // exact set still supports them. Never fill effort holes or invent defaults.
-    if let Some(options) = &mut metadata.options {
-        if options.default.is_none() {
-            options.default = known
-                .and_then(|c| c.options)
-                .and_then(|o| o.default)
-                .filter(|default| options.values.contains(default));
-        }
-    }
-    Some(metadata)
 }
 
 #[derive(Clone, Debug)]
@@ -1567,11 +1424,10 @@ fn api_models_from_response_for(
             d.route_for_model(id)?;
             octet_ai::model_metadata::model_capability_metadata(d.id, id)
         });
-        let reasoning_metadata =
-            builtin_discovery_reasoning(entry, declaration, id, snapshot.as_ref())?;
+        let reasoning_metadata = builtin_discovery_reasoning(entry)?;
         let enriched = snapshot
             .as_ref()
-            .map(|snapshot| enriched_builtin_entry(entry, snapshot));
+            .map(|snapshot| builtin_display_entry(entry, snapshot));
         let entry = enriched.as_ref().unwrap_or(entry);
         let input_modalities = input_modalities_from_entry(entry);
         let modalities_asserted = has_metadata_assertion(entry, MODALITY_FIELDS);
@@ -1768,6 +1624,11 @@ fn sparse_route_reasoning(
     }
     if declaration.id == "deepseek" && protocol == Protocol::OpenAiChat {
         return Some(match id {
+            "deepseek-flash" => effort_capability(
+                Mode::DeepSeekThinking,
+                &["none", "low", "high", "max"],
+                None,
+            ),
             "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4" => effort_capability(
                 Mode::DeepSeekThinking,
                 &["none", "high", "xhigh"],
@@ -1854,6 +1715,9 @@ fn discovered_reasoning_capability(
                 .unwrap_or(OpenAiChatReasoningMode::SystemMessage),
         },
         Protocol::OpenAiResponses => OpenAiChatReasoningMode::Standard,
+        // This codec does not support Conversations reasoning controls yet.
+        // Discovery must not manufacture a Chat control for the native route.
+        Protocol::MistralConversations => return None,
         // Native codecs need a declaration-owned control/budget contract, but
         // that must not broaden an endpoint's narrower exact choices/default.
         Protocol::AnthropicMessages | Protocol::GoogleGenerativeAi | Protocol::BedrockConverse => {
@@ -1973,17 +1837,25 @@ fn register_openai_compatible_models_from_response(
             continue;
         }
         let protocol = route.protocol;
-        let reasoning = discovered_reasoning_capability(
-            declaration,
-            protocol,
-            api_name,
-            &model.reasoning_metadata,
-        );
         let context_window = model.context_window.unwrap_or(128_000);
         let max_output_tokens = model
             .max_output_tokens
             .unwrap_or(32_768)
             .min(context_window);
+        let reasoning = discovered_reasoning_capability(
+            declaration,
+            protocol,
+            api_name,
+            &model.reasoning_metadata,
+        )
+        .filter(|capability| {
+            // A native declaration's budget table may not fit the discovered
+            // ceiling (or the sparse fallback). Do not enlarge that ceiling or
+            // invent a different budget contract to make registration succeed.
+            capability
+                .effort_budgets
+                .is_none_or(|budgets| budgets.max < max_output_tokens)
+        });
         // GPT-6 family fallbacks belong only to the verified public OpenAI
         // declaration. Other providers must advertise image input directly.
         let gpt_vision_fallback = declaration
@@ -2100,7 +1972,14 @@ fn register_anthropic_compatible_models_from_response(
                     route.protocol,
                     api_name,
                     &model.reasoning_metadata,
-                ),
+                )
+                .filter(|capability| {
+                    // Keep the declaration's budgets only when the endpoint's
+                    // effective output ceiling can accommodate the full table.
+                    capability
+                        .effort_budgets
+                        .is_none_or(|budgets| budgets.max < max_output_tokens)
+                }),
                 responses_lite: false,
                 agent_delegation: None,
                 structured_output: model.structured_output.unwrap_or(true),
@@ -2531,11 +2410,10 @@ fn openrouter_models_from_response(
         }
         let snapshot =
             octet_ai::model_metadata::model_capability_metadata(declaration.id, api_name);
-        let reasoning_metadata =
-            builtin_discovery_reasoning(entry, Some(declaration), api_name, snapshot.as_ref())?;
+        let reasoning_metadata = builtin_discovery_reasoning(entry)?;
         let enriched = snapshot
             .as_ref()
-            .map(|snapshot| enriched_builtin_entry(entry, snapshot));
+            .map(|snapshot| builtin_display_entry(entry, snapshot));
         let entry = enriched.as_ref().unwrap_or(entry);
         let context_window = entry
             .get("context_length")
@@ -2552,8 +2430,8 @@ fn openrouter_models_from_response(
             .filter(|value| *value > 0)
             .map(|value| value.min(context_window))
         else {
-            // Without a provider assertion or pinned route ceiling, do not
-            // guess a completion limit.
+            // Only the endpoint can supply this ceiling; the pinned display/
+            // pricing supplement must not make an incomplete route admissible.
             continue;
         };
         // OpenRouter may expose modality metadata under architecture or at
@@ -4973,8 +4851,8 @@ fn base_model_catalog(offline: bool) -> anyhow::Result<ModelCatalog> {
     base_model_catalog_with_custom_store(offline, None)
 }
 
-/// Build the runtime model catalog, exposing ChatGPT subscription models only
-/// when octet owns a usable OAuth credential.
+/// Build the runtime model catalog, exposing subscription models only through
+/// their authenticated product-owned registration boundary.
 pub fn model_catalog() -> anyhow::Result<ModelCatalog> {
     model_catalog_with_offline(false)
 }
@@ -4982,6 +4860,7 @@ pub fn model_catalog() -> anyhow::Result<ModelCatalog> {
 pub fn model_catalog_with_offline(offline: bool) -> anyhow::Result<ModelCatalog> {
     let mut catalog = base_model_catalog(offline)?;
     register_codex_catalog(&mut catalog, offline);
+    register_copilot_catalog(&mut catalog, offline);
     Ok(catalog)
 }
 
@@ -4994,6 +4873,7 @@ pub(crate) fn model_catalog_with_setup_store(
 ) -> anyhow::Result<ModelCatalog> {
     let mut catalog = base_model_catalog_with_custom_store(offline, Some(custom_store))?;
     register_codex_catalog(&mut catalog, offline);
+    register_copilot_catalog(&mut catalog, offline);
     Ok(catalog)
 }
 
@@ -5011,10 +4891,23 @@ fn register_codex_catalog(catalog: &mut ModelCatalog, offline: bool) {
     }
 }
 
-/// Build the catalog without subscription models, used to make `/logout`
-/// atomic when the active model itself belongs to ChatGPT.
+fn register_copilot_catalog(catalog: &mut ModelCatalog, offline: bool) {
+    // No ambient credential access in unit tests. Unlike Codex, this adapter has
+    // no offline inventory: offline must return before even resolving its store.
+    if cfg!(test) || offline {
+        return;
+    }
+    if let Err(error) = crate::auth::copilot::register_available_models_blocking(catalog, offline) {
+        crate::output::stderr!("warning: GitHub Copilot models unavailable: {error}");
+    }
+}
+
+/// Build the catalog without ChatGPT models, used to make `/logout` atomic when
+/// its active model belongs to ChatGPT. Other authenticated providers are kept.
 pub fn model_catalog_without_codex() -> anyhow::Result<ModelCatalog> {
-    base_model_catalog(false)
+    let mut catalog = base_model_catalog(false)?;
+    register_copilot_catalog(&mut catalog, false);
+    Ok(catalog)
 }
 
 /// Build bootstrap state from resolved configuration.

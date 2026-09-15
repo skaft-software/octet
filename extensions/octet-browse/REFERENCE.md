@@ -77,6 +77,10 @@ The setup runtime is built in a private temporary directory and published only a
 There is no general browser escape hatch. The exact tools are:
 
 - `browser_status`
+- `browser_backend_select`
+- `browser_backend_revoke`
+- `browser_backend_stop`
+- `browser_backend_status`
 - `browser_launch`
 - `browser_tabs`
 - `browser_open_url`
@@ -89,6 +93,34 @@ There is no general browser escape hatch. The exact tools are:
 - `browser_screenshot`
 - `browser_tab_close`
 - `browser_close`
+
+## Explicit connectors
+
+The isolated, always-headful Chromium context remains the default. Existing
+browser targets are available only through a connector explicitly registered by
+the host integration; Browse performs no ambient browser discovery, process
+enumeration, normal-profile attachment, or session/window/tab listing.
+Registration and connector callback requirements are documented in
+[CONNECTORS.md](CONNECTORS.md).
+
+Use `browser_backend_select` with all five exact identities:
+`connector_id`, `browser_id`, `session_id`, `window_id`, and `tab_id`. An optional
+connector-issued `target_revision` is a stale-target fence. The selection tool
+cannot discover omitted identities. `browser_backend_status` reports only
+bounded registered descriptors and owner-visible selected state; it does not
+query unrelated external targets. `browser_backend_revoke` releases the exact
+selected target, while `browser_backend_stop` invokes the connector's explicit
+stop callback and then releases it. Releasing or stopping is not inferred from
+process state.
+
+External and isolated browsing are mutually exclusive. Each external operation
+rechecks the host-derived resource owner, target identity/revision, page
+liveness, connector verification, and declared capability before confirmation or
+browser use. Unsupported capabilities fail with `unsupported_capability`.
+Native Firefox and Safari operations are unsupported; a connector cannot turn a
+literal native-browser selection into an isolated Chromium operation. External
+connectors must preserve the manual-auth boundary and must not provide
+credentials, cookies, storage, profile data, or arbitrary evaluation.
 
 Every tab operation takes an explicit opaque `tab_id`. `browser_open_url` creates a new explicit tab only when `tab_id` is omitted; it never selects an implicit active page. Browser state is fenced by the host-derived `{session_id, extension_instance_id, process_generation}` owner, never a model argument. Handler-time presentation snapshots are parent-correlated, and worker-thread snapshots echo that complete host-issued triple; owner changes clear cached tab/activity/artifact presentation before publication.
 

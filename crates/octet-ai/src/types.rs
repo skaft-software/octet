@@ -113,6 +113,8 @@ pub enum Protocol {
     BedrockConverse,
     /// Google Generative AI / Vertex `generateContent` protocol.
     GoogleGenerativeAi,
+    /// Native Mistral Conversations HTTP/SSE protocol.
+    MistralConversations,
 }
 
 /// Preferred transport for streaming provider responses.

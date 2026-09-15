@@ -107,8 +107,9 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
     );
 
     match cancellation.await.expect("cancellation task") {
-        Err(ExtensionRuntimeError::Cancelled { method, .. }) => {
+        Err(ExtensionRuntimeError::Cancelled { method, reason }) => {
             assert_eq!(method, "tool/call");
+            assert_eq!(reason, "shutdown");
         }
         other => panic!("expected host cancellation, got {other:?}"),
     }

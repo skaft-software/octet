@@ -1,5 +1,10 @@
 //! Composer surface: an inset multiline input area framed by stable
 //! model-adaptive rules, with a calm semantic status footer below.
+//!
+//! This surface owns rendering, cache invalidation, geometry, and footer layout
+//! only. Attachment admission/composition live in `tui::composer`; popup
+//! selection/event loops and model/session/extension/subagent flows remain with
+//! the view and picker owners.
 
 use std::time::Instant;
 

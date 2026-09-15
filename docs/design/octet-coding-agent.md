@@ -452,10 +452,24 @@ credentials and headers remain behind
 provider definitions, catalog model metadata, logs, or persistence. The resolver
 serializes exchange/refresh and refreshes before its short-lived session expires.
 
-The standalone CLI and NDJSON host intentionally provide no Copilot login or
-configuration path. GitHub OAuth endpoint behavior, Enterprise policy, and live
-integration testing remain embedding-host responsibilities; the product covers
-only deterministic fake-host/transport behavior.
+The product now supplies a separate `auth::copilot` adapter for GitHub.com's
+bounded device/OAuth exchange, owner-private selected credential storage and
+vetted inference origins. CLI `--login copilot [--headless]` and `--logout copilot`
+(also `github-copilot`) dispatch before workspace/session startup. Synchronous
+catalog construction registers through a scoped discovery thread/current-thread
+runtime; the existing interactive blocking-lifecycle worker remains outside the
+renderer. Offline and missing credentials return before runtime/client creation,
+and failed discovery cannot partially mutate the catalog. Setup rebuilds and
+Codex-only logout preserve independent Copilot registration.
+
+The same catalog flows into existing NDJSON `models` and catalog-backed `run`;
+there is no new native-host auth command, OAuth payload field, or extension API
+0.3 authority. TUI slash auth is not yet integrated. Fresh credential resolution
+rechecks the host's selected login; explicit replacement is serialized with
+invalidation, and rejected/changed origins fence every resolver sharing a host.
+No local operation promises remote revocation of an already-resolved request or
+pending device code. All new Rust fixtures, full provider parity and native/live
+acceptance remain unqualified; see the [candidate record](../qualification/copilot-host-current-candidate.md).
 
 ## Authentication
 

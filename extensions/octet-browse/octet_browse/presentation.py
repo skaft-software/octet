@@ -75,9 +75,13 @@ class BrowsePresentation:
         }
         self._browser: Dict[str, Any] = {
             "open": False,
+            "isolated_open": False,
+            "external_open": False,
             "tab_count": 0,
             "tabs": [],
             "selected_tab_id": None,
+            "backends": [],
+            "selected_backend": None,
         }
         self._activities: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._runtime_degraded: Optional[str] = None
@@ -120,22 +124,88 @@ class BrowsePresentation:
                         "selected": bool(item.get("selected", False)),
                     }
                 )
+        backends = self._backend_state(result.get("backends"))
+        selected_backend = self._selection_state(result.get("selected_backend"))
         with self._lock:
             if resource_owner is not None:
                 self._set_resource_owner_locked(resource_owner)
             self._browser = {
                 "open": bool(result.get("open", False)),
+                "isolated_open": bool(result.get("isolated_open", False)),
+                "external_open": bool(result.get("external_open", False)),
                 "tab_count": min(len(tabs), 64),
                 "tabs": tabs,
                 "selected_tab_id": result.get("selected_tab_id")
                 if isinstance(result.get("selected_tab_id"), str)
                 else None,
+                "backends": backends,
+                "selected_backend": selected_backend,
             }
             if self._browser["open"]:
                 self._runtime_degraded = None
             elif result.get("degraded"):
                 self._runtime_degraded = "Browser runtime or profile health is degraded."
             self._publish_locked()
+
+    @staticmethod
+    def _selection_state(value: Any) -> Optional[Dict[str, str]]:
+        if not isinstance(value, Mapping):
+            return None
+        fields = (
+            "connector_id",
+            "browser_id",
+            "session_id",
+            "window_id",
+            "tab_id",
+            "target_revision",
+        )
+        result: Dict[str, str] = {}
+        for field in fields:
+            item = value.get(field)
+            if isinstance(item, str):
+                result[field] = bounded_text(item, 256)
+        return result if all(field in result for field in fields[:5]) else None
+
+    @classmethod
+    def _backend_state(cls, value: Any) -> List[Dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        result: List[Dict[str, Any]] = []
+        for item in value[:16]:
+            if not isinstance(item, Mapping):
+                continue
+            backend: Dict[str, Any] = {}
+            for field, maximum in (
+                ("connector_id", 128),
+                ("label", 160),
+                ("protocol", 80),
+                ("browser", 80),
+                ("browser_family", 32),
+                ("state", 32),
+            ):
+                raw = item.get(field)
+                if isinstance(raw, str):
+                    backend[field] = bounded_text(raw, maximum)
+            capabilities: Dict[str, Dict[str, Any]] = {}
+            raw_capabilities = item.get("capabilities")
+            if isinstance(raw_capabilities, Mapping):
+                for name, capability in list(raw_capabilities.items())[:32]:
+                    if not isinstance(name, str) or not isinstance(capability, Mapping):
+                        continue
+                    value = {"supported": bool(capability.get("supported", False))}
+                    reason = capability.get("reason")
+                    if isinstance(reason, str) and reason:
+                        value["reason"] = bounded_text(reason, 256)
+                    capabilities[bounded_text(name, 64)] = value
+            backend["capabilities"] = capabilities
+            limitations = item.get("limitations")
+            backend["limitations"] = (
+                [bounded_text(entry, 256) for entry in limitations[:8] if isinstance(entry, str)]
+                if isinstance(limitations, list)
+                else []
+            )
+            result.append(backend)
+        return result
 
     def activity(
         self,
@@ -212,9 +282,13 @@ class BrowsePresentation:
             # a different owner's complete snapshot.
             self._browser = {
                 "open": False,
+                "isolated_open": False,
+                "external_open": False,
                 "tab_count": 0,
                 "tabs": [],
                 "selected_tab_id": None,
+                "backends": [],
+                "selected_backend": None,
             }
             self._activities.clear()
         self._resource_owner = value
@@ -300,6 +374,11 @@ class BrowsePresentation:
             collection["detail"] = detail
         return {
             "status": self._status_locked(),
+            "open": bool(self._browser.get("open")),
+            "isolated_open": bool(self._browser.get("isolated_open")),
+            "external_open": bool(self._browser.get("external_open")),
+            "backends": list(self._browser.get("backends", [])),
+            "selected_backend": self._browser.get("selected_backend"),
             "activities": list(self._activities.values()),
             "collection": collection,
             "actions": [
@@ -343,6 +422,12 @@ class BrowsePresentation:
                 if tab.get("tab_id") == selected:
                     origin = tab.get("origin", "unavailable")
                     break
+            if self._browser.get("external_open"):
+                return {
+                    "state": "active",
+                    "label": f"Browse · connected · {count} tab{'s' if count != 1 else ''} · {origin}",
+                    "detail": "Explicitly injected existing-browser connector.",
+                }
             return {
                 "state": "active",
                 "label": f"Browse · open · {count} tab{'s' if count != 1 else ''} · {origin}",

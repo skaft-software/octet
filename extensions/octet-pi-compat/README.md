@@ -63,9 +63,34 @@ The default API `0.2` bridge supports:
 - host session-name and reasoning snapshots where supplied by octet.
 
 Unknown Pi APIs fail closed. Session/tree mutation, compaction control, root-agent
-messaging, active-tool policy mutation, arbitrary components/editors/widgets, and
-terminal input are not silently emulated. The [per-surface ledger](COMPATIBILITY.md#public-extension-surface)
-is authoritative; an example that loads is not evidence of behavioral parity.
+messaging, active-tool policy mutation, arbitrary terminal components, replacement
+editors, and raw terminal input are not silently emulated. The
+[per-surface ledger](COMPATIBILITY.md#public-extension-surface) records the baseline
+fixtures; an example that loads is not evidence of behavioral parity.
+
+### Optional API 0.2 UI handoff
+
+When the host explicitly offers the corresponding legacy features, the bridge
+also supports these bounded operations:
+
+- `semantic_ui`: keyed status, working/hidden-thinking metadata, plain-text
+  widgets, and synchronous header/footer components projected as sanitized text.
+  Header/footer surfaces must also be declared by the host's manifest snapshot.
+- `editor_handoff`: host-acknowledged get/set/paste/focus operations. The synchronous
+  Pi getter fails explicitly until an authoritative editor snapshot is available;
+  delayed acknowledgements cannot overwrite a newer observation.
+- `autocomplete`: bounded suffix suggestions, with UTF-8 cursor validation and
+  explicit host registration. Providers belong to the UI owner, not the transient
+  request that installed them; a cancelled request cannot poison later disposal.
+- `terminal_input`: host resize observations update semantic component widths.
+  Raw input hooks and component input delivery remain unsupported.
+
+Settlement, shutdown and replacement fence queued updates, clear contributions,
+abort editor waits and dispose component/provider instances. Generated links
+include both helper modules before their manifest becomes discoverable. There is
+no new credential, process, terminal or API `0.3` authority. The
+[qualification record](../../docs/qualification/pi-ui-current-candidate.md)
+distinguishes bridge fixtures from still-unrun Rust-host and real-Pi gates.
 
 ## API 0.3 provider mode
 
@@ -104,6 +129,8 @@ These maintainer commands check fixtures or diagnose a selected local runtime:
 ```sh
 # Hermetic bridge, public-surface, and ledger fixtures.
 python3 -m unittest discover -s extensions/octet-pi-compat/tests -p 'test_*.py'
+node --test extensions/octet-pi-compat/tests/test_semantic_ui.mjs \
+  extensions/octet-pi-compat/tests/test_editor_handoff.mjs
 python3 extensions/octet-pi-compat/conformance.py --check --json
 
 # Developer diagnosis only; neither command verifies npm tarball integrity.
@@ -118,7 +145,7 @@ OCTET_PI_REAL_PACKAGE=/path/to/@earendil-works/pi-coding-agent \
 
 The real-Pi suite covers the official hello example and an unchanged `plan-mode`
 load plus `/todos` smoke, not plan-mode behavioral parity. Flags, shortcuts,
-active-tool overlays, session entries, root messages, editor/widget transport,
+active-tool overlays, session entries, root messages, full editor/widget parity,
 and durable custom entries remain explicit blockers. Fake-Pi provider cases cover
 catalog, authorization, hooks, streaming, cancellation, mutation, and cleanup only.
 

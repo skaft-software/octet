@@ -2,12 +2,12 @@
 
 //! Provider authentication flows for subscription-backed models.
 //!
-//! Currently this is OpenAI Codex ("Sign in with ChatGPT") OAuth and
-//! custom OpenAI-compatible endpoint credentials. Everything here lives in the
-//! product crate and implements the *public* [`octet_ai::CredentialResolver`]
-//! trait, so the frozen `octet-ai` crate is not touched.
+//! OpenAI Codex ("Sign in with ChatGPT"), GitHub Copilot device OAuth, and
+//! custom OpenAI-compatible endpoint credentials. Authentication stays in the
+//! product crate behind public credential/provider seams; `octet-ai` is not touched.
 
 pub mod codex;
+pub mod copilot;
 pub mod custom;
 
 pub(crate) fn read_bounded_regular(

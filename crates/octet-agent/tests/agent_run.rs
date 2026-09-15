@@ -897,7 +897,7 @@ fn scripted_model_for_protocol(uri: &str, protocol: Protocol) -> Model {
         Protocol::OpenAiResponses => scripted_responses_model(uri),
         Protocol::OpenAiChat => openai_multimodal_model(uri),
         Protocol::AnthropicMessages => scripted_model(uri),
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi => {
+        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi | Protocol::MistralConversations => {
             panic!("{protocol:?} requires a codec-specific provider fixture")
         }
     }

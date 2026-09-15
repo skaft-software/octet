@@ -221,7 +221,9 @@ fn default_batch_endpoint(model: &Model) -> anyhow::Result<&'static str> {
         Protocol::OpenAiChat => Ok("/v1/chat/completions"),
         Protocol::OpenAiResponses => Ok("/v1/responses"),
         Protocol::AnthropicMessages => Ok("/v1/messages"),
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi => {
+        Protocol::BedrockConverse
+        | Protocol::GoogleGenerativeAi
+        | Protocol::MistralConversations => {
             anyhow::bail!("OpenRouter Batch API does not support the selected model protocol")
         }
     }

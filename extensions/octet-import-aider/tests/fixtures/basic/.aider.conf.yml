@@ -1,0 +1,12 @@
+model: anthropic/claude-3-5-sonnet
+weak-model: gpt-4o-mini
+api-key: "${OPENAI_API_KEY}"
+edit-format: diff
+mcp-servers:
+  - name: local-docs
+    command: uvx
+    args:
+      - mcp-server-filesystem
+      - /workspace/docs
+  - name: remote-search
+    url: https://example.invalid/mcp

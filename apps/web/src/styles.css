@@ -880,12 +880,105 @@ kbd {
   -webkit-app-region: drag;
 }
 
+.shortcut-reference {
+  position: relative;
+  display: block;
+}
+
+.shortcut-reference > summary {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-soft);
+  background: var(--surface);
+  cursor: pointer;
+  font-weight: 650;
+  line-height: 1;
+  list-style: none;
+}
+
+.shortcut-reference > summary::-webkit-details-marker {
+  display: none;
+}
+
+.shortcut-reference > summary:hover,
+.shortcut-reference > summary:focus-visible {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.shortcut-reference-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 21;
+  width: min(320px, calc(100vw - 24px));
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-float);
+}
+
+.shortcut-reference-panel strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.shortcut-reference-panel dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.shortcut-reference-panel dl > div {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+}
+
+.shortcut-reference-panel dt {
+  color: var(--text-soft);
+}
+
+.shortcut-reference-panel dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--font-meta);
+}
+
+.shortcut-reference-panel kbd {
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: var(--font-meta);
+  white-space: nowrap;
+}
+
 .session-header-leading,
 .session-header-actions {
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.utility-topbar > .icon-button {
+  -webkit-app-region: no-drag;
+}
+
+.utility-topbar > .shortcut-reference {
+  margin-left: auto;
   -webkit-app-region: no-drag;
 }
 

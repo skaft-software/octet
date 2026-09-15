@@ -806,6 +806,65 @@ class BridgeProtocolTests(unittest.TestCase):
             self.assertIn("ctx.newSession", response["error"]["message"])
 
 
+    def test_fake_pi_ui_hook_crosses_host_requests_notifications_and_shutdown(self) -> None:
+        """Exercise the compatibility UI through a loaded Pi extension, not its helper."""
+        with tempfile.TemporaryDirectory() as directory:
+            extension = Path(directory) / "ui-bridge-hook.mjs"
+            extension.write_text(
+                """
+export default function uiBridgeHook(pi) {
+  pi.registerCommand("ui-bridge-hook", {
+    description: "bridge UI fixture",
+    handler: async (_args, ctx) => {
+      ctx.ui.setStatus("bridge-ui", "active");
+      ctx.ui.notify("bridge notification", "info");
+      const value = await ctx.ui.input("bridge input", "placeholder");
+      const confirmed = await ctx.ui.confirm("bridge confirm", "detail");
+      if (value !== "typed" || !confirmed) throw new Error("host UI fixture was not answered");
+    },
+  });
+}
+""",
+                encoding="utf-8",
+            )
+            host_requests: list[dict] = []
+            with BridgeProcess(extension=extension, fixture_mode="ui-bridge") as bridge:
+                bridge.handlers["input/request"] = lambda message: host_requests.append(message) or {"value": "typed"}
+                bridge.handlers["confirmation/request"] = lambda message: host_requests.append(message) or {"confirmed": True}
+                bridge.initialize("semantic_ui", "runtime_commands")
+                response = bridge.request(
+                    "command/execute", {"name": "ui-bridge-hook", "arguments": []}
+                )
+                self.assertNotIn("error", response)
+                self.assertEqual(
+                    ["input/request", "confirmation/request"],
+                    [message["method"] for message in host_requests],
+                )
+                self.assertEqual(
+                    ["bridge input (placeholder)", "bridge confirm"],
+                    [message["params"]["prompt"] for message in host_requests],
+                )
+                self.assertIn("bridge notification", bridge.notifications())
+                self.assertTrue(
+                    any(
+                        message.get("method") == "ui/contribution"
+                        and message.get("params", {}).get("key") == "bridge-ui"
+                        and message.get("params", {}).get("text") == "active"
+                        for message in bridge.messages
+                    )
+                )
+                shutdown = bridge.request("shutdown")
+                self.assertEqual({}, shutdown["result"])
+                self.assertTrue(
+                    any(
+                        message.get("method") == "ui/contribution"
+                        and message.get("params", {}).get("key") == "bridge-ui"
+                        and message.get("params", {}).get("text") is None
+                        for message in bridge.messages
+                    )
+                )
+
+
 @unittest.skipUnless(NODE, "node is required for the API 0.3 bridge subprocess tests")
 class Api03ProviderBridgeTests(unittest.TestCase):
     def provider_bridge(

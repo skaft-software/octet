@@ -415,10 +415,10 @@ fn canonical_uri(url: &url::Url) -> String {
         return "/".to_owned();
     }
 
-    // `Url::path()` is already percent-encoded (for example, the model ID's
-    // `:` is represented as `%3A`). SigV4 canonicalization must encode the
-    // decoded path segments once, otherwise the literal `%` is encoded again
-    // and the signature no longer covers the bytes sent by reqwest.
+    // `Url::path_segments()` retains percent escapes from the prepared URL.
+    // Standard SigV4 URI-encodes that path again: wire `%3A` becomes canonical
+    // `%253A`. This is signing input, not a rewrite of the transmitted URL.
+    // See botocore 1.35.99 SigV4Auth::_normalize_url_path (safe='/~').
     let Some(segments) = url.path_segments() else {
         return aws_uri_encode(path, false);
     };
@@ -1284,8 +1284,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            canonical_uri(&url),
+            url.path(),
             "/model/anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse-stream"
+        );
+        assert_eq!(
+            canonical_uri(&url),
+            "/model/anthropic.claude-3-7-sonnet-20250219-v1%253A0/converse-stream"
         );
         assert_eq!(
             canonical_query(&url),
@@ -1301,14 +1305,12 @@ mod tests {
             http::HeaderValue::from_static("application/json"),
         );
         let signed = signer
-            .sign(
-                &SigningRequest::new(
-                    http::Method::POST,
-                    url.clone(),
-                    body.clone(),
-                    headers.clone(),
-                ),
-            )
+            .sign(&SigningRequest::new(
+                http::Method::POST,
+                url.clone(),
+                body.clone(),
+                headers.clone(),
+            ))
             .await
             .unwrap();
         assert_eq!(

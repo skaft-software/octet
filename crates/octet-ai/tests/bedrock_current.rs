@@ -28,9 +28,14 @@ fn fixture_auth() -> Auth {
     .unwrap();
     let signer = AwsSigV4Signer::new(credentials, "us-east-1", "bedrock")
         .unwrap()
-        .with_clock(Arc::new(|| {
-            UNIX_EPOCH + Duration::from_secs(1_700_000_000)
-        }));
+        .with_clock(Arc::new(|| UNIX_EPOCH + Duration::from_secs(1_700_000_000)));
+    let signer_debug = format!("{signer:?}");
+    assert!(signer_debug.contains("AwsSigV4Signer"));
+    assert!(signer_debug.contains("Secret(<redacted>)"));
+    assert!(!signer_debug.contains("fixture-access-key"));
+    assert!(!signer_debug.contains("fixture-secret-key"));
+    assert!(!signer_debug.contains("fixture-session-token"));
+
     Auth::request_signer(Arc::new(signer))
 }
 
@@ -195,16 +200,22 @@ async fn converse_stream_fixture_signs_exact_wire_body_and_preserves_usage() {
         &format!("{}/", server.uri()),
         "anthropic.claude-3-7-sonnet-20250219-v1:0",
     );
-    let mut stream = AiClient::new().stream(&model, text_request()).await.unwrap();
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event.unwrap());
     }
 
-    let response = events.iter().find_map(|event| match event {
-        StreamEvent::Finished(response) => Some(response),
-        _ => None,
-    }).expect("Bedrock fixture must finish");
+    let response = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Finished(response) => Some(response),
+            _ => None,
+        })
+        .expect("Bedrock fixture must finish");
     assert!(events.iter().any(|event| matches!(
         event,
         StreamEvent::TextDelta { delta, .. } if delta == "hello"
@@ -244,7 +255,12 @@ async fn converse_stream_fixture_signs_exact_wire_body_and_preserves_usage() {
         .unwrap();
     assert!(authorization.contains("Credential=fixture-access-key/"));
     assert!(authorization.contains("/us-east-1/bedrock/aws4_request"));
-    assert!(request.headers["x-amz-security-token"].is_sensitive());
+    // Wiremock reconstructs received HeaderValues from serialized bytes, so
+    // it cannot preserve the process-local sensitivity bit checked in auth.rs.
+    assert_eq!(
+        request.headers["x-amz-security-token"].to_str().unwrap(),
+        "fixture-session-token"
+    );
     assert_eq!(
         request.headers["accept"].to_str().unwrap(),
         "application/vnd.amazon.eventstream"
@@ -267,7 +283,10 @@ async fn converse_stream_without_message_stop_is_rejected() {
         .await;
 
     let model = bedrock_model(&format!("{}/", server.uri()), "fixture-model");
-    let mut stream = AiClient::new().stream(&model, text_request()).await.unwrap();
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
     assert!(matches!(
         stream.next().await,
         Some(Ok(StreamEvent::Started { .. }))
@@ -303,7 +322,10 @@ async fn converse_stream_exception_is_structured_without_live_aws() {
         .await;
 
     let model = bedrock_model(&format!("{}/", server.uri()), "fixture-model");
-    let mut stream = AiClient::new().stream(&model, text_request()).await.unwrap();
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
     let error = stream
         .next()
         .await
@@ -339,7 +361,10 @@ async fn converse_stream_crc_failure_is_terminal() {
         .await;
 
     let model = bedrock_model(&format!("{}/", server.uri()), "fixture-model");
-    let mut stream = AiClient::new().stream(&model, text_request()).await.unwrap();
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
     let mut failure = None;
     while let Some(event) = stream.next().await {
         match event {
@@ -404,11 +429,11 @@ async fn dropping_bedrock_stream_closes_the_response_without_replay() {
         }
     });
 
-    let model = bedrock_model(
-        &format!("http://{address}/"),
-        "fixture-model",
-    );
-    let mut stream = AiClient::new().stream(&model, text_request()).await.unwrap();
+    let model = bedrock_model(&format!("http://{address}/"), "fixture-model");
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
     assert!(matches!(
         stream.next().await,
         Some(Ok(StreamEvent::Started { .. }))

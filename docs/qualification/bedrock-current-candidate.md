@@ -11,8 +11,9 @@ focused qualification rather than changing the generic client or bootstrap:
 
 - The Bedrock codec serializes the completed route through `Url::set_path` after
   `path_segments_mut()` construction, so a model ID such as
-  `...v1:0` is prepared as the exact `%3A` path bytes sent on the wire. Existing
-  SigV4 canonical URI handling re-encodes decoded URL path segments once;
+  `...v1:0` is prepared as the exact `%3A` path bytes sent on the wire.
+  Standard SigV4 canonical URI handling encodes that prepared path again for signing
+  (`%3A` on the wire becomes `%253A` in the canonical URI), without changing the URL;
   canonical query ordering and the exact prepared body hash remain covered.
 
 - Bedrock usage now retains `cacheReadInputTokens` and `cacheWriteInputTokens` while
@@ -91,17 +92,18 @@ the existing authenticated/static catalog.
 ## Wire-path repair delta
 
 The ConverseStream fixture exposed a literal `:0` in the prepared model path, while
-its expected wire route and the existing SigV4 canonical-URI test use `%3A0`. The
-existing `path_segments_mut().push(...)` construction is retained for endpoint-path
+its expected wire route uses `%3A0`. The existing `path_segments_mut().push(...)` construction is retained for endpoint-path
 handling; after the route is complete, the codec sends the serialized path through
 `Url::set_path` with literal colons replaced by `%3A`. The URL setter preserves that
 existing escape, avoiding `%253A`.
 
-This keeps the prepared URL and `auth.rs:412-435`'s canonical URI aligned: the URL
-stores `%3A`, `path_segments()` exposes the decoded colon, and the signer encodes it
-once. The fixture's request body, body hash, signing, usage, security-token, and
-accept assertions remain unchanged. This repair does not edit `auth.rs`, the generic
-client, bootstrap, or catalog.
+The prepared URL and canonical signing input are intentionally different. The URL
+stores `%3A`; `path_segments()` preserves that escape, so standard SigV4 encodes its
+percent sign and signs `%253A`. The earlier claim that `path_segments()` decodes the
+colon was incorrect. The auth fixture now checks wire and canonical paths separately,
+consistent with [botocore 1.35.99's standard SigV4 path normalization](https://github.com/boto/botocore/blob/1.35.99/botocore/auth.py).
+This correction changes the assertion and explanation, not production signing or
+transport behavior. Body/hash, usage, security-token, and accept checks remain.
 
 No tests, builds, or other commands were run for this source-only repair, per the
 invocation constraint.

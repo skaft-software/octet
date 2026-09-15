@@ -1,0 +1,59 @@
+name: OctetCompanion
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  defaultConfig: Debug
+packages:
+  apple-shared:
+    path: ../apple-shared
+targets:
+  OctetCompanion:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/OctetCompanion
+      - path: Sources/OctetCompanionApp.swift
+    resources:
+      - path: Resources
+    dependencies:
+      - package: apple-shared
+        product: OctetServeClient
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.octet.companion
+        INFOPLIST_FILE: Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/OctetCompanion.entitlements
+        SWIFT_VERSION: "5.9"
+        SWIFT_STRICT_CONCURRENCY: targeted
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: false
+        ENABLE_TESTABILITY: true
+  OctetCompanionTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Tests/OctetCompanionTests
+    dependencies:
+      - target: OctetCompanion
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.octet.companion.tests
+        SWIFT_VERSION: "5.9"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/OctetCompanion.app/OctetCompanion"
+schemes:
+  OctetCompanion:
+    build:
+      targets:
+        OctetCompanion: all
+        OctetCompanionTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - OctetCompanionTests
+    archive:
+      config: Release
