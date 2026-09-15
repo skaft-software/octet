@@ -35,6 +35,8 @@ import {
   sep,
 } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createSemanticUiAdapter } from "./semantic_ui.mjs";
+import { createEditorHandoff } from "./editor_handoff.mjs";
 
 const API_VERSION_0_2 = "0.2";
 const API_VERSION_0_3 = "0.3";
@@ -166,6 +168,11 @@ const OPTIONAL_FEATURES = [
   "lifecycle_events",
   "dynamic_tools",
   "runtime_commands",
+  // Legacy feature selection only; not canonical API 0.3 authority.
+  "semantic_ui",
+  "editor_handoff",
+  "autocomplete",
+  "terminal_input",
 ];
 const LIFECYCLE_EVENTS = [
   "session/started",
@@ -514,13 +521,13 @@ function notifyHost(method, params) {
   return send({ jsonrpc: "2.0", method, params });
 }
 
-async function requestHost(method, params) {
+async function requestHost(method, params, options = {}) {
   if (isApiV03() && !bridge?.v03Contract?.methods?.includes(method)) {
     throw providerCapabilityError(`${method} is not selected by the API 0.3 contract`);
   }
   const scope = scopes.getStore();
-  const signal = scope?.signal;
-  if (signal?.aborted) throw new CancellationError();
+  const signal = options.signal ?? scope?.signal;
+  if (signal?.aborted || options.isCurrent?.() === false) throw new CancellationError();
 
   const id = `pi:${nextHostRequestId++}`;
   const request = {
@@ -534,6 +541,7 @@ async function requestHost(method, params) {
     rejectPending = rejectReply;
     pendingHostRequests.set(id, { resolve: resolveReply, reject: rejectReply });
   });
+  void promise.catch(() => {}); // cancellation may arrive while the write is queued
   const onAbort = () => {
     if (!pendingHostRequests.delete(id)) return;
     rejectPending(new CancellationError());
@@ -548,7 +556,8 @@ async function requestHost(method, params) {
 
   if (pendingHostRequests.has(id)) {
     try {
-      await send(request);
+      const written = await send(request, () => !signal?.aborted && options.isCurrent?.() !== false);
+      if (!written) onAbort();
     } catch (error) {
       pendingHostRequests.delete(id);
       signal?.removeEventListener("abort", onAbort);
@@ -618,7 +627,110 @@ function makeCompatibilityTheme() {
   });
 }
 
+// These are local adapter fences. The host stamps the actual process/session
+// resource owner on the wire; never transmit a fabricated host generation.
+function makeUiOwner() {
+  const root = bridge;
+  const owner = { closed: false, queued: 0, renderTimer: null };
+  root.uiOwner = owner;
+  const live = () => bridge === root && root.uiOwner === owner && !owner.closed;
+  owner.live = live;
+  owner.require = (feature, name) => {
+    if (isApiV03() || !root.features.has(feature)) unsupported(`ctx.ui.${name} (${feature} not negotiated)`);
+    if (!live()) throw new Error("Pi UI owner is stale or disposed");
+    if (scopes.getStore()?.signal?.aborted) throw new CancellationError();
+  };
+  owner.enqueue = (method, params) => {
+    if (!live()) throw new Error("Pi UI owner is stale or disposed");
+    const signal = scopes.getStore()?.signal;
+    if (signal?.aborted) throw new CancellationError();
+    if (owner.queued >= 128) throw new Error("Pi UI notification queue is full");
+    if (Buffer.byteLength(JSON.stringify(params)) > 128 * 1024) throw new Error("Pi UI notification exceeds its byte bound");
+    owner.queued += 1;
+    void send({ jsonrpc: "2.0", method, params }, () => live() && !signal?.aborted)
+      .catch((error) => boundedDiagnostic(`Pi UI send failed: ${error}`))
+      .finally(() => { owner.queued -= 1; });
+    return true;
+  };
+  if (!isApiV03() && root.features.has("semantic_ui")) {
+    owner.semantic = createSemanticUiAdapter({
+      apiVersion: API_VERSION_0_2,
+      admit: (contract) => contract.apiVersion === API_VERSION_0_2 && root.features.has(contract.feature),
+      owner: { sessionId: "pi-ui", extensionInstanceId: `pi-${process.pid}`, generation: ++root.uiGeneration },
+      isCurrent: live,
+      emitContribution: (params, context) => owner.enqueue(context.method, params),
+      diagnostic: ({ message }) => boundedDiagnostic(`Pi semantic UI: ${message}`),
+      requestRender() {
+        if (owner.renderTimer || owner.rendering) return;
+        owner.renderTimer = setImmediate(() => {
+          owner.renderTimer = null;
+          if (!live()) return;
+          owner.rendering = true;
+          try { owner.semantic.invalidate(); }
+          catch (error) { boundedDiagnostic(`Pi semantic UI render failed: ${error}`); }
+          finally { owner.rendering = false; }
+        });
+      },
+    });
+  }
+  if (!isApiV03() && (root.features.has("editor_handoff") || root.features.has("autocomplete"))) {
+    owner.editor = createEditorHandoff({
+      isCurrent: live, request: requestHost,
+      diagnostic: (error) => boundedDiagnostic(`Pi editor handoff: ${error}`),
+    });
+    if (root.features.has("editor_handoff")) {
+      setImmediate(() => {
+        if (live() && root.initialized) void owner.editor.refresh().catch(() => {});
+      });
+    }
+  }
+  return owner;
+}
+
+async function disposeBridgeUi() {
+  const root = bridge;
+  const owner = root?.uiOwner;
+  if (!owner) return;
+  if (owner.closed) return owner.disposal;
+  const snapshot = owner.semantic?.snapshot();
+  owner.closed = true; // fence queued sends and reentrant component disposal first
+  if (owner.renderTimer) clearImmediate(owner.renderTimer);
+  owner.semantic?.dispose();
+  owner.editor?.dispose();
+  // Bounded tombstones (at most 64 keyed entries + four shared surfaces).
+  // Unlike ordinary queued updates, these survive closing this owner, but not
+  // replacement of the bridge or its UI generation.
+  const clear = (method, params) => send({ jsonrpc: "2.0", method, params },
+    () => bridge === root && root.uiOwner === owner);
+  const pending = [];
+  if (snapshot) {
+    for (const key of Object.keys(snapshot.statuses)) pending.push(clear("ui/contribution", { kind: "status", key, text: null }));
+    for (const [key, widget] of Object.entries(snapshot.widgets)) pending.push(clear("ui/contribution", { kind: "widget", key, lines: null, placement: widget.placement }));
+    for (const surface of ["header", "footer"]) {
+      if (snapshot[surface]) pending.push(clear("status/contribution", { surface, text: "", style_role: "extension.pi.status", priority: 0 }));
+    }
+    pending.push(clear("ui/contribution", { kind: "working", message: null, visible: null, frames: null, interval_ms: null }));
+    pending.push(clear("ui/contribution", { kind: "hidden_thinking", label: null }));
+  }
+  owner.disposal = Promise.all(pending);
+  await owner.disposal;
+}
+
 function makeUi() {
+  const owner = makeUiOwner();
+  const semantic = (name, ...values) => {
+    owner.require("semantic_ui", name);
+    const surface = name === "setHeader" ? "header" : name === "setFooter" ? "footer" : null;
+    if (surface && !bridge.uiSurfaces.has(surface)) unsupported(`ctx.ui.${name} (${surface} surface not declared)`);
+    return owner.semantic[name](...values);
+  };
+  const editor = (name, ...values) => {
+    owner.require(name === "addAutocompleteProvider" ? "autocomplete" : "editor_handoff", name);
+    // Provider registration outlives the tool request that installed it; its
+    // lifetime is fenced by the editor owner, not that transient request scope.
+    const signal = name === "addAutocompleteProvider" ? undefined : scopes.getStore()?.signal;
+    return owner.editor[name](...values, signal);
+  };
   return {
     theme: makeCompatibilityTheme(),
     async select(title, options) {
@@ -659,6 +771,7 @@ function makeUi() {
       return unsupported("ctx.ui.onTerminalInput");
     },
     setStatus(key, text) {
+      if (owner.semantic) return semantic("setStatus", key, text);
       if (isApiV03()) unsupported("ctx.ui.setStatus (API 0.3 does not negotiate UI surfaces)");
       return send({
         jsonrpc: "2.0",
@@ -671,50 +784,29 @@ function makeUi() {
         },
       });
     },
-    setWorkingMessage() {
-      return unsupported("ctx.ui.setWorkingMessage");
-    },
-    setWorkingVisible() {
-      return unsupported("ctx.ui.setWorkingVisible");
-    },
-    setWorkingIndicator() {
-      return unsupported("ctx.ui.setWorkingIndicator");
-    },
-    setHiddenThinkingLabel() {
-      return unsupported("ctx.ui.setHiddenThinkingLabel");
-    },
-    setWidget() {
-      return unsupported("ctx.ui.setWidget");
-    },
-    setFooter() {
-      return unsupported("ctx.ui.setFooter");
-    },
-    setHeader() {
-      return unsupported("ctx.ui.setHeader");
-    },
+    setWorkingMessage: (...values) => semantic("setWorkingMessage", ...values),
+    setWorkingVisible: (...values) => semantic("setWorkingVisible", ...values),
+    setWorkingIndicator: (...values) => semantic("setWorkingIndicator", ...values),
+    setHiddenThinkingLabel: (...values) => semantic("setHiddenThinkingLabel", ...values),
+    setWidget: (...values) => semantic("setWidget", ...values),
+    setFooter: (...values) => semantic("setFooter", ...values),
+    setHeader: (...values) => semantic("setHeader", ...values),
     setTitle() {
       return unsupported("ctx.ui.setTitle");
     },
     custom() {
       return unsupported("ctx.ui.custom");
     },
-    pasteToEditor() {
-      return unsupported("ctx.ui.pasteToEditor");
-    },
-    setEditorText() {
-      return unsupported("ctx.ui.setEditorText");
-    },
-    getEditorText() {
-      return unsupported("ctx.ui.getEditorText");
-    },
-    addAutocompleteProvider() {
-      return unsupported("ctx.ui.addAutocompleteProvider");
-    },
+    pasteToEditor: (value) => editor("pasteToEditor", value),
+    setEditorText: (value) => editor("setEditorText", value),
+    getEditorText: () => editor("getEditorText"),
+    addAutocompleteProvider: (factory) => editor("addAutocompleteProvider", factory),
     setAutocompleteProvider() {
       return unsupported("ctx.ui.setAutocompleteProvider");
     },
-    setEditorComponent() {
-      return unsupported("ctx.ui.setEditorComponent");
+    setEditorComponent(factory) {
+      if (factory !== undefined) return unsupported("ctx.ui.setEditorComponent (replacement editors)");
+      return editor("focus");
     },
     getEditorComponent() {
       return unsupported("ctx.ui.getEditorComponent");
@@ -3148,6 +3240,8 @@ async function loadBridge(params, v03Selection = undefined) {
     toolRefreshRequested: false,
     catalogRevision: 0,
     features: new Set(REQUIRED_FEATURES),
+    uiSurfaces: new Set(params.contributes?.ui ?? []),
+    uiGeneration: 0,
     terminal: {
       pendingCompletedTurn: null,
       pendingAgentMessages: null,
@@ -3289,6 +3383,7 @@ async function handleInitialize(message) {
   }
   const params = message.params ?? {};
   const v03Selection = isApiV03() ? selectV03Contract(params) : undefined;
+  await disposeBridgeUi();
   await loadBridge(params, v03Selection);
   // This bridge selects the offered frame limit exactly, so the bootstrap and
   // selected limits agree while the initialize response is serialized.
@@ -3598,10 +3693,12 @@ async function emitSessionShutdown() {
 
 async function handleLifecycle(method, params) {
   if (method === "session/started") {
+    if (bridge.uiOwner?.closed) bridge.runner.setUIContext(makeUi(), "rpc");
     bridge.terminal.sessionShutdown = false;
     await bridge.runner.emit({ type: "session_start", reason: "startup" });
   } else if (method === "session/settled") {
-    await emitSessionShutdown();
+    try { await emitSessionShutdown(); }
+    finally { await disposeBridgeUi(); }
   } else if (method === "turn/started") {
     bridge.agentActive = true;
     bridge.terminal.pendingCompletedTurn = null;
@@ -3677,6 +3774,35 @@ async function handleRequest(message) {
     throw v03ProtocolError("unknown_method", `method ${message.method} is unavailable`);
   }
   updateHostStateFromMessage(message);
+  if (["ui/editor-state", "ui/resize", "ui/terminal-input"].includes(message.method) && message.id !== undefined) {
+    throw new Error(`${message.method} must be a notification`);
+  }
+  if (message.method === "ui/editor-state") {
+    bridge.uiOwner.require("editor_handoff", "editor-state");
+    bridge.uiOwner.editor.observe(message.params);
+    return null;
+  }
+  if (message.method === "ui/resize") {
+    bridge.uiOwner.require("terminal_input", "resize");
+    const { columns, rows } = message.params ?? {};
+    if (![columns, rows].every((value) => Number.isInteger(value) && value >= 0 && value <= 65535)
+      || Object.keys(message.params).some((key) => !["columns", "rows"].includes(key))) throw new Error("invalid host terminal resize");
+    bridge.uiOwner.semantic?.resize(Math.max(1, columns));
+    return null;
+  }
+  if (message.method === "ui/terminal-input") {
+    bridge.uiOwner.require("terminal_input", "terminal-input");
+    const params = message.params;
+    if (!params || typeof params.data !== "string" || Object.keys(params).some((key) => key !== "data")
+      || Buffer.byteLength(params.data) > 256 || params.data.includes("\x1b")) throw new Error("invalid normalized terminal input");
+    // No raw input or input-consuming Pi hooks are exposed by this packet.
+    return null;
+  }
+  if (message.method === "ui/autocomplete/complete") {
+    bridge.uiOwner.require("autocomplete", "autocomplete");
+    if (message.id === undefined) throw new Error("autocomplete completion must be a request");
+    return bridge.uiOwner.editor.complete(message.params, currentScope().signal);
+  }
   if (LIFECYCLE_EVENTS.includes(message.method)) {
     await handleLifecycle(message.method, message.params ?? {});
     return null;
@@ -3686,7 +3812,8 @@ async function handleRequest(message) {
   if (message.method === "hook/run") return runHook(message);
   if (message.method === "context/collect") return collectContext(message);
   if (message.method === "shutdown") {
-    await emitSessionShutdown();
+    try { await emitSessionShutdown(); }
+    finally { await disposeBridgeUi(); }
     return {};
   }
   if (message.method === "$/cancelRequest") {
@@ -3885,7 +4012,15 @@ function dispatchIncoming(message) {
     if (resumesV03Input) resumeV03InputAfterInitialize();
   };
   if (isRequest && !reserveV03IncomingRequest(message)) return;
-  if (isResponse || isCancellation) {
+  if (!isApiV03() && ["shutdown", "session/settled", "initialize"].includes(message?.method)) {
+    // Fence callbacks/queued writes and release editor waits before joining the
+    // ordered command/lifecycle lane, which may itself be awaiting the editor.
+    void disposeBridgeUi().catch((error) => boundedDiagnostic(`Pi UI disposal failed: ${error}`));
+  }
+  const isUiObservation = !isApiV03() && bridge?.initialized && [
+    "ui/editor-state", "ui/resize", "ui/terminal-input", "ui/autocomplete/complete",
+  ].includes(message?.method);
+  if (isResponse || isCancellation || isUiObservation) {
     void onMessage(message)
       .catch((error) => boundedDiagnostic(`Pi compatibility dispatch failed: ${error}`))
       .finally(finish);
@@ -4036,6 +4171,13 @@ process.stdin.on("end", () => {
 });
 process.stdin.on("close", () => {
   if (inputProtocolFailed) process.exit(1);
+});
+process.on("exit", () => {
+  const owner = bridge?.uiOwner;
+  if (!owner) return;
+  owner.closed = true;
+  owner.semantic?.dispose();
+  owner.editor?.dispose();
 });
 process.on("uncaughtException", (error) => diagnostic(`Pi compatibility uncaught exception: ${error.stack ?? error}`));
 process.on("unhandledRejection", (error) => diagnostic(`Pi compatibility unhandled rejection: ${error}`));

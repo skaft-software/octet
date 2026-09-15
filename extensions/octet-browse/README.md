@@ -45,6 +45,23 @@ Safe mode removes implicit trust and keeps it stopped even with explicit grants:
 executable startup still requires `unsafe_host`. It runs with your OS authority,
 not in a sandbox. Installing files starts nothing; skill activation is separate.
 
+## Use an explicitly injected browser connector
+
+Isolated, visible Chromium remains the default. Connecting to an already-running
+browser is opt-in and requires a host integration to register a connector before
+use. Browse never discovers browsers, enumerates processes, attaches to normal
+profiles, or substitutes a native Firefox/Safari backend. The model must provide
+the exact connector, browser, session, window, and tab identities; omitted or
+stale identities fail closed.
+
+Connector-backed browsing is mutually exclusive with the isolated browser. The
+same owner fencing, stale-target checks, capability checks, manual-auth boundary,
+navigation/download policy, bounded results, and cleanup rules still apply.
+Connector integrations must not expose credentials, cookies, storage, profile
+paths, or ambient browser discovery. See [connector registration](CONNECTORS.md)
+for the host contract and [the reference](REFERENCE.md#explicit-connectors) for
+the tool behavior.
+
 ## Work safely
 
 - Authentication stays manual in the visible window. The typing tool refuses
@@ -75,7 +92,9 @@ exactly octet `0.7.6` and `playwright==1.57.0`.
 
 - <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
 - <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.
-- <a id="tool-surface"></a>[Tool surface](REFERENCE.md#tool-surface): all 13 tools, targets, owner fencing, keys, and limits.
+- <a id="tool-surface"></a>[Tool surface](REFERENCE.md#tool-surface): all 17 tools, targets, owner fencing, keys, and limits.
+- <a id="explicit-connectors"></a>[Explicit connectors](REFERENCE.md#explicit-connectors): host-registered existing-browser targets and lifecycle tools.
+- <a id="connector-registration"></a>[Connector registration](CONNECTORS.md): the explicit injected-connector contract.
 - <a id="authentication-and-actions"></a>[Authentication and actions](REFERENCE.md#authentication-and-actions): confirmation and navigation policy.
 - <a id="untrusted-observations-and-screenshots"></a>[Untrusted observations and screenshots](REFERENCE.md#untrusted-observations-and-screenshots): redaction, retention, and the limited form-screenshot override.
 - <a id="owned-state-and-cleanup"></a>[Owned state and cleanup](REFERENCE.md#owned-state-and-cleanup): paths, locks, worker ownership, and shutdown.

@@ -43,8 +43,8 @@ use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
@@ -676,7 +676,11 @@ impl ProcessGroupGuard {
         #[cfg(not(windows))]
         {
             let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
-            terminate_registered_process_group(process_group_id, self.registration_id, libc_sigkill());
+            terminate_registered_process_group(
+                process_group_id,
+                self.registration_id,
+                libc_sigkill(),
+            );
         }
     }
 
@@ -1582,11 +1586,7 @@ fn libc_sigkill() -> i32 {
 }
 
 #[cfg(not(windows))]
-fn terminate_registered_process_group(
-    process_group_id: u64,
-    registration_id: u64,
-    signal: i32,
-) {
+fn terminate_registered_process_group(process_group_id: u64, registration_id: u64, signal: i32) {
     #[cfg(unix)]
     {
         refresh_registered_descendants();
@@ -4465,7 +4465,7 @@ pub enum ExtensionRuntimeError {
     /// A request was cooperatively cancelled before a terminal response.
     #[error("extension request `{method}` cancelled: {reason}")]
     Cancelled {
-        /// JSON-RPC method.
+        /// Original JSON-RPC request method, not the cancellation notification.
         method: String,
         /// Inspectable terminal reason.
         reason: String,
@@ -6557,7 +6557,7 @@ impl ExtensionProcess {
     /// any remainder without replaying them.
     pub async fn drain(&self, deadline: Duration) -> bool {
         let connection = read_std_lock(&self.inner.connection).clone();
-        connection.drain(deadline).await
+        connection.drain(deadline, "reload drain deadline").await
     }
 
     /// Restarts the process and atomically swaps it in after a successful
@@ -6954,7 +6954,9 @@ impl ExtensionProcess {
             "shutdown",
         )
         .await;
-        let _ = connection.drain(self.inner.config.shutdown_timeout).await;
+        let _ = connection
+            .drain(self.inner.config.shutdown_timeout, "shutdown")
+            .await;
         let graceful = connection.shutdown().await;
         self.inner
             .approval_store
@@ -8805,7 +8807,10 @@ impl ProcessConnection {
                 Err(_) => Err(PendingError::Closed("response channel closed".into())),
             };
             registration.disarm();
-            reply.map_err(pending_error)
+            // Pending cancellation carries a reason, while this future retains
+            // the admitted JSON-RPC method. Keep that provenance on shutdown or
+            // reload just as on the direct cancellation and timeout paths.
+            reply.map_err(|error| pending_error(error, method))
         };
         tokio::pin!(operation);
         let timed = tokio::time::timeout(timeout, &mut operation);
@@ -9126,7 +9131,7 @@ impl ProcessConnection {
                         .map_err(|_| {
                             ExtensionRuntimeError::Closed("extension writer closed".into())
                         })?
-                        .map_err(pending_error)?;
+                        .map_err(|error| pending_error(error, "request"))?;
                     return Ok(ChildResponseAdmission::Queued);
                 }
                 Err(CHILD_RESPONDING) => {
@@ -9184,10 +9189,10 @@ impl ProcessConnection {
         })
     }
 
-    async fn drain(self: &Arc<Self>, deadline: Duration) -> bool {
+    async fn drain(self: &Arc<Self>, deadline: Duration, cancellation_reason: &str) -> bool {
         let settled = self.quiesce(deadline).await;
         if !settled {
-            self.cancel_all_pending("reload drain deadline");
+            self.cancel_all_pending(cancellation_reason);
         } else {
             self.settle_artifacts();
         }
@@ -9591,7 +9596,9 @@ fn provider_protocol_name(protocol: Protocol) -> Option<&'static str> {
         // The API 0.3 extension-provider schema intentionally declares only
         // these three generic wire protocols. Do not coerce native host codecs
         // into a misleading generic route.
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi => None,
+        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi | Protocol::MistralConversations => {
+            None
+        }
     }
 }
 
@@ -12144,7 +12151,7 @@ async fn queue_api_v03_child_response(
                         result
                             .map_err(|_| "API 0.3 session lifecycle response write timed out".to_owned())?
                             .map_err(|_| "extension writer closed".to_owned())?
-                            .map_err(|error| pending_error(error).to_string())?;
+                            .map_err(|error| pending_error(error, "request").to_string())?;
                     }
                 };
                 return Ok(ChildResponseAdmission::Queued);
@@ -14565,12 +14572,12 @@ fn fail_all_pending(pending: &PendingRequests, pending_changed: &Notify, error: 
     pending_changed.notify_waiters();
 }
 
-fn pending_error(error: PendingError) -> ExtensionRuntimeError {
+fn pending_error(error: PendingError, method: &str) -> ExtensionRuntimeError {
     match error {
         PendingError::Closed(message) => ExtensionRuntimeError::Closed(message),
         PendingError::Protocol(message) => ExtensionRuntimeError::Protocol(message),
         PendingError::Cancelled(reason) => ExtensionRuntimeError::Cancelled {
-            method: "request".into(),
+            method: method.to_owned(),
             reason,
         },
         PendingError::Remote {
@@ -14949,6 +14956,54 @@ confirmations = true
             session_id: session_id.into(),
             extension_instance_id: "instance-test".into(),
             process_generation: 1,
+        }
+    }
+
+    #[test]
+    fn pending_cancellation_preserves_original_method_and_reason() {
+        for expected_method in [
+            methods::TOOL_CALL,
+            methods::COMMAND_EXECUTE,
+            methods::HOOK_RUN,
+        ] {
+            for expected_reason in ["shutdown", "reload drain deadline", "user"] {
+                let error = pending_error(
+                    PendingError::Cancelled(expected_reason.into()),
+                    expected_method,
+                );
+                match error {
+                    ExtensionRuntimeError::Cancelled { method, reason } => {
+                        assert_eq!(method, expected_method);
+                        assert_eq!(reason, expected_reason);
+                    }
+                    other => panic!("expected local cancellation, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_remote_cancellation_remains_a_remote_error() {
+        let data = serde_json::json!({"terminal": "cancelled", "reason": "remote"});
+        let error = pending_error(
+            PendingError::Remote {
+                code: -32800,
+                message: "request cancelled".into(),
+                data: Some(data.clone()),
+            },
+            methods::TOOL_CALL,
+        );
+        match error {
+            ExtensionRuntimeError::Remote {
+                code,
+                message,
+                data: actual_data,
+            } => {
+                assert_eq!(code, -32800);
+                assert_eq!(message, "request cancelled");
+                assert_eq!(actual_data, Some(data));
+            }
+            other => panic!("remote terminal error was reclassified: {other:?}"),
         }
     }
 
@@ -16362,6 +16417,7 @@ flags = [
         );
         assert_eq!(provider_protocol_name(Protocol::BedrockConverse), None);
         assert_eq!(provider_protocol_name(Protocol::GoogleGenerativeAi), None);
+        assert_eq!(provider_protocol_name(Protocol::MistralConversations), None);
     }
 
     #[test]
@@ -18645,8 +18701,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             .acquire_request_admission()
             .expect("admit before drain");
         let drain_connection = Arc::clone(&connection);
-        let mut drain =
-            tokio::spawn(async move { drain_connection.drain(Duration::from_secs(1)).await });
+        let mut drain = tokio::spawn(async move {
+            drain_connection
+                .drain(Duration::from_secs(1), "reload drain deadline")
+                .await
+        });
 
         assert!(
             tokio::time::timeout(Duration::from_millis(25), &mut drain)
@@ -18660,6 +18719,105 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             .expect("drain did not observe admission release")
             .expect("drain task failed"));
         assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_shutdown_preserves_each_pending_method_and_wire_envelope() {
+        let temp = TempDir::new().expect("tempdir");
+        let script_path = temp.path().join("cancel-methods.sh");
+        write_executable_script(
+            &script_path,
+            r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.1","tools":[],"commands":[]}}'
+IFS= read -r first
+IFS= read -r second
+printf '%s\n%s\n' "$first" "$second" > "$OCTET_WORKSPACE/requests.jsonl"
+IFS= read -r shutdown
+case "$shutdown" in
+  *'"method":"shutdown"'*) printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{}}' ;;
+  *) exit 23 ;;
+esac
+"#,
+        );
+        let descriptor = trusted_descriptor(
+            temp.path(),
+            minimal_manifest("cancel-methods", "cancel-methods.sh"),
+        );
+        let process = ExtensionProcess::start(descriptor, ExtensionRuntimeConfig::new(temp.path()))
+            .await
+            .expect("start process");
+        let connection = read_std_lock(&process.inner.connection).clone();
+        let methods = [methods::TOOL_CALL, methods::COMMAND_EXECUTE];
+        let calls = methods.map(|method| {
+            let connection = Arc::clone(&connection);
+            tokio::spawn(async move {
+                connection
+                    .request(
+                        method,
+                        serde_json::json!({"marker": method}),
+                        Duration::from_secs(5),
+                    )
+                    .await
+            })
+        });
+        // Wait for both writes, not a scheduling delay or just queued frames:
+        // cancellation may legitimately skip a frame not yet sent to the child.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let written = {
+                    let pending = lock_std_mutex(&connection.pending);
+                    pending.len() == 2
+                        && pending.values().all(|request| {
+                            request.frame_state.load(Ordering::Acquire) == FRAME_WRITTEN
+                        })
+                };
+                if written {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both requests must be written before shutdown");
+
+        assert!(process.shutdown().await);
+        for (expected_method, call) in methods.into_iter().zip(calls) {
+            match call.await.expect("request task") {
+                Err(ExtensionRuntimeError::Cancelled { method, reason }) => {
+                    assert_eq!(method, expected_method);
+                    assert_eq!(reason, "shutdown");
+                }
+                other => panic!("expected pending cancellation, got {other:?}"),
+            }
+        }
+        assert!(lock_std_mutex(&connection.pending).is_empty());
+
+        let captured = std::fs::read_to_string(temp.path().join("requests.jsonl"))
+            .expect("captured legacy requests");
+        let frames = captured
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("request envelope"))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["id"], 2);
+        assert_eq!(frames[1]["id"], 3);
+        for method in methods {
+            let frame = frames
+                .iter()
+                .find(|frame| frame["method"] == method)
+                .expect("original method on the wire");
+            assert_eq!(
+                *frame,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": frame["id"],
+                    "method": method,
+                    "params": {"marker": method},
+                })
+            );
+        }
     }
 
     #[cfg(unix)]

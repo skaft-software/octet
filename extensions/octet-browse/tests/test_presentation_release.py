@@ -18,6 +18,10 @@ PACKAGE = Path(__file__).resolve().parents[1]
 REPOSITORY = PACKAGE.parents[1]
 TOOLS = {
     "browser_status",
+    "browser_backend_select",
+    "browser_backend_revoke",
+    "browser_backend_stop",
+    "browser_backend_status",
     "browser_launch",
     "browser_tabs",
     "browser_open_url",
@@ -31,6 +35,13 @@ TOOLS = {
     "browser_tab_close",
     "browser_close",
 }
+BACKEND_TOOLS = {
+    "browser_backend_select",
+    "browser_backend_revoke",
+    "browser_backend_stop",
+    "browser_backend_status",
+}
+ISOLATED_SKILL_TOOLS = TOOLS - BACKEND_TOOLS
 
 
 class PresentationTests(unittest.TestCase):
@@ -225,7 +236,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("launch_persistent_context", worker_source)
         self.assertNotIn("headless=True", worker_source)
 
-    def test_packaged_skill_declares_all_tools_plus_read_and_limitation(self) -> None:
+    def test_packaged_skill_declares_isolated_tools_and_excludes_backend_admin(self) -> None:
         skill = (PACKAGE / "skills" / "octet-browse" / "SKILL.md").read_text(encoding="utf-8")
         required_section = skill.split("required-tools:", 1)[1].split("tags:", 1)[0]
         required = {
@@ -233,7 +244,8 @@ class PackageTests(unittest.TestCase):
             for line in required_section.splitlines()
             if line.strip().startswith("- ")
         }
-        self.assertEqual(required, TOOLS | {"read"})
+        self.assertEqual(required, ISOLATED_SKILL_TOOLS | {"read"})
+        self.assertTrue(required.isdisjoint(BACKEND_TOOLS))
         self.assertIn("Do not activate it for a partial or failed setup", skill)
         self.assertIn("refuses this skill invocation", skill)
         self.assertIn("BEGIN UNTRUSTED BROWSER CONTENT", skill)
@@ -352,7 +364,46 @@ class PackageTests(unittest.TestCase):
             messages = [json.loads(line) for line in process.stdout.splitlines() if line]
             by_id = {message.get("id"): message for message in messages if "id" in message}
             self.assertEqual(by_id[1]["result"]["api_version"], "0.2")
-            self.assertEqual({tool["name"] for tool in by_id[1]["result"]["tools"]}, TOOLS)
+            tools = {tool["name"]: tool for tool in by_id[1]["result"]["tools"]}
+            self.assertEqual(set(tools), TOOLS)
+            identity_properties = {
+                "connector_id",
+                "browser_id",
+                "session_id",
+                "window_id",
+                "tab_id",
+            }
+            backend_safety = {
+                "browser_backend_select": (
+                    "No browser discovery, enumeration, or native-browser substitution is performed."
+                ),
+                "browser_backend_revoke": "after rechecking its identity and owner claim.",
+                "browser_backend_stop": "when the injected connector exposes that capability.",
+            }
+            for name, safety_clause in backend_safety.items():
+                with self.subTest(tool=name):
+                    parameters = tools[name]["parameters"]
+                    self.assertEqual(parameters["type"], "object")
+                    self.assertEqual(
+                        set(parameters["properties"]),
+                        identity_properties | {"target_revision"},
+                    )
+                    self.assertEqual(set(parameters["required"]), identity_properties)
+                    self.assertFalse(parameters["additionalProperties"])
+                    self.assertIn(safety_clause, tools[name]["description"])
+                    self.assertIn(
+                        "stale revisions fail closed",
+                        parameters["properties"]["target_revision"]["description"],
+                    )
+            backend_status = tools["browser_backend_status"]
+            self.assertEqual(
+                backend_status["parameters"],
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            )
+            self.assertIn(
+                "without discovering browsers or returning connector internals.",
+                backend_status["description"],
+            )
             self.assertIn("Browse setup: not_set_up", by_id[2]["result"]["text"])
             self.assertEqual(by_id[3]["result"], {})
             self.assertFalse((Path(home) / ".octet" / "browse").exists())

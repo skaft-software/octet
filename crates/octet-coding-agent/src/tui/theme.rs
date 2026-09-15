@@ -1,8 +1,6 @@
 #![allow(missing_docs)]
 
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use octet_ai::{Model, ModelSpec};
@@ -13,7 +11,6 @@ use sexy_tui_rs::{
 };
 
 use crate::config::{ColorMode, Config};
-#[cfg(test)]
 use crate::resource_resolver::{ResourceKind, ResourceResolver};
 use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 use crate::tui::theme_schema::{self, ParsedTheme, RoleStyleSpec, ThemeSurface};
@@ -1579,17 +1576,15 @@ pub(crate) fn test_theme_source_with(
     .expect("renderer test theme should compile")
 }
 
-#[cfg(test)]
-fn project_theme_dir(config: &Config) -> PathBuf {
-    config.workspace.join(".octet").join("themes")
-}
-
-#[cfg(test)]
 fn theme_file_name(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty()
+        || name == "."
+        || name == ".."
         || Path::new(name).components().count() != 1
-        || name.contains(std::path::MAIN_SEPARATOR)
+        || name
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'\\' | b'\0'))
     {
         return None;
     }
@@ -1600,16 +1595,40 @@ fn theme_file_name(name: &str) -> Option<String> {
     })
 }
 
-/// Resolve a theme by name, preferring the workspace theme directory.
-#[cfg(test)]
-pub fn theme_path(name: &str, config: &Config) -> Option<PathBuf> {
-    let file_name = theme_file_name(name)?;
+fn discover_themes(config: &Config) -> crate::resource_resolver::ResourceSnapshot {
+    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+    resolver.discover(ResourceKind::Theme, &config.theme_paths)
+}
+
+/// Return best-effort diagnostics from the theme discovery pass. A diagnostic
+/// is inspectable by callers but never turns discovery into a startup error.
+pub fn theme_discovery_diagnostics(
+    config: &Config,
+) -> Vec<crate::resource_resolver::ResourceDiagnostic> {
+    discover_themes(config).diagnostics().to_vec()
+}
+
+fn resolved_theme_resource(
+    name: &str,
+    config: &Config,
+) -> anyhow::Result<(ResourceResolver, crate::resource_resolver::ResolvedResource)> {
+    let file_name =
+        theme_file_name(name).ok_or_else(|| anyhow::anyhow!("invalid theme name {name:?}"))?;
     let resource_name = file_name.strip_suffix(".toml").unwrap_or(&file_name);
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
-    resolver
-        .discover(ResourceKind::Theme, &config.theme_paths)
+    let snapshot = resolver.discover(ResourceKind::Theme, &config.theme_paths);
+    let resource = snapshot
         .get(resource_name)
-        .map(|resource| resource.path.clone())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("theme {name:?} was not discovered"))?;
+    Ok((resolver, resource))
+}
+
+/// Resolve a theme by name through the shared global/project/explicit resolver.
+pub fn theme_path(name: &str, config: &Config) -> Option<PathBuf> {
+    resolved_theme_resource(name, config)
+        .ok()
+        .map(|(_, resource)| resource.path)
 }
 
 fn read_theme_file_bounded(path: &Path) -> anyhow::Result<String> {
@@ -1855,10 +1874,17 @@ pub(crate) fn load_named_theme_for_background(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let capabilities = TerminalCapabilities::detect(config.color, config.plain);
-    if name.trim().eq_ignore_ascii_case(DEFAULT_THEME_NAME) {
+    if theme_file_name(name)
+        .as_deref()
+        .and_then(|file_name| file_name.strip_suffix(".toml"))
+        .is_some_and(|resource_name| resource_name.eq_ignore_ascii_case(DEFAULT_THEME_NAME))
+    {
         return Ok(default_theme_for(background, capabilities));
     }
-    anyhow::bail!("only the default theme is available")
+
+    let (resolver, resource) = resolved_theme_resource(name, config)?;
+    let source_text = resolver.read_text(&resource)?;
+    load_resolved_theme_for(&resource.path, &source_text, capabilities, background)
 }
 
 /// Load a named theme or return an error without altering the current theme.
@@ -1896,28 +1922,16 @@ pub fn load_theme(config: &Config) -> OctetTheme {
     load_theme_for_background(config, terminal_background())
 }
 
-#[cfg(test)]
-fn available_themes_from_dirs(global: &Path, project: &Path) -> Vec<String> {
-    let mut names = BTreeSet::new();
-    for directory in [global, project] {
-        if let Ok(entries) = std::fs::read_dir(directory) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str()) == Some("toml") {
-                    if let Some(name) = path.file_stem().and_then(|name| name.to_str()) {
-                        names.insert(name.to_owned());
-                    }
-                }
-            }
+/// Return the compiled default and all safe names selected by the shared
+/// resolver. Parsing is deferred to the loader so discovery stays best-effort.
+pub fn available_themes(config: &Config) -> Vec<String> {
+    let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
+    for resource in discover_themes(config).resources() {
+        if theme_file_name(&resource.name).is_some() {
+            names.insert(resource.name.clone());
         }
     }
     names.into_iter().collect()
-}
-
-/// Return the single theme exposed by the current runtime.
-#[allow(dead_code)]
-pub fn available_themes(_config: &Config) -> Vec<String> {
-    vec![DEFAULT_THEME_NAME.to_owned()]
 }
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
@@ -2134,39 +2148,40 @@ mod tests {
     }
 
     #[test]
-    fn project_theme_wins_and_available_themes_deduplicate() {
+    fn project_theme_is_discovered_loaded_and_names_are_deduplicated() {
         let directory = tempfile::tempdir().unwrap();
-        let config = config(directory.path().to_owned());
-        let project = project_theme_dir(&config);
-        let global = directory.path().join("global-themes");
+        let mut config = config(directory.path().to_owned());
+        let project = config.workspace.join(".octet/themes");
+        let explicit = directory.path().join("explicit-themes");
         std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&global).unwrap();
-        std::fs::write(project.join("project.toml"), "accent = 'blue'").unwrap();
-        std::fs::write(project.join("shared.toml"), "accent = 'green'").unwrap();
-        std::fs::write(global.join("global.toml"), "accent = 'red'").unwrap();
-        std::fs::write(global.join("shared.toml"), "accent = 'red'").unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::write(project.join("shared.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(explicit.join("custom.toml"), "accent = '#654321'").unwrap();
+        config.theme_paths.push(explicit);
+
         assert_eq!(
             theme_path("shared", &config),
-            Some(project.join("shared.toml").canonicalize().unwrap())
+            Some(project.canonicalize().unwrap().join("shared.toml"))
         );
+        let theme = load_named_theme("shared", &config).unwrap();
         assert_eq!(
-            available_themes_from_dirs(&global, &project),
-            vec![
-                "global".to_owned(),
-                "project".to_owned(),
-                "shared".to_owned()
-            ]
+            theme.resolve::<String>("accent").as_deref(),
+            Some("#123456")
         );
+
+        let names = available_themes(&config);
+        assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
+        assert!(names.contains(&"shared".to_owned()));
+        assert!(names.contains(&"custom".to_owned()));
+        assert_eq!(names.iter().filter(|name| *name == "shared").count(), 1);
     }
 
     #[test]
-    fn only_compiled_default_is_exposed() {
+    fn missing_and_legacy_names_keep_the_compiled_default_fallback() {
         let directory = tempfile::tempdir().unwrap();
         let config = config(directory.path().to_owned());
-        assert_eq!(
-            available_themes(&config),
-            vec![DEFAULT_THEME_NAME.to_owned()]
-        );
+        let names = available_themes(&config);
+        assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
         assert!(load_named_theme(DEFAULT_THEME_NAME, &config).is_ok());
         for name in ["legacy-theme", "custom"] {
             assert!(
@@ -2177,18 +2192,133 @@ mod tests {
 
         let custom_dir = directory.path().join("themes");
         std::fs::create_dir_all(&custom_dir).unwrap();
-        std::fs::write(custom_dir.join("custom.toml"), "accent = 'red'").unwrap();
+        std::fs::write(custom_dir.join("custom.toml"), "accent = '#123456'").unwrap();
         let mut configured = config;
         configured.theme_paths.push(custom_dir);
-        configured.theme = Some("legacy-theme".to_owned());
-        assert_eq!(
-            available_themes(&configured),
-            vec![DEFAULT_THEME_NAME.to_owned()]
+        configured.theme = Some("custom".to_owned());
+        assert!(available_themes(&configured).contains(&"custom".to_owned()));
+        assert!(
+            !load_theme_for_background(&configured, TerminalBackground::Unknown)
+                .is_compiled_default()
         );
+
+        configured.theme = Some("legacy-theme".to_owned());
         assert!(
             load_theme_for_background(&configured, TerminalBackground::Unknown)
                 .is_compiled_default()
         );
+    }
+
+    #[test]
+    fn malformed_and_oversized_named_themes_fall_back_without_startup_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("malformed.toml"), "[colors\naccent = '#123456'").unwrap();
+        std::fs::write(
+            themes.join("oversized.toml"),
+            vec![b' '; MAX_THEME_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let mut config = config(directory.path().to_owned());
+        config.theme_paths.push(themes);
+        for (name, expected_error) in [("malformed", ""), ("oversized", "too large")] {
+            config.theme = Some(name.to_owned());
+            let error = load_named_theme(name, &config).unwrap_err().to_string();
+            if !expected_error.is_empty() {
+                assert!(error.contains(expected_error), "{error}");
+            }
+            assert!(
+                load_theme_for_background(&config, TerminalBackground::Unknown)
+                    .is_compiled_default(),
+                "{name} must use the compiled fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_names_cannot_traverse_outside_discovered_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("safe.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(directory.path().join("outside.toml"), "accent = '#654321'").unwrap();
+        let mut config = config(directory.path().to_owned());
+        config.theme_paths.push(themes);
+
+        assert!(theme_path("safe", &config).is_some());
+        for name in [
+            "../outside",
+            r"..\outside",
+            "/tmp/outside",
+            "safe/../safe",
+            "..",
+        ] {
+            assert!(
+                theme_path(name, &config).is_none(),
+                "accepted unsafe name {name:?}"
+            );
+            assert!(
+                load_named_theme(name, &config).is_err(),
+                "loaded unsafe name {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_project_themes_are_not_selected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        config.workspace_trusted = false;
+        let project = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("untrusted-project.toml"), "accent = '#123456'").unwrap();
+
+        assert!(theme_path("untrusted-project", &config).is_none());
+        assert!(!available_themes(&config).contains(&"untrusted-project".to_owned()));
+        assert!(theme_discovery_diagnostics(&config)
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("workspace is not trusted") }));
+        config.theme = Some("untrusted-project".to_owned());
+        assert!(
+            load_theme_for_background(&config, TerminalBackground::Unknown).is_compiled_default()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_and_fifo_theme_candidates_are_not_selected() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        let target = directory.path().join("target.toml");
+        std::fs::write(&target, "accent = '#123456'").unwrap();
+        symlink(&target, themes.join("linked.toml")).unwrap();
+
+        let fifo = themes.join("pipe.toml");
+        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+
+        let mut config = config(directory.path().to_owned());
+        config.theme_paths.push(themes);
+        let names = available_themes(&config);
+        assert!(!names.contains(&"linked".to_owned()));
+        assert!(!names.contains(&"pipe".to_owned()));
+        assert!(theme_path("linked", &config).is_none());
+        assert!(theme_path("pipe", &config).is_none());
+        assert!(theme_discovery_diagnostics(&config)
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.path.ends_with("linked.toml")
+                    && diagnostic
+                        .message
+                        .contains("candidate must not be a symlink")
+            }));
     }
 
     #[test]

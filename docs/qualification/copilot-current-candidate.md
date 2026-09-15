@@ -46,8 +46,9 @@ Actual Octet API evidence read from this checkout:
   deterministic tests); userinfo, path, query, and fragment are rejected.
 - `CopilotProvider::register_models` calls host availability/exchange/discovery,
   uses `route_for_protocol`, and stages before catalog mutation.
-- `bootstrap.rs` explicitly skips `HostOwned` authentication, so standalone
-  bootstrap cannot silently advertise these models.
+- Generic preset bootstrap skips `HostOwned` authentication; the separate
+  authenticated coding-host adapter now contributes eligible models to shared
+  catalog construction without an environment/static preset.
 - `octet-ai` dynamic auth marks primary and extra headers sensitive and sanitizes
   provider error diagnostics; stream dropping is the cancellation boundary.
 
@@ -67,21 +68,27 @@ inference implementation. No Codex code was copied.
 
 ## Exact integration gap and gates
 
-The generic CLI, bootstrap, NDJSON host, client, and `octet-ai` auth files are
-read-only for this task. They do **not** invoke or register `CopilotProvider`.
-Therefore this candidate does not claim standalone `--login`, environment
-configuration, `octet-host`, or module-level tests as end-to-end Copilot login
-support. A future owner would need a typed embedding-host integration that owns
-GitHub device/OAuth endpoints, Enterprise policy, durable storage, and vetted
-inference-origin selection; the seam alone intentionally does not implement
-those wire endpoints.
+The [coding-host adapter candidate](copilot-host-current-candidate.md) owns
+GitHub.com's device/OAuth endpoints, private credential storage, vetted inference
+origins and dynamic catalog registration. Source CLI flag dispatch now supports
+`copilot`/`github-copilot`, and synchronous shared catalog construction calls the
+auth adapter. Existing native-host catalog/run callers inherit those models
+without any new auth command or OAuth field. TUI slash auth, custom Enterprise
+policy, full inventory/protocol/reasoning parity and native/live qualification
+remain open; source imports and authored fixtures do not close #249.
+
+Coordinator source review also made `availability` a fresh-credential boundary
+and serialized explicit exchange/refresh with resolver invalidation. The private
+provider unit fixtures cover failed, cancelled and invalidated replacement; the
+host fixtures cover fresh cache invalidation after local credential changes and
+rejected inference origins. These additional Rust fixtures are **UNRUN**.
 
 Still required:
 
 - Rust verifier execution of the dedicated test and existing provider unit tests
   (including compilation, formatting, and dependency/build checks);
-- completed-stack review and integration without changing read-only generic
-  surfaces;
+- completed-stack review and caller qualification while preserving native-host
+  and extension API authority boundaries;
 - live account-scoped model inventory/OAuth validation, explicitly outside
   ordinary CI; and
 - physical terminal/installed-host acceptance if the embedding integration is

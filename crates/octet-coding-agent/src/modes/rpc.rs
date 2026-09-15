@@ -395,6 +395,7 @@ fn protocol_name(protocol: &Protocol) -> &'static str {
         Protocol::AnthropicMessages => "anthropic-messages",
         Protocol::BedrockConverse => "bedrock-converse",
         Protocol::GoogleGenerativeAi => "google-generative-ai",
+        Protocol::MistralConversations => "mistral-conversations",
     }
 }
 

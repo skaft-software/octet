@@ -188,6 +188,13 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 AuthCommand::Logout => auth::codex::logout(&store).await,
             }
         }
+        "copilot" | "github-copilot" => {
+            let store = auth::copilot::CredentialStore::new(auth::copilot::default_path()?);
+            match command {
+                AuthCommand::Login { headless } => auth::copilot::login(&store, headless).await,
+                AuthCommand::Logout => auth::copilot::logout(&store).await,
+            }
+        }
         "custom" | "openai-custom" => {
             let store = auth::custom::CredentialStore::new(auth::custom::default_path());
             match command {
@@ -232,6 +239,6 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 }
             }
         }
-        other => anyhow::bail!("unknown provider {other:?}; supported: codex, custom"),
+        other => anyhow::bail!("unknown provider {other:?}; supported: codex, copilot, custom"),
     }
 }

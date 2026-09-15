@@ -278,6 +278,12 @@ pub(crate) struct ResponseBuilder {
     /// `response_id` so a first chunk with an empty/absent provider id does
     /// not re-arm the start gate.
     pub(crate) started: bool,
+    /// Request translation policy for native codecs with non-canonical output.
+    pub(crate) compatibility: crate::types::CompatibilityMode,
+    /// Native Conversations terminal latch survives `finish_mut` replacement.
+    pub(crate) mistral_finished: bool,
+    /// Highest native entry index first observed, fencing reordered tool effects.
+    pub(crate) mistral_last_output_index: Option<u64>,
 }
 
 impl ResponseBuilder {
@@ -316,6 +322,9 @@ impl ResponseBuilder {
             ended_indices: HashSet::with_capacity(4),
             next_canonical_index: 0,
             started: false,
+            compatibility: crate::types::CompatibilityMode::Strict,
+            mistral_finished: false,
+            mistral_last_output_index: None,
         }
     }
 

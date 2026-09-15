@@ -1,0 +1,7 @@
+{
+  "channel": "stable",
+  "bundleIdentifier": "com.octet.serve.macos",
+  "minimumOSVersion": "13.0",
+  "artifacts": [],
+  "note": "Populate only with a signed, notarized artifact and an independently verified SHA-256."
+}

@@ -847,6 +847,7 @@ async fn batch_http_request(
 
 struct HttpStreamRequest {
     model: Model,
+    compatibility: crate::types::CompatibilityMode,
     parts: crate::protocol::HttpRequestParts,
     headers: http::HeaderMap,
     requested_audio_format: Option<crate::types::AudioFormat>,
@@ -1071,6 +1072,7 @@ async fn stream_http(
 ) -> Result<ResponseStream, AiError> {
     let HttpStreamRequest {
         model,
+        compatibility,
         parts,
         mut headers,
         requested_audio_format,
@@ -1256,6 +1258,7 @@ async fn stream_http(
                 model_clone.spec.protocol,
                 model_clone.spec.pricing.clone()
             );
+            builder.compatibility = compatibility;
             builder.set_tool_definitions(&tool_definitions)?;
             builder.set_buffer_ambiguous_compatibility_content(
                 buffer_ambiguous_compatibility_content,
@@ -1418,6 +1421,7 @@ async fn stream_http(
                                 Protocol::OpenAiResponses => crate::protocol::openai_responses::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::BedrockConverse => unreachable!("Bedrock uses AWS Event Stream, not SSE"),
                                 Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
+                                Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
                             }
                             .map_err(|error| {
                                 annotate_stream_failure(
@@ -1513,6 +1517,7 @@ async fn stream_http(
                                 Protocol::OpenAiResponses => crate::protocol::openai_responses::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::BedrockConverse => unreachable!("Bedrock uses AWS Event Stream, not SSE"),
                                 Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
+                                Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
                             }
                             .map_err(|error| {
                                 annotate_stream_failure(
@@ -2109,6 +2114,9 @@ impl AiClient {
             }
             Protocol::BedrockConverse => crate::protocol::bedrock::build_request(model, &req)?,
             Protocol::GoogleGenerativeAi => crate::protocol::google::build_request(model, &req)?,
+            Protocol::MistralConversations => {
+                crate::protocol::mistral_conversations::build_request(model, &req)?
+            }
         };
 
         // Pre-send Lossy diagnostics (capability drops computed in `build_request`)
@@ -2159,6 +2167,7 @@ impl AiClient {
 
         let fallback_request = HttpStreamRequest {
             model: model.clone(),
+            compatibility: req.compatibility,
             parts,
             headers,
             requested_audio_format,

@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from octet_browse.adapters import AdapterRegistry
 from octet_browse.paths import BrowsePaths
 from octet_browse.profile import ProfileManager
 from octet_browse.safety import BrowseError, ResourceOwner
@@ -211,6 +212,7 @@ class BrowserActionSafetyTests(unittest.TestCase):
         self.engine.profiles = None
         self.engine._tab_id_factory = lambda: "tab_fixture"
         self.engine._playwright = object()
+        self.engine._context = None
         self.engine._profile_lease = None
         self.engine._context_closed = False
         self.engine._closing_context = False
@@ -223,6 +225,8 @@ class BrowserActionSafetyTests(unittest.TestCase):
         self.engine._download_events = 0
         self.engine._blocked_navigation = False
         self.engine._degraded = False
+        self.engine._adapters = AdapterRegistry()
+        self.engine._attached = None
 
     def _attach(self, page: FakePage) -> str:
         self.engine._context = FakeContext([page])
@@ -408,18 +412,31 @@ class BrowserActionSafetyTests(unittest.TestCase):
 
     def test_context_failure_closes_state_and_reports_degraded(self) -> None:
         class BrokenContext:
+            close_calls = 0
+
             @property
             def pages(self):
                 raise RuntimeError("browser crashed")
 
             def close(self):
-                pass
+                self.close_calls += 1
 
-        self.engine._context = BrokenContext()
+        self._attach(FakePage())
+        context = BrokenContext()
+        self.engine._context = context
         status = self.engine.status(self.operation(), self.owner)
         self.assertFalse(status["open"])
+        self.assertFalse(status["isolated_open"])
+        self.assertFalse(status["external_open"])
         self.assertTrue(status["degraded"])
         self.assertEqual(status["tabs"], [])
+        self.assertIsNone(status["selected_tab_id"])
+        self.assertEqual(context.close_calls, 1)
+        repeated = self.engine.status(self.operation(), self.owner)
+        self.assertFalse(repeated["open"])
+        self.assertTrue(repeated["degraded"])
+        self.assertIsNone(self.engine._context)
+        self.assertEqual(context.close_calls, 1)
 
     def test_owner_mismatch_cannot_enumerate_or_operate_tabs(self) -> None:
         page = FakePage()

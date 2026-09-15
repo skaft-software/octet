@@ -1,15 +1,13 @@
 #![allow(missing_docs)]
 
-use octet_sdk::provider::{
-    builtin_provider_definitions, ProviderAccess, ProviderCatalogKind,
-};
+use octet_sdk::provider::{builtin_provider_definitions, ProviderAccess, ProviderCatalogKind};
 
 #[test]
 fn google_and_vertex_declarations_keep_authentication_boundaries() {
     let definitions = builtin_provider_definitions();
     let google = definitions
         .iter()
-        .find(|definition| definition.id() == "google")
+        .find(|definition| definition.id() == "gemini")
         .expect("native Gemini declaration");
     assert!(matches!(
         google.authentication(),
@@ -19,7 +17,7 @@ fn google_and_vertex_declarations_keep_authentication_boundaries() {
 
     let vertex = definitions
         .iter()
-        .find(|definition| definition.id() == "google-vertex")
+        .find(|definition| definition.id() == "vertex")
         .expect("Vertex declaration");
     assert!(matches!(
         vertex.authentication(),
@@ -38,6 +36,9 @@ fn google_and_vertex_declarations_keep_authentication_boundaries() {
         "fixture-client",
         "fixture-refresh",
     ] {
-        assert!(!rendered.contains(forbidden), "definition leaked {forbidden}");
+        assert!(
+            !rendered.contains(forbidden),
+            "definition leaked {forbidden}"
+        );
     }
 }

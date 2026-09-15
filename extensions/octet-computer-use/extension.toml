@@ -1,0 +1,16 @@
+name = "octet-computer-use"
+version = "0.1.0"
+api_version = "0.3"
+requires_octet = "=0.7.6"
+description = "A source-only, host-authorized computer-use policy boundary"
+
+[entrypoint]
+command = "main.py"
+
+[capabilities]
+filesystem = "none"
+process = false
+network = false
+
+[contributes]
+tools = ["computer_use"]

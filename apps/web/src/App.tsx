@@ -76,6 +76,11 @@ import {
 } from "./components/ComposerCommands/goal";
 import { applyStoredTypePreferences } from "./theme";
 import {
+  GLOBAL_SHORTCUTS,
+  registerGlobalShortcuts,
+  type ShortcutAction,
+} from "./shortcuts";
+import {
   createTransport,
   type TransportConnectionState,
   transportModeFromSearch,
@@ -284,6 +289,54 @@ function ErrorState({
   );
 }
 
+const shortcutDescriptions: Record<ShortcutAction, string> = {
+  "new-session": "Start a new task",
+  "toggle-sidebar": "Show or hide the sidebar",
+  "open-settings": "Open settings",
+  "open-transcript-search": "Focus task and transcript search",
+  "open-projects": "Open projects",
+  "focus-model-picker": "Focus the model picker",
+  "close-overlay": "Close the active panel or overlay",
+};
+
+function ShortcutReference() {
+  return (
+    <details
+      className="shortcut-reference"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }}
+    >
+      <summary
+        aria-label="Keyboard shortcuts"
+        title="Keyboard shortcuts"
+      >
+        <span aria-hidden="true">?</span>
+      </summary>
+      <div
+        className="shortcut-reference-panel"
+        role="dialog"
+        aria-label="Keyboard shortcuts"
+      >
+        <strong>Keyboard shortcuts</strong>
+        <dl>
+          {GLOBAL_SHORTCUTS.map((shortcut) => (
+            <div key={shortcut.action}>
+              <dt>
+                <kbd>{shortcut.label}</kbd>
+              </dt>
+              <dd>{shortcutDescriptions[shortcut.action]}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </details>
+  );
+}
+
 interface HeaderProps {
   sidebarOpen: boolean;
   sessionId: string;
@@ -303,6 +356,7 @@ interface HeaderProps {
   sessionExportAvailable: boolean;
   activityButtonRef: RefObject<HTMLButtonElement | null>;
   sidebarButtonRef: RefObject<HTMLButtonElement | null>;
+  terminalButtonRef?: RefObject<HTMLButtonElement | null>;
   onOpenSidebar: () => void;
   onToggleActivity: () => void;
   onToggleTerminal: () => void;
@@ -331,6 +385,7 @@ export function SessionHeader({
   sessionExportAvailable,
   activityButtonRef,
   sidebarButtonRef,
+  terminalButtonRef,
   onOpenSidebar,
   onToggleActivity,
   onToggleTerminal,
@@ -354,8 +409,8 @@ export function SessionHeader({
       setMenuOpen(false);
       window.requestAnimationFrame(() => menuTriggerRef.current?.focus());
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [menuOpen]);
 
   const finishRename = (commit: boolean, restoreFocus: boolean) => {
@@ -380,6 +435,8 @@ export function SessionHeader({
             ref={sidebarButtonRef}
             className="icon-button open-sidebar"
             onClick={onOpenSidebar}
+            aria-keyshortcuts="Control+B"
+            title="Open sidebar (Ctrl+B)"
           >
             <Menu aria-hidden="true" />
             <span className="sr-only">Open sidebar</span>
@@ -416,6 +473,7 @@ export function SessionHeader({
       </div>
 
       <div className="session-header-actions">
+        <ShortcutReference />
         <GoalBadge
           goal={goal}
           working={status === "working" || status === "needs_attention"}
@@ -428,10 +486,12 @@ export function SessionHeader({
         </span>
         {terminalAvailable ? (
           <button
+            ref={terminalButtonRef}
             className={`icon-button ${terminalOpen ? "is-active" : ""}`}
             onClick={onToggleTerminal}
             aria-label={terminalOpen ? "Close terminal" : "Open terminal"}
             aria-pressed={terminalOpen}
+            title={terminalOpen ? "Close terminal" : "Open terminal"}
           >
             <SquareTerminal aria-hidden="true" />
           </button>
@@ -442,6 +502,7 @@ export function SessionHeader({
             className={`icon-button ${activityOpen ? "is-active" : ""}`}
             onClick={onToggleActivity}
             aria-label={activityOpen ? "Close activity" : "Open activity"}
+            title={activityOpen ? "Close activity" : "Open activity"}
           >
             <PanelRight aria-hidden="true" />
           </button>
@@ -578,10 +639,12 @@ function BranchHistorySheet({
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      onClose();
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [onClose]);
 
   return (
@@ -691,12 +754,15 @@ function UtilityTopbar({
           ref={sidebarButtonRef}
           className="icon-button"
           onClick={onOpenSidebar}
+          aria-keyshortcuts="Control+B"
+          title="Open sidebar (Ctrl+B)"
         >
           <Menu aria-hidden="true" />
           <span className="sr-only">Open sidebar</span>
         </button>
       ) : null}
       <strong>{title}</strong>
+      <ShortcutReference />
     </header>
   );
 }
@@ -752,6 +818,7 @@ export default function App() {
   });
   const activityButtonRef = useRef<HTMLButtonElement>(null);
   const sidebarButtonRef = useRef<HTMLButtonElement>(null);
+  const terminalButtonRef = useRef<HTMLButtonElement>(null);
   const inspectorCloseTimerRef = useRef<number | null>(null);
   const paneResizeCleanupRef = useRef<(() => void) | null>(null);
   const restoreActivityFocus = useCallback(() => {
@@ -761,6 +828,11 @@ export default function App() {
   }, []);
   const restoreSidebarFocus = useCallback(() => {
     const restore = () => sidebarButtonRef.current?.focus();
+    restore();
+    window.requestAnimationFrame(restore);
+  }, []);
+  const restoreTerminalFocus = useCallback(() => {
+    const restore = () => terminalButtonRef.current?.focus();
     restore();
     window.requestAnimationFrame(restore);
   }, []);
@@ -907,10 +979,14 @@ export default function App() {
     !delegatedSessionReadOnly && state.bootstrap?.capabilities.terminal,
   );
 
-  const closeTerminal = useCallback(() => {
-    setTerminalOpen(false);
-    persistBoolean(terminalPaneOpenStorageKey, false);
-  }, []);
+  const closeTerminal = useCallback(
+    (restoreFocus = false) => {
+      setTerminalOpen(false);
+      persistBoolean(terminalPaneOpenStorageKey, false);
+      if (restoreFocus) restoreTerminalFocus();
+    },
+    [restoreTerminalFocus],
+  );
 
   const visibleTerminalOpen =
     surface === "session" && terminalAvailable && terminalOpen;
@@ -930,6 +1006,111 @@ export default function App() {
     (branchHistoryOpen ||
       (!wideLayout && (visibleActivityOpen || Boolean(inspector))) ||
       (!terminalSplitLayout && visibleTerminalOpen));
+  const closeBranchHistory = useCallback(() => {
+    setBranchHistoryOpen(false);
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLButtonElement>('[aria-label="Task actions"]')
+        ?.focus();
+    });
+  }, []);
+
+  const focusSidebarSearch = useCallback(() => {
+    if (branchHistoryOpen) setBranchHistoryOpen(false);
+    if (mobileLayout) {
+      if (inspector) closeInspector();
+      if (visibleActivityOpen) closeActivity();
+      if (visibleTerminalOpen) closeTerminal();
+    }
+    setSidebarOpen(true);
+    const focus = () => {
+      const search = document.querySelector<HTMLInputElement>(
+        ".sidebar-search input",
+      );
+      if (!search || search.closest("[inert]")) return;
+      search.focus();
+    };
+    focus();
+    window.requestAnimationFrame(() => {
+      focus();
+      window.requestAnimationFrame(focus);
+    });
+  }, [
+    branchHistoryOpen,
+    closeActivity,
+    closeInspector,
+    closeTerminal,
+    inspector,
+    mobileLayout,
+    visibleActivityOpen,
+    visibleTerminalOpen,
+  ]);
+
+  const focusModelPicker = useCallback(() => {
+    if (surface !== "session" || modalWorkspaceOpen) return;
+    if (mobileLayout && sidebarOpen) closeSidebar();
+    const focus = () => {
+      const picker = document.querySelector<HTMLButtonElement>(
+        ".model-picker-trigger",
+      );
+      if (!picker || picker.disabled || picker.closest("[inert]")) return;
+      picker.focus();
+    };
+    window.requestAnimationFrame(() => {
+      focus();
+      window.requestAnimationFrame(focus);
+    });
+  }, [
+    closeSidebar,
+    mobileLayout,
+    modalWorkspaceOpen,
+    sidebarOpen,
+    surface,
+  ]);
+
+  const closeOverlay = useCallback(() => {
+    if (branchHistoryOpen) {
+      closeBranchHistory();
+      return;
+    }
+    if (inspector) {
+      closeInspector();
+      return;
+    }
+    if (visibleActivityOpen) {
+      closeActivity();
+      return;
+    }
+    if (visibleTerminalOpen) {
+      closeTerminal(true);
+      return;
+    }
+    if (mobileLayout && sidebarOpen) closeSidebar();
+  }, [
+    branchHistoryOpen,
+    closeActivity,
+    closeBranchHistory,
+    closeInspector,
+    closeSidebar,
+    closeTerminal,
+    inspector,
+    mobileLayout,
+    sidebarOpen,
+    visibleActivityOpen,
+    visibleTerminalOpen,
+  ]);
+
+  const hasClosableOverlay =
+    branchHistoryOpen ||
+    Boolean(inspector) ||
+    visibleActivityOpen ||
+    visibleTerminalOpen ||
+    (mobileLayout && sidebarOpen);
+  const canInterrupt = Boolean(
+    session?.activeRunId ||
+      session?.status === "working" ||
+      session?.status === "needs_attention",
+  );
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 760px)");
@@ -1376,6 +1557,51 @@ export default function App() {
       setSidebarOpen(false);
     }
   }, []);
+  useEffect(() => {
+    return registerGlobalShortcuts({
+      onAction: (action) => {
+        switch (action) {
+          case "new-session":
+            startNewSession();
+            break;
+          case "toggle-sidebar":
+            if (sidebarOpen) closeSidebar();
+            else setSidebarOpen(true);
+            break;
+          case "open-settings":
+            openSettings();
+            break;
+          case "open-transcript-search":
+            focusSidebarSearch();
+            break;
+          case "open-projects":
+            openProjects();
+            break;
+          case "focus-model-picker":
+            focusModelPicker();
+            break;
+          case "close-overlay":
+            if (hasClosableOverlay) closeOverlay();
+            else if (canInterrupt) void store.interrupt();
+            break;
+        }
+      },
+      isEnabled: (action) =>
+        action !== "close-overlay" || hasClosableOverlay || canInterrupt,
+    });
+  }, [
+    canInterrupt,
+    closeOverlay,
+    closeSidebar,
+    focusModelPicker,
+    focusSidebarSearch,
+    hasClosableOverlay,
+    openProjects,
+    openSettings,
+    sidebarOpen,
+    startNewSession,
+  ]);
+
   const submitSession = useCallback(
     (
       prompt: string,
@@ -1496,7 +1722,7 @@ export default function App() {
       store.writeProjectFile(projectId, request),
     [],
   );
-const getCommandDiscovery = useCallback(
+  const getCommandDiscovery = useCallback(
     () => store.getCommandDiscovery(),
     [],
   );
@@ -1544,9 +1770,10 @@ const getCommandDiscovery = useCallback(
     return store.forkConversation(entryId);
   }, [session?.branches.head]);
   const openRuntimeStatus = useCallback(() => {
+    closeTerminal();
     setInspector(null);
     setActivityOpen(true);
-  }, []);
+  }, [closeTerminal]);
 
   const editUserTurn = useCallback(
     (entryId: string, text: string) =>
@@ -1701,6 +1928,7 @@ const getCommandDiscovery = useCallback(
             }
             activityButtonRef={activityButtonRef}
             sidebarButtonRef={sidebarButtonRef}
+            terminalButtonRef={terminalButtonRef}
             onOpenSidebar={() => setSidebarOpen(true)}
             onToggleActivity={() => {
               closeTerminal();
@@ -1778,13 +2006,13 @@ const getCommandDiscovery = useCallback(
                 ? "Command center"
                 : surface === "settings"
                   ? "Settings"
-                : surface === "projects"
-                  ? "Projects"
-                  : surface === "files"
-                    ? "Files"
-                    : surface === "usage"
-                      ? "Usage"
-                      : "Connected devices"
+                  : surface === "projects"
+                    ? "Projects"
+                    : surface === "files"
+                      ? "Files"
+                      : surface === "usage"
+                        ? "Usage"
+                        : "Connected devices"
             }
             sidebarOpen={sidebarOpen}
             onOpenSidebar={() => setSidebarOpen(true)}
@@ -1962,7 +2190,7 @@ const getCommandDiscovery = useCallback(
       {surface === "session" && session && branchHistoryOpen ? (
         <BranchHistorySheet
           session={session}
-          onClose={() => setBranchHistoryOpen(false)}
+          onClose={closeBranchHistory}
           onCheckout={(entryId) => store.checkoutBranch(entryId)}
         />
       ) : null}

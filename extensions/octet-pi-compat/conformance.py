@@ -10,19 +10,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+from dataclasses import dataclass
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
-import select
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
-import time
+from typing import Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
@@ -50,10 +50,153 @@ VERSION = "0.84.4"
 SKIP = {".git", ".pytest_cache", "__pycache__", "node_modules", "target"}
 MAX_FILES, MAX_ENTRIES, MAX_DEPTH, MAX_BYTES = 4096, 8192, 64, 64 * 1024 * 1024
 MAX_TARBALL_BYTES = 128 * 1024 * 1024
+PERSISTENT_TEMP_ROOT = Path("/var/tmp")
+STANDARD_RUNTIME_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 class GateFailure(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class NetworkBackend:
+    """An explicitly selected Linux launcher, never an environment marker."""
+
+    name: str
+    executable: str
+    evidence_name: str
+
+    def command(
+        self,
+        child: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        writable_dir: Path,
+        read_only_paths: Sequence[Path],
+    ) -> list[str]:
+        if self.name == "unshare":
+            return [self.executable, "--net", "--", *child]
+        return build_bubblewrap_command(
+            self.executable,
+            child,
+            cwd=cwd,
+            env=env,
+            writable_dir=writable_dir,
+            read_only_paths=read_only_paths,
+        )
+
+
+def _absolute_mount_path(path: Path | str) -> str:
+    return os.path.abspath(os.fspath(path))
+
+
+def _mount_parent_directories(destinations: Sequence[str]) -> list[str]:
+    """Create only parents needed by selected file/directory destinations."""
+    protected = {
+        "/",
+        "/bin",
+        "/dev",
+        "/lib",
+        "/lib64",
+        "/proc",
+        "/sbin",
+        "/tmp",
+        "/usr",
+        "/var",
+    }
+    parents: set[str] = set()
+    for destination in destinations:
+        current = Path(destination).parent
+        while str(current) not in protected and str(current) != "/":
+            parents.add(str(current))
+            current = current.parent
+    return sorted(parents, key=lambda value: (len(Path(value).parts), value))
+
+
+def build_bubblewrap_command(
+    executable: str | Path,
+    child: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    writable_dir: Path,
+    read_only_paths: Sequence[Path],
+) -> list[str]:
+    """Build a minimal Bubblewrap command for one selected real-runtime child.
+
+    No host root, home, run directory, or host proc is bound.  Bubblewrap creates
+    its own `/dev` and `/proc`; only the selected package/source/bridge/runtime
+    paths and ordinary OS runtime directories are visible to the child.
+    """
+    if not child:
+        fail("selected network backend received an empty child command")
+    writable = _absolute_mount_path(writable_dir)
+    cwd_path = _absolute_mount_path(cwd)
+    selected: list[str] = []
+    for path in [*read_only_paths, Path(child[0]) if os.path.isabs(str(child[0])) else None]:
+        if path is None:
+            continue
+        value = _absolute_mount_path(path)
+        if value not in selected:
+            selected.append(value)
+    os_runtime = ("/usr", "/bin", "/sbin", "/lib", "/lib64")
+    mounts: list[str] = []
+    seen_destinations: set[str] = set()
+    for path in [*os_runtime, *selected]:
+        source = _absolute_mount_path(path)
+        destination = source
+        if destination in seen_destinations:
+            continue
+        if path in os_runtime and not Path(source).exists():
+            continue
+        seen_destinations.add(destination)
+        mounts.extend((source, destination))
+
+    destinations = [destination for _, destination in zip(mounts[::2], mounts[1::2], strict=True)]
+    destinations.extend((writable, cwd_path))
+    command = [
+        _absolute_mount_path(executable),
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-net",
+        "--clearenv",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+    ]
+    directories = set(_mount_parent_directories(destinations))
+    directories.update((writable, cwd_path))
+    for directory in sorted(directories, key=lambda value: (len(Path(value).parts), value)):
+        command.extend(("--dir", directory))
+    command.extend(("--bind", writable, writable))
+    for source, destination in zip(mounts[::2], mounts[1::2], strict=True):
+        command.extend(("--ro-bind", source, destination))
+    command.extend(("--chdir", cwd_path))
+    for key, value in sorted(env.items()):
+        command.extend(("--setenv", str(key), str(value)))
+    command.extend(("--", *map(str, child)))
+    return command
+
+
+def select_network_backend(requested: str | None = None) -> NetworkBackend:
+    """Resolve the requested launcher before any source is loaded."""
+    if not sys.platform.startswith("linux"):
+        fail("--full requires Linux network isolation")
+    selected = (requested or "unshare").lower()
+    if selected == "bwrap":
+        selected = "bubblewrap"
+    if selected not in {"unshare", "bubblewrap"}:
+        fail(f"unknown Linux network backend {requested!r}")
+    program = "unshare" if selected == "unshare" else "bwrap"
+    executable = shutil.which(program)
+    if not executable or not os.access(executable, os.X_OK):
+        fail(f"--full requires selected {selected} launcher {program!r} on PATH")
+    evidence_name = "linux_unshare_net" if selected == "unshare" else "linux_bubblewrap_unshare_net"
+    return NetworkBackend(selected, executable, evidence_name)
 
 
 def fail(message: str):
@@ -766,62 +909,104 @@ def link_identity(
     return digest.hexdigest()
 
 
-def load_source(node: str, package: Path, checkout: Path, extension: Path, digest: str, env):
-    unshare = shutil.which("unshare")
-    if not sys.platform.startswith("linux") or not unshare:
-        fail("--full requires Linux unshare --net")
-    command = [unshare, "--net", "--", node, str(BRIDGE), "--pi-package", str(package), "--extension", str(extension), "--source-fingerprint", digest]
-    initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"workspace": str(checkout), "host": {}, "protocol": {"optional_features": ["runtime_commands"]}}}
-    shutdown = {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}}
-    process = None
+def _persistent_temp_directory(prefix: str):
+    root = PERSISTENT_TEMP_ROOT
     try:
-        process = subprocess.Popen(
-            command, cwd=checkout, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
-        )
-        assert process.stdin is not None and process.stdout is not None
-        process.stdin.write(json.dumps(initialize) + "\n")
-        process.stdin.flush()
-        response = None
-        deadline = time.monotonic() + 20
-        while response is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
-                fail(f"{extension} timed out while loading")
-            line = process.stdout.readline()
-            if not line:
-                stderr = process.stderr.read() if process.stderr is not None else ""
-                fail(f"{extension} exited before initialize response; stderr={stderr[-3000:]!r}")
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                fail(f"{extension} wrote non-JSON protocol stdout")
-            if isinstance(message, dict) and message.get("id") == 1 and "method" not in message:
-                response = message
-            elif isinstance(message, dict) and message.get("method"):
-                fail(f"{extension} requested host method {message['method']!r} during hermetic initialization")
+        metadata = root.lstat()
+    except OSError as error:
+        fail(f"persistent runtime temp root {root} is unavailable: {error}")
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        fail(f"persistent runtime temp root {root} must be a real directory")
+    try:
+        context = tempfile.TemporaryDirectory(prefix=prefix, dir=str(root))
+    except OSError as error:
+        fail(f"cannot create runtime state below {root}: {error}")
+    actual = Path(context.name).resolve()
+    expected_root = root.resolve()
+    try:
+        rooted = os.path.commonpath((str(actual), str(expected_root))) == str(expected_root)
+    except ValueError:
+        rooted = False
+    if not rooted:
+        context.cleanup()
+        fail(f"runtime temp directory escaped {root}")
+    return context
+
+
+def load_source(
+    node: str,
+    package: Path,
+    checkout: Path,
+    extension: Path,
+    digest: str,
+    env: Mapping[str, str],
+    backend: NetworkBackend,
+):
+    command = backend.command(
+        [
+            node,
+            str(BRIDGE),
+            "--pi-package",
+            str(package),
+            "--extension",
+            str(extension),
+            "--source-fingerprint",
+            digest,
+        ],
+        cwd=checkout,
+        env=env,
+        writable_dir=Path(env["HOME"]),
+        read_only_paths=(package, extension, BRIDGE, Path(node)),
+    )
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "workspace": str(checkout),
+            "host": {},
+            "protocol": {"optional_features": ["runtime_commands"]},
+        },
+    }
+    shutdown = {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}}
+    peer = None
+    module = None
+    try:
+        runner = importlib.util.spec_from_file_location("octet_pi_bounded_protocol", ROOT / "real_runtime.py")
+        if runner is None or runner.loader is None:
+            fail("bounded real-runtime protocol runner is unavailable")
+        module = importlib.util.module_from_spec(runner)
+        sys.modules[runner.name] = module
+        runner.loader.exec_module(module)
+        peer = module.JsonRpcPeer(command, checkout, dict(env))
+        response_id = peer.send_request(initialize["method"], initialize["params"])
+        response = peer.response(response_id)
         if "error" in response:
             fail(f"{extension} failed loader initialization: {response['error']!r}")
-        process.stdin.write(json.dumps(shutdown) + "\n")
-        process.stdin.flush()
-        process.stdin.close()
-        process.stdin = None
-        stdout, stderr = process.communicate(timeout=20)
-        for line in stdout.splitlines():
-            try:
-                json.loads(line)
-            except json.JSONDecodeError:
-                fail(f"{extension} wrote non-JSON protocol stdout")
-        if process.returncode:
-            fail(f"{extension} exited after initialize with {process.returncode}; stderr={stderr[-3000:]!r}")
-    except subprocess.TimeoutExpired:
-        fail(f"{extension} timed out while loading")
+        if any(message.get("method") for message in peer.messages):
+            fail(f"{extension} requested a host method during hermetic initialization")
+        shutdown_id = peer.send_request(shutdown["method"], shutdown["params"])
+        shutdown_response = peer.response(shutdown_id)
+        if "error" in shutdown_response:
+            fail(f"{extension} failed loader shutdown: {shutdown_response['error']!r}")
+    except GateFailure:
+        raise
     except OSError as error:
         fail(f"could not launch {extension}: {error}")
+    except Exception as error:
+        failure_type = getattr(module, "RealRuntimeFailure", None) if module is not None else None
+        if failure_type is not None and isinstance(error, failure_type):
+            fail(str(error))
+        raise
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
+        if peer is not None:
+            try:
+                peer.close()
+            except Exception as error:
+                failure_type = getattr(module, "RealRuntimeFailure", None) if module is not None else None
+                if failure_type is not None and isinstance(error, failure_type):
+                    fail(str(error))
+                raise
 
 
 def run_real_aggregate(**kwargs):
@@ -831,11 +1016,15 @@ def run_real_aggregate(**kwargs):
     if spec is None or spec.loader is None:
         fail("real-runtime runner is unavailable")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
         return module.run_real_aggregate(**kwargs)
-    except module.RealRuntimeFailure as error:
-        fail(str(error))
+    except Exception as error:
+        failure_type = getattr(module, "RealRuntimeFailure", None)
+        if failure_type is not None and isinstance(error, failure_type):
+            fail(str(error))
+        raise
 
 
 def run_full(arguments, report):
@@ -844,6 +1033,7 @@ def run_full(arguments, report):
     required = [arguments.coding_agent_tarball, arguments.tui_tarball, arguments.pi_package, arguments.source_root]
     if any(value is None for value in required):
         fail("--full requires --coding-agent-tarball, --tui-tarball, --pi-package, and --source-root")
+    backend = select_network_backend(arguments.network_backend)
     profile = document(PROFILE_PATH)
     packages = profile["packages"]
     verify_tarball(arguments.coding_agent_tarball, packages["coding_agent"]["npm_integrity"], "coding-agent")
@@ -863,18 +1053,21 @@ def run_full(arguments, report):
     if not examples_root.is_dir() or any(not (examples_root / example).exists() for example in examples):
         fail("source checkout lacks the exact official example inventory")
     node = shutil.which("node")
-    if node is None:
+    if node is None or not os.access(node, os.X_OK):
         fail("--full requires node on PATH")
+    node = str(Path(node).resolve())
     failures = []
-    with tempfile.TemporaryDirectory(prefix="octet-pi-conformance-") as directory:
+    with _persistent_temp_directory(prefix="octet-pi-conformance-") as directory:
         home = Path(directory)
         (home / "tmp").mkdir()
         agent_dir = home / "pi-agent"
         agent_dir.mkdir()
+        node_path = str(Path(node).parent)
+        path_entries = list(dict.fromkeys([node_path, *STANDARD_RUNTIME_PATH.split(":"), "/usr/bin", "/bin"]))
         env = {
             "HOME": str(home),
             "TMPDIR": str(home / "tmp"),
-            "PATH": os.environ.get("PATH", ""),
+            "PATH": os.pathsep.join(path_entries),
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "NO_PROXY": "*",
@@ -887,7 +1080,7 @@ def run_full(arguments, report):
         for example in examples:
             source = examples_root / example
             try:
-                load_source(node, package, checkout, source, fingerprint(source), env)
+                load_source(node, package, checkout, source, fingerprint(source), env, backend)
             except GateFailure as error:
                 failures.append(str(error))
         if failures:
@@ -900,9 +1093,6 @@ def run_full(arguments, report):
             fail("source checkout lacks a selected unchanged real-runtime aggregate source")
         if not REAL_RUNTIME_MANIFEST_PATH.is_file() or not ALTERNATE_RUNTIME_MANIFEST_PATH.is_file():
             fail("real-runtime identity manifests are missing")
-        unshare = shutil.which("unshare")
-        if not unshare:
-            fail("--full requires Linux unshare --net")
         source_hashes = [fingerprint(source) for source in real_sources]
         lock_hashes = [source_lock_fingerprint(source) for source in real_sources]
         runtime_hash = runtime_integrity(package)
@@ -924,6 +1114,20 @@ def run_full(arguments, report):
                 agent_dir=agent_dir,
             )
 
+        def aggregate_command_builder(child):
+            selected = [package, BRIDGE, Path(node), REAL_RUNTIME_MANIFEST_PATH, ALTERNATE_RUNTIME_MANIFEST_PATH]
+            path_flags = {"--pi-package", "--extension", "--link-manifest"}
+            for index, value in enumerate(child[:-1]):
+                if value in path_flags:
+                    selected.append(Path(child[index + 1]))
+            return backend.command(
+                [node, *child],
+                cwd=checkout,
+                env=env,
+                writable_dir=home,
+                read_only_paths=selected,
+            )
+
         aggregate_identity = make_link_identity(
             extensions=real_sources,
             source_fingerprints=source_hashes,
@@ -931,7 +1135,7 @@ def run_full(arguments, report):
             manifest_path=REAL_RUNTIME_MANIFEST_PATH,
         )
         aggregate_report = run_real_aggregate(
-            launcher=[unshare, "--net", "--", node],
+            command_builder=aggregate_command_builder,
             bridge=BRIDGE,
             checkout=checkout,
             package=package,
@@ -950,11 +1154,12 @@ def run_full(arguments, report):
             env=env,
             expected=real_fixture["expected"],
         )
+        aggregate_report["network_backend"] = backend.evidence_name
     report.update(
         {
             "real_runtime": "integrity_verified_local_full_run",
             "real_examples_loaded": 78,
-            "network_isolation": "linux_unshare_net",
+            "network_isolation": backend.evidence_name,
             "real_aggregate": aggregate_report,
         }
     )
@@ -964,7 +1169,13 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="run checked-in gates (default)")
     parser.add_argument("--full", action="store_true", help="load all exact-source examples with verified local artifacts")
-    parser.add_argument("--network-isolated", action="store_true", help="allow --full to use Linux unshare --net")
+    parser.add_argument("--network-isolated", action="store_true", help="allow --full to launch the selected Linux isolated backend")
+    parser.add_argument(
+        "--network-backend",
+        choices=("unshare", "bubblewrap", "bwrap"),
+        default="unshare",
+        help="Linux network-isolation launcher for --full (no fallback)",
+    )
     parser.add_argument("--coding-agent-tarball", type=Path)
     parser.add_argument("--tui-tarball", type=Path)
     parser.add_argument("--pi-package", type=Path)

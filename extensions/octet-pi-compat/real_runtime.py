@@ -9,7 +9,8 @@ the existing source/package checks.
 from __future__ import annotations
 
 import json
-import select
+import os
+import selectors
 import shutil
 import subprocess
 import tempfile
@@ -18,12 +19,18 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 
+MAX_FRAME_BYTES = 1 * 1024 * 1024
+MAX_MESSAGES = 512
+MAX_STDERR_BYTES = 64 * 1024
+READ_CHUNK_BYTES = 64 * 1024
+
+
 class RealRuntimeFailure(RuntimeError):
     """A bounded failure from the real-runtime protocol journey."""
 
 
 class JsonRpcPeer:
-    """Small line-protocol peer which drains both bridge output streams."""
+    """Bounded byte-framed JSON-RPC peer for the selected real-runtime child."""
 
     def __init__(self, command: Sequence[str], cwd: Path, env: dict[str, str]) -> None:
         try:
@@ -34,21 +41,42 @@ class JsonRpcPeer:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
+                bufsize=0,
             )
         except OSError as error:
             raise RealRuntimeFailure("could not launch the pinned Pi aggregate") from error
         self.messages: list[dict[str, Any]] = []
-        self.stderr: list[str] = []
+        self.stderr = bytearray()
         self._next_id = 1
+        self._stdout_buffer = bytearray()
+        self._pending: list[dict[str, Any]] = []
+        self._message_count = 0
+        self._selector = selectors.DefaultSelector()
+        self._stdout_open = False
+        self._stderr_open = False
+        try:
+            if self.process.stdout is None or self.process.stderr is None:
+                raise RealRuntimeFailure("pinned Pi aggregate output pipes are unavailable")
+            for stream, kind in ((self.process.stdout, "stdout"), (self.process.stderr, "stderr")):
+                os.set_blocking(stream.fileno(), False)
+                self._selector.register(stream, selectors.EVENT_READ, kind)
+            self._stdout_open = True
+            self._stderr_open = True
+        except (OSError, ValueError) as error:
+            self.close()
+            raise RealRuntimeFailure("could not configure bounded Pi aggregate output") from error
 
     def send(self, message: dict[str, Any]) -> None:
         if self.process.stdin is None:
             raise RealRuntimeFailure("pinned Pi aggregate stdin is unavailable")
         try:
-            self.process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+            frame = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
+        except (TypeError, ValueError) as error:
+            raise RealRuntimeFailure("pinned Pi aggregate request is not JSON serializable") from error
+        if len(frame) > MAX_FRAME_BYTES:
+            raise RealRuntimeFailure("pinned Pi aggregate request exceeds the protocol frame limit")
+        try:
+            self.process.stdin.write(frame)
             self.process.stdin.flush()
         except OSError as error:
             raise RealRuntimeFailure("pinned Pi aggregate stopped accepting protocol input") from error
@@ -59,42 +87,82 @@ class JsonRpcPeer:
         self.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}})
         return request_id
 
-    def _read_message(self, deadline: float) -> dict[str, Any]:
-        if self.process.stdout is None:
-            raise RealRuntimeFailure("pinned Pi aggregate stdout is unavailable")
-        streams = [self.process.stdout]
-        if self.process.stderr is not None:
-            streams.append(self.process.stderr)
+    def _fail(self, message: str) -> RealRuntimeFailure:
+        detail = bytes(self.stderr).decode("utf-8", "replace")[-1000:]
+        if detail:
+            message += f"; stderr={detail!r}"
+        return RealRuntimeFailure(message)
+
+    def _unregister(self, stream: Any) -> None:
+        try:
+            self._selector.unregister(stream)
+        except (KeyError, ValueError):
+            pass
+
+    def _parse_stdout(self) -> None:
+        while True:
+            try:
+                end = self._stdout_buffer.index(b"\n")
+            except ValueError:
+                if len(self._stdout_buffer) > MAX_FRAME_BYTES:
+                    raise self._fail("pinned Pi aggregate protocol frame exceeds the size limit")
+                return
+            frame = bytes(self._stdout_buffer[:end])
+            del self._stdout_buffer[: end + 1]
+            if len(frame) > MAX_FRAME_BYTES:
+                raise self._fail("pinned Pi aggregate protocol frame exceeds the size limit")
+            try:
+                message = json.loads(frame.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise self._fail("pinned Pi aggregate wrote non-JSON protocol output") from error
+            if not isinstance(message, dict):
+                raise self._fail("pinned Pi aggregate wrote a non-object protocol message")
+            self._message_count += 1
+            if self._message_count > MAX_MESSAGES:
+                raise self._fail("pinned Pi aggregate exceeded the protocol message limit")
+            self.messages.append(message)
+            self._pending.append(message)
+
+    def _read_message(self, deadline: float, description: str) -> dict[str, Any]:
+        if self._pending:
+            return self._pending.pop(0)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RealRuntimeFailure("pinned Pi aggregate timed out during the real journey")
+                raise self._fail(f"pinned Pi aggregate timed out waiting for {description}")
             try:
-                ready, _, _ = select.select(streams, [], [], remaining)
+                ready = self._selector.select(remaining)
             except OSError as error:
-                raise RealRuntimeFailure("could not read pinned Pi aggregate output") from error
+                raise self._fail("could not read pinned Pi aggregate output") from error
             if not ready:
-                raise RealRuntimeFailure("pinned Pi aggregate timed out during the real journey")
-            for stream in ready:
-                line = stream.readline()
-                if stream is self.process.stderr:
-                    if line:
-                        self.stderr.append(line.rstrip("\n"))
-                        self.stderr = self.stderr[-64:]
-                    continue
-                if not line:
-                    detail = " ".join(self.stderr)[-1000:]
-                    raise RealRuntimeFailure(
-                        f"pinned Pi aggregate exited before completing the real journey; stderr={detail!r}"
-                    )
+                raise self._fail(f"pinned Pi aggregate timed out waiting for {description}")
+            for key, _ in ready:
+                stream = key.fileobj
+                kind = key.data
                 try:
-                    message = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise RealRuntimeFailure("pinned Pi aggregate wrote non-JSON protocol output") from error
-                if not isinstance(message, dict):
-                    raise RealRuntimeFailure("pinned Pi aggregate wrote a non-object protocol message")
-                self.messages.append(message)
-                return message
+                    chunk = os.read(stream.fileno(), READ_CHUNK_BYTES)
+                except BlockingIOError:
+                    continue
+                except OSError as error:
+                    raise self._fail("could not read pinned Pi aggregate output") from error
+                if not chunk:
+                    self._unregister(stream)
+                    if kind == "stdout":
+                        self._stdout_open = False
+                        if self._stdout_buffer:
+                            raise self._fail("pinned Pi aggregate ended with an incomplete protocol frame")
+                        raise self._fail("pinned Pi aggregate exited before completing the real journey")
+                    self._stderr_open = False
+                    continue
+                if kind == "stderr":
+                    if len(self.stderr) + len(chunk) > MAX_STDERR_BYTES:
+                        raise self._fail("pinned Pi aggregate stderr exceeds the size limit")
+                    self.stderr.extend(chunk)
+                    continue
+                self._stdout_buffer.extend(chunk)
+                self._parse_stdout()
+            if self._pending:
+                return self._pending.pop(0)
 
     def wait_for(
         self,
@@ -108,7 +176,7 @@ class JsonRpcPeer:
                 return message
         deadline = time.monotonic() + timeout
         while True:
-            message = self._read_message(deadline)
+            message = self._read_message(deadline, description)
             if predicate(message):
                 return message
 
@@ -124,22 +192,35 @@ class JsonRpcPeer:
         return response
 
     def close(self) -> None:
-        if self.process.stdin is not None:
+        if getattr(self.process, "stdin", None) is not None:
             try:
                 self.process.stdin.close()
             except OSError:
                 pass
             self.process.stdin = None
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
+        try:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RealRuntimeFailure("pinned Pi aggregate did not cleanly terminate") from error
         for stream in (self.process.stdout, self.process.stderr):
             if stream is not None:
-                stream.close()
+                self._unregister(stream)
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        try:
+            self._selector.close()
+        except OSError:
+            pass
+        if self.process.poll() is None:
+            raise RealRuntimeFailure("pinned Pi aggregate remained alive after cleanup")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -159,7 +240,8 @@ def _notification(peer: JsonRpcPeer, exact: str | None = None, prefix: str | Non
 
 def _strict_command(
     *,
-    launcher: Sequence[str],
+    launcher: Sequence[str] | None = None,
+    command_builder: Callable[[Sequence[str]], Sequence[str]] | None = None,
     bridge: Path,
     package: Path,
     extensions: Sequence[Path],
@@ -173,14 +255,14 @@ def _strict_command(
     octet_version: str,
     command_name: str,
 ) -> list[str]:
-    command = [*launcher, str(bridge), "--pi-package", str(package)]
+    child = [str(bridge), "--pi-package", str(package)]
     for extension in extensions:
-        command.extend(["--extension", str(extension)])
+        child.extend(["--extension", str(extension)])
     for digest in source_fingerprints:
-        command.extend(["--source-fingerprint", digest])
+        child.extend(["--source-fingerprint", digest])
     for digest in source_lock_fingerprints:
-        command.extend(["--source-lock-fingerprint", digest])
-    command.extend(
+        child.extend(["--source-lock-fingerprint", digest])
+    child.extend(
         [
             "--agent-dir",
             str(agent_dir),
@@ -198,7 +280,10 @@ def _strict_command(
             command_name,
         ]
     )
-    return command
+    if command_builder is not None:
+        return list(command_builder(child))
+    _require(launcher is not None, "real aggregate launcher is unavailable")
+    return [*launcher, *child]
 
 
 def _initialize_params(checkout: Path, command_name: str, manifest_path: Path, octet_version: str) -> dict[str, Any]:
@@ -331,7 +416,8 @@ def _rejection(
 
 def run_real_aggregate(
     *,
-    launcher: Sequence[str],
+    launcher: Sequence[str] | None = None,
+    command_builder: Callable[[Sequence[str]], Sequence[str]] | None = None,
     bridge: Path,
     checkout: Path,
     package: Path,
@@ -355,6 +441,7 @@ def run_real_aggregate(
     _require(len(extensions) == len(source_lock_fingerprints), "real aggregate lock identity is incomplete")
     command = _strict_command(
         launcher=launcher,
+        command_builder=command_builder,
         bridge=bridge,
         package=package,
         extensions=extensions,
@@ -400,7 +487,7 @@ def run_real_aggregate(
     )
 
     stale_source = extensions[0]
-    with tempfile.TemporaryDirectory(prefix="octet-pi-stale-source-") as directory:
+    with tempfile.TemporaryDirectory(prefix="octet-pi-stale-source-", dir=agent_dir.parent) as directory:
         copied = Path(directory) / stale_source.name
         shutil.copyfile(stale_source, copied)
         copied.write_bytes(copied.read_bytes() + b"\n// verifier-only stale copy mutation\n")
@@ -415,6 +502,7 @@ def run_real_aggregate(
         )
         stale_command = _strict_command(
             launcher=launcher,
+            command_builder=command_builder,
             bridge=bridge,
             package=package,
             extensions=stale_extensions,

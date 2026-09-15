@@ -16,6 +16,8 @@ use octet_agent::{EXTENSION_API_VERSION_0_2, EXTENSION_API_VERSION_0_3};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod package;
+
 const BRIDGE_VERSION: &str = "0.7.0";
 const SUPPORTED_PI_VERSION: &str = "0.84.4";
 const OCTET_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -84,6 +86,94 @@ impl PiBridgeApiVersion {
     }
 }
 
+/// The explicitly selected executable package manager for Pi package inputs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum PiPackageManager {
+    #[value(name = "npm")]
+    Npm,
+    #[value(name = "pnpm")]
+    Pnpm,
+    #[value(name = "yarn")]
+    Yarn,
+    #[value(name = "bun")]
+    Bun,
+}
+
+impl PiPackageManager {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "npm" => Some(Self::Npm),
+            "pnpm" => Some(Self::Pnpm),
+            "yarn" => Some(Self::Yarn),
+            "bun" => Some(Self::Bun),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+            Self::Yarn => "yarn",
+            Self::Bun => "bun",
+        }
+    }
+
+    fn executable(self) -> &'static str {
+        self.name()
+    }
+
+    fn install_args(
+        self,
+        spec: Option<&str>,
+        lock_present: bool,
+        allow_network: bool,
+        scripts: bool,
+    ) -> Vec<String> {
+        let mut args = Vec::new();
+        let preserve_generated_lock = spec.is_some();
+        match self {
+            Self::Npm => {
+                args.push(if lock_present { "ci" } else { "install" }.to_owned());
+                if !lock_present && !preserve_generated_lock {
+                    args.push("--no-package-lock".to_owned());
+                }
+            }
+            Self::Pnpm => {
+                args.push("install".to_owned());
+                if lock_present {
+                    args.push("--frozen-lockfile".to_owned());
+                } else if !preserve_generated_lock {
+                    args.push("--lockfile=false".to_owned());
+                }
+            }
+            Self::Yarn => {
+                args.push("install".to_owned());
+                if lock_present {
+                    args.push("--frozen-lockfile".to_owned());
+                } else if !preserve_generated_lock {
+                    args.push("--no-lockfile".to_owned());
+                }
+            }
+            Self::Bun => {
+                args.push("install".to_owned());
+                if lock_present {
+                    args.push("--frozen-lockfile".to_owned());
+                } else if !preserve_generated_lock {
+                    args.push("--no-save".to_owned());
+                }
+            }
+        }
+        if !scripts {
+            args.push("--ignore-scripts".to_owned());
+        }
+        if !allow_network {
+            args.push("--offline".to_owned());
+        }
+        args
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct FingerprintLimits {
     max_files: usize,
@@ -99,9 +189,9 @@ const FINGERPRINT_LIMITS: FingerprintLimits = FingerprintLimits {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum PiCommand {
-    /// Create an inert octet wrapper for an existing local Pi extension/package.
+    /// Create an inert octet wrapper for an existing local or reviewed Pi package input.
     Install {
-        /// A local .ts/.js extension file or an installed Pi package directory.
+        /// A local .ts/.js file/directory, npm:NAME[@VERSION], or git package input.
         source: PathBuf,
         /// Additional reviewed Pi sources loaded into the same ordered process.
         #[arg(long = "with", value_name = "SOURCE")]
@@ -115,6 +205,15 @@ pub enum PiCommand {
         /// Exact @earendil-works/pi-coding-agent package root for bridge profile 0.84.4.
         #[arg(long, value_name = "DIR")]
         pi_package: Option<PathBuf>,
+        /// Reviewed package manager used for dependency resolution.
+        #[arg(long, value_enum, default_value = "npm")]
+        package_manager: PiPackageManager,
+        /// Explicitly allow the selected package manager to resolve or download packages.
+        #[arg(long)]
+        allow_network: bool,
+        /// Explicitly allow package lifecycle scripts during the reviewed install.
+        #[arg(long)]
+        allow_scripts: bool,
         /// Generate against API 0.2 (default) or the host-owned API 0.3 provider contract.
         #[arg(long, value_enum, default_value = "0.2")]
         api_version: PiBridgeApiVersion,
@@ -124,7 +223,7 @@ pub enum PiCommand {
     },
     /// Compile an inert, ordered Pi aggregate plan without executing source.
     Plan {
-        /// A local .ts/.js extension file or an installed Pi package directory.
+        /// A local .ts/.js file/directory or an already installed Pi package directory.
         source: PathBuf,
         /// Additional reviewed Pi sources, retained in this exact load order.
         #[arg(long = "with", value_name = "SOURCE")]
@@ -138,6 +237,9 @@ pub enum PiCommand {
         /// Exact @earendil-works/pi-coding-agent package root for bridge profile 0.84.4.
         #[arg(long, value_name = "DIR")]
         pi_package: Option<PathBuf>,
+        /// Reviewed package manager used only for inert package metadata validation.
+        #[arg(long, value_enum, default_value = "npm")]
+        package_manager: PiPackageManager,
         /// Write the canonical plan to a new regular file instead of stdout.
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
@@ -226,6 +328,8 @@ struct PiLockedSource {
     source_fingerprint: SourceFingerprint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lock_fingerprint: Option<SourceLockFingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<package::PackageIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +386,8 @@ struct PiLinkRecord {
     source_fingerprint: SourceFingerprint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_lock_fingerprint: Option<SourceLockFingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<package::PackageIdentity>,
     name: String,
     source: PathBuf,
     pi_home: PathBuf,
@@ -433,39 +539,41 @@ pub fn run(command: PiCommand, invocation_cwd: &Path) -> anyhow::Result<()> {
             name,
             pi_home,
             pi_package,
+            package_manager,
+            allow_network,
+            allow_scripts,
             api_version,
             extension_root,
-        } => {
-            let plan = compile_requested_plan(
-                &source,
-                &additional_sources,
-                name.as_deref(),
-                pi_home.as_deref(),
-                pi_package.as_deref(),
-                invocation_cwd,
-            )?;
-            publish_plan_for_api(
-                &plan,
-                extension_root.as_deref(),
-                invocation_cwd,
-                api_version,
-            )
-        }
+        } => install_with_controls(
+            &source,
+            &additional_sources,
+            name.as_deref(),
+            pi_home.as_deref(),
+            pi_package.as_deref(),
+            extension_root.as_deref(),
+            invocation_cwd,
+            package_manager,
+            allow_network,
+            allow_scripts,
+            api_version,
+        ),
         PiCommand::Plan {
             source,
             additional_sources,
             name,
             pi_home,
             pi_package,
+            package_manager,
             output,
         } => {
-            let plan = compile_requested_plan(
+            let plan = compile_requested_plan_with_manager(
                 &source,
                 &additional_sources,
                 name.as_deref(),
                 pi_home.as_deref(),
                 pi_package.as_deref(),
                 invocation_cwd,
+                package_manager,
             )?;
             let text = format!("{}\n", serde_json::to_string_pretty(&plan)?);
             if let Some(output) = output {
@@ -513,6 +621,61 @@ pub fn run(command: PiCommand, invocation_cwd: &Path) -> anyhow::Result<()> {
         } => rollback(&name, extension_root.as_deref(), invocation_cwd),
         PiCommand::List { extension_root } => list(extension_root.as_deref(), invocation_cwd),
     }
+}
+
+fn install_with_controls(
+    source: &Path,
+    additional_sources: &[PathBuf],
+    requested_name: Option<&str>,
+    requested_pi_home: Option<&Path>,
+    requested_pi_package: Option<&Path>,
+    requested_extension_root: Option<&Path>,
+    invocation_cwd: &Path,
+    package_manager: PiPackageManager,
+    allow_network: bool,
+    allow_scripts: bool,
+    api_version: PiBridgeApiVersion,
+) -> anyhow::Result<()> {
+    if allow_scripts && !allow_network {
+        anyhow::bail!(
+            "--allow-scripts requires --allow-network; lifecycle effects may access the network"
+        );
+    }
+    let mut requested_sources = Vec::with_capacity(1 + additional_sources.len());
+    requested_sources.push(source.to_path_buf());
+    requested_sources.extend_from_slice(additional_sources);
+    if requested_sources.len() > MAX_AGGREGATE_SOURCES {
+        anyhow::bail!(
+            "Pi compatibility source set contains {} sources; limit is {MAX_AGGREGATE_SOURCES}",
+            requested_sources.len()
+        );
+    }
+    let extension_root = resolve_extension_root(requested_extension_root, invocation_cwd)?;
+    let _package_store_lock = package::acquire_package_store_lock(&extension_root)?;
+    let mut prepared = package::prepare_sources(
+        &requested_sources,
+        invocation_cwd,
+        &extension_root,
+        package_manager,
+        allow_network,
+        allow_scripts,
+    )?;
+    for line in package::review_lines(&prepared, package_manager, allow_network, allow_scripts) {
+        crate::output::stdout_line(line);
+    }
+    package::run_lifecycle(&mut prepared, package_manager, allow_network, allow_scripts)?;
+    let plan = compile_prepared_plan(
+        &prepared,
+        requested_name,
+        requested_pi_home,
+        requested_pi_package,
+        invocation_cwd,
+    )?;
+    let result = publish_plan_for_api(&plan, requested_extension_root, invocation_cwd, api_version);
+    if result.is_ok() {
+        package::commit_sources(&mut prepared);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -586,6 +749,26 @@ fn compile_requested_plan(
     requested_pi_package: Option<&Path>,
     invocation_cwd: &Path,
 ) -> anyhow::Result<PiAggregatePlan> {
+    compile_requested_plan_with_manager(
+        source,
+        additional_sources,
+        requested_name,
+        requested_pi_home,
+        requested_pi_package,
+        invocation_cwd,
+        PiPackageManager::Npm,
+    )
+}
+
+fn compile_requested_plan_with_manager(
+    source: &Path,
+    additional_sources: &[PathBuf],
+    requested_name: Option<&str>,
+    requested_pi_home: Option<&Path>,
+    requested_pi_package: Option<&Path>,
+    invocation_cwd: &Path,
+    package_manager: PiPackageManager,
+) -> anyhow::Result<PiAggregatePlan> {
     let mut requested_sources = Vec::with_capacity(1 + additional_sources.len());
     requested_sources.push(source.to_path_buf());
     requested_sources.extend_from_slice(additional_sources);
@@ -595,11 +778,31 @@ fn compile_requested_plan(
             requested_sources.len()
         );
     }
+    let prepared =
+        package::resolve_unexecuted_sources(&requested_sources, invocation_cwd, package_manager)?;
+    compile_prepared_plan(
+        &prepared,
+        requested_name,
+        requested_pi_home,
+        requested_pi_package,
+        invocation_cwd,
+    )
+}
 
-    let mut sources = Vec::with_capacity(requested_sources.len());
+fn compile_prepared_plan(
+    prepared: &[package::PreparedSource],
+    requested_name: Option<&str>,
+    requested_pi_home: Option<&Path>,
+    requested_pi_package: Option<&Path>,
+    invocation_cwd: &Path,
+) -> anyhow::Result<PiAggregatePlan> {
+    if prepared.is_empty() {
+        anyhow::bail!("at least one Pi extension source is required");
+    }
+    let mut sources = Vec::with_capacity(prepared.len());
     let mut unique_sources = std::collections::BTreeSet::new();
-    for (index, requested_source) in requested_sources.iter().enumerate() {
-        let source = resolve_source(requested_source, invocation_cwd)?;
+    for (index, prepared_source) in prepared.iter().enumerate() {
+        let source = resolve_source(&prepared_source.source, Path::new("/"))?;
         if !unique_sources.insert(source.clone()) {
             anyhow::bail!("duplicate Pi extension source; remove the duplicate before planning");
         }
@@ -612,6 +815,7 @@ fn compile_requested_plan(
             source,
             source_fingerprint,
             lock_fingerprint: Some(lock_fingerprint),
+            package: prepared_source.package.clone(),
         });
     }
     let pi_home = resolve_pi_home(requested_pi_home, invocation_cwd)?;
@@ -668,6 +872,14 @@ fn preflight_plan(plan: &PiAggregatePlan) -> anyhow::Result<()> {
                 "Pi source {} dependency lock changed after planning; review it and compile a replacement plan",
                 source_label(index)
             );
+        }
+        if let Some(identity) = source.package.as_ref() {
+            package::verify_identity(identity, &source.source).map_err(|error| {
+                anyhow::anyhow!(
+                    "Pi source {} package identity is no longer valid: {error:#}; review it and compile a replacement plan",
+                    source_label(index)
+                )
+            })?;
         }
     }
     let actual_runtime = runtime_identity(&plan.pi_runtime.path)
@@ -776,6 +988,18 @@ fn publish_plan_for_api(
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&bridge_path, fs::Permissions::from_mode(0o700))?;
         }
+        for (name, source) in [
+            (
+                "semantic_ui.mjs",
+                include_str!("../../../extensions/octet-pi-compat/semantic_ui.mjs"),
+            ),
+            (
+                "editor_handoff.mjs",
+                include_str!("../../../extensions/octet-pi-compat/editor_handoff.mjs"),
+            ),
+        ] {
+            publication.write_private_file(&package.join(name), source)?;
+        }
         publication
             .write_private_file(&package.join(PI_RUNTIME_EVIDENCE_RECORD), &evidence_text)?;
         publication.write_private_file(&package.join(record_name), &record_text)?;
@@ -837,13 +1061,24 @@ fn rollback(
             "Pi compatibility link {name:?} has a mismatched generated record; it was not moved"
         );
     }
-    for (file, label) in [("bridge.mjs", "bridge"), ("extension.toml", "manifest")] {
+    for (file, label, required) in [
+        ("bridge.mjs", "bridge", true),
+        ("extension.toml", "manifest", true),
+        ("semantic_ui.mjs", "semantic UI helper", false),
+        ("editor_handoff.mjs", "editor handoff helper", false),
+    ] {
         let path = package.join(file);
-        let metadata = fs::symlink_metadata(&path).map_err(|_| {
-            anyhow::anyhow!(
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            // Older generated links did not contain helper modules. They must
+            // remain removable, but a present helper must be a regular file.
+            Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(_) => anyhow::bail!(
                 "Pi compatibility link {name:?} has no generated {label}; it was not moved"
-            )
-        })?;
+            ),
+        };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             anyhow::bail!(
                 "Pi compatibility link {name:?} has an unsafe generated {label}; it was not moved"
@@ -1111,6 +1346,11 @@ fn validate_plan_shape(plan: &PiAggregatePlan) -> anyhow::Result<()> {
         {
             anyhow::bail!("Pi aggregate plan has invalid dependency lock fingerprint metadata");
         }
+        if let Some(identity) = source.package.as_ref() {
+            package::validate_identity_shape(identity).map_err(|_| {
+                anyhow::anyhow!("Pi aggregate plan has invalid package identity metadata")
+            })?;
+        }
     }
     if !plan.pi_home.is_absolute()
         || !plan.pi_runtime.path.is_absolute()
@@ -1149,6 +1389,7 @@ fn link_record_from_plan(
         octet_version: plan.octet_version.clone(),
         source_fingerprint: source.source_fingerprint.clone(),
         source_lock_fingerprint: source.lock_fingerprint.clone(),
+        package: source.package.clone(),
         name: plan.name.clone(),
         source: source.source.clone(),
         pi_home: plan.pi_home.clone(),
@@ -1417,6 +1658,11 @@ fn link_status(record: &ParsedPiLinkRecord) -> String {
             Ok(_) => {}
         }
     }
+    if let Some(identity) = record.package.as_ref() {
+        if package::verify_identity(identity, &record.source).is_err() {
+            stale.push("package identity changed or dependencies are incomplete".to_owned());
+        }
+    }
     let Some(runtime) = record.pi_runtime.as_ref() else {
         stale.push("pinned Pi runtime metadata is missing".to_owned());
         return format!("stale ({})", stale.join("; "));
@@ -1457,6 +1703,7 @@ fn link_status(record: &ParsedPiLinkRecord) -> String {
                 source: record.source.clone(),
                 source_fingerprint: record.source_fingerprint.clone(),
                 lock_fingerprint: record.source_lock_fingerprint.clone(),
+                package: record.package.clone(),
             }],
             trust,
         ) {
@@ -1533,6 +1780,14 @@ fn aggregate_status(record: &PiLockRecord) -> String {
                 index + 1
             )),
             Ok(_) => {}
+        }
+        if let Some(identity) = source.package.as_ref() {
+            if package::verify_identity(identity, &source.source).is_err() {
+                stale.push(format!(
+                    "source {} package identity changed or dependencies are incomplete",
+                    index + 1
+                ));
+            }
         }
     }
     let Some(runtime) = record.pi_runtime.as_ref() else {
@@ -2839,6 +3094,24 @@ mod tests {
 
         let package = extension_root.join("pi-aggregate");
         assert!(package.join("bridge.mjs").is_file());
+        for (name, source) in [
+            (
+                "semantic_ui.mjs",
+                include_str!("../../../extensions/octet-pi-compat/semantic_ui.mjs"),
+            ),
+            (
+                "editor_handoff.mjs",
+                include_str!("../../../extensions/octet-pi-compat/editor_handoff.mjs"),
+            ),
+        ] {
+            let helper = package.join(name);
+            assert_eq!(fs::read_to_string(&helper).unwrap(), source);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&helper).unwrap().permissions().mode() & 0o077, 0);
+            }
+        }
         assert!(package.join("extension.toml").is_file());
         assert!(package.join(PI_LOCK_RECORD).is_file());
         assert!(!package.join(LINK_RECORD).exists());
@@ -2914,6 +3187,56 @@ mod tests {
                 .file_name()
                 .to_string_lossy()
                 .starts_with(".pi-rollback-pi-rollback-")));
+    }
+
+    #[test]
+    fn rollback_preserves_links_generated_before_helper_modules_were_bundled() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("extension.mjs");
+        fs::write(&source, b"export default () => {};\n").unwrap();
+        let source = canonical(&source);
+        let plan = test_plan(&temp, std::slice::from_ref(&source), "pi-old-link");
+        let extension_root = temp.path().join("extensions");
+        publish_plan(&plan, Some(&extension_root), temp.path()).unwrap();
+        let package = extension_root.join("pi-old-link");
+        for helper in ["semantic_ui.mjs", "editor_handoff.mjs"] {
+            fs::remove_file(package.join(helper)).unwrap();
+        }
+        rollback("pi-old-link", Some(&extension_root), temp.path()).unwrap();
+        assert!(!package.exists());
+        assert_eq!(fs::read_dir(&extension_root).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_unsafe_generated_helpers_without_moving_the_package() {
+        for helper in ["semantic_ui.mjs", "editor_handoff.mjs"] {
+            for as_symlink in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let source = temp.path().join("extension.mjs");
+                let source_bytes = b"export default () => {};\n";
+                fs::write(&source, source_bytes).unwrap();
+                let source = canonical(&source);
+                let plan = test_plan(&temp, std::slice::from_ref(&source), "pi-unsafe-helper");
+                let extension_root = temp.path().join("extensions");
+                publish_plan(&plan, Some(&extension_root), temp.path()).unwrap();
+                let package = extension_root.join("pi-unsafe-helper");
+                let helper_path = package.join(helper);
+                fs::remove_file(&helper_path).unwrap();
+                if as_symlink {
+                    std::os::unix::fs::symlink(&source, &helper_path).unwrap();
+                } else {
+                    fs::create_dir(&helper_path).unwrap();
+                }
+                let error = rollback("pi-unsafe-helper", Some(&extension_root), temp.path())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("unsafe generated"), "{helper}: {error}");
+                assert!(package.is_dir());
+                assert_eq!(fs::read_dir(&extension_root).unwrap().count(), 1);
+                assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            }
+        }
     }
 
     #[test]

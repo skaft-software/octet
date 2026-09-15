@@ -2622,13 +2622,27 @@ fn prompt_history_restores_the_draft_cursor_and_payload_at_newest_boundary() {
     shell.on_prompt_submitted("sent");
     shell.apply_edit(EditAction::Paste("draft line\n".repeat(20)));
     let draft_display = shell.pending();
-    let draft_cursor = shell.state.borrow().editor.cursor();
+    let paste_cursor = shell.state.borrow().editor.cursor();
+    assert!(
+        paste_cursor > 0,
+        "paste must leave its chip insertion cursor"
+    );
 
+    // The first Up owns ordinary visual movement and reaches the document
+    // boundary. Only an Up already at source offset zero starts recall.
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), draft_display);
+    assert_eq!(shell.state.borrow().editor.cursor(), 0);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+
+    let draft_cursor = shell.state.borrow().editor.cursor();
     shell.apply_edit(EditAction::Up);
     assert_eq!(shell.pending(), "sent");
+    assert!(shell.state.borrow().prompt_history_navigation.is_some());
     shell.apply_edit(EditAction::Down);
     assert_eq!(shell.pending(), draft_display);
     assert_eq!(shell.state.borrow().editor.cursor(), draft_cursor);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
     let restored = shell.drain_composed();
     assert_eq!(restored.display_text, draft_display);
     assert!(matches!(
@@ -2652,7 +2666,11 @@ fn prompt_history_is_bounded_to_recent_successful_prompts() {
     for _ in 0..MAX_PROMPT_HISTORY_ENTRIES {
         shell.apply_edit(EditAction::Up);
     }
-    assert_eq!(shell.pending(), "prompt 3", "oldest retained prompt wrapped");
+    assert_eq!(
+        shell.pending(),
+        "prompt 3",
+        "oldest retained prompt wrapped"
+    );
 }
 
 #[test]

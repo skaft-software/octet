@@ -1,0 +1,11 @@
+{
+  "apiProvider": " OpenAI ",
+  "apiModelId": " gpt-4o ",
+  "actModeApiProvider": "Anthropic",
+  "actModeApiModelId": "claude-3-5-sonnet",
+  "apiConfiguration": {
+    "openAiModelId": "gpt-4o-mini",
+    "apiKey": "fixture-secret-must-not-be-imported"
+  },
+  "customInstructions": "fixture setting is intentionally unsupported"
+}
