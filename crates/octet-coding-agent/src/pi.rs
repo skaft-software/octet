@@ -2706,6 +2706,16 @@ mod tests {
         path.canonicalize().unwrap()
     }
 
+    /// macOS `$TMPDIR` lives under the `/var` -> `/private/var` alias while Pi
+    /// package inputs must already be canonical. Create fixture roots inside a
+    /// canonical parent so derived paths are canonical on every platform.
+    fn canonical_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("octet-pi-")
+            .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
+            .unwrap()
+    }
+
     fn fake_pi_package(temp: &tempfile::TempDir) -> PathBuf {
         let package = temp.path().join("pi-package");
         fs::create_dir_all(package.join("dist")).unwrap();
@@ -3076,7 +3086,7 @@ mod tests {
 
     #[test]
     fn aggregate_install_publishes_one_inert_locked_process() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let first = temp.path().join("first.ts");
         let second = temp.path().join("second.ts");
         fs::write(&first, b"export default () => {};\n").unwrap();
@@ -3306,7 +3316,7 @@ mod tests {
         if !fake_pi.exists() {
             return;
         }
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let fixture_extension = temp.path().join("pi-source");
         fs::create_dir_all(fixture_extension.join("nested")).unwrap();
         fs::create_dir_all(fixture_extension.join("node_modules/ignored")).unwrap();
