@@ -1610,6 +1610,7 @@ async fn execute_parallel_read_wave(
         match prepared {
             ParallelReadPreparation::Completed(execution) => results[index] = Some(execution),
             ParallelReadPreparation::Admitted(admitted) => {
+                let execution_cancellation = cancellation.clone();
                 executions.push(async move {
                     (
                         index,
@@ -1620,7 +1621,7 @@ async fn execute_parallel_read_wave(
                             resource_owner,
                             active_skills,
                             registered_tools,
-                            cancellation.clone(),
+                            execution_cancellation,
                         )
                         .await,
                     )
