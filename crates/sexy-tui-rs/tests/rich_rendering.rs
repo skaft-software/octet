@@ -124,7 +124,10 @@ fn ordinary_streaming_paragraph_boundaries_keep_canonical_rows_stable() {
         chunks.push(chunk);
     }
 
-    for chunk in chunks {
+    let mut saw_open_paragraph_reflow = false;
+    let mut saw_completed_paragraph_commit = false;
+
+    for (chunk_index, chunk) in chunks.into_iter().enumerate() {
         source.push_str(&chunk);
         stream.push_str(&chunk);
         let previous = frame.clone();
@@ -132,17 +135,63 @@ fn ordinary_streaming_paragraph_boundaries_keep_canonical_rows_stable() {
         assert!(update.stable_prefix <= previous.len());
         frame.truncate(update.stable_prefix);
         frame.extend(update.replacement);
-        assert_eq!(
-            &frame[..previous.len().min(frame.len())],
-            &previous[..previous.len().min(frame.len())],
-            "stream frame changed an already emitted row for {chunk:?}"
+        assert!(
+            update.stable_prefix <= frame.len(),
+            "reported stable prefix exceeds the new frame for {chunk:?}"
         );
+        assert_eq!(
+            &frame[..update.stable_prefix],
+            &previous[..update.stable_prefix],
+            "only the reported stable prefix may be reused for {chunk:?}"
+        );
+
+        let committed_rows = cache.committed_rows();
+        assert!(
+            committed_rows <= frame.len(),
+            "committed rows must be present in the rendered frame: {committed_rows} > {}",
+            frame.len()
+        );
+        let prior_committed_rows = committed_rows.min(previous.len());
+        assert_eq!(
+            &frame[..prior_committed_rows],
+            &previous[..prior_committed_rows],
+            "parser-committed rows changed for {chunk:?}"
+        );
+
+        if chunk_index == 2 {
+            // APPEND_01 continues the first paragraph. Its final visual row is
+            // provisional: Markdown's soft newline can still add to it.
+            assert!(
+                update.stable_prefix < previous.len(),
+                "an open paragraph must retain a mutable visual frontier"
+            );
+            assert!(
+                committed_rows < previous.len(),
+                "open-paragraph rows must not be reported as parser-committed"
+            );
+            assert_ne!(
+                frame, previous,
+                "the open paragraph's provisional row should be allowed to reflow"
+            );
+            saw_open_paragraph_reflow = true;
+        }
+        if chunk_index == 9 {
+            // APPEND_08 follows the first explicit blank-line boundary, so the
+            // first ordinary paragraph is now safe to append to native history.
+            assert!(stream.committed().blocks.len() >= 2);
+            assert!(committed_rows > 0);
+            assert!(committed_rows <= previous.len());
+            assert_eq!(&frame[..committed_rows], &previous[..committed_rows]);
+            saw_completed_paragraph_commit = true;
+        }
         assert_eq!(
             frame,
             renderer.render(&parse_markdown(&source), 96).plain_lines(),
             "stream geometry diverged for {chunk:?}"
         );
     }
+    assert!(saw_open_paragraph_reflow);
+    assert!(saw_completed_paragraph_commit);
 
     let previous = frame.clone();
     stream.finish();
