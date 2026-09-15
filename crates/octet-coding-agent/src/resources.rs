@@ -1488,7 +1488,7 @@ mod tests {
             invocation_cwd: cwd,
             model: None,
             model_explicit: false,
-            reasoning: octet_ai::ReasoningConfig::Off,
+            reasoning: None,
             reasoning_explicit: false,
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,

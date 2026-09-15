@@ -222,7 +222,7 @@ fn config(directory: &std::path::Path, model: Option<&str>) -> Config {
         invocation_cwd: directory.to_path_buf(),
         model: model.map(|model| ModelId(model.to_owned())),
         model_explicit: model.is_some(),
-        reasoning: ReasoningConfig::Off,
+        reasoning: None,
         reasoning_explicit: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
@@ -271,7 +271,11 @@ fn configured_test_extensions(_skills: Arc<dyn SkillRegistry>, config: &Config) 
     let model_id = config.model.as_ref().expect("test model");
     let model = boot.catalog.resolve(model_id).unwrap();
     let session = Session::create(config.workspace.join("tool-policy-test.jsonl")).unwrap();
-    configured_extensions(config, &session, &model, &config.reasoning, &boot.sessions)
+    let reasoning = config
+        .reasoning
+        .clone()
+        .unwrap_or_else(|| default_reasoning_for_model(&model));
+    configured_extensions(config, &session, &model, &reasoning, &boot.sessions)
         .unwrap()
         .0
 }
@@ -2528,10 +2532,40 @@ fn deepseek_v4_pro_is_registered_as_openai_chat_with_env_auth() {
 }
 
 #[test]
+fn first_launch_uses_custom_server_reasoning_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut boot = bootstrap(config(directory.path(), Some("custom/onboarding/probe"))).unwrap();
+    let mut spec = (*boot
+        .catalog
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap()
+        .spec)
+        .clone();
+    spec.id = ModelId("custom/onboarding/probe".into());
+    spec.capabilities.reasoning = custom_reasoning_capability(&crate::auth::custom::CustomModel {
+        reasoning: true,
+        reasoning_values: vec!["none".into(), "default".into()],
+        reasoning_default: "default".into(),
+        ..Default::default()
+    });
+    boot.catalog.register_model(spec).unwrap();
+
+    let launch = resolve_launch_print(&boot, "first-run").unwrap();
+    let app = build_app(boot, launch, "system".into()).unwrap();
+    assert_eq!(app.reasoning, ReasoningConfig::On);
+    assert_eq!(
+        persisted_session_config(app.agent.session())
+            .unwrap()
+            .reasoning,
+        Some(ReasoningConfig::On)
+    );
+}
+
+#[test]
 fn deepseek_v4_pro_accepts_high_reasoning_at_startup() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = config(directory.path(), Some(DEEPSEEK_MODEL_ID));
-    config.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    config.reasoning = Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High));
     let boot = bootstrap(config).unwrap();
     let launch = resolve_launch_print(&boot, "test-session").unwrap();
     let app = build_app(boot, launch, "system".into()).unwrap();
@@ -2623,7 +2657,7 @@ fn print_resume_restores_session_model_and_reasoning_unless_cli_overrides() {
     let mut overridden = config(directory.path(), Some("gpt-4o-mini"));
     overridden.resume = ResumeSelector::Continue;
     overridden.model_explicit = true;
-    overridden.reasoning = ReasoningConfig::Off;
+    overridden.reasoning = Some(ReasoningConfig::Off);
     overridden.reasoning_explicit = true;
     let launch = resolve_launch_print(&bootstrap(overridden).unwrap(), "unused").unwrap();
     assert_eq!(launch.model.0, "gpt-4o-mini");
@@ -2635,7 +2669,7 @@ fn explicit_reasoning_clears_a_persisted_legacy_pro_mode() {
     let directory = tempfile::tempdir().unwrap();
     let mut process_config = config(directory.path(), Some("gpt-5.4-mini-responses"));
     process_config.resume = ResumeSelector::Continue;
-    process_config.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    process_config.reasoning = Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High));
     process_config.reasoning_explicit = true;
     process_config.reasoning_mode_explicit = false;
     let boot = bootstrap(process_config).unwrap();
@@ -2683,14 +2717,20 @@ fn launch_configuration_parts_returns_the_preopened_resume_session() {
         .unwrap();
     drop(session);
 
-    let (prepared, model, reasoning, reasoning_mode) =
-        launch_configuration_parts(&config, &SessionSelection::OpenExisting(path.clone())).unwrap();
+    let (
+        prepared,
+        LaunchConfiguration {
+            model,
+            reasoning,
+            reasoning_mode,
+        },
+    ) = launch_configuration_parts(&config, &SessionSelection::OpenExisting(path.clone())).unwrap();
 
     assert_eq!(prepared.as_ref().map(Session::path), Some(path.as_path()));
     assert_eq!(model, Some(ModelId("gpt-5.4-mini-responses".into())));
     assert_eq!(
         reasoning,
-        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High))
     );
     assert_eq!(reasoning_mode, ReasoningMode::Standard);
 }
@@ -2842,7 +2882,7 @@ fn model_without_tool_capability_gets_no_default_surface_and_rejects_explicit_to
         &default_config,
         &session,
         &model,
-        &default_config.reasoning,
+        &ReasoningConfig::Off,
         &boot.sessions,
     )
     .unwrap();
@@ -2856,7 +2896,7 @@ fn model_without_tool_capability_gets_no_default_surface_and_rejects_explicit_to
         &default_config,
         &explicit_session,
         &model,
-        &default_config.reasoning,
+        &ReasoningConfig::Off,
         &boot.sessions,
     )
     .unwrap();

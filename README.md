@@ -58,7 +58,7 @@ installed copy. Continue with [getting started](docs/getting-started.md).
 [OpenRouter Batch API](docs/openrouter-batches.md) ·
 [Download benchmark results](docs/assets/evidence/README.md) ·
 [Brand Kit](docs/assets/octet/README.md) ·
-[Roadmap](https://github.com/orgs/skaft-software/projects/5) ·
+[Roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md) ·
 [Changelog](CHANGELOG.md)
 
 Built by [Achu Mukundan](https://github.com/achuthanmukundan00). [MIT licensed](LICENSE).

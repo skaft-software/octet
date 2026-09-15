@@ -1358,8 +1358,7 @@ fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
             .reasoning
             .as_deref()
             .map(crate::config::parse_reasoning)
-            .transpose()?
-            .unwrap_or(octet_ai::ReasoningConfig::Off),
+            .transpose()?,
         reasoning_explicit: request.reasoning.is_some(),
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: true,

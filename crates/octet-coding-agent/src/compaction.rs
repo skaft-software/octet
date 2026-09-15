@@ -623,7 +623,7 @@ pub(crate) mod tests {
             invocation_cwd: directory.path().to_owned(),
             model: Some(ModelId("gpt-4o-mini".into())),
             model_explicit: false,
-            reasoning: ReasoningConfig::Off,
+            reasoning: None,
             reasoning_explicit: false,
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,

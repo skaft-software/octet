@@ -13,6 +13,13 @@ live-provider availability or acceptance.
   exact provider/model models.dev record; this does not advertise availability
   or enrich custom/Codex inventories. Existing declaration-owned wire profiles,
   not names or booleans, determine which semantic options can be consumed.
+- CLI configuration keeps an unset preference distinct from explicit Off until
+  model selection. New launches use the endpoint default or its first supported
+  enabled choice; absent usable reasoning metadata stays Off without inventing
+  wire controls. Explicit choices and resumed-session precedence remain intact.
+  Serve catalog defaults follow the same rule. This is an
+  [unreleased product fix](providers.md#defaults-unreleased), not a change to
+  core `ReasoningConfig::Off` or native-host protocol 1 defaults.
 - Exact sets preserve holes: `low, high` does not imply `medium`. Off is distinct
   from Minimal, and an always-on contract has only On.
 - CLI/config and persisted choices may normalize to a supported choice. Core
@@ -69,6 +76,13 @@ aggregate response limit. Opaque replay fields serialize unchanged for durable
 continuation, but their Debug representations are redacted.
 
 ## Qualification boundary
+
+`cargo test --locked -p octet-coding-agent --test reasoning_defaults` exercises
+fresh CLI processes with isolated HOME/workspace/configuration and a loopback
+Chat Completions fixture. It checks effective wire controls and durable choices
+for binary, exact-effort, always-on, absent and unsupported metadata, all explicit
+configuration sources, a real workspace `read` tool round trip, and restart/resume.
+It does not run a real model or establish live LM Studio/OpenRouter acceptance.
 
 Unit and loopback tests cover exact choices, controls, caches, stream assembly,
 continuation and pre-network rejection. They use synthetic inputs and private
