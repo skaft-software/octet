@@ -170,6 +170,7 @@ class BridgeProcess:
         self,
         *,
         pi_package: Path = FAKE_PI,
+        bridge_path: Path = BRIDGE,
         extension: Path = FIXTURE_EXTENSION,
         extensions: list[Path] | None = None,
         source_fingerprint: str | None = None,
@@ -190,6 +191,7 @@ class BridgeProcess:
             raise ValueError(f"unsupported test API version {api_version}")
         self.api_version = api_version
         environment = os.environ.copy()
+        environment.pop("OCTET_EXTENSION_DIR", None)
         environment.pop("OCTET_PI_FIXTURE_MODE", None)
         environment.pop("OCTET_PI_FIXTURE_EVENTS", None)
         environment["OCTET_PI_FIXTURE_API_VERSION"] = api_version
@@ -202,7 +204,7 @@ class BridgeProcess:
         selected_extensions = [Path(item).resolve() for item in (extensions or [extension])]
         selected_agent_dir = Path(agent_dir or (ROOT / ".test-pi-agent")).absolute()
         selected_manifest = Path(manifest_path or (FIXTURES / "extension.toml")).absolute()
-        command = [NODE, str(BRIDGE), "--api-version", api_version]
+        command = [NODE, str(bridge_path), "--api-version", api_version]
         for selected in selected_extensions:
             command.extend(["--extension", str(selected)])
         if strict_identity:

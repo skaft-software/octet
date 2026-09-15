@@ -186,8 +186,15 @@ struct ChatFunctionCall {
 }
 
 #[derive(Serialize)]
-struct ChatTool {
-    r#type: String,
+#[serde(untagged)]
+enum ChatTool {
+    Function(ChatFunctionTool),
+    Custom(ChatCustomTool),
+}
+
+#[derive(Serialize)]
+struct ChatFunctionTool {
+    r#type: &'static str,
     function: ChatFunctionDef,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
@@ -198,6 +205,36 @@ struct ChatFunctionDef {
     name: String,
     description: String,
     parameters: serde_json::Value,
+    /// Always emitted: providers that reject unknown fields are excluded from
+    /// strict routes; the flag is `false` unless the tool requested and the
+    /// route could enforce the rewritten schema.
+    strict: bool,
+}
+
+/// OpenAI `custom` tool constrained by a Lark/regex grammar.
+#[derive(Serialize)]
+struct ChatCustomTool {
+    r#type: &'static str,
+    custom: ChatCustomDef,
+}
+
+#[derive(Serialize)]
+struct ChatCustomDef {
+    name: String,
+    description: String,
+    format: ChatCustomFormat,
+}
+
+#[derive(Serialize)]
+struct ChatCustomFormat {
+    r#type: &'static str,
+    grammar: ChatGrammar,
+}
+
+#[derive(Serialize)]
+struct ChatGrammar {
+    syntax: String,
+    definition: String,
 }
 
 #[derive(Serialize)]
@@ -416,27 +453,6 @@ struct ChatChunkFunction {
 }
 
 // --- Core Codec Implementations ---
-
-/// Collect tool names that were announced mid-conversation via a tool
-/// result's `added_tool_names` (pi's deferred-tools pattern). Announced
-/// schemas are excluded from the static request tool set from the
-/// announcement onward; providers with native deferred loading consume the
-/// same names as load points.
-fn deferred_tool_names(messages: &[crate::types::Message]) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
-    for message in messages {
-        if let crate::types::Message::User(user) = message {
-            for part in &user.content {
-                if let crate::types::UserPart::ToolResult(result) = part {
-                    if let Some(added) = &result.added_tool_names {
-                        names.extend(added.iter().cloned());
-                    }
-                }
-            }
-        }
-    }
-    names
-}
 
 /// Mistral accepts tool-call IDs with exactly nine ASCII alphanumeric bytes.
 /// Keep a valid existing ID, otherwise derive a deterministic opaque ID without
@@ -773,41 +789,50 @@ pub(crate) fn build_request(
     }
 
     // 4. Map tools and tool_choice
-    // Tools announced mid-conversation via `added_tool_names` are loaded
-    // dynamically: their schemas are excluded from the static request set
-    // from the announcement onward. Mirrors pi's deferred-tools handling for
-    // OpenAI Chat providers.
-    let deferred_tool_names = if model.spec.capabilities.deferred_tool_loading {
-        deferred_tool_names(&req.messages)
-    } else {
-        Default::default()
-    };
-    let active_tools: Vec<&crate::types::ToolDef> = req
-        .tools
-        .iter()
-        .filter(|tool| !deferred_tool_names.contains(&tool.name))
-        .collect();
+    // Registry announcements are local metadata, not a provider load operation.
+    // Until a native deferred-load codec exists, always send every schema.
+    let active_tools: Vec<&crate::types::ToolDef> = req.tools.iter().collect();
     let tools_opt = if active_tools.is_empty() || !model.spec.capabilities.tools {
         None
     } else {
-        Some(
-            active_tools
-                .iter()
-                .enumerate()
-                .map(|(index, t)| ChatTool {
-                    r#type: "function".to_string(),
-                    function: ChatFunctionDef {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        parameters: t.parameters.clone(),
+        let mut built = Vec::with_capacity(active_tools.len());
+        for (index, tool) in active_tools.iter().enumerate() {
+            // Grammar-constrained tools are caller-opted OpenAI `custom` tools;
+            // every other tool is a strict-resolved function tool.
+            if let Some(grammar) = crate::constrained_sampling::resolve_grammar(tool, true)? {
+                built.push(ChatTool::Custom(ChatCustomTool {
+                    r#type: "custom",
+                    custom: ChatCustomDef {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        format: ChatCustomFormat {
+                            r#type: "grammar",
+                            grammar: ChatGrammar {
+                                syntax: grammar.format.to_owned(),
+                                definition: grammar.definition,
+                            },
+                        },
                     },
-                    cache_control: (index + 1 == active_tools.len()
-                        && model.spec.cache.supports_cache_control_on_tools)
-                        .then_some(cache_marker)
-                        .flatten(),
-                })
-                .collect(),
-        )
+                }));
+                continue;
+            }
+            let (parameters, strict) =
+                crate::constrained_sampling::function_tool_parameters(tool, true)?;
+            built.push(ChatTool::Function(ChatFunctionTool {
+                r#type: "function",
+                function: ChatFunctionDef {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters,
+                    strict,
+                },
+                cache_control: (index + 1 == active_tools.len()
+                    && model.spec.cache.supports_cache_control_on_tools)
+                    .then_some(cache_marker)
+                    .flatten(),
+            }));
+        }
+        Some(built)
     };
 
     let tool_choice_opt = if !model.spec.capabilities.tools || req.tools.is_empty() {
@@ -2853,13 +2878,14 @@ mod tests {
     }
 
     #[test]
-    fn deferred_tool_loading_excludes_announced_schemas() {
+    fn unsupported_deferred_tool_loading_rejects_instead_of_hiding_schemas() {
         let mut model = make_test_model(false, false, false, true, false, false);
         Arc::make_mut(&mut model.spec)
             .capabilities
             .deferred_tool_loading = true;
 
         let make_tool = |name: &str| crate::types::ToolDef {
+            constrained_sampling: None,
             name: name.to_string(),
             description: "test tool".to_string(),
             parameters: serde_json::json!({"type": "object"}),
@@ -2905,17 +2931,133 @@ mod tests {
             session_id: None,
         };
 
+        assert!(matches!(
+            build_request(&model, &request),
+            Err(AiError::Config(crate::error::ConfigError::InvalidModel(_)))
+        ));
+    }
+
+    #[test]
+    fn constrained_sampling_emits_strict_and_grammar_custom_tools() {
+        use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict, GrammarVariants};
+
+        let model = make_test_model(false, false, false, true, false, false);
+        let request = Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("go".into())],
+            })],
+            tools: vec![
+                crate::types::ToolDef {
+                    constrained_sampling: Some(ConstrainedSampling::JsonSchema {
+                        strict: ConstrainedSamplingStrict::Prefer,
+                    }),
+                    name: "strict_tool".to_string(),
+                    description: "strict".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }),
+                },
+                crate::types::ToolDef {
+                    constrained_sampling: Some(ConstrainedSampling::Grammar {
+                        variants: GrammarVariants {
+                            openai_lark: Some("start: WORD".to_string()),
+                            openai_regex: None,
+                        },
+                    }),
+                    name: "grammar_tool".to_string(),
+                    description: "grammar".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {"input": {"type": "string"}},
+                        "required": ["input"]
+                    }),
+                },
+            ],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        };
+
         let body: serde_json::Value =
             serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
-        let names: Vec<&str> = body["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["function"]["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"read"));
-        assert!(names.contains(&"bash"));
-        assert!(!names.contains(&"browser_click"));
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["strict"], true);
+        // Strict rewrite closes the object and re-lists every property.
+        assert_eq!(
+            tools[0]["function"]["parameters"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            tools[0]["function"]["parameters"]["required"],
+            serde_json::json!(["city"])
+        );
+        assert_eq!(tools[1]["type"], "custom");
+        assert_eq!(tools[1]["custom"]["name"], "grammar_tool");
+        assert_eq!(tools[1]["custom"]["format"]["type"], "grammar");
+        assert_eq!(tools[1]["custom"]["format"]["grammar"]["syntax"], "lark");
+        assert_eq!(
+            tools[1]["custom"]["format"]["grammar"]["definition"],
+            "start: WORD"
+        );
+    }
+
+    #[test]
+    fn required_constrained_sampling_that_cannot_be_honored_is_rejected() {
+        use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict};
+
+        let model = make_test_model(false, false, false, true, false, false);
+        let request = Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("go".into())],
+            })],
+            tools: vec![crate::types::ToolDef {
+                constrained_sampling: Some(ConstrainedSampling::JsonSchema {
+                    strict: ConstrainedSamplingStrict::Require,
+                }),
+                name: "unstrictable".to_string(),
+                description: String::new(),
+                // `oneOf` is outside the strict subset, so a `require` request
+                // must fail rather than silently downgrade.
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "oneOf": [{"type": "object"}]
+                }),
+            }],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        };
+
+        assert!(matches!(
+            build_request(&model, &request),
+            Err(AiError::Unsupported(
+                crate::error::UnsupportedError::ConstrainedSampling(_)
+            ))
+        ));
     }
 
     #[test]
@@ -2926,6 +3068,7 @@ mod tests {
             .deferred_tool_loading = false;
 
         let make_tool = |name: &str| crate::types::ToolDef {
+            constrained_sampling: None,
             name: name.to_string(),
             description: "test tool".to_string(),
             parameters: serde_json::json!({"type": "object"}),
@@ -3002,6 +3145,7 @@ mod tests {
                 content: vec![UserPart::Text("Read sentinel.txt".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                constrained_sampling: None,
                 name: "read".into(),
                 description: "Read a file".into(),
                 parameters: serde_json::json!({
@@ -3491,6 +3635,7 @@ mod tests {
                 content: vec![UserPart::Text("latest user turn".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                constrained_sampling: None,
                 name: "read".to_string(),
                 description: "Read a file".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
@@ -3919,6 +4064,7 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::OpenAiChat, None);
         let tools = [ToolDef {
+            constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({

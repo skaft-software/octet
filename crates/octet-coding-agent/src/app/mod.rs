@@ -478,10 +478,17 @@ impl App {
     }
 
     /// Synchronizes secret-free API 0.3 provider declarations at a product
-    /// catalog boundary after extension activity has been observed.
+    /// catalog boundary after extension activity has been observed. Also consumes
+    /// queued, generation-fenced PostMutation resource rescans at that boundary.
     pub fn synchronize_extension_provider_catalog(&mut self) -> Vec<String> {
-        self.executable_extensions
-            .synchronize_provider_catalog(&mut self.catalog, &self.client)
+        let mut diagnostics = self
+            .executable_extensions
+            .rescan_post_mutation_resources(&self.config);
+        diagnostics.extend(
+            self.executable_extensions
+                .synchronize_provider_catalog(&mut self.catalog, &self.client),
+        );
+        diagnostics
     }
 
     /// Reconciles provider declarations at the request boundary and rejects a

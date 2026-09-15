@@ -481,7 +481,12 @@ Invoke a lifecycle hook (declared in `contributes.hooks`).
 }
 ```
 
-`hook` is one of: `"before_prompt"`, `"after_response"`, `"before_tool_call"`, `"after_tool_call"`.
+Both legacy APIs support `"before_prompt"`, `"after_response"`,
+`"before_tool_call"`, and `"after_tool_call"`. API `0.2` additionally supports
+typed `provider_retry`, `before_persistence`, and `post_mutation` hooks. See
+[retry advice](../extensions.md#provider-retry-observations-and-advice) and
+[bounded metadata and rescan enrichments](HOOK-ENRICHMENT.md) for their payloads,
+non-veto boundaries, and current product coverage.
 
 `payload` is hook-specific:
 - `before_prompt`: `{ "prompt": string }`
@@ -1023,6 +1028,8 @@ Event variants are:
 
 - `status {message, current?, total?, unit?}`
 - `output {stream: "stdout"|"stderr", encoding: "utf8"|"base64", data}`
+- `decoration {label, detail?}` additionally requires `progress_decoration`;
+  [bounded ephemeral annotation rules](HOOK-ENRICHMENT.md#bounded-progress-decorations).
 
 Inactive-request and non-monotonic progress is ignored with a diagnostic.
 Accepted output uses octet's existing 8 KiB chunking and bounded progress sink,
@@ -1664,6 +1671,7 @@ reference, safety, parentage, and bound rules.
 | `request_cancellation` | yes | Cooperative `$/cancelRequest`, cancellation errors, tombstones |
 | `content_parts` | yes | Ordered text/media tool-result parts and native result details |
 | `request_progress` | no | Request-scoped `$/progress` |
+| `progress_decoration` | no | Bounded ephemeral semantic annotations; also requires `request_progress` |
 | `artifacts` | no | `artifact/publish` and image/audio content parts |
 | `lifecycle_events` | no | Subscribed session/turn/tool observations |
 | `policy_intents` | no | Correlated `policy/evaluate` requests |

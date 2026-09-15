@@ -5,16 +5,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import tempfile
+import ssl
 import threading
 from typing import Any, Callable, Optional
 import unittest
 
 from octet_mcp.config import BridgeConfig, HttpAuthConfig, ServerConfig
 from octet_mcp.manager import BridgeManager
+from octet_mcp.ownership import ResourceOwner
 from octet_mcp.protocol import McpCancelled, McpError, McpTransportError
 from octet_mcp.streamable_http import McpAuthenticationError, McpStreamableHttpClient
 
 from .helpers import FakeCancellation, FakeExtension, ROOT, limits, wait_for
+
+
+OWNER = ResourceOwner("test-session", "test-instance", 1)
+CONTEXT = {"resource_owner": OWNER.wire()}
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,7 @@ class _HttpReply:
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes = b""
     include_content_length: bool = True
+    stream: Optional[Callable[[Any], None]] = None
 
 
 class _LoopbackHandler(BaseHTTPRequestHandler):
@@ -90,6 +97,13 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         for name, value in headers.items():
             self.send_header(name, value)
         self.end_headers()
+        if reply.stream is not None:
+            try:
+                reply.stream(self.wfile)
+            except OSError:
+                pass
+            except Exception as error:
+                fixture._record_error(error)
         if reply.body:
             try:
                 self.wfile.write(reply.body)
@@ -100,12 +114,15 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
 
 
 class _LoopbackFixture:
-    def __init__(self, responder: Callable[[_HttpRequest], _HttpReply]) -> None:
+    def __init__(self, responder: Callable[[_HttpRequest], _HttpReply], *, tls_context: Optional[ssl.SSLContext] = None) -> None:
         self.responder = responder
         self._lock = threading.Lock()
         self._requests: list[_HttpRequest] = []
         self._errors: list[BaseException] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _LoopbackHandler)
+        self._tls = tls_context is not None
+        if tls_context is not None:
+            self._server.socket = tls_context.wrap_socket(self._server.socket, server_side=True)
         self._server.daemon_threads = True
         self._server.fixture = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -113,7 +130,8 @@ class _LoopbackFixture:
 
     @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_port}/mcp"
+        scheme = "https" if self._tls else "http"
+        return f"{scheme}://127.0.0.1:{self._server.server_port}/mcp"
 
     @property
     def errors(self) -> tuple[BaseException, ...]:
@@ -231,9 +249,11 @@ class _TokenProvider:
     def __init__(self, token: str) -> None:
         self.token = token
         self.calls: list[tuple[str, str]] = []
+        self.owners: list[ResourceOwner] = []
 
-    def bearer_token(self, credential: str, *, server_id: str) -> Optional[str]:
+    def bearer_token(self, credential: str, *, server_id: str, resource_owner: ResourceOwner) -> Optional[str]:
         self.calls.append((credential, server_id))
+        self.owners.append(resource_owner)
         return self.token
 
 
@@ -267,6 +287,7 @@ class StreamableHttpTests(unittest.TestCase):
                 max_restarts=max_restarts,
             ),
             limits(shutdown_timeout_ms=250),
+            resource_owner=OWNER,
             credential_provider=credential_provider,
         )
 
@@ -605,6 +626,7 @@ class StreamableHttpTests(unittest.TestCase):
             client = McpStreamableHttpClient(
                 _remote_config(fixture.url.removesuffix("/mcp") + path),
                 limits(max_frame_bytes=1024, max_result_bytes=1024, shutdown_timeout_ms=250),
+                resource_owner=OWNER,
             )
             with self.assertRaises(McpError) as raised:
                 client.start()
@@ -719,6 +741,7 @@ class StreamableHttpTests(unittest.TestCase):
                 scratch_directory=Path(directory),
                 credential_provider=provider,
                 experimental_streamable_http_mcp=True,
+                resource_owner=OWNER,
             )
             try:
                 manager.start()
@@ -727,7 +750,7 @@ class StreamableHttpTests(unittest.TestCase):
                     message="remote manager ready",
                 )
                 tool_name = next(iter(extension._tools))
-                result = extension._tools[tool_name]["handler"]({"value": "managed"}, {})
+                result = extension._tools[tool_name]["handler"]({"value": "managed"}, CONTEXT)
                 self.assertFalse(result["is_error"])
                 self.assertEqual(result["structured_content"], {"echo": "managed"})
                 encoded = json.dumps(manager.snapshot())
@@ -758,6 +781,7 @@ class StreamableHttpTests(unittest.TestCase):
                 ),
                 scratch_directory=Path(directory),
                 experimental_streamable_http_mcp=True,
+                resource_owner=OWNER,
             )
             try:
                 manager.start()
@@ -765,7 +789,7 @@ class StreamableHttpTests(unittest.TestCase):
                     lambda: _server_node(manager.snapshot(), "remote")["state"] == "unavailable",
                     message="unavailable auth parked",
                 )
-                detail = manager.execute_command(["show", "remote"])["text"]
+                detail = manager.execute_command(["show", "remote"], CONTEXT)["text"]
                 self.assertIn("authentication_unavailable", detail)
                 self.assertEqual(extension._tools, {})
             finally:

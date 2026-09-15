@@ -1,0 +1,12 @@
+: cite: pi anthropic-messages.ts content_block_start fallback after content (mid-output rejection)
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_fallback_mid","usage":{"input_tokens":3,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"fallback"}}

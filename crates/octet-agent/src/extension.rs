@@ -991,12 +991,39 @@ mod tests {
     use crate::tool::{ToolContext, ToolError, ToolOutput};
     use octet_ai::ToolDef;
 
+    struct NoMetadata;
+
+    #[async_trait::async_trait]
+    impl PersistenceMetadataHook for NoMetadata {
+        async fn before_assistant_persist(
+            &self,
+            _context: &AssistantPersistenceContext,
+        ) -> Option<PersistenceMetadataProposal> {
+            None
+        }
+    }
+
+    #[test]
+    fn persistence_metadata_registration_rejects_duplicate_and_invalid_namespaces() {
+        let mut host = ExtensionHost::new();
+        host.persistence_metadata_hook("owner.notes", NoMetadata);
+        host.persistence_metadata_hook("owner.notes", NoMetadata);
+        host.persistence_metadata_hook("owner..invalid", NoMetadata);
+        assert_eq!(host.persistence_metadata_hooks.len(), 1);
+        assert_eq!(host.persistence_metadata_hooks[0].namespace, "owner.notes");
+        assert_eq!(
+            host.invalid_metadata_namespaces,
+            ["owner.notes", "owner..invalid"]
+        );
+    }
+
     struct NamedTool(&'static str);
 
     #[async_trait::async_trait]
     impl Tool for NamedTool {
         fn definition(&self) -> ToolDef {
             ToolDef {
+                constrained_sampling: None,
                 name: self.0.to_string(),
                 description: String::new(),
                 parameters: serde_json::json!({"type": "object"}),

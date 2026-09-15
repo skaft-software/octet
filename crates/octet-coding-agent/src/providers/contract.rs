@@ -2343,4 +2343,73 @@ mod tests {
         assert!(diagnostic.action().len() <= 512);
         assert!(!diagnostic.action().contains('\x1b'));
     }
+
+    #[test]
+    fn token_plan_and_coding_provider_declarations_are_declared() {
+        // Row 1a.1: declarative presets for OpenAI-compatible token-plan and
+        // coding subscriptions. Base URLs and credential variables mirror the
+        // upstream Pi provider definitions; no provider-name branching is added.
+        let expected = [
+            (
+                "baseten",
+                "Baseten",
+                "https://inference.baseten.co/v1/",
+                "BASETEN_API_KEY",
+            ),
+            (
+                "qwen-token-plan",
+                "Qwen Token Plan",
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+                "QWEN_TOKEN_PLAN_API_KEY",
+            ),
+            (
+                "qwen-token-plan-cn",
+                "Qwen Token Plan CN",
+                "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/",
+                "QWEN_TOKEN_PLAN_CN_API_KEY",
+            ),
+            (
+                "qwen-token-plan-individual",
+                "Qwen Token Plan Individual",
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+                "QWEN_TOKEN_PLAN_API_KEY",
+            ),
+            (
+                "zai-coding-cn",
+                "Z.AI Coding CN",
+                "https://open.bigmodel.cn/api/coding/paas/v4/",
+                "ZAI_CODING_CN_API_KEY",
+            ),
+        ];
+        for (id, name, base_url, env) in expected {
+            let declaration = ALL_PROVIDER_DECLARATIONS
+                .iter()
+                .find(|declaration| declaration.id == id)
+                .unwrap_or_else(|| panic!("missing declaration for {id}"));
+            assert_eq!(declaration.name, name, "{id} label drifted");
+            assert_eq!(declaration.base_url, base_url, "{id} base URL drifted");
+            match declaration.authentication {
+                ProviderAuthentication::Environment { variables } => {
+                    assert_eq!(variables, &[env], "{id} credential environment drifted")
+                }
+                other => panic!("{id}: unexpected authentication {other:?}"),
+            }
+            assert_eq!(declaration.routes.len(), 1, "{id} must expose one route");
+            let route = declaration.routes[0];
+            assert_eq!(route.protocol, Protocol::OpenAiChat, "{id} protocol drifted");
+            assert_eq!(
+                route.auth_presentation,
+                EndpointAuthPresentation::Bearer,
+                "{id} auth presentation drifted"
+            );
+            assert!(
+                matches!(declaration.model_discovery, ModelDiscovery::OpenAiModels { .. }),
+                "{id} discovery drifted"
+            );
+            assert!(
+                matches!(declaration.pricing, PricingProfile::Reference),
+                "{id} pricing profile drifted"
+            );
+        }
+    }
 }

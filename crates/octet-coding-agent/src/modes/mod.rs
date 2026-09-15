@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+pub(crate) mod export_html;
 pub mod interactive;
 pub mod plain;
 pub mod print;

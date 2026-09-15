@@ -3320,6 +3320,7 @@ impl Tool for ParallelOverlapProbe {
             name: "parallel_overlap_probe".into(),
             description: "Records whether independent calls overlap".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4172,6 +4173,7 @@ impl Tool for ProgressTool {
             name: "progress_test".to_string(),
             description: "Emits progress and sleeps".to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4211,6 +4213,7 @@ impl Tool for QueuedActivationTool {
             name: "queued_activation".into(),
             description: "Queues a semantic activation event".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4268,6 +4271,7 @@ impl Tool for LargeOutputTool {
             name: "large_output".into(),
             description: "Returns a large result".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4297,6 +4301,7 @@ impl Tool for RichErrorTool {
             name: "rich_error".into(),
             description: "Returns a structured error with supported media".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4338,6 +4343,7 @@ impl Tool for RegisteredToolsProbe {
             name: "registered_tools_probe".into(),
             description: "Records the final registered tool set".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4432,6 +4438,7 @@ impl Tool for UnsafeRecoveryTool {
             name: "unsafe_recovery".into(),
             description: "Represents an irreversible external mutation".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4460,6 +4467,7 @@ impl Tool for CountingRecoveryTool {
             name: "count_recovery".into(),
             description: "Counts crash-recovery executions".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -5560,6 +5568,7 @@ impl Tool for ClassifiedEffectProbe {
                 "properties": {},
                 "additionalProperties": false
             }),
+            constrained_sampling: None,
         }
     }
 
@@ -5604,6 +5613,7 @@ impl Tool for SchemaMismatchBashProbe {
                 "required": ["command"],
                 "additionalProperties": false,
             }),
+            constrained_sampling: None,
         }
     }
 
@@ -9378,3 +9388,6 @@ async fn opening_outage_deadlines_preserve_unknown_usage_in_main_local_and_gate(
         assert_eq!(transport.requests.lock().unwrap().len(), request_count);
     }
 }
+
+#[path = "support/extension_hooks.rs"]
+mod extension_hooks;

@@ -79,7 +79,10 @@ the tool behavior.
   normal-profile access.
 - Repeated open requests reuse the existing visible context. If the user closes
   it or it crashes, Browse reports degraded closed state and releases its owned
-  helpers; only a new explicit open request may relaunch it.
+  helpers; only a new explicit open request may relaunch it. Tool-created tabs
+  request non-activating creation in that visible browser. Initial launch and
+  page-created popups can still take focus; physical focus preservation is not
+  yet qualified (see [qualification](QUALIFICATION.md)).
 
 Use `/browse close` when finished. `/browse reset-profile` separately confirms
 before removing only the locked, sentinel-verified isolated profile.

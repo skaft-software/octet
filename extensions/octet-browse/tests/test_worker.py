@@ -154,7 +154,8 @@ class LaunchChromium:
         self.launched = launched
         self.launch_calls = 0
 
-    def launch_persistent_context(self, **_arguments: object) -> LifecycleContext:
+    def launch_persistent_context(self, **arguments: object) -> LifecycleContext:
+        self.launch_arguments = arguments
         self.launch_calls += 1
         if self.launched is not None:
             self.launched.set()

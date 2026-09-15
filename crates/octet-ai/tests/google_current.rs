@@ -63,6 +63,7 @@ fn fixture_request() -> Request {
             content: vec![UserPart::Text("Look up Paris.".to_owned())],
         })],
         tools: vec![ToolDef {
+            constrained_sampling: None,
             name: "lookup".to_owned(),
             description: "Look up a city.".to_owned(),
             parameters: serde_json::json!({

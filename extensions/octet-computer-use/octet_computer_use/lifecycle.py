@@ -1720,14 +1720,18 @@ class LifecycleSession:
         # A frame-generation change is accepted as a fresh observation, but it
         # cannot authorize an action bound to the old frame.  The old action
         # will fail the exact target/digest check below.
-        self._selected_target = observation.target
-        self._last_observation = observation
-        self._history[observation.observation_id] = observation
-        self._history.move_to_end(observation.observation_id)
-        while len(self._history) > MAX_HISTORY:
-            self._history.popitem(last=False)
-        self._state = SessionState.ACTIVE
-        self._state_reason = "observed"
+        with self._operation_condition:
+            token.throw_if_cancelled()
+            if self._settled or self._session_token.cancelled:
+                raise LifecycleError("owner_settled", "Observation owner is no longer active.")
+            self._selected_target = observation.target
+            self._last_observation = observation
+            self._history[observation.observation_id] = observation
+            self._history.move_to_end(observation.observation_id)
+            while len(self._history) > MAX_HISTORY:
+                self._history.popitem(last=False)
+            self._state = SessionState.ACTIVE
+            self._state_reason = "observed"
         return observation
 
     def observe(
@@ -1811,7 +1815,7 @@ class LifecycleSession:
             timeout=self.budget.budget.max_action_seconds if timeout is None else timeout,
             operation="approval",
         )
-        return bool(raw)
+        return raw is True
 
     def _receipt(
         self,
@@ -2396,7 +2400,7 @@ class LifecycleSession:
             # input was released; host qualification must provide this seam.
             return False
         try:
-            bounded_call(
+            released = bounded_call(
                 lambda: _call_with_contract(
                     function,
                     (self.owner,),
@@ -2406,7 +2410,7 @@ class LifecycleSession:
                 timeout=DEFAULT_STOP_SECONDS,
                 operation="input release",
             )
-            return True
+            return released is True
         except BaseException:
             return False
 
@@ -2443,8 +2447,9 @@ class LifecycleSession:
         if not self._release_adapter_input(cleanup_token):
             self._cleanup_degraded = True
         self.input_ownership.release_owner(self.owner)
-        self._last_observation = None
-        self._history.clear()
+        with self._operation_condition:
+            self._last_observation = None
+            self._history.clear()
         self._safe_fallback_required = True
         if self._cleanup_degraded:
             self._state = SessionState.DEGRADED

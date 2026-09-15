@@ -118,6 +118,33 @@ class CompatibilityProfileTests(unittest.TestCase):
 
 @unittest.skipUnless(NODE, "node is required for the Pi compatibility subprocess tests")
 class BridgeProtocolTests(unittest.TestCase):
+    def test_staged_entrypoint_loads_helpers_from_host_package_directory(self) -> None:
+        package = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary) / "bridge.mjs"
+            shutil.copyfile(package / "bridge.mjs", staged)
+            self.assertFalse((staged.parent / "semantic_ui.mjs").exists())
+            with BridgeProcess(
+                bridge_path=staged,
+                fixture_environment={"OCTET_EXTENSION_DIR": str(package)},
+                strict_identity=True,
+            ) as bridge:
+                result = bridge.initialize("runtime_commands")
+                self.assertIn("runtime_commands", result["protocol"]["features"])
+                self.assertIn("ui-methods", [item["name"] for item in result["commands"]])
+                output = bridge.request("command/execute", {"name": "ui-methods", "arguments": []})
+                self.assertIn("completed", output["result"]["text"])
+                self.assertEqual({}, bridge.request("shutdown")["result"])
+                self.assertEqual(0, bridge.process.wait(timeout=5))
+
+    def test_missing_selected_package_helper_never_falls_back_to_script_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with BridgeProcess(fixture_environment={"OCTET_EXTENSION_DIR": temporary}) as bridge:
+                self.assertNotEqual(0, bridge.process.wait(timeout=5))
+                bridge._stderr_thread.join(timeout=5)
+                self.assertIn("ERR_MODULE_NOT_FOUND", "".join(bridge.stderr))
+                self.assertEqual([], bridge.messages)
+
     def test_console_output_stays_off_protocol_stdout(self) -> None:
         with BridgeProcess() as bridge:
             bridge.initialize()

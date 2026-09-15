@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import time
+import threading
 from typing import Any, Callable, FrozenSet, Mapping, Optional, Protocol, Sequence, Tuple, Union
 from urllib.parse import urlsplit
 
@@ -402,6 +403,8 @@ class ActionRequest:
     frame_generation: int
     data_classes: FrozenSet[str] = frozenset()
     destination: Optional[str] = None
+    observation_digest: Optional[str] = None
+    native_identity_digest: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operation", _opaque_identifier(self.operation, "operation"))
@@ -417,6 +420,9 @@ class ActionRequest:
             "effect",
             _known_text(self.effect, "action effect", tuple(item.value for item in Effect)),
         )
+        permission = permission_for_operation(self.operation)
+        if self.capability != permission.capability or self.effect != permission.effect:
+            raise PolicyError("operation capability/effect classification does not match")
         object.__setattr__(self, "session_id", _opaque_identifier(self.session_id, "session_id"))
         object.__setattr__(self, "owner_id", _opaque_identifier(self.owner_id, "owner_id"))
         object.__setattr__(
@@ -431,6 +437,9 @@ class ActionRequest:
         object.__setattr__(self, "data_classes", _bounded_data_classes(self.data_classes, "data class"))
         if self.destination is not None:
             object.__setattr__(self, "destination", _normalise_origin(self.destination))
+        for value in (self.observation_digest, self.native_identity_digest):
+            if value is not None and (not isinstance(value, str) or not _DIGEST_RE.fullmatch(value)):
+                raise PolicyError("observation/native identity digest is invalid")
 
     @property
     def fingerprint(self) -> str:
@@ -452,6 +461,10 @@ class ActionRequest:
         }
         if self.destination is not None:
             result["destination"] = self.destination
+        if self.observation_digest is not None:
+            result["observation_digest"] = self.observation_digest
+        if self.native_identity_digest is not None:
+            result["native_identity_digest"] = self.native_identity_digest
         return result
 
     def to_intent(self) -> "PolicyIntent":
@@ -506,6 +519,8 @@ class PolicyIntent:
 class AuthorizationBinding:
     """All facts that an allow decision is bound to."""
 
+    operation: str
+    parent_request_id: Union[int, str]
     target: TargetIdentity
     capability: str
     session_id: str
@@ -518,10 +533,14 @@ class AuthorizationBinding:
     expires_at: int
     data_classes: FrozenSet[str] = frozenset()
     destination: Optional[str] = None
+    observation_digest: Optional[str] = None
+    native_identity_digest: Optional[str] = None
 
     @classmethod
-    def for_action(cls, action: ActionRequest, now: int) -> "AuthorizationBinding":
+    def for_action(cls, action: ActionRequest, now: int, parent_request_id: Union[int, str]) -> "AuthorizationBinding":
         return cls(
+            operation=action.operation,
+            parent_request_id=parent_request_id,
             target=action.target,
             capability=action.capability,
             session_id=action.session_id,
@@ -534,6 +553,8 @@ class AuthorizationBinding:
             expires_at=now + MAX_LOCAL_AUTHORIZATION_TTL_MS,
             data_classes=action.data_classes,
             destination=action.destination,
+            observation_digest=action.observation_digest,
+            native_identity_digest=action.native_identity_digest,
         )
 
     def __post_init__(self) -> None:
@@ -564,10 +585,14 @@ class AuthorizationBinding:
         object.__setattr__(self, "data_classes", _bounded_data_classes(self.data_classes, "authorization data class"))
         if self.destination is not None:
             object.__setattr__(self, "destination", _normalise_origin(self.destination))
+        for value in (self.observation_digest, self.native_identity_digest):
+            if value is not None and (not isinstance(value, str) or not _DIGEST_RE.fullmatch(value)):
+                raise PolicyError("observation/native identity digest is invalid")
 
     def matches(self, action: ActionRequest, now: int) -> bool:
         return (
             now < self.expires_at
+            and self.operation == action.operation
             and self.target == action.target
             and self.capability == action.capability
             and self.session_id == action.session_id
@@ -579,10 +604,14 @@ class AuthorizationBinding:
             and self.frame_generation == action.frame_generation
             and self.data_classes == action.data_classes
             and self.destination == action.destination
+            and self.observation_digest == action.observation_digest
+            and self.native_identity_digest == action.native_identity_digest
         )
 
     def to_wire(self) -> dict[str, Any]:
         result: dict[str, Any] = {
+            "operation": self.operation,
+            "parent_request_id": self.parent_request_id,
             "target": self.target.to_wire(),
             "capability": self.capability,
             "session_id": self.session_id,
@@ -597,6 +626,10 @@ class AuthorizationBinding:
         }
         if self.destination is not None:
             result["destination"] = self.destination
+        if self.observation_digest is not None:
+            result["observation_digest"] = self.observation_digest
+        if self.native_identity_digest is not None:
+            result["native_identity_digest"] = self.native_identity_digest
         return result
 
 
@@ -653,11 +686,15 @@ class PolicyDecision:
 
 
 class PolicyEvaluator(Protocol):
-    """Host adapter boundary; implementations own the JSON-RPC transport."""
+    """Trusted local exact-action adapter, NOT the legacy policy/evaluate wire.
 
-    def evaluate(
+    API 0.3 has no negotiated automation authorization service. Embeddings must
+    explicitly supply this service; a legacy intent evaluator is insufficient.
+    """
+
+    def evaluate_action(
         self,
-        intent: Mapping[str, Any],
+        action: Mapping[str, Any],
         *,
         parent_request_id: Union[int, str],
         approval_token: Optional[str] = None,
@@ -701,7 +738,7 @@ def arguments_digest(arguments: Any) -> str:
 def permission_for_operation(operation: str) -> Permission:
     """Return the static capability/effect classification for an operation."""
     operation = _bounded_text(operation, "operation")
-    name = operation.rsplit(".", 1)[-1]
+    name = operation
     mapping = {
         "observe": (Capability.OBSERVE.value, Effect.OBSERVATION.value),
         "start": (Capability.START.value, Effect.INPUT.value),
@@ -734,6 +771,8 @@ def make_action_request(
     scope: str = "session",
     trusted_data_classes: Sequence[str] = (),
     destination: Optional[str] = None,
+    observation_digest: Optional[str] = None,
+    native_identity_digest: Optional[str] = None,
 ) -> ActionRequest:
     """Construct an action with host owner context and a private arg digest."""
     permission = permission_for_operation(operation)
@@ -750,96 +789,168 @@ def make_action_request(
         frame_generation=frame_generation,
         data_classes=frozenset(trusted_data_classes),
         destination=destination,
+        observation_digest=observation_digest,
+        native_identity_digest=native_identity_digest,
     )
 
 
 class AuthorizationLedger:
-    """Local one-use dispatch ledger; it is never a token issuer."""
+    """Bounded one-use grants registered only after exact host evaluation."""
 
     def __init__(self) -> None:
-        self._used: set[str] = set()
+        self._issued: dict[int, Authorization] = {}
+        self._lock = threading.Lock()
 
-    def consume(self, authorization: Authorization, action: ActionRequest, now: int) -> None:
-        if not authorization.permits(action, now):
-            raise PolicyDenied("authorization is stale or does not match the exact action")
-        key = authorization.binding.arguments_digest + ":" + str(authorization.binding.frame_generation)
-        if key in self._used:
-            raise PolicyDenied("authorization has already been consumed")
-        self._used.add(key)
+    def issue(self, authorization: Authorization, now: int) -> None:
+        with self._lock:
+            self._issued = {key: value for key, value in self._issued.items()
+                            if now < value.binding.expires_at}
+            if len(self._issued) >= MAX_TOTAL_ACTIONS:
+                raise PolicyDenied("authorization capacity exhausted")
+            self._issued[id(authorization)] = authorization
+
+    def revoke(self) -> None:
+        with self._lock:
+            self._issued.clear()
+
+    def consume(self, authorization: Authorization, action: ActionRequest, now: int,
+                parent_request_id: Union[int, str]) -> None:
+        with self._lock:
+            issued = self._issued.pop(id(authorization), None)
+            if issued is not authorization:
+                raise PolicyDenied("authorization was not issued here or has been consumed")
+            if (not authorization.permits(action, now)
+                    or authorization.binding.parent_request_id != parent_request_id):
+                raise PolicyDenied("authorization is stale or does not match the exact action")
 
 
 class PolicyGate:
-    """Fail-closed policy adapter for action admission.
+    """One trusted owner/target scope, action-time evaluation, and one-use grants.
 
-    This class does not dispatch actions. A runtime must call ``evaluate``
-    before each action and ``authorize`` immediately before backend dispatch.
+    The evaluator is a local host dependency, never a model-supplied callback or
+    a cooperative confirmation. Revocation is terminal for this gate.
     """
 
-    def __init__(
-        self,
-        evaluator: Optional[PolicyEvaluator] = None,
-        *,
-        clock_ms: Optional[Callable[[], int]] = None,
-    ) -> None:
+    def __init__(self, evaluator: Optional[PolicyEvaluator] = None, *,
+                 scope: Optional[Scope] = None,
+                 clock_ms: Optional[Callable[[], int]] = None) -> None:
         self._evaluator = evaluator
-        self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
-        self._pending: dict[Tuple[Union[int, str], str], str] = {}
+        self.scope = scope
+        self._clock_ms = clock_ms or (lambda: int(time.monotonic() * 1000))
+        self._pending: dict[Tuple[Union[int, str], str], Tuple[str, int]] = {}
         self._ledger = AuthorizationLedger()
+        self._lock = threading.RLock()
+        self._revoked = False
+        self._actions = 0
 
     def _now(self) -> int:
         return _nonnegative_integer(self._clock_ms(), "policy clock")
 
-    def evaluate(
-        self,
-        action: ActionRequest,
-        *,
-        parent_request_id: Optional[Union[int, str]],
-        approval_token: Optional[str] = None,
-    ) -> PolicyDecision:
-        now = self._now()
-        if parent_request_id is None or isinstance(parent_request_id, bool):
-            return PolicyDecision.deny("host owner request is unavailable")
-        if not isinstance(parent_request_id, (int, str)):
-            return PolicyDecision.deny("host owner request is invalid")
-        if isinstance(parent_request_id, int) and parent_request_id < 0:
-            return PolicyDecision.deny("host owner request is invalid")
-        intent = action.to_intent()
-        key = (parent_request_id, action.fingerprint)
-        if approval_token is not None:
-            if not _APPROVAL_RE.fullmatch(approval_token):
-                return PolicyDecision.deny("approval token is malformed")
-            if self._pending.get(key) != intent.fingerprint:
-                return PolicyDecision.deny("approval is not bound to this exact action")
-        if self._evaluator is None:
-            return PolicyDecision.deny("host policy adapter is unavailable")
-        try:
-            result = self._evaluator.evaluate(
-                intent.to_wire(),
-                parent_request_id=parent_request_id,
-                approval_token=approval_token,
-            )
-            decision, token = parse_host_decision(result)
-        except (PolicyError, ValueError, TypeError):
-            return PolicyDecision.deny("host policy response is invalid")
-        if decision == Decision.DENY:
-            self._pending.pop(key, None)
-            return PolicyDecision.deny("host policy denied the exact action")
-        if decision == Decision.ASK:
-            self._pending[key] = intent.fingerprint
-            return PolicyDecision.ask("host approval is required", token)
-        self._pending.pop(key, None)
-        binding = AuthorizationBinding.for_action(action, now)
-        return PolicyDecision(
-            Decision.ALLOW,
-            "host policy allowed the exact action",
-            authorization=Authorization(binding=binding, decision=Decision.ALLOW, issued_at=now),
-        )
+    def revoke(self) -> None:
+        with self._lock:
+            self._revoked = True
+            self._pending.clear()
+            self._ledger.revoke()
 
-    def authorize(self, action: ActionRequest, decision: PolicyDecision) -> None:
-        """Perform the final exact binding check immediately before dispatch."""
-        if decision.decision != Decision.ALLOW or decision.authorization is None:
-            raise PolicyDenied(decision.reason)
-        self._ledger.consume(decision.authorization, action, self._now())
+    def _admitted(self, action: ActionRequest, now: int) -> bool:
+        return (not self._revoked and self.scope is not None
+                and self._actions < self.scope.max_actions
+                and self.scope.allows(session_id=action.session_id,
+                    owner_id=action.owner_id,
+                    extension_generation=action.extension_generation,
+                    target=action.target, capability=action.capability,
+                    effect=action.effect, scope=action.scope, now=now))
+
+    def check_scope(self, action: ActionRequest) -> None:
+        """Check continuing observation authority without minting an input grant.
+
+        Internal recaptures belong to an already admitted bounded operation;
+        they may not outlive its trusted observation scope or read credentials.
+        """
+        with self._lock:
+            scope = self.scope
+            if (self._revoked or scope is None
+                    or not scope.allows(session_id=action.session_id,
+                        owner_id=action.owner_id, extension_generation=action.extension_generation,
+                        target=action.target, capability=action.capability, effect=action.effect,
+                        scope=action.scope, now=self._now())
+                    or action.data_classes & {"credentials", "authentication", "password", "secret"}):
+                raise PolicyDenied("observation scope is no longer available")
+
+    def evaluate(self, action: ActionRequest, *,
+                 parent_request_id: Optional[Union[int, str]],
+                 approval_token: Optional[str] = None) -> PolicyDecision:
+        if (type(parent_request_id) not in (int, str)
+                or (type(parent_request_id) is int
+                    and not 0 <= parent_request_id <= MAX_PORTABLE_JSON_INTEGER)
+                or (type(parent_request_id) is str
+                    and (not parent_request_id or len(parent_request_id.encode("utf-8")) > MAX_IDENTIFIER_BYTES))):
+            return PolicyDecision.deny("host owner request is unavailable or invalid")
+        now = self._now()
+        key = (parent_request_id, action.fingerprint)
+        with self._lock:
+            if not self._admitted(action, now):
+                return PolicyDecision.deny("host scope is unavailable, expired, exhausted, or mismatched")
+            if action.effect != Effect.OBSERVATION.value and (
+                    action.observation_digest is None or action.native_identity_digest is None):
+                return PolicyDecision.deny("fresh private observation and native identity are required")
+            if action.effect == Effect.AUTHENTICATION.value or action.data_classes & {
+                "credentials", "authentication", "password", "secret"
+            }:
+                return PolicyDecision.deny("credentials and authentication require manual takeover")
+            self._pending = {k: v for k, v in self._pending.items() if now < v[1]}
+            if approval_token is not None:
+                if not isinstance(approval_token, str) or not _APPROVAL_RE.fullmatch(approval_token):
+                    return PolicyDecision.deny("approval token is malformed")
+                pending = self._pending.pop(key, None)
+                # Presenting a token against different input invalidates it too.
+                for old_key, value in list(self._pending.items()):
+                    if value[0] == approval_token:
+                        del self._pending[old_key]
+                if pending is None or pending[0] != approval_token:
+                    return PolicyDecision.deny("approval is not bound to this exact action")
+            evaluator = getattr(self._evaluator, "evaluate_action", None)
+            if not callable(evaluator):
+                return PolicyDecision.deny("exact-action host policy adapter is unavailable")
+        # Do not hold a lock while a host approval is pending: stop must win.
+        try:
+            result = evaluator(action.to_binding_wire(),
+                               parent_request_id=parent_request_id,
+                               approval_token=approval_token)
+            decision, token = parse_host_decision(result)
+        except Exception:
+            return PolicyDecision.deny("host policy response is unavailable or invalid")
+        with self._lock:
+            if not self._admitted(action, self._now()):
+                return PolicyDecision.deny("host scope changed during evaluation")
+            if decision == Decision.DENY:
+                self._pending.pop(key, None)
+                return PolicyDecision.deny("host policy denied the exact action")
+            if decision == Decision.ASK:
+                if token is not None and len(self._pending) < MAX_TOTAL_ACTIONS:
+                    self._pending[key] = (token, min(now + MAX_AUTHORIZATION_TTL_MS, self.scope.expires_at))
+                return PolicyDecision.ask("host approval is required", token)
+            self._pending.pop(key, None)
+            # Expiry begins before evaluation, so a slow approval cannot renew it.
+            binding = AuthorizationBinding.for_action(action, now, parent_request_id)
+            authorization = Authorization(binding=binding, decision=Decision.ALLOW, issued_at=now)
+            try:
+                self._ledger.issue(authorization, self._now())
+            except PolicyDenied as error:
+                return PolicyDecision.deny(str(error))
+            return PolicyDecision(Decision.ALLOW, "host policy allowed the exact action",
+                                  authorization=authorization)
+
+    def authorize(self, action: ActionRequest, decision: PolicyDecision, *,
+                  parent_request_id: Union[int, str]) -> None:
+        with self._lock:
+            if decision.decision != Decision.ALLOW or decision.authorization is None:
+                raise PolicyDenied(decision.reason)
+            now = self._now()
+            if not self._admitted(action, now):
+                raise PolicyDenied("host scope is no longer active")
+            self._ledger.consume(decision.authorization, action, now, parent_request_id)
+            self._actions += 1
 
 
 __all__ = [

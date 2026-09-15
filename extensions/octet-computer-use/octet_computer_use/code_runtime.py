@@ -12,10 +12,12 @@ sandboxing.  This module adds a *fail-closed* model-code transport:
 * code is run only after a genuine operating-system containment setup has
   succeeded.
 
-The OS setup is intentionally conservative.  On systems where the required
-Linux namespaces, resource limits, and no-new-privileges control are not
-available, execution returns ``sandbox_unavailable`` or
-``sandbox_setup_failed`` instead of falling back to an ordinary subprocess.
+The retained namespace prototype is NOT qualified containment. All in-package
+launchers and CodeRuntime.execute reject execution, including supplied sandbox
+objects or capability flags. Primitive presence, AST validation, fork, chroot,
+and resource limits cannot qualify host-memory/FD/PID/capability isolation.
+The child execution helpers are retained as source-only protocol material;
+no public runtime path dispatches them.
 """
 
 from __future__ import annotations
@@ -28,7 +30,10 @@ import math
 import multiprocessing
 import os
 import platform
-import resource
+try:
+    import resource
+except ImportError:  # Windows has no resource module; execution remains unavailable.
+    resource = None
 import sys
 import tempfile
 import time
@@ -1061,27 +1066,12 @@ def _setup_linux_sandbox(request: SandboxRequest) -> None:
 
 
 def _detected_capabilities() -> SandboxCapabilities:
-    system = platform.system().lower()
-    prerequisites = (
-        system == "linux",
-        callable(getattr(os, "unshare", None)),
-        callable(getattr(os, "chroot", None)),
-        hasattr(resource, "setrlimit"),
-    )
-    genuine = all(prerequisites)
-    detail = "Linux namespace, tmpfs-root, resource-limit, and no-new-privileges setup required."
-    if not genuine:
-        detail = "The required Linux containment primitives are unavailable."
+    # Primitives are not containment evidence. The retained Linux prototype
+    # forks host memory/FDs and CLONE_NEWPID only affects subsequent children;
+    # it has no qualified descriptor, capability or syscall isolation boundary.
     return SandboxCapabilities(
-        genuine=genuine,
-        os_isolated=genuine,
-        network_isolated=genuine,
-        filesystem_isolated=genuine,
-        process_isolated=genuine,
-        resource_limits=genuine,
-        no_new_privileges=genuine,
-        platform=system,
-        detail=detail,
+        platform=platform.system().lower(),
+        detail="No qualified model-code containment launcher is available.",
     )
 
 
@@ -1090,14 +1080,14 @@ def _detected_capabilities() -> SandboxCapabilities:
 
 
 class ProcessSandbox:
-    """Run validated source in a namespace/resource-limited child process."""
+    """Unavailable prototype; capability metadata cannot enable execution."""
 
     def __init__(self, *, capabilities: Optional[SandboxCapabilities] = None) -> None:
-        self.capabilities = capabilities or _detected_capabilities()
+        self.capabilities = _detected_capabilities()
 
     @property
     def available(self) -> bool:
-        return self.capabilities.genuine
+        return False
 
     def run(
         self,
@@ -1107,272 +1097,23 @@ class ProcessSandbox:
         cancellation: Optional[Any] = None,
         timeout: Optional[float] = None,
     ) -> SandboxResult:
-        if not isinstance(request, SandboxRequest):
-            request = SandboxRequest(**dict(request))
-        if not self.capabilities.genuine:
-            return SandboxResult(
-                status="sandbox_unavailable",
-                error={"code": "sandbox_unavailable", "message": self.capabilities.detail or "Genuine OS containment is unavailable."},
-                capabilities=self.capabilities,
-            )
-        if not request.restrictions.deny_by_default:
-            return SandboxResult(
-                status="rejected",
-                error={"code": "capability_denied", "message": "Sandbox capabilities are deny-by-default."},
-                capabilities=self.capabilities,
-            )
-        try:
-            validate_source(request.source, restrictions=request.restrictions)
-        except CodeRuntimeError as error:
-            return SandboxResult(status="rejected", error=error.as_dict(), capabilities=self.capabilities)
-        selected_timeout = request.budget.max_wall_seconds if timeout is None else timeout
-        if isinstance(selected_timeout, bool) or not isinstance(selected_timeout, (int, float)) or not math.isfinite(float(selected_timeout)) or selected_timeout <= 0:
-            return SandboxResult(
-                status="rejected",
-                error={"code": "invalid_timeout", "message": "Code-runtime timeout must be finite and positive."},
-                capabilities=self.capabilities,
-            )
-        selected_timeout = min(float(selected_timeout), request.budget.max_wall_seconds)
-        try:
-            request_bytes = _json_bytes(request.as_dict(), maximum=request.budget.max_ipc_bytes)
-        except CodeRuntimeError as error:
-            return SandboxResult(status="rejected", error=error.as_dict(), capabilities=self.capabilities)
-
-        try:
-            context = multiprocessing.get_context("fork")
-        except ValueError:
-            # A spawn fallback would not make this a different kind of OS
-            # sandbox, but it is intentionally not used: fork is required for
-            # the currently qualified Linux setup.
-            return SandboxResult(
-                status="sandbox_unavailable",
-                error={"code": "sandbox_unavailable", "message": "The qualified process start method is unavailable."},
-                capabilities=self.capabilities,
-            )
-        child_to_parent, parent_to_child = context.Pipe(duplex=False)
-        # For a simplex Pipe, the first endpoint receives and the second sends.
-        parent_receive = child_to_parent
-        child_send = parent_to_child
-        parent_send, child_receive = context.Pipe(duplex=False)
-        process = context.Process(
-            target=_sandbox_worker,
-            args=(request_bytes, child_send, child_receive, request.budget.max_ipc_bytes),
-            name="octet-contained-model-code",
-        )
-        process.daemon = True
-        try:
-            process.start()
-        except BaseException:
-            for connection in (parent_receive, child_send, parent_send, child_receive):
-                try:
-                    connection.close()
-                except BaseException:
-                    pass
-            return SandboxResult(
-                status="sandbox_setup_failed",
-                error={"code": "sandbox_setup_failed", "message": "The contained process could not be started."},
-                capabilities=self.capabilities,
-            )
-        # Close child ends in the parent and parent ends in the child as soon
-        # as possible.  The worker closes its inherited copies below.
-        for connection in (child_send, child_receive):
-            try:
-                connection.close()
-            except BaseException:
-                pass
-
-        deadline = time.monotonic() + selected_timeout
-        in_flight: Optional[str] = None
-        final: Optional[Mapping[str, Any]] = None
-        setup_status: Optional[str] = None
-        timed_out = False
-        cancelled = False
-        try:
-            while True:
-                if _token_cancelled(cancellation):
-                    cancelled = True
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                if parent_receive.poll(min(0.025, remaining)):
-                    try:
-                        raw = parent_receive.recv_bytes(request.budget.max_ipc_bytes)
-                        message = json.loads(raw.decode("utf-8"))
-                    except (EOFError, OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-                        final = None
-                        break
-                    if not isinstance(message, Mapping):
-                        final = None
-                        break
-                    message_type = message.get("type")
-                    if message_type == "sandbox_setup":
-                        setup_status = str(message.get("status", "sandbox_setup_failed"))
-                        continue
-                    if message_type == "bridge_request":
-                        operation = message.get("operation")
-                        arguments = message.get("arguments", {})
-                        if not isinstance(operation, str) or not isinstance(arguments, Mapping):
-                            response = {
-                                "type": "bridge_result",
-                                "ok": False,
-                                "error": {"code": "invalid_bridge_request", "message": "The bridge request was invalid."},
-                            }
-                        elif bridge_handler is None:
-                            response = {
-                                "type": "bridge_result",
-                                "ok": False,
-                                "error": {"code": "bridge_unavailable", "message": "No parent-owned bridge is available."},
-                            }
-                        else:
-                            in_flight = operation
-                            try:
-                                raw_result = bridge_handler(operation, arguments)
-                                bridge_result = _result_mapping(raw_result)
-                                response = {
-                                    "type": "bridge_result",
-                                    "ok": True,
-                                    "result": bridge_result,
-                                }
-                                if bridge_result.get("status") in {"unknown_effect", "unknown_effects"} or bridge_result.get("unknown_effects"):
-                                    response["unknown_effect"] = True
-                            except BaseException as error:
-                                error_value = _error_mapping(error, "bridge_failed")
-                                response = {
-                                    "type": "bridge_result",
-                                    "ok": False,
-                                    "error": error_value,
-                                    "unknown_effect": error_value.get("code") == "unknown_effect",
-                                }
-                            finally:
-                                in_flight = None
-                        try:
-                            parent_send.send_bytes(_json_bytes(response, maximum=request.budget.max_ipc_bytes))
-                        except (CodeRuntimeError, OSError, ValueError):
-                            final = None
-                            break
-                        continue
-                    if message_type == "final":
-                        final = message
-                        break
-                    final = None
-                    break
-                if not process.is_alive() and not parent_receive.poll(0):
-                    break
-        finally:
-            if cancelled or timed_out or final is None:
-                try:
-                    process.terminate()
-                except BaseException:
-                    pass
-            process.join(timeout=min(0.25, max(0.0, deadline - time.monotonic())))
-            if process.is_alive():
-                try:
-                    process.kill()
-                except BaseException:
-                    try:
-                        process.terminate()
-                    except BaseException:
-                        pass
-                process.join(timeout=0.25)
-            for connection in (parent_receive, parent_send):
-                try:
-                    connection.close()
-                except BaseException:
-                    pass
-
-        if cancelled:
-            if in_flight in {"act", "act_group"}:
-                return SandboxResult(
-                    status="unknown_effect",
-                    error={"code": "unknown_effect", "message": "Code cancellation interrupted a parent-owned action bridge."},
-                    bridge_calls=0,
-                    unknown_effects=({"operation": in_flight, "reason": "cancelled"},),
-                    capabilities=self.capabilities,
-                )
-            return SandboxResult(
-                status="cancelled",
-                error={"code": "cancelled", "message": "Model-code execution was cancelled."},
-                capabilities=self.capabilities,
-            )
-        if timed_out:
-            if in_flight in {"act", "act_group"}:
-                return SandboxResult(
-                    status="unknown_effect",
-                    error={"code": "unknown_effect", "message": "The code wall deadline interrupted a parent-owned action bridge."},
-                    unknown_effects=({"operation": in_flight, "reason": "deadline_exceeded"},),
-                    capabilities=self.capabilities,
-                )
-            return SandboxResult(
-                status="budget_exhausted",
-                error={"code": "wall_budget_exhausted", "message": "The model-code wall-time budget was exhausted."},
-                capabilities=self.capabilities,
-            )
-        if final is None:
-            status = setup_status or ("sandbox_setup_failed" if not process.exitcode else "failed")
-            return SandboxResult(
-                status=status,
-                error={
-                    "code": status,
-                    "message": "The contained model-code process exited without a bounded result.",
-                },
-                capabilities=self.capabilities,
-            )
-        raw_status = final.get("status", "failed")
-        status = raw_status if raw_status in _SANDBOX_STATUSES else "failed"
-        unknown_value = final.get("unknown_effects", ())
-        unknown: Tuple[Mapping[str, Any], ...] = ()
-        if isinstance(unknown_value, (list, tuple)):
-            unknown = tuple(item for item in unknown_value if isinstance(item, Mapping))
         return SandboxResult(
-            status=status,
-            output=final.get("output", "") if isinstance(final.get("output", ""), str) else "",
-            value=final.get("value"),
-            error=final.get("error") if isinstance(final.get("error"), Mapping) else None,
-            bridge_calls=final.get("bridge_calls", 0) if isinstance(final.get("bridge_calls", 0), int) else 0,
-            unknown_effects=unknown,
-            capabilities=self.capabilities,
+            status="sandbox_unavailable",
+            error={"code": "sandbox_unavailable",
+                   "message": "No qualified model-code containment launcher is available."},
+            capabilities=_detected_capabilities(),
         )
 
     execute = run
 
 
 def _sandbox_worker(request_bytes: bytes, child_send: Any, child_receive: Any, maximum: int) -> None:
+    # No source is decoded, compiled or executed without a qualified launcher.
     try:
-        try:
-            request_value = json.loads(request_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            _child_send(child_send, {"type": "sandbox_setup", "status": "sandbox_setup_failed"}, maximum)
-            return
-        if not isinstance(request_value, Mapping):
-            _child_send(child_send, {"type": "sandbox_setup", "status": "sandbox_setup_failed"}, maximum)
-            return
-        request = SandboxRequest(
-            source=request_value.get("source", ""),
-            budget=CodeBudget(**dict(request_value.get("budget", {}))),
-            restrictions=SandboxRestrictions(**dict(request_value.get("restrictions", {}))),
-            metadata=request_value.get("metadata", {}),
-        )
-        try:
-            _setup_linux_sandbox(request)
-        except BaseException:
-            _child_send(child_send, {"type": "sandbox_setup", "status": "sandbox_setup_failed"}, maximum)
-            return
-        _child_send(child_send, {"type": "sandbox_setup", "status": "succeeded"}, maximum)
-        final = _child_execute(request.source, request_value, child_send, child_receive)
-        _child_send(child_send, final, maximum)
-    except BaseException:
-        try:
-            _child_send(child_send, {"type": "sandbox_setup", "status": "sandbox_setup_failed"}, maximum)
-        except BaseException:
-            pass
+        _child_send(child_send, {"type": "sandbox_setup", "status": "sandbox_unavailable"}, maximum)
     finally:
         for connection in (child_send, child_receive):
-            try:
-                connection.close()
-            except BaseException:
-                pass
+            connection.close()
 
 
 class OSSandbox(ProcessSandbox):
@@ -1403,10 +1144,8 @@ class UnavailableSandbox:
 
 
 def select_sandbox(*, capabilities: Optional[SandboxCapabilities] = None) -> Any:
-    selected = capabilities or _detected_capabilities()
-    if not selected.genuine:
-        return UnavailableSandbox(selected)
-    return OSSandbox(capabilities=selected)
+    # Caller-supplied flags are descriptive data, never authority to run code.
+    return UnavailableSandbox(_detected_capabilities())
 
 
 # ---------------------------------------------------------------------------
@@ -1615,6 +1354,13 @@ class CodeRuntime:
             cancellation,
             timeout,
         )
+        # No supplied object or capability booleans can qualify a launcher.
+        # Until a reviewed host launcher exists, do not forward any model source.
+        if not _detected_capabilities().genuine:
+            return CodeExecutionResult(status="sandbox_unavailable", error={
+                "code": "sandbox_unavailable",
+                "message": "No qualified model-code containment launcher is available.",
+            })
         try:
             raw = _call_sandbox(
                 self.sandbox,

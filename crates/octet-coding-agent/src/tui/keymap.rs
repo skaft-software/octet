@@ -9,11 +9,24 @@ use sexy_tui_rs::key_text;
 /// continues to own terminal-event translation and key policy.
 pub use sexy_tui_rs::TextEditAction as EditAction;
 
+pub mod keybindings;
+
 /// Actions produced by the pure terminal-event translator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum InputAction {
     Abort,
+    /// The terminal reported keyboard focus returning to the window (`?1004`).
+    FocusGained,
+    /// The terminal reported keyboard focus leaving the window. Consumers must
+    /// reset transient interaction state (press/drag/hover/selection) so it
+    /// cannot resume from a stale press when focus returns.
+    FocusLost,
+    /// Interrupt, settle, then dispatch an already queued follow-up (never the draft).
+    DispatchQueued,
+    /// Return the newest local follow-up to the composer without submitting it.
+    EditQueued,
+    Queue(String),
     ClearEditor,
     Steer(String),
     Submit(String),
@@ -222,6 +235,7 @@ pub(crate) fn is_reserved_extension_shortcut(key: &ExtensionShortcutKey) -> bool
         {
             true
         }
+        (KeyCode::Up, KeyModifiers::ALT) => true,
         (KeyCode::PageUp | KeyCode::PageDown, modifiers) if modifiers.is_empty() => true,
         (KeyCode::End, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => true,
         _ => false,
@@ -247,6 +261,10 @@ pub fn translate_with_popup(
 
     match event {
         Event::Resize(columns, rows) => InputAction::Resize(columns, rows),
+        // Focus reporting is enabled by the terminal backend (`?1004h`); the
+        // translator surfaces the raw transition so the shell owns the reset.
+        Event::FocusGained => InputAction::FocusGained,
+        Event::FocusLost => InputAction::FocusLost,
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => InputAction::ScrollLines(-3),
             MouseEventKind::ScrollDown => InputAction::ScrollLines(3),
@@ -347,9 +365,12 @@ pub fn translate_with_popup(
             {
                 return InputAction::CopyTranscriptSelection;
             }
+            if key.code == KeyCode::Up && key.modifiers == KeyModifiers::ALT {
+                return InputAction::EditQueued;
+            }
             if key.code == KeyCode::Esc && key.modifiers.is_empty() {
                 return if active {
-                    InputAction::Abort
+                    InputAction::DispatchQueued
                 } else {
                     InputAction::Close
                 };
@@ -390,7 +411,7 @@ pub fn translate_with_popup(
                     if editor_text.is_empty() {
                         InputAction::Ignore
                     } else {
-                        InputAction::Steer(editor_text.to_owned())
+                        InputAction::Queue(editor_text.to_owned())
                     }
                 }
                 (true, KeyCode::Char('s'), KeyModifiers::CONTROL) => {
@@ -435,7 +456,6 @@ pub fn translate_with_popup(
                 _ => InputAction::Ignore,
             }
         }
-        _ => InputAction::Ignore,
     }
 }
 
@@ -591,7 +611,7 @@ mod tests {
         );
         assert_eq!(
             translate(Some(key(KeyCode::Enter, KeyModifiers::NONE)), true, "hello"),
-            InputAction::Steer("hello".into())
+            InputAction::Queue("hello".into())
         );
         assert_eq!(
             translate(
@@ -609,6 +629,66 @@ mod tests {
             ),
             InputAction::Ignore
         );
+    }
+
+    #[test]
+    fn queued_controls_are_one_shot_and_slash_escape_keeps_ownership() {
+        for active in [false, true] {
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ] {
+                let event = Some(Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Up,
+                    KeyModifiers::ALT,
+                    kind,
+                )));
+                assert_eq!(
+                    translate(event, active, ""),
+                    if kind == KeyEventKind::Press {
+                        InputAction::EditQueued
+                    } else {
+                        InputAction::Ignore
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            translate_with_popup(Some(key(KeyCode::Esc, KeyModifiers::NONE)), true, "/", true),
+            InputAction::SlashMenu(SlashMenuAction::Close)
+        );
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            assert_eq!(
+                translate(
+                    Some(Event::Key(KeyEvent::new_with_kind(
+                        KeyCode::Esc,
+                        KeyModifiers::NONE,
+                        kind,
+                    ))),
+                    true,
+                    "draft"
+                ),
+                InputAction::Ignore
+            );
+        }
+    }
+
+    #[test]
+    fn focus_transitions_translate_independently_of_key_state() {
+        for active in [false, true] {
+            assert_eq!(
+                translate(Some(Event::FocusGained), active, "draft"),
+                InputAction::FocusGained
+            );
+            assert_eq!(
+                translate(Some(Event::FocusLost), active, "draft"),
+                InputAction::FocusLost
+            );
+        }
+        // A focus loss is never mistaken for a coordinated close or abort.
+        assert_ne!(translate(Some(Event::FocusLost), true, ""), InputAction::Closed);
+        assert_ne!(translate(Some(Event::FocusLost), true, ""), InputAction::Abort);
     }
 
     #[test]
@@ -1024,7 +1104,7 @@ mod tests {
         );
         assert_eq!(
             translate(Some(key(KeyCode::Esc, KeyModifiers::NONE)), true, ""),
-            InputAction::Abort
+            InputAction::DispatchQueued
         );
     }
 

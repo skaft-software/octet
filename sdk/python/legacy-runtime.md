@@ -364,6 +364,13 @@ protocol traffic, not tool-result content. See
 [cancellation](../../docs/extensions/PROTOCOL-REFERENCE.md#19-cancelrequest-api-02)
 and [progress bounds](../../docs/extensions/PROTOCOL-REFERENCE.md#26-progress-api-02).
 
+For retained API `0.2`, `ext.progress_decoration(label, detail=None)` also requires
+negotiated `progress_decoration`. The helpers `persistence_metadata(value,
+public=False)` and `post_mutation_rescan(resource_ids)` build typed hook result
+fields for declared `before_persistence` and `post_mutation` hooks. See the
+[complete bounded contracts and product coverage](../../docs/extensions/HOOK-ENRICHMENT.md);
+these are not API `0.3` aliases.
+
 ## Structured results and artifacts
 
 API `0.2` returns typed content parts. String returns convert to one text part;

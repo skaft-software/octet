@@ -133,3 +133,47 @@ connector. Connector registration is bounded to 16 descriptors.
 After shutdown or an owner change, release any integration-owned resources from
 the connector lifecycle callbacks. Do not use connector registration as a way
 to transfer an existing browser session between owners.
+
+## Native Firefox/Safari prerequisites (#378)
+
+Native operation remains **unsupported**, not silently mapped onto Chromium.
+`NativeFirefoxConnector` and `NativeSafariConnector` are descriptors only. The
+current worker consumes a Playwright page for locator metadata, reference
+lifetimes, actions, navigation and screenshots; changing a family allowlist is
+not a native implementation. Playwright's patched Firefox and WebKit builds are
+not an attachment bridge to the user's existing Firefox or Safari tabs.
+
+A safe complete native connector first needs all of the following:
+
+1. A reviewed, versioned native transport supplied and explicitly enabled by the
+   host/user, with installation/permission and revocation UX. No process/port
+   scanning, normal-profile reuse, or implicit remote-automation enablement.
+   A Firefox WebExtension/native-messaging bridge or a Safari-specific bridge
+   must demonstrate existing-target operation; a driver that creates a separate
+   automation session does not satisfy existing-tab selection.
+2. A trusted picker or integration that issues the complete connector/browser/
+   session/window/tab identity and a revision/liveness proof. No title matching,
+   active-tab fallback, integer tab-index guessing, or selecting a different
+   page after closure, navigation, window moves, process restart or owner change.
+3. An operation adapter (not a fabricated Playwright page) covering each declared
+   capability, with serialized bounded calls, exact-target verification before
+   every action, stable snapshot-generation fencing and untrusted observations.
+   Native errors must not expose transport secrets, profile paths or credentials.
+4. Proven safety at the selected target: credential/payment/form metadata without
+   reading values; manual authentication; action-time consequential confirmation;
+   pre-navigation/redirect/popup HTTP(S) enforcement; download cancellation; and
+   conservative viewport screenshot refusal around possible sensitive values.
+   Native APIs that cannot enforce a boundary must leave that capability disabled.
+   The existing external selection path only installs a download listener; the
+   isolated context's route interception is not automatically transferred to a
+   native connector. Post-navigation URL inspection alone is not prevention.
+5. Exact-target release/stop, owner-change cleanup and takeover behavior that
+   never closes or operates unrelated windows/tabs. Test denied/revoked grants,
+   stale identities, wrong owners, tab replacement, transport loss and timeout,
+   then qualify on an explicitly authorized real Firefox/Safari target with
+   unrelated windows present. No such native campaign has run for this candidate.
+
+The dependency-free native refusal/identity/owner regressions live in
+`tests/test_adapters.py`. They prove the unsupported boundary stays closed, not
+that native browsing works. Supplying these prerequisites is separate from the
+[isolated Chromium focus candidate](QUALIFICATION.md).

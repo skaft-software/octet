@@ -277,9 +277,9 @@ pub struct Capabilities {
     pub agent_delegation: Option<AgentDelegation>,
     /// Whether the model supports structured outputs (JSON schema / mode).
     pub structured_output: bool,
-    /// Whether the provider loads tool schemas dynamically after a
-    /// `added_tool_names` announcement on a tool result. When false, every
-    /// registered tool's schema is sent with every request.
+    /// Reserved legacy flag; must be false. No codec currently implements
+    /// native deferred tool loading. Catalog and request validation reject true
+    /// rather than hide schemas after a local registry announcement.
     #[serde(default)]
     pub deferred_tool_loading: bool,
 }
@@ -1025,9 +1025,8 @@ pub struct ToolResult {
     pub is_error: bool,
     /// Names from the registry that became available as a consequence of this
     /// tool execution (for example an extension or MCP server that registers
-    /// additional tools on first use). Providers capable of deferred tool
-    /// loading treat these names as load points: once announced, those tool
-    /// schemas are excluded from the static request schema set.
+    /// additional tools on first use). This is local registry metadata only:
+    /// codecs still send every tool schema and do not claim native load points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_tool_names: Option<Vec<String>>,
 }
@@ -1302,6 +1301,58 @@ pub struct ToolDef {
     pub description: String,
     /// JSON schema describing expected parameters.
     pub parameters: serde_json::Value,
+    /// Optional provider-side constrained-sampling request for this tool.
+    ///
+    /// `None` means the caller made no request: codecs send the ordinary
+    /// function schema. A codec that cannot honor a declared requirement must
+    /// fail the request rather than silently relax it (see
+    /// [`crate::constrained_sampling`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constrained_sampling: Option<ConstrainedSampling>,
+}
+
+/// Provider-side constrained-sampling request attached to a [`ToolDef`].
+///
+/// This roughly maps to the `strict` concept implemented by several APIs as
+/// JSON-schema constrained sampling. Grammar variants let callers provide
+/// provider-specific encodings of the same intended language; a codec uses the
+/// variant its route actually defines and ignores the rest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConstrainedSampling {
+    /// Ask the provider to enforce the tool's parameter schema.
+    JsonSchema {
+        /// How to react when the schema is outside the provider's strict subset.
+        #[serde(default)]
+        strict: ConstrainedSamplingStrict,
+    },
+    /// Ask the provider to constrain generation with a grammar.
+    Grammar {
+        /// Provider-specific grammar encodings of the intended language.
+        variants: GrammarVariants,
+    },
+}
+
+/// Failure policy for JSON-schema constrained sampling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstrainedSamplingStrict {
+    /// Omit the constraint when the route or schema cannot express it.
+    #[default]
+    Prefer,
+    /// Fail the request rather than run without the constraint.
+    Require,
+}
+
+/// Provider-specific grammar encodings for grammar constrained sampling.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrammarVariants {
+    /// OpenAI `custom` tool Lark grammar definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_lark: Option<String>,
+    /// OpenAI `custom` tool regex grammar definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_regex: Option<String>,
 }
 
 /// Tool invocation constraint settings.
@@ -1803,6 +1854,7 @@ mod tests {
             system: Some("sys".to_string()),
             messages: vec![],
             tools: vec![ToolDef {
+                constrained_sampling: None,
                 name: "tool".to_string(),
                 description: "desc".to_string(),
                 parameters: serde_json::json!({"type": "object"}),

@@ -363,7 +363,7 @@ fn protocol_commands_are_bounded_and_semantically_separate() {
     }));
 
     let iterm_image = image(jpeg(2, 1));
-    let iterm = ImageProtocolEncoder::new(ImageProtocol::Iterm2, ImageLimits::default())
+    let iterm = ImageProtocolEncoder::new(ImageProtocol::Iterm2, limits.clone())
         .encode_place(image_id(10), &iterm_image, ImageLayout::new(2, 1).unwrap())
         .unwrap();
     let iterm_wire = write_command(&iterm);
@@ -372,7 +372,18 @@ fn protocol_commands_are_bounded_and_semantically_separate() {
         .windows(b";inline=1;doNotMoveCursor=1;width=2;height=1;preserveAspectRatio=1:".len())
         .any(|window| window
             == b";inline=1;doNotMoveCursor=1;width=2;height=1;preserveAspectRatio=1:"));
-    assert_eq!(iterm_wire.iter().filter(|&&byte| byte == 0x1b).count(), 1);
+    // One OSC frame has two ESC bytes: its introducer and the ST terminator.
+    // Check the complete wire contract, including multi-chunk base64 payload,
+    // rather than mistaking ST for a second image frame.
+    let jpeg_bytes = jpeg(2, 1);
+    let expected = format!(
+        "\x1b]1337;File=size={};inline=1;doNotMoveCursor=1;width=2;height=1;preserveAspectRatio=1:{}\x1b\\",
+        jpeg_bytes.len(), base64(&jpeg_bytes),
+    );
+    assert!(iterm.payload_chunks() > 1);
+    assert_eq!(iterm_wire, expected.as_bytes());
+    assert_eq!(iterm.encoded_len(), iterm_wire.len());
+    assert!(iterm_wire.len() <= limits.max_encoded_output_bytes());
 
     let webp_image = image(webp(2, 1));
     assert_eq!(

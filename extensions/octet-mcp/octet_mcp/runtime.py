@@ -106,8 +106,7 @@ def build_runtime(
         ),
     )
     def mcp_command(arguments: list[str], context: Mapping[str, Any]) -> dict[str, Any]:
-        del context
-        return manager.execute_command(arguments)
+        return manager.execute_command(arguments, context)
 
     @extension.status("status")
     def mcp_status(params: Mapping[str, Any]) -> dict[str, Any]:

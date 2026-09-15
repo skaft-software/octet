@@ -312,6 +312,7 @@ impl Tool for WaveProbe {
                 "required": ["slot"],
                 "additionalProperties": false
             }),
+            constrained_sampling: None,
         }
     }
 
@@ -487,6 +488,7 @@ impl Tool for PhaseRead {
                 "required": ["phase", "tag"],
                 "additionalProperties": false
             }),
+            constrained_sampling: None,
         }
     }
 
@@ -541,6 +543,7 @@ impl Tool for BarrierMutation {
                 "required": ["tag"],
                 "additionalProperties": false
             }),
+            constrained_sampling: None,
         }
     }
 
@@ -750,6 +753,7 @@ impl Tool for CancelRead {
             name: "cancel_read_probe".into(),
             description: "cancellable HostRead probe".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            constrained_sampling: None,
         }
     }
 
@@ -977,6 +981,7 @@ impl Tool for EffectBarrierProbe {
                 "required": ["tag"],
                 "additionalProperties": false
             }),
+            constrained_sampling: None,
         }
     }
 

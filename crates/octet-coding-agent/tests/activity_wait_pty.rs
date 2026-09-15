@@ -327,6 +327,7 @@ struct HeldApi {
     arrived: mpsc::Receiver<usize>,
     release: mpsc::Sender<()>,
     count: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -344,6 +345,8 @@ impl HeldApi {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker_count = count.clone();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let worker_bodies = bodies.clone();
         let worker = thread::spawn(move || {
             while !worker_stop.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
@@ -356,7 +359,7 @@ impl HeldApi {
                 socket
                     .set_write_timeout(Some(Duration::from_secs(2)))
                     .expect("fixture write timeout");
-                let Some((headers, _body)) = read_request(&mut socket) else {
+                let Some((headers, body)) = read_request(&mut socket) else {
                     continue;
                 };
                 assert!(
@@ -374,6 +377,7 @@ impl HeldApi {
                 if socket.write_all(response_headers.as_bytes()).is_err() {
                     continue;
                 }
+                worker_bodies.lock().unwrap().push(body);
                 let index = worker_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if arrived_tx.send(index).is_err() {
                     return;
@@ -399,6 +403,7 @@ impl HeldApi {
             arrived,
             release,
             count,
+            bodies,
             stop,
             worker: Some(worker),
         }
@@ -565,12 +570,10 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
     api.wait_for_request(&mut candidate, 1);
     let (label, request_count) = if compact {
         api.release_response();
-        await_screen(
-            &mut candidate,
-            &mut parser,
-            &mut consumed,
-            "fixture response done",
-        );
+        await_screen(&mut candidate, &mut parser, &mut consumed, "completed");
+        // Public text precedes authoritative settlement. Wait for the terminal
+        // outcome before requesting idle-only compaction, rather than sending
+        // into the active run's after-response lifecycle owner.
         // A trailing space makes this an unambiguous no-argument command.
         candidate.pty.write_input(b"/compact \r");
         api.wait_for_request(&mut candidate, 2);
@@ -677,4 +680,73 @@ fn real_activity_wait_pty_contract() {
     run_activity_case("light", false, "always");
     run_activity_case("dark", true, "always");
     run_activity_case("dark", false, "never");
+}
+
+#[test]
+fn real_queued_input_escape_dispatch_and_option_up_edit_pty_contract() {
+    let _guard = pty_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let api = HeldApi::start();
+    let mut candidate = Candidate::spawn(&api.url, "dark", "never");
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+    candidate.pty.write_input(b"queue fixture initial\r");
+    api.wait_for_request(&mut candidate, 1);
+    candidate.pty.write_input(b"QUEUE-FIRST\rQUEUE-ORIGINAL\r");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "2 queued");
+    candidate.pty.write_input(b"\x1b[1;3A"); // Option/Alt+Up, not an editor arrow.
+    await_screen(&mut candidate, &mut parser, &mut consumed, "QUEUE-ORIGINAL");
+    candidate
+        .pty
+        .write_input(b"\x03QUEUE-EDITED\rDRAFT-NEVER-SUBMIT");
+    await_screen(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "DRAFT-NEVER-SUBMIT",
+    );
+    assert_eq!(
+        api.count.load(Ordering::SeqCst),
+        1,
+        "queue editing must not send"
+    );
+    candidate.pty.write_input(b"\x1b");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "interrupted");
+    // The serial fixture must release its cancelled socket before accepting
+    // the next one. The real frontend has already settled cancellation.
+    api.release_response();
+    api.wait_for_request(&mut candidate, 2);
+    {
+        let bodies = api.bodies.lock().unwrap();
+        let request = String::from_utf8_lossy(&bodies[1]);
+        assert!(request.contains("QUEUE-FIRST"), "{request}");
+        assert!(!request.contains("QUEUE-ORIGINAL"), "{request}");
+        assert!(
+            !request.contains("QUEUE-EDITED"),
+            "FIFO dispatch: {request}"
+        );
+        assert!(!request.contains("DRAFT-NEVER-SUBMIT"), "{request}");
+    }
+    api.release_response();
+    api.wait_for_request(&mut candidate, 3);
+    {
+        let bodies = api.bodies.lock().unwrap();
+        let request = String::from_utf8_lossy(&bodies[2]);
+        assert!(request.contains("QUEUE-EDITED"), "{request}");
+        assert!(!request.contains("QUEUE-ORIGINAL"), "{request}");
+        assert!(!request.contains("DRAFT-NEVER-SUBMIT"), "{request}");
+    }
+    await_screen(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "DRAFT-NEVER-SUBMIT",
+    );
+    candidate.pty.write_input(b"\x03\x03"); // clear draft, then plain cancellation
+    candidate.pty.drain_for(Duration::from_millis(250));
+    api.release_response();
+    candidate.shutdown();
+    assert_eq!(api.count.load(Ordering::SeqCst), 3);
 }

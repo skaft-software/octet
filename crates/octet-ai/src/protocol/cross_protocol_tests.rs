@@ -360,3 +360,141 @@ fn test_cross_protocol_reasoning_state_rejection() {
         "Expected Lossy mode to drop state and pass"
     );
 }
+
+/// Strict JSON-schema constrained sampling is applied across every codec family,
+/// and grammar-constrained tools become OpenAI `custom` tools where the wire
+/// format defines them.
+#[test]
+fn constrained_sampling_wire_shape_across_codecs() {
+    use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict, GrammarVariants, ToolDef};
+
+    let strict_tool = |name: &str| ToolDef {
+        name: name.to_string(),
+        description: "strict".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+        }),
+        constrained_sampling: Some(ConstrainedSampling::JsonSchema {
+            strict: ConstrainedSamplingStrict::Prefer,
+        }),
+    };
+    let grammar_tool = ToolDef {
+        name: "grammar_tool".to_string(),
+        description: "grammar".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"]
+        }),
+        constrained_sampling: Some(ConstrainedSampling::Grammar {
+            variants: GrammarVariants {
+                openai_lark: Some("start: WORD".to_string()),
+                openai_regex: None,
+            },
+        }),
+    };
+
+    let req_for = || Request {
+        system: None,
+        messages: vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("go".to_string())],
+        })],
+        tools: vec![strict_tool("strict_tool"), grammar_tool.clone()],
+        tool_choice: ToolChoice::Auto,
+        max_output_tokens: None,
+        temperature: None,
+        stop: vec![],
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: crate::types::ReasoningMode::Standard,
+        responses: None,
+        output_format: OutputFormat::Text,
+        output_modalities: OutputModalities::Text,
+        compatibility: Strict,
+        cache_retention: crate::types::CacheRetention::Short,
+        session_id: None,
+    };
+
+    // Chat Completions: strict function tool + grammar `custom` tool.
+    let chat = make_model(Protocol::OpenAiChat, false, false, false, false);
+    let body: serde_json::Value = serde_json::from_slice(
+        &crate::protocol::openai_chat::build_request(&chat, &req_for())
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(body["tools"][0]["function"]["strict"], true);
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"]["additionalProperties"],
+        false
+    );
+    assert_eq!(body["tools"][1]["type"], "custom");
+    assert_eq!(
+        body["tools"][1]["custom"]["format"]["grammar"]["syntax"],
+        "lark"
+    );
+
+    // Responses: strict function tool + grammar `custom` tool.
+    let resp = make_model(Protocol::OpenAiResponses, false, false, false, false);
+    let body: serde_json::Value = serde_json::from_slice(
+        &crate::protocol::openai_responses::build_request(&resp, &req_for())
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(body["tools"][0]["strict"], true);
+    assert_eq!(
+        body["tools"][0]["parameters"]["additionalProperties"],
+        false
+    );
+    assert_eq!(body["tools"][1]["type"], "custom");
+    assert_eq!(body["tools"][1]["format"]["type"], "grammar");
+
+    // Anthropic: strict rewrite of the input schema (no separate flag on wire).
+    let anthropic = make_model(Protocol::AnthropicMessages, false, false, false, false);
+    let body: serde_json::Value = serde_json::from_slice(
+        &crate::protocol::anthropic::build_request(&anthropic, &req_for())
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(
+        body["tools"][0]["input_schema"]["additionalProperties"],
+        false
+    );
+    // Grammar is unsupported on Anthropic messages, so it stays a function tool
+    // with its canonical schema.
+    assert_eq!(body["tools"][1]["name"], "grammar_tool");
+
+    // Bedrock: strict flag inside toolSpec.
+    let bedrock = make_model(Protocol::BedrockConverse, false, false, false, false);
+    let body: serde_json::Value = serde_json::from_slice(
+        &crate::protocol::bedrock::build_request(&bedrock, &req_for())
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(body["toolConfig"]["tools"][0]["toolSpec"]["strict"], true);
+    assert_eq!(
+        body["toolConfig"]["tools"][0]["toolSpec"]["inputSchema"]["json"]["additionalProperties"],
+        false
+    );
+
+    // Google: strict rewrite plus VALIDATED function-calling mode.
+    let google = make_model(Protocol::GoogleGenerativeAi, false, false, false, false);
+    let body: serde_json::Value = serde_json::from_slice(
+        &crate::protocol::google::build_request(&google, &req_for())
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(
+        body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        body["toolConfig"]["functionCallingConfig"]["mode"],
+        "VALIDATED"
+    );
+}

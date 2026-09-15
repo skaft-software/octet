@@ -20,7 +20,7 @@ octet <- API 0.2 JSON-RPC -> octet-mcp <- MCP JSON-RPC stdio -> local servers
 ```
 
 Local stdio is the normal transport. Streamable HTTP is blocked-by-default and
-experimental, with the unresolved defects listed below. Legacy MCP SSE endpoints,
+experimental, with the remediation and remaining closure gates listed below. Legacy MCP SSE endpoints,
 OAuth/browser authorization, resources, prompts, sampling, elicitation, automatic
 server installation, and ambient discovery are unsupported.
 
@@ -105,38 +105,62 @@ loopback address, which exists for deterministic local development and tests.
 URLs cannot contain userinfo, a query, or a fragment, preventing URL-auth and
 query credential fields as well as endpoint switching by redirect. The extension
 never synthesizes a browser `Origin` header or forwards browser credentials.
+DNS runs in an isolated, cancellable Python helper which is killed and reaped on
+cancellation/shutdown. Every answer must be globally routable; mixed public/private
+answers and mapped/transition addresses fail closed. Only an explicitly configured
+literal loopback address is exempt. The reviewed numeric address is pinned for the
+client lifetime, with no second DNS lookup during connection; TLS still uses the
+original endpoint hostname for SNI and certificate verification. Non-public HTTPS
+endpoints are not supported (apart from that literal loopback exception).
 
 Remote `auth` contains only a logical credential reference, never a token or
 header value. A host/application composition may inject the narrow
-`CredentialProvider.bearer_token(reference, server_id=...)` adapter; the bridge
+`CredentialProvider.bearer_token(reference, server_id=..., resource_owner=...)` adapter; the bridge
 asks it at request time, uses the returned token only to form that request's
 `Authorization: Bearer` header, redacts it from parsed remote data, then drops
-it. The normal bundled runtime intentionally has no provider, so such a server
-parks with `authentication_unavailable`. OAuth discovery, browser redirects,
+it. The owner is an immutable host-issued `ResourceOwner`, never a tool argument.
+Adapters must bind their lookup to that complete owner and return promptly; a
+blocking application callback cannot be forcibly killed inside Python. Its late
+return cannot initiate DNS or a connection after cancellation/deadline.
+The normal bundled runtime intentionally has no provider, so an owner-bound server
+requiring auth parks with `authentication_unavailable`. OAuth discovery, browser redirects,
 token acquisition/refresh, persistent token stores, static config headers, and
 secret environment fallback are not implemented.
 
 ### Known Streamable HTTP defects
 
-The gate is a containment measure, not a claim that remote transport is safe.
-Do **not** enable it for production, privileged networks, or sensitive
-credentials. The known unresolved defects are:
+The gate remains a containment measure, not a production safety qualification.
+Do **not** enable it for production, privileged networks, or sensitive credentials.
+The original nine defects now have the following local remediation and regressions
+in `tests/test_http_hardening.py`:
 
-1. HTTPS SSRF remains possible through DNS rebinding; connections are not pinned
-   to a reviewed address.
-2. Credential and session state can be shared across distinct resource owners.
-3. DNS workers can outlive cancellation and shutdown (they are not reliably
-   killable).
-4. Buffered SSE handling can confuse peer identity.
-5. Control-message fanout is unbounded.
-6. Aggregate budgets can reset across remote transport paths.
-7. Truncated framing can be accepted.
-8. An empty SSE event ID can produce an incorrect resume cursor.
-9. The startup deadline can be escaped.
+| Original defect | Current safeguard |
+| --- | --- |
+| 1. HTTPS DNS rebinding/SSRF | Validate all resolved addresses; reject non-public/special-use answers; connect only a pinned numeric address with original-host TLS verification. |
+| 2. Cross-owner credentials and sessions | Require an immutable host owner before remote startup; pass it to credential composition; reject absent/foreign session, instance or generation before policy, credentials or I/O. No in-place owner migration. |
+| 3. DNS outlives cancellation/shutdown | A bounded-output isolated helper is killable and reaped; sockets and helpers belong to tracked operations. |
+| 4. Buffered SSE confuses peer identity | Route server requests/progress while reading; distinguish requests from terminal responses even when IDs collide; parse before payload redaction and reject foreign response IDs. |
+| 5. Unbounded control fanout | At most 16 peer-request/catalog-change actions per operation and 16 concurrent reply/cancel workers per client; no unbounded control queue; tracked cancellation and absolute control watchdogs. |
+| 6. Budgets reset across transport paths | One cumulative byte/event/control budget for a POST and all GET resumptions. |
+| 7. Truncated framing accepted | Require complete SSE blank-line boundaries, exact Content-Length and strict chunk separators/final trailer terminator; ambiguous framing fails closed. |
+| 8. Empty SSE ID retains stale cursor | Commit IDs at complete event boundaries; empty ID clears the operation-local cursor and prevents another GET; absent ID preserves it. |
+| 9. Startup deadline renewed | One absolute deadline covers initialize, initialized notification and every initial catalog page, including admission, DNS and resumptions. Refresh has one deadline across all pages. |
 
-The only activation path is the process-owner opt-in above. These defects need
-remediation before general availability; the framing and recovery behavior
-below does not override this warning.
+**Remaining closure gates:** this is still a candidate, not general availability.
+Local TLS/HTTP adversarial fixtures do not qualify external-server interoperability,
+Linux/platform cleanup, long-duration resource pressure or host/Serve owner changes.
+A resident binds to only one host owner: remotes initially park with
+`resource_owner_required`; run `/mcp restart <server>` from an owned command to
+connect. A different owner requires restarting the extension process. Automatic
+multi-owner partitioning, owner-settlement cleanup and host-qualified owner-specific
+catalog visibility remain unimplemented; foreign tool calls fail closed. These
+limitations must not be mistaken for a fully shared remote service.
+
+An injected synchronous credential/progress callback is trusted application code;
+Python cannot forcibly terminate it. Its operation remains bounded in admission
+and late network activity is fenced, but full cleanup cannot be guaranteed until
+it returns. The stock executable still has no credential adapter. API `0.2`
+product integration and release qualification remain independent gates.
 
 ## Requirements and installation
 
@@ -309,8 +333,8 @@ activities, and action counts have additional fixed bounds in source.
 
 ### Streamable HTTP framing and recovery
 
-This describes the experimental path, subject to all
-[known defects](#known-streamable-http-defects), not a safety qualification.
+This describes the experimental path, subject to the
+[remaining closure gates](#known-streamable-http-defects), not a safety qualification.
 
 The HTTP client POSTs one JSON-RPC message with `Content-Type: application/json`
 and `Accept: application/json, text/event-stream`. It accepts a bounded JSON
@@ -322,8 +346,10 @@ A `404` for an established session is treated as expiration and triggers the
 normal fresh-session reconnect path.
 
 SSE response events are UTF-8 JSON-RPC `message` events, bounded by the existing
-frame limit both per event and in aggregate (at most 256 events). A server-issued
-SSE `id` is retained only in memory. If a POST response stream closes before its
+frame limit both per event and cumulatively across the POST and all resumed GETs
+(at most 256 event blocks, including ignored/control blocks). Peer requests and
+progress route as complete events arrive, not after the final response. A server-issued
+SSE `id` is retained only in that operation's memory; an empty ID clears it. If a POST response stream closes before its
 terminal response *after* such an ID, the bridge may perform at most the
 configured `maxRestarts` bounded GET resumptions with `Last-Event-ID`; it never
 re-POSTs the original request. Without an ID, an interrupted request is
@@ -333,13 +359,13 @@ notification stream and does not implement the retired standalone/legacy SSE
 transport.
 
 HTTP response bodies, event streams, request slots, timeouts, and shutdown use
-the configured bounds, subject to the defects above. Redirects are rejected
+the configured bounds, subject to the closure gates above. Redirects are rejected
 before following a `Location`; 401/403 park with a generic authentication error;
 malformed, oversized, unsupported-content-type, and unsafe status responses park
 without retaining response text. Rate limits and transient transport/server
 failures use the existing bounded lifecycle backoff (honouring a capped numeric
 `Retry-After` when present). Cancellation aborts the in-flight socket and sends
-one bounded `notifications/cancelled`; it never claims rollback or replays the
+at most one best-effort bounded `notifications/cancelled`; it never claims rollback or replays the
 request.
 
 ## Catalogs, calls, and results
@@ -421,7 +447,8 @@ fixtures are frontend-neutral and are intended for both TUI and Serve reducers.
 
 ## Tests
 
-From the package root:
+From the package root (the release-manifest test requires Python 3.11+
+for stdlib `tomllib`; runtime transport tests also run on Python 3.9):
 
 ```console
 python3 -m unittest discover -s tests -t . -v
@@ -433,4 +460,5 @@ add/replace/remove catalogs, epoch-pinned schemas, malformed/oversized frames,
 cancellation, timeout, crash/restart/parking, bounded redacted logs, media
 artifacts, policy failure, shutdown, API `0.2` wire behavior, generic
 presentation fixtures, and release/package smoke checks. This inventory is not
-live remote-transport or release qualification.
+live remote-transport or release qualification. The local TLS fixture uses a
+[deliberately public test-only key](fixtures/tls/README.md), never a real credential.

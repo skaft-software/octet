@@ -403,3 +403,173 @@ fn native_long_markdown_finish_retains_source_and_exactly_once_rows() {
         assert_eq!(physical.matches(&marker).count(), 1, "{marker}: {physical}");
     }
 }
+
+#[test]
+fn native_structural_stream_resize_replays_once_without_losing_source_or_history() {
+    let mut replay = NativeReplay::with_size(96, 18);
+    let run = replay.shell.begin_run("openai");
+    let mut source = String::from("# RESIZE-HEADING\n\n| Marker | Details |\n|---|---|\n");
+    replay.shell.on_run_event(
+        run,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: source.clone(),
+        },
+    );
+    replay.render(true);
+    for index in 0..24 {
+        let row =
+            format!("| RESIZE-{index:02} | stable table geometry while the viewport changes |\n");
+        source.push_str(&row);
+        // Fragment inside cells as a provider would, not only at complete rows.
+        for chunk in row.as_bytes().chunks(7) {
+            replay.shell.on_run_event(
+                run,
+                &AgentEvent::OutputDelta {
+                    channel: OutputChannel::Text,
+                    text: String::from_utf8(chunk.to_vec()).unwrap(),
+                },
+            );
+            replay.render(true);
+        }
+        if let Some((width, height)) = match index {
+            6 => Some((40, 8)),
+            12 => Some((120, 30)),
+            18 => Some((96, 18)),
+            _ => None,
+        } {
+            let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
+            // Model only emitted reset/replay, not a modern emulator's reflow.
+            replay.terminal.set_size(height, width);
+            replay.width = width;
+            replay.height = height;
+            replay.shell.set_size(width, height);
+            let output = replay.render(false);
+            assert_eq!(output.matches("\x1b[3J").count(), 1, "{output:?}");
+            assert_eq!(output.matches("\x1b[2J").count(), 1, "{output:?}");
+            assert_eq!(
+                replay.shell.tui.as_ref().unwrap().full_redraws(),
+                baseline + 1
+            );
+            for sentinel in 0..30 {
+                assert_eq!(
+                    output
+                        .matches(&format!("NATIVE-HISTORY-{sentinel:02}"))
+                        .count(),
+                    1
+                );
+            }
+            for _ in 0..3 {
+                replay.render(true);
+            }
+        }
+    }
+    let state = replay.shell.state.borrow();
+    let index = state.active_text.unwrap();
+    let TranscriptBlock::Assistant(assistant) = &state.transcript[index] else {
+        panic!("assistant")
+    };
+    assert_eq!(assistant.text, source);
+    assert_eq!(
+        block_copy_text(&state.transcript[index]),
+        sexy_tui_rs::parse_markdown(&source).plain_text()
+    );
+    drop(state);
+    let physical = replay.history();
+    for index in 0..24 {
+        assert_eq!(
+            physical.matches(&format!("RESIZE-{index:02}")).count(),
+            1,
+            "{physical}"
+        );
+    }
+}
+
+#[test]
+fn native_late_reference_finalization_repairs_history_once_then_stays_quiet() {
+    use octet_ai::{AssistantMessage, AssistantPart, ModelId, Protocol, StopReason};
+    let mut replay = NativeReplay::with_size(80, 12);
+    let run = replay.shell.begin_run("openai");
+    let mut source = String::from("[REFERENCE-LABEL][late]\n\n");
+    for index in 0..24 {
+        source.push_str(&format!("REFERENCE-BODY-{index:02}\n\n"));
+    }
+    replay.shell.on_run_event(
+        run,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: source.clone(),
+        },
+    );
+    replay.render(true);
+    let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
+    let suffix = "[late]: https://example.invalid/reference\n";
+    source.push_str(suffix);
+    replay.shell.on_run_event(
+        run,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: suffix.into(),
+        },
+    );
+    let mut output = replay.render(false);
+    replay.shell.on_run_event(
+        run,
+        &AgentEvent::TurnFinished {
+            message: AssistantMessage {
+                content: vec![AssistantPart::Text(source.clone())],
+                model: ModelId("fixture".into()),
+                protocol: Protocol::OpenAiResponses,
+            },
+            stop_reason: StopReason::EndTurn,
+            turn_usage: Usage::default(),
+            usage: Usage::default(),
+            session_cost_microdollars: None,
+            run_cost_microdollars: 0,
+        },
+    );
+    output.push_str(&replay.render(false));
+    assert_eq!(
+        output.matches("\x1b[3J").count(),
+        1,
+        "late semantic repair: {output:?}"
+    );
+    assert_eq!(
+        replay.shell.tui.as_ref().unwrap().full_redraws(),
+        baseline + 1
+    );
+    for _ in 0..3 {
+        replay.render(true);
+    }
+    let state = replay.shell.state.borrow();
+    let block = state
+        .transcript
+        .iter()
+        .find(|block| matches!(block, TranscriptBlock::Assistant(_)))
+        .unwrap();
+    let TranscriptBlock::Assistant(assistant) = block else {
+        unreachable!()
+    };
+    assert_eq!(assistant.text, source);
+    assert!(assistant.finished);
+    assert_eq!(
+        block_copy_text(block),
+        sexy_tui_rs::parse_markdown(&source).plain_text()
+    );
+    drop(state);
+    let physical = replay.history();
+    assert_eq!(physical.matches("REFERENCE-LABEL").count(), 1, "{physical}");
+    assert!(
+        !physical.contains("[late]"),
+        "unresolved reference leaked: {physical}"
+    );
+    for index in 0..24 {
+        assert_eq!(
+            physical
+                .matches(&format!("REFERENCE-BODY-{index:02}"))
+                .count(),
+            1,
+            "{physical}"
+        );
+    }
+}

@@ -172,7 +172,7 @@ def validate_schema(schema: dict[str, Any]) -> None:
         "schema_format", "api_version", "schema_id", "canonical_encoding",
         "canonical_profile", "legacy_adapters", "version_policy", "bounds",
         "capabilities", "methods", "errors", "dispositions", "models",
-        "envelopes", "fixtures", "negative_fixtures",
+        "envelopes", "fixtures", "negative_fixtures", "theme_selection",
     }
     missing = sorted(required - set(schema))
     if missing:
@@ -368,6 +368,49 @@ def validate_schema(schema: dict[str, Any]) -> None:
         if (method.get("params"), method.get("result"), method.get("terminal"), method.get("notification")) != semantics:
             raise ValueError(f"foundation method {name} semantics must remain explicit")
 
+    theme = schema["theme_selection"]
+    if not isinstance(theme, dict) or set(theme) != {
+        "capability", "method", "params_model", "result_model", "namespace",
+        "scopes", "roles", "trust_values", "rejections",
+    }:
+        raise ValueError("theme_selection must declare exactly the generated policy keys")
+    if theme["capability"] not in capability_names:
+        raise ValueError("theme_selection references an unknown capability")
+    theme_methods = [method for method in schema["methods"] if method["name"] == theme["method"]]
+    if len(theme_methods) != 1 or theme_methods[0]["capability"] != theme["capability"]:
+        raise ValueError("theme_selection method must reference its capability exactly once")
+    if theme_methods[0]["params"] != theme["params_model"] or theme_methods[0]["result"] != theme["result_model"]:
+        raise ValueError("theme_selection method models must match the policy models")
+    if theme["namespace"] != "extension" or theme["scopes"] != ["extension"]:
+        raise ValueError("theme_selection must stay scoped to the requesting extension")
+    if (
+        not isinstance(theme["roles"], list) or not theme["roles"]
+        or not all(isinstance(role, str) and role for role in theme["roles"])
+        or len(set(theme["roles"])) != len(theme["roles"])
+    ):
+        raise ValueError("theme_selection roles must be unique non-empty strings")
+    if not isinstance(theme["trust_values"], list) or not theme["trust_values"] or not all(isinstance(value, str) and value for value in theme["trust_values"]):
+        raise ValueError("theme_selection trust_values must be non-empty strings")
+    if theme["namespace"] in theme["trust_values"]:
+        raise ValueError("theme_selection trust vocabulary must not overlap the extension namespace")
+    rejection_names = {"namespace_mismatch", "unknown_theme", "unknown_role", "trust_widening"}
+    allowed_error_names = {entry["name"] for entry in schema["errors"]}
+    if not isinstance(theme["rejections"], dict) or set(theme["rejections"]) != rejection_names or any(code not in allowed_error_names for code in theme["rejections"].values()):
+        raise ValueError("theme_selection rejections must map the four rejections to generated error semantics")
+    model_by_name = {model["name"]: model for model in schema["models"]}
+    params_model = model_by_name.get(theme["params_model"])
+    result_model = model_by_name.get(theme["result_model"])
+    if params_model is None or result_model is None or result_model.get("kind") == "tagged_union":
+        raise ValueError("theme_selection policy models must be existing records")
+    params_fields = {field["name"]: field for field in params_model["fields"]}
+    for field_name in ("namespace", "theme_id", "role", "scope"):
+        if params_fields.get(field_name, {}).get("type") != "string":
+            raise ValueError(f"theme_selection params model needs a {field_name} string field")
+    if params_fields["role"].get("values", []) != theme["roles"]:
+        raise ValueError("theme_selection roles must match the params role enum exactly")
+    if params_fields["scope"].get("values", []) != theme["scopes"]:
+        raise ValueError("theme_selection scopes must match the params scope enum exactly")
+
     error_names = names(schema["errors"], "errors")
     if set(error_names) != {
         "parse_error", "invalid_request", "unknown_method", "invalid_params", "internal_error",
@@ -442,6 +485,86 @@ def rust_field_type(field: dict[str, Any]) -> str:
     if is_optional(field) or field.get("nullable", False):
         return f"Option<{value}>"
     return value
+
+
+def render_theme_policy_rust(schema: dict[str, Any]) -> list[str]:
+    """Render the host-mediated theme-selection policy for the generated host surface.
+
+    The policy is fail-closed: unknown namespaces, themes, and roles are rejected,
+    and a theme whose host-resolved trust is not non-widening is refused so a
+    selection can never widen project trust.  The host supplies the catalog, so
+    the generated surface never invents host trust state.
+    """
+    theme = schema["theme_selection"]
+    rejections = theme["rejections"]
+    params_validator = f"validate_{snake(theme['params_model'])}"
+    result_validator = f"validate_{snake(theme['result_model'])}"
+    return [
+        "",
+        f"pub const THEME_ROLES: &[&str] = &[{rust_array(theme['roles'])}];",
+        f"pub const THEME_TRUST_VALUES: &[&str] = &[{rust_array(theme['trust_values'])}];",
+        "",
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",
+        "pub enum ThemeSelectionRejection { NamespaceMismatch, UnknownTheme, UnknownRole, TrustWidening }",
+        "impl ThemeSelectionRejection {",
+        "    pub fn error_name(self) -> &'static str {",
+        "        match self {",
+        f"            Self::NamespaceMismatch => {rust_string(rejections['namespace_mismatch'])},",
+        f"            Self::UnknownTheme => {rust_string(rejections['unknown_theme'])},",
+        f"            Self::UnknownRole => {rust_string(rejections['unknown_role'])},",
+        f"            Self::TrustWidening => {rust_string(rejections['trust_widening'])},",
+        "        }",
+        "    }",
+        "    pub fn error(self, detail: &str) -> ContractError { ContractError::named(self.error_name(), detail) }",
+        "}",
+        "",
+        f"pub fn {params_validator}(params: &{theme['params_model']}) -> Result<(), ContractError> {{ let value = serialized_value(params)?; validate_model_value({rust_string(theme['params_model'])}, &value) }}",
+        f"pub fn {result_validator}(result: &{theme['result_model']}) -> Result<(), ContractError> {{ let value = serialized_value(result)?; validate_model_value({rust_string(theme['result_model'])}, &value) }}",
+        "pub fn theme_role_is_known(role: &str) -> bool { THEME_ROLES.contains(&role) }",
+        "pub fn theme_trust_is_non_widening(trust: &str) -> bool { THEME_TRUST_VALUES.contains(&trust) }",
+        f"pub fn resolve_theme_selection(params: &{theme['params_model']}, requesting_namespace: &str, catalog: &[(&str, &str)]) -> Result<{theme['result_model']}, ContractError> {{",
+        f"    {params_validator}(params)?;",
+        "    if params.namespace != requesting_namespace { return Err(ThemeSelectionRejection::NamespaceMismatch.error(\"theme namespace does not match the requesting extension\")); }",
+        "    if !theme_role_is_known(&params.role) { return Err(ThemeSelectionRejection::UnknownRole.error(\"unknown theme role\")); }",
+        "    let Some((_theme_id, trust)) = catalog.iter().find(|(theme_id, _trust)| *theme_id == params.theme_id.as_str()) else {",
+        "        return Err(ThemeSelectionRejection::UnknownTheme.error(\"unknown theme id\"));",
+        "    };",
+        "    if !theme_trust_is_non_widening(trust) { return Err(ThemeSelectionRejection::TrustWidening.error(\"theme would widen presentation trust\")); }",
+        f"    let result = {theme['result_model']} {{ status: \"selected\".to_owned(), theme_id: Some(params.theme_id.clone()), reason: None }};",
+        f"    {result_validator}(&result)?;",
+        "    Ok(result)",
+        "}",
+        "",
+    ]
+
+
+def render_theme_policy_python(schema: dict[str, Any]) -> list[str]:
+    """Render the same host-mediated theme-selection policy for the Python SDK."""
+    theme = schema["theme_selection"]
+    rejections = theme["rejections"]
+    params_validator = f"validate_{snake(theme['params_model'])}"
+    result_validator = f"validate_{snake(theme['result_model'])}"
+    return [
+        "",
+        f"THEME_ROLES = {tuple(theme['roles'])!r}",
+        f"THEME_TRUST_VALUES = {tuple(theme['trust_values'])!r}",
+        "",
+        f"def {params_validator}(value: {theme['params_model']}) -> None: value.to_wire()",
+        f"def {result_validator}(value: {theme['result_model']}) -> None: value.to_wire()",
+        "def theme_role_is_known(role: str) -> bool: return role in THEME_ROLES",
+        "def theme_trust_is_non_widening(trust: str) -> bool: return trust in THEME_TRUST_VALUES",
+        f"def resolve_theme_selection(params: {theme['params_model']}, requesting_namespace: str, catalog: Mapping[str, str]) -> {theme['result_model']}:",
+        f"    {params_validator}(params)",
+        f"    if params.namespace != requesting_namespace: raise ContractError({rejections['namespace_mismatch']!r}, 'theme namespace does not match the requesting extension')",
+        f"    if not theme_role_is_known(params.role): raise ContractError({rejections['unknown_role']!r}, 'unknown theme role')",
+        "    trust = catalog.get(params.theme_id)",
+        f"    if trust is None: raise ContractError({rejections['unknown_theme']!r}, 'unknown theme id')",
+        f"    if not theme_trust_is_non_widening(trust): raise ContractError({rejections['trust_widening']!r}, 'theme would widen presentation trust')",
+        f"    result = {theme['result_model']}(status='selected', theme_id=params.theme_id, reason=None)",
+        f"    {result_validator}(result)",
+        "    return result",
+        "",
+    ]
 
 
 def render_rust(schema: dict[str, Any], source_hash: str) -> str:
@@ -718,6 +841,7 @@ def render_rust(schema: dict[str, Any], source_hash: str) -> str:
         "pub fn parse_json_rpc_envelope(value: serde_json::Value) -> Result<JsonRpcEnvelope, ContractError> { let invalid = |error: ContractError| ContractError::named(\"invalid_request\", error.message); canonical_value(&value, 0).map_err(invalid)?; let object = value.as_object().ok_or_else(|| ContractError::named(\"invalid_request\", \"JSON-RPC envelope must be an object\"))?; let facts = (object.contains_key(\"id\"), object.contains_key(\"method\"), object.contains_key(\"result\"), object.contains_key(\"error\")); let spec = ENVELOPES.iter().find(|entry| (entry.id, entry.method, entry.result, entry.error) == facts).ok_or_else(|| ContractError::named(\"invalid_request\", \"JSON-RPC envelope has an invalid request/response shape\"))?; if let Some(method) = object.get(\"method\").and_then(serde_json::Value::as_str) { if let Some(method_spec) = method_spec(method) { if method_spec.notification == facts.0 { return Err(ContractError::named(\"invalid_request\", \"JSON-RPC method id presence violates generated method semantics\")); } } } let parsed = match spec.model { \"JsonRpcRequest\" => parse_json_rpc_request(value).map(JsonRpcEnvelope::Request).map_err(invalid), \"JsonRpcNotification\" => parse_json_rpc_notification(value).map(JsonRpcEnvelope::Notification).map_err(invalid), \"JsonRpcSuccessResponse\" => parse_json_rpc_success_response(value).map(JsonRpcEnvelope::SuccessResponse).map_err(invalid), \"JsonRpcErrorResponse\" => parse_json_rpc_error_response(value).map(JsonRpcEnvelope::ErrorResponse).map_err(invalid), _ => Err(ContractError::named(\"internal_error\", \"unknown generated envelope\")) }?; match spec.semantic_validator { None => {}, Some(\"error_object\") => match &parsed { JsonRpcEnvelope::ErrorResponse(response) => validate_error_object(&response.error).map_err(invalid)?, _ => return Err(ContractError::named(\"internal_error\", \"error_object validator applied to a non-error envelope\")), }, Some(_) => return Err(ContractError::named(\"internal_error\", \"unknown generated envelope semantic validator\")), }; Ok(parsed) }",
         "",
     ])
+    lines.extend(render_theme_policy_rust(schema))
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
@@ -1117,6 +1241,7 @@ def render_python(schema: dict[str, Any], source_hash: str) -> str:
         "",
     ])
     # `re` is only needed by snake in generated module; keep import source-only concise.
+    lines.extend(render_theme_policy_python(schema))
     lines.insert(7, "import re")
     return "\n".join(lines).rstrip("\n") + "\n"
 

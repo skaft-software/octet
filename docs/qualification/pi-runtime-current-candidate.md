@@ -1,43 +1,57 @@
 # Pi 0.84.4 current-candidate qualification
 
-**Issues:** #257, #258  
-**Claim:** `dogfood_conformance` / source-only candidate  
-**Pi target:** `@earendil-works/pi-coding-agent@0.84.4` and `@earendil-works/pi-tui@0.84.4`, MIT  
-**Pi source revision:** `b79e4cc834970cca69daebffab7df1da7d1e52c4` (`v0.84.4`)  
-**Node minimum:** `22.19.0`  
-**Bridge identity:** `0.7.0`
+- **Issues:** #397, #258, #257, #259, #260, #272, #262, #156, #157, #279
+- **Claim:** `dogfood_conformance` / local source-candidate fixtures only
+- **Candidate:** `df5a7e80` plus the shared working-tree diff
+- **Pi target:** `@earendil-works/pi-coding-agent@0.84.4` and `@earendil-works/pi-tui@0.84.4`, MIT
+- **Pi source revision:** `b79e4cc834970cca69daebffab7df1da7d1e52c4` (`v0.84.4`)
+- **Node minimum:** `22.19.0`; observed local Node `26.7.0`, Python `3.14.7`, Darwin
+- **Bridge identity:** `0.7.0`
 
-This record documents source inspection and the checked-in real-runtime plans. It does not claim that an installed Pi package, an unchanged-source full run, or a live provider has passed. Static fixture presence is not real-runtime evidence.
+This record now includes actual local execution, superseding its earlier
+source-inspection-only status. It does **not** claim release acceptance,
+unchanged-source full conformance, live provider/OAuth parity or installed-release
+qualification. Exact commands, initial failures and repairs are retained in
+[the execution record](../swarm-audit/EXECUTION-pi.md).
 
-## Implemented contract
+## Observed local evidence
 
-- `bridge.mjs` validates package/runtime, source and dependency-lock fingerprints, aggregate digest, manifest/link identity, explicit enablement/trust, and Octet version before loading. It uses Pi's public `DefaultResourceLoader` with ordered `additionalExtensionPaths`, `noExtensions`, and one in-memory event bus. Partial aggregate loading is rejected before the `ExtensionRunner` is constructed (`extensions/octet-pi-compat/bridge.mjs:3192-3229`).
-- The real path constructs Pi's actual `ExtensionRunner` once for the loaded aggregate (`bridge.mjs:3228-3235`). The source-owned tests/fixtures cover ordered registration, shared `globalThis`/event bus, lifecycle settlement, cancellation, restart, stale-source rejection, trust binding, and rollback safeguards.
-- `real_runtime.py` is a bounded JSON-RPC peer. Its strict command carries every selected source, source-lock fingerprint, runtime integrity, aggregate digest, manifest, link identity, and Octet version (`real_runtime.py:160-201`). `_run_once` checks registration, command order, lifecycle, execution, cancellation, and shutdown; `run_real_aggregate` repeats the journey and checks restart, trust, and stale-source rejection (`real_runtime.py:219-304`, `332-456`).
-- `conformance.py` now validates both real-runtime fixture files and cross-links them from the 0.84.4 profile. The ledger records `real-runtime-aggregate` as **unrun**, rather than as covered. The aggregate metadata remains explicitly `unrun_until_explicit_real_package_and_source_root_are_supplied`.
+| Issue / boundary | Result and limits |
+| --- | --- |
+| #397 generated-link negotiation | Reproduced `Closed("extension stdout closed")`, then repaired staged-entrypoint helper resolution. The unchanged Rust host test passes native command negotiation/execution, shutdown, symlinked manifest identity and stale-source refusal. |
+| #397 local installed package / rollback | Two real CLI fixtures pass: pre-materialized local dependency tree links without importing package/dependency code or running lifecycle scripts; rollback preserves source/dependency bytes. Missing dependencies and unapproved scripts fail before publication. No npm download/install or upstream-package acceptance is claimed. |
+| #257 ordered aggregate | Fake-Pi aggregate tests pass order, shared globals/event bus, partial-load rejection, lifecycle, cancellation, restart and source/lock/runtime/trust binding. The actual Pi `ExtensionRunner` journey remains unrun. |
+| #258 public ledger | `--check --json` passes: 118 public surfaces, 78 examples (9 directories), 33 TUI rows, 6 plan journeys, profile integrity and fixture links. The Python suite executes bounded declared behavior/safe divergences, not all unchanged upstream example behavior. Five baseline plan journeys remain deferred. |
+| #259 / #260 UI and editor | Actual-bridge fake-Pi tests and 17 Node helper tests pass bounded semantic output, disposal/owner fencing, editor acknowledgements, suffix completions, cancellation and resize. No native/PTY accessibility or real Pi TUI parity is established. |
+| #272 provider mode | API `0.3` fake-Pi tests pass catalog completion, bounded streaming, cancellation, safe hooks, replacement/unregister and rejection of credential/header/endpoint/OAuth authority. They do not establish real-provider/OAuth equivalence. |
+| #262 typed transport | Shared migration schema suite passes 15 tests; migration unit/CLI/adapter package tests pass typed detection/import and host normalization. The public CLI still selects only the built-in adapter. |
+| #156 adapter package | `extensions/octet-import-pi/` now contains a manifest, fixed exec launcher, README and 4 passing process tests. Rust validates its manifest. It delegates to the same version-matched typed implementation, not a new parser or arbitrary adapter-selection flag. Not published to a catalog. |
+| #157 / #279 host ingestion | 11 migration unit tests, 5 host-full CLI tests and 2 migration-import integration tests pass. Coverage includes disabled outputs, source/credential safety, idempotence, conflict refusal/approval, backups, restore, CAS-failure rollback and preservation of a concurrent writer. Source symlink rejection was repaired at the CLI boundary without weakening adapter validation. |
 
-## Checked-in evidence inventory
+The full Python Pi suite ran **73 tests: 70 passed, 3 explicitly skipped**.
+The Rust `pi::tests` filter reports **22 passed**, but two real-runtime tests
+return early without `OCTET_PI_REAL_PACKAGE`; they are **not runtime evidence**.
+The ledger still records `real-runtime-aggregate` as **unrun**. Its fixture and
+`real-runtime.json` are statically verified plans, not executed upstream journeys.
 
-| Evidence | Source | Status in this candidate |
-| --- | --- | --- |
-| Ordered aggregate plan | `tests/fixtures/conformance/real-runtime-aggregate.json` | Declared and statically validated by source; not executed |
-| Concrete real-runtime source set and assertions | `tests/fixtures/conformance/real-runtime.json` | Declared and statically validated by source; not executed |
-| Focused aggregate metadata test | `tests/test_conformance.py::ConformanceHarnessTests::test_real_runtime_aggregate_fixture_is_ordered_and_explicitly_unrun` | Authored; not run |
-| Profile/fixture cross-link and raw-byte digest | `profiles/0.84.4.json`, `profiles/0.84.4.integrity.json` | Synchronized in source; not verified by a command here |
-| Ledger gate | `profiles/0.84.4.ledger.json` (`real-runtime-aggregate`) | Explicitly `unrun` |
+## Reproduce the local checks
 
-## Exact central-verifier commands
-
-These are the pending commands for the central non-Rust verifier; none was run in this source-only lane:
-
-```console
+```sh
 python3 -m unittest discover -s extensions/octet-pi-compat/tests -p 'test_*.py'
+node --test extensions/octet-pi-compat/tests/test_semantic_ui.mjs extensions/octet-pi-compat/tests/test_editor_handoff.mjs
 python3 extensions/octet-pi-compat/conformance.py --check --json
+cargo test --locked -p octet-coding-agent --lib pi::tests
+cargo test --locked -p octet-coding-agent --lib migration_import
+cargo test --locked -p octet-coding-agent --test pi_install --test migration_import --test migration_host_full
+cargo test --locked -p octet-migrate-types --test schemas
+OCTET_PI_IMPORT_TEST_BINARY="$PWD/target/debug/octet" python3 -m unittest discover -s extensions/octet-import-pi/tests -p 'test_*.py' -v
 ```
 
-With the exact local artifacts available, the real gate is:
+## Blocked integrity-verified full gate
 
-```console
+With the exact local artifacts available, the separate real gate is:
+
+```sh
 python3 extensions/octet-pi-compat/conformance.py --full --network-isolated --json \
   --coding-agent-tarball /local/pi-coding-agent-0.84.4.tgz \
   --tui-tarball /local/pi-tui-0.84.4.tgz \
@@ -45,21 +59,19 @@ python3 extensions/octet-pi-compat/conformance.py --full --network-isolated --js
   --source-root /local/pi-source-at-b79e4cc834970cca69daebffab7df1da7d1e52c4
 ```
 
-The full gate itself launches the runtime through Linux `unshare --net`; `--network-isolated` is not a substitute for that namespace. It must be run on Linux with `unshare` available. Record the JSON result and stderr separately; do not infer a real-runtime pass from `--check` or the focused fixture test.
+Prerequisites remain unsupplied in this lane:
 
-## Artifact, cache, and dependency prerequisites
+1. Coding-agent and TUI tarballs matching the profile's exact SRI/name/version/MIT license.
+2. A reviewed unpacked coding-agent installation whose resolved Pi TUI root matches the verified tarball.
+3. A clean checkout at the exact revision, containing the complete example inventory and prepared dependency/lock/cache inputs.
+4. Linux `unshare --net` capability. This host is Darwin and `unshare` is absent; `--network-isolated` is not a substitute for isolation.
 
-Before the isolated run, the package owner must provide, without downloading during the gate:
+An actual `--full --network-isolated --json` invocation without artifact arguments
+exited 1, explicitly requiring all four artifact selectors. Nothing was loaded.
+The gate performs no download, npm installation, source rewrite or credential
+import. No fake fixture, newer Pi version, package directory alone, smoke test or
+weakened count assertion substitutes for these prerequisites.
 
-1. Coding-agent and TUI tarballs whose SRI, names, versions, and MIT licenses match the 0.84.4 profile.
-2. An unpacked coding-agent package root whose resolved `@earendil-works/pi-tui` root matches the verified TUI tarball and whose runtime integrity is stable.
-3. A clean Pi checkout at the exact revision above, with `packages/coding-agent/examples/extensions` present and its dependency-bearing sources/lock material already prepared in the local cache/package environment.
-4. Node `22.19.0` or newer and Linux `unshare --net` capability.
-
-The gate performs no npm install, dependency resolution, source rewrite, network fetch, or credential import. Any missing dependency or lock/cache input is an artifact-readiness failure, not permission to substitute a toy source or newer Pi checkout.
-
-## Remaining blockers and separate gates
-
-- The real aggregate journey has not been run because the exact package tarballs, unpacked package root, clean pinned source checkout, prepared dependency locks/cache, and Linux namespace are not supplied in this lane.
-- Native Windows behavior, live/provider/OAuth behavior, install/update/remove/rollback acceptance, physical terminal behavior, endurance/soak, and release approval remain separate gates.
-- No #258 closure, unchanged-source parity claim, installed-candidate claim, or live-provider claim is made from these fixtures.
+Native Windows, real provider/OAuth and installed upstream-package/dependency
+acquisition/update acceptance, physical terminal behavior, endurance and release
+approval remain separate gates. **No #258 closure or full #397 closure is claimed.**

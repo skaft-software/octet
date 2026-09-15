@@ -1555,6 +1555,18 @@ async fn stream_http(
                     ))?;
                 }
             }
+            // Native Conversations deltas do not settle entries, even when
+            // function arguments already form valid JSON. Classify the missing
+            // native terminal here before the generic guard handles raw EOF.
+            if model_clone.spec.protocol == Protocol::MistralConversations && !terminal_seen {
+                Err(annotate_stream_failure(
+                    AiError::StreamProtocol(StreamProtocolError::MissingFinish),
+                    &builder,
+                    first_body_chunk,
+                    started_at,
+                    last_event_at,
+                ))?;
+            }
         };
 
         let sanitized_event_stream = raw_event_stream.map(move |event| {

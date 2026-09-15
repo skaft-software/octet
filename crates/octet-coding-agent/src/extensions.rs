@@ -1374,6 +1374,13 @@ pub struct ExecutableExtensions {
     /// product resource owner drains this queue and decides how to rescan; an
     /// extension never receives authority to perform the host mutation.
     pending_post_mutation_rescans: VecDeque<PostMutationRescan>,
+    /// Discovery configuration bound at product construction.
+    ///
+    /// A post-mutation rescan must re-resolve through the same workspace trust,
+    /// explicit extension roots, and extension policy as initial discovery, so
+    /// the product drain paths reuse the exact configuration the fleet was
+    /// built from instead of guessing roots at drain time.
+    rescan_config: Option<Config>,
     #[cfg(test)]
     lifecycle_delivery_test_control: Option<std::sync::Arc<LifecycleDeliveryTestControl>>,
 }
@@ -1633,6 +1640,7 @@ impl Default for ExecutableExtensions {
             last_lifecycle_outcome: None,
             seen_post_mutation_ids: VecDeque::new(),
             pending_post_mutation_rescans: VecDeque::new(),
+            rescan_config: None,
             #[cfg(test)]
             lifecycle_delivery_test_control: None,
         }
@@ -2126,6 +2134,7 @@ impl ExecutableExtensions {
         extensions.session_lifecycle_receiver = session_lifecycle_receiver;
         extensions.session_id = host_state.session_id.clone();
         extensions.resource_owner = Some(session.resource_owner_key());
+        extensions.rescan_config = Some(config.clone());
         extensions.start_policy_supervisors();
         extensions.start_session_lifecycle();
         extensions
@@ -2749,6 +2758,7 @@ impl ExecutableExtensions {
         // Contributions and owner-scoped presentation are observations of the
         // old active session and must not bleed into the replacement.
         self.pending_context = PendingContext::default();
+        self.pending_post_mutation_rescans.clear();
         self.session_id = host_state(session, model, reasoning, sessions).session_id;
         self.resource_owner = Some(session.resource_owner_key());
         let active_owner = self.resource_owner.as_deref();
@@ -3708,15 +3718,14 @@ impl ExecutableExtensions {
         accepted
     }
 
-    /// Convenience bridge for a future committed Pi migration ingestion.
+    /// Convenience bridge for a host-owned committing migration integration.
     ///
-    /// The current `octet migrate pi` scanner is explicitly dry-run and must not
-    /// invoke this method because it writes nothing. A real ingestion path must
-    /// pass the same stable ID on retry and call this only after commit or a
-    /// completed rollback.
+    /// Dry-run scanners must never invoke this method. A committing ingestion
+    /// path must have a safely bound extension owner, pass the same stable ID
+    /// on retry, and call this only after commit or a completed rollback.
     #[expect(
         dead_code,
-        reason = "Pi migration remains dry-run-only until a committing ingestion path exists"
+        reason = "CLI ingestion does not bind an executable-extension observation owner"
     )]
     pub async fn notify_migration_ingested(
         &mut self,
@@ -3743,12 +3752,104 @@ impl ExecutableExtensions {
     ///
     /// The queue contains no raw paths or contents and is bounded independently
     /// of extension event/progress channels.
-    #[expect(
-        dead_code,
-        reason = "no committed product mutation path consumes deferred rescan requests yet"
-    )]
     pub fn take_post_mutation_rescans(&mut self) -> Vec<PostMutationRescan> {
         self.pending_post_mutation_rescans.drain(..).collect()
+    }
+
+    /// Drains and re-resolves post-mutation rescan requests through the
+    /// discovery configuration bound at construction.
+    ///
+    /// This is the product drain for mutations that have no reload path of their
+    /// own (for example a configuration commit). It fails closed: when no
+    /// discovery configuration is bound the queue is discarded with a bounded
+    /// diagnostic rather than resolved against guessed roots, and a request for a
+    /// stale generation or stopped process is dropped without re-entering it.
+    pub fn drain_post_mutation_rescans(&mut self) -> Vec<String> {
+        let Some(config) = self.rescan_config.clone() else {
+            let dropped = self
+                .take_post_mutation_rescans()
+                .into_iter()
+                .map(|request| request.resource_ids.len())
+                .sum::<usize>();
+            return if dropped == 0 {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "warning: discarded {dropped} post_mutation rescan request(s); no discovery configuration is bound"
+                )]
+            };
+        };
+        self.rescan_post_mutation_resources(&config)
+    }
+
+    /// Re-resolves selected extension resources through the same trust,
+    /// precedence, no-follow and byte bounds as initial discovery. This is
+    /// read-only: changed sources require an explicit product rebuild, never
+    /// implicit activation or a recursive reload from an observational hook.
+    pub(crate) fn rescan_post_mutation_resources(&mut self, config: &Config) -> Vec<String> {
+        let requests = self.take_post_mutation_rescans();
+        if requests.is_empty() {
+            return Vec::new();
+        }
+        let mut messages = Vec::new();
+        let mut selected = BTreeMap::new();
+        for request in requests {
+            for resource_id in request.resource_ids {
+                let process = self.processes.iter().find(|process| {
+                    opaque_extension_resource_id(&process.descriptor().manifest.name) == resource_id
+                });
+                let Some(process) = process.filter(|process| {
+                    process.is_running()
+                        && process.health_snapshot().generation == request.generation
+                }) else {
+                    messages.push(
+                        "warning: discarded stale or unavailable post_mutation resource rescan"
+                            .into(),
+                    );
+                    continue;
+                };
+                selected.insert(
+                    resource_id,
+                    (process.descriptor().clone(), request.generation),
+                );
+            }
+        }
+        if selected.is_empty() {
+            return messages;
+        }
+        let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+        let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
+        let (policy, _) = extension_policy(config, &mut messages);
+        for (_, (previous, generation)) in selected {
+            let name = &previous.manifest.name;
+            let Some(resource) = snapshot
+                .resources()
+                .iter()
+                .find(|resource| &resource.name == name)
+            else {
+                messages.push(format!(
+                    "warning: rescanned extension {name:?} is unavailable; run /reload"
+                ));
+                continue;
+            };
+            let Some(mut current) =
+                load_extension_descriptor(&resolver, resource, &policy, &mut messages)
+            else {
+                continue;
+            };
+            apply_experimental_streamable_http_mcp_gate(
+                &mut current,
+                config.experimental_streamable_http_mcp,
+            );
+            if current != previous {
+                messages.push(format!("warning: rescanned extension {name:?} changed; run /reload before using the new resource"));
+                continue;
+            }
+            messages.push(format!(
+                "rescanned extension {name:?} (generation {generation})"
+            ));
+        }
+        messages
     }
 
     async fn settle_session_lifecycle(&mut self) {
@@ -3835,51 +3936,39 @@ impl ExecutableExtensions {
 
     pub async fn reload(&mut self) -> Vec<String> {
         self.cancel_background_work();
-        if let Some(manager) = self.runtime_manager.clone() {
+        // Both runtime ownership modes settle through the same notification
+        // boundary. In particular, the product's manager-backed path must not
+        // skip PostMutation delivery after a successful generation replacement.
+        let results = if let Some(manager) = self.runtime_manager.clone() {
             let names = self
                 .processes
                 .iter()
                 .map(|process| process.descriptor().manifest.name.clone())
                 .collect::<BTreeSet<_>>();
-            let reloads = futures_util::future::join_all(names.into_iter().map(|name| {
+            futures_util::future::join_all(names.into_iter().map(|name| {
                 let manager = manager.clone();
                 async move { (name.clone(), manager.reload(&name).await) }
             }))
-            .await;
-            let mut messages = Vec::new();
-            let mut reloaded = BTreeSet::new();
-            for (name, results) in reloads {
-                for result in results {
-                    match result {
-                        Ok(report) => {
-                            reloaded.insert(name.clone());
-                            messages.push(format!(
-                                "reloaded {name} (generation {}, previous shutdown {})",
-                                report.generation,
-                                if report.previous_shutdown_graceful {
-                                    "clean"
-                                } else {
-                                    "forced"
-                                }
-                            ));
-                        }
-                        Err(error) => messages.push(format!("unable to reload {name}: {error}")),
-                    }
-                }
-            }
-            self.await_reloaded_provider_registrations(&reloaded).await;
-            self.start_policy_supervisors();
-            messages.extend(self.drain_events());
-            return messages;
-        }
-        let reloads = self.processes.iter().cloned().map(|process| async move {
-            let name = process.descriptor().manifest.name.clone();
-            (name, process.reload().await)
-        });
-        // `join_all` polls every reload concurrently and preserves the input
-        // order in its output, so one hung child cannot serialize every
-        // extension and completion timing cannot reorder user-visible lines.
-        let results = futures_util::future::join_all(reloads).await;
+            .await
+            .into_iter()
+            .flat_map(|(name, results)| {
+                results
+                    .into_iter()
+                    .map(move |result| (name.clone(), result.map_err(|error| error.to_string())))
+            })
+            .collect::<Vec<_>>()
+        } else {
+            let reloads = self.processes.iter().cloned().map(|process| async move {
+                let name = process.descriptor().manifest.name.clone();
+                (
+                    name,
+                    process.reload().await.map_err(|error| error.to_string()),
+                )
+            });
+            // Concurrent polling preserves input order without serializing
+            // unrelated extension reloads behind a hung child.
+            futures_util::future::join_all(reloads).await
+        };
         let mut messages = Vec::with_capacity(results.len());
         let mut reloaded = BTreeSet::new();
         let mut completed_mutations = Vec::new();
@@ -3927,6 +4016,12 @@ impl ExecutableExtensions {
         self.shortcuts = shortcuts;
         messages.extend(diagnostics);
         messages.extend(self.drain_events());
+        // A generation replacement is a product resource mutation. Drain the
+        // bounded rescan queue it just admitted so an admitted hook cannot leave
+        // resolver work queued forever. Re-resolution reuses the same trusted
+        // discovery path; a stale or unavailable owner is dropped with a
+        // diagnostic and a changed source is never activated implicitly.
+        messages.extend(self.drain_post_mutation_rescans());
         messages
     }
 
@@ -5439,6 +5534,14 @@ args = ["--keep", "--experimental-streamable-http-mcp"]
         let snapshot: ExtensionPresentationSnapshot =
             serde_json::from_str(include_str!("../fixtures/extension-presentation.json")).unwrap();
         let mut extensions = ExecutableExtensions::default();
+        extensions
+            .pending_post_mutation_rescans
+            .push_back(PostMutationRescan {
+                extension: "fixture-extension".into(),
+                mutation_id: "mutation:old".into(),
+                generation: 1,
+                resource_ids: vec!["resource:old".into()],
+            });
         extensions.session_id = Some("old".into());
         extensions.resource_owner = Some(old_owner.clone());
         extensions
@@ -5477,6 +5580,7 @@ args = ["--keep", "--experimental-streamable-http-mcp"]
             &sessions,
         );
 
+        assert!(extensions.pending_post_mutation_rescans.is_empty());
         assert!(extensions.pending_context.entries.is_empty());
         assert_eq!(extensions.pending_context.retained_bytes, 0);
         assert_eq!(
@@ -5506,7 +5610,11 @@ command = "does-not-exist"
     }
 
     #[cfg(unix)]
-    fn executable_extension_config(workspace: &Path, extension_root: &Path, name: &str) -> Config {
+    pub(super) fn executable_extension_config(
+        workspace: &Path,
+        extension_root: &Path,
+        name: &str,
+    ) -> Config {
         Config {
             workspace: workspace.to_owned(),
             invocation_cwd: workspace.to_owned(),
@@ -7679,3 +7787,7 @@ context = true
         assert_eq!(assistant_text(&message), "final answer");
     }
 }
+
+#[cfg(test)]
+#[path = "extensions/hook_tests.rs"]
+mod hook_tests;

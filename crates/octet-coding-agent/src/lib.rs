@@ -62,7 +62,7 @@ pub async fn run_cli() -> std::process::ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let args = std::env::args_os().collect::<Vec<_>>();
-    let (cli, extension_flag_values, parsed_cwd) = if cli::uses_runtime_extension_flag_parser(&args)
+    let (mut cli, extension_flag_values, parsed_cwd) = if cli::uses_runtime_extension_flag_parser(&args)
     {
         let cwd = std::env::current_dir()?;
         let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
@@ -71,6 +71,8 @@ async fn run() -> anyhow::Result<()> {
         (cli::Cli::parse(), Default::default(), None)
     };
     let top_level_command = cli.command.clone();
+    let parity = cli.parity.clone();
+    parity.validate()?;
 
     // Subscription auth commands run and exit before any run configuration is
     // built — they need neither a workspace nor a session.
@@ -104,8 +106,17 @@ async fn run() -> anyhow::Result<()> {
         no_open,
         port,
         web_root,
+        name,
     }) = top_level_command.clone()
     {
+        // The installed extension runtime owns its own launch protocol and this
+        // build cannot apply a startup session name. Fail closed instead of
+        // silently ignoring a requested name.
+        if name.is_some() {
+            anyhow::bail!(
+                "octet serve --name requires an octet build with the embedded Serve runtime ('serve' feature); this build launches the installed octet-serve extension package, which has no startup session-name option to set"
+            );
+        }
         return extension_package::run_serve(no_open, port, web_root);
     }
 
@@ -124,8 +135,14 @@ async fn run() -> anyhow::Result<()> {
         tui::terminal::install_panic_hook();
         tui::terminal::install_signal_restore()?;
     }
+    let invocation = if top_level_command.is_none() && parity.list_models.is_none() {
+        cli::parity::prepare_input(&mut cli, &cwd)?
+    } else { Default::default() };
     let mut config = cli::build_config(cli, &cwd)?;
     config.extension_flag_values = extension_flag_values;
+    if let Some(search) = parity.list_models.as_deref() {
+        return cli::parity::list_models(&config, search);
+    }
     if matches!(&top_level_command, Some(cli::TopLevelCommand::Doctor)) {
         return doctor::run(&config);
     }
@@ -147,10 +164,13 @@ async fn run() -> anyhow::Result<()> {
         no_open,
         port,
         web_root,
+        name,
     }) = top_level_command
     {
-        return extensions::serve::run(config, port, no_open, web_root).await;
+        return extensions::serve::run_with_session_name(config, port, no_open, web_root, name).await;
     }
+    parity.resolve_models(&mut config)?;
+    parity.select_session(&mut config)?;
     let mode = config.mode.clone();
     let initial_prompt = config.initial_prompt.clone();
     let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
@@ -162,7 +182,7 @@ async fn run() -> anyhow::Result<()> {
             modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await
         }
         config::Mode::Print { prompt } => {
-            modes::print::run_print(app::bootstrap::bootstrap(config)?, prompt).await
+            modes::print::run_invocation(app::bootstrap::bootstrap(config)?, prompt, invocation.remaining, invocation.media, invocation.json).await
         }
         config::Mode::Rpc => modes::rpc::run_rpc(app::bootstrap::bootstrap(config)?).await,
     };

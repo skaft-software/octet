@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use octet_ai::{Model, ModelSpec};
 use sexy_tui_rs::theme::{capability::CapabilityTier, Theme as SexyTheme};
@@ -13,6 +14,10 @@ use sexy_tui_rs::{
 use crate::config::{ColorMode, Config};
 use crate::resource_resolver::{ResourceKind, ResourceResolver};
 use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+use crate::tui::theme_reload::{
+    ReloadBoundary, ReloadDecision, ReloadFailureKind, ThemeChangeReceiver, ThemeChangeSender,
+    ThemePathError, ThemeReloadEngine, ThemeReloadMode, ThemeWatch,
+};
 use crate::tui::theme_schema::{self, ParsedTheme, RoleStyleSpec, ThemeSurface};
 
 #[allow(unused_imports)]
@@ -374,6 +379,59 @@ fn default_surfaces() -> BTreeMap<String, ThemeSurface> {
     .map(|kind| (kind.to_owned(), ThemeSurface::default()))
     .collect()
 }
+
+/// Published semantic role vocabulary (roadmap #419).
+///
+/// These are the terminal-independent role names that the theme-file `[roles]`
+/// table maps onto octet's semantic text roles. `docs/themes.md` publishes the
+/// same list; the `published_semantic_role_vocabulary_is_closed_and_accepted`
+/// test keeps the two in sync. Extensions contribute additional
+/// `extension.<namespace>.<role>` roles, which the schema accepts as open but
+/// typed names.
+pub const SEMANTIC_ROLE_VOCABULARY: &[&str] = &[
+    "text",
+    "foreground",
+    "muted",
+    "subtle",
+    "dim",
+    "accent",
+    "success",
+    "warning",
+    "error",
+    "heading",
+    "md_heading",
+    "emphasis",
+    "md_emphasis",
+    "strong",
+    "md_strong",
+    "inline_code",
+    "md_code",
+    "code",
+    "md_code_block",
+    "quote",
+    "md_quote",
+    "border",
+    "link",
+    "md_link",
+    "list_marker",
+    "md_list_bullet",
+    "diff_add",
+    "diff_added",
+    "diff_remove",
+    "diff_removed",
+    "diff_context",
+    "diff_hunk",
+    "diff_header",
+    "syntax_comment",
+    "syntax_keyword",
+    "syntax_function",
+    "syntax_variable",
+    "syntax_string",
+    "syntax_number",
+    "syntax_type",
+    "syntax_operator",
+    "syntax_punctuation",
+];
 
 fn semantic_text_role(name: &str) -> Option<(TextRole, &'static str)> {
     Some(match name {
@@ -1867,6 +1925,113 @@ pub fn load_resolved_theme(
     )
 }
 
+/// Production coordinator for bounded active-theme file reload (roadmap #418).
+///
+/// The interactive frontend owns the `notify` adapter: it registers
+/// [`Self::watch_spec`] with the watcher and forwards ordinary file changes
+/// through [`Self::sender`]. Everything after the filesystem callback lives
+/// here, so a reload reuses the same bounded, no-follow, regular-file
+/// validation as startup and only commits at an idle prompt boundary.
+///
+/// Call [`Self::poll`] once per idle-loop tick with the current boundary. It
+/// drains the bounded channel, admits at most one due request, runs
+/// [`OctetTheme::reload`], and returns the decision to apply. Print, plain, and
+/// RPC modes stay inert, and a compiled-default source never creates a watcher.
+#[derive(Debug)]
+pub struct ThemeFileReload {
+    engine: ThemeReloadEngine<OctetTheme>,
+    receiver: ThemeChangeReceiver,
+}
+
+impl ThemeFileReload {
+    /// Build the coordinator for the active `theme`. Returns the bounded sender
+    /// the frontend's watcher callback must use, or an error when the active
+    /// file path cannot be watched.
+    pub fn new(
+        theme: &OctetTheme,
+        mode: ThemeReloadMode,
+        debounce: Duration,
+    ) -> Result<(Self, ThemeChangeSender), ThemePathError> {
+        let (sender, receiver) = crate::tui::theme_reload::theme_change_channel();
+        let active_path = theme.source_path().map(Path::to_path_buf);
+        let fallback = default_theme_for(theme.background, theme.capabilities);
+        let engine = ThemeReloadEngine::new(mode, active_path, theme.clone(), fallback, debounce)?;
+        Ok((Self { engine, receiver }, sender))
+    }
+
+    /// The non-recursive parent-directory watch the frontend must register, if
+    /// any. `None` means the engine owns no file source or is non-interactive.
+    pub fn watch_spec(&self) -> Option<ThemeWatch> {
+        self.engine.watch_spec()
+    }
+
+    /// Switch runtime mode; leaving interactive cancels queued and in-flight work.
+    pub fn set_mode(&mut self, mode: ThemeReloadMode) {
+        self.engine.set_mode(mode);
+    }
+
+    /// Re-point the coordinator after a theme selection. Returns whether the
+    /// active source changed; a change cancels queued and in-flight work.
+    pub fn set_active_theme(&mut self, theme: &OctetTheme) -> Result<bool, ThemePathError> {
+        self.engine.set_last_good(theme.clone());
+        self.engine
+            .set_compiled_fallback(default_theme_for(theme.background, theme.capabilities));
+        self.engine
+            .set_active_theme(theme.source_path().map(Path::to_path_buf))
+    }
+
+    /// Drain the bounded watcher channel and, at an idle boundary, load and
+    /// commit at most one due reload. Invalid or unsafe edits retain the
+    /// last-good theme; missing or broken sources install the compiled fallback.
+    pub fn poll(
+        &mut self,
+        now: Instant,
+        boundary: ReloadBoundary,
+    ) -> Option<ReloadDecision<OctetTheme>> {
+        self.engine.drain_notifications(&self.receiver, now);
+        let request = self.engine.begin_if_ready(now, boundary)?;
+        let path = request.path().to_path_buf();
+        let token = request.token();
+        let capabilities = self.engine.last_good().capabilities;
+        let background = self.engine.last_good().background;
+        let result = load_theme_path_for(&path, capabilities, background)
+            .map_err(|error| classify_reload_failure(&error));
+        Some(self.engine.finish(token, result))
+    }
+
+    /// The currently retained theme.
+    pub fn last_good(&self) -> &OctetTheme {
+        self.engine.last_good()
+    }
+}
+
+/// Map the existing bounded loader's error into the reload retention policy
+/// without changing that loader. Missing sources fall back to the compiled
+/// default; unsafe replacements and schema failures retain the last-good theme.
+fn classify_reload_failure(error: &anyhow::Error) -> ReloadFailureKind {
+    use octet_agent::secure_fs::SecureFileError;
+    if let Some(secure) = error.downcast_ref::<SecureFileError>() {
+        return match secure {
+            SecureFileError::NotRegular | SecureFileError::InvalidPath(_) => {
+                ReloadFailureKind::Unsafe
+            }
+            SecureFileError::TooLarge { .. } => ReloadFailureKind::Broken,
+            SecureFileError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                ReloadFailureKind::Missing
+            }
+            _ => ReloadFailureKind::Other,
+        };
+    }
+    if let Some(io) = error.downcast_ref::<std::io::Error>() {
+        return if io.kind() == std::io::ErrorKind::NotFound {
+            ReloadFailureKind::Missing
+        } else {
+            ReloadFailureKind::Other
+        };
+    }
+    ReloadFailureKind::Invalid
+}
+
 /// Load a named theme or return an error without altering the current theme.
 pub(crate) fn load_named_theme_for_background(
     name: &str,
@@ -2402,6 +2567,178 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         symlink(&replacement, &path).unwrap();
         assert!(theme.reload().is_err());
+    }
+
+    #[test]
+    fn shipped_reference_theme_is_schema_valid_and_variant_aware() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes/octet-default.toml");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        assert!(
+            source.len() as u64 <= MAX_THEME_BYTES,
+            "reference theme exceeds the bounded file size"
+        );
+
+        let dark =
+            theme_schema::parse_theme(&source, "reference", TerminalBackground::Dark).unwrap();
+        let light =
+            theme_schema::parse_theme(&source, "reference", TerminalBackground::Light).unwrap();
+        assert_eq!(
+            dark.tokens.get("accent").map(String::as_str),
+            Some("#16876d")
+        );
+        assert_eq!(
+            dark.tokens.get("md_code_bg").map(String::as_str),
+            Some("#202630"),
+            "dark variant keeps the dark fenced-code surface"
+        );
+        assert_eq!(
+            light.tokens.get("md_code_bg").map(String::as_str),
+            Some("#f1f5f4"),
+            "light variant overrides the universal fenced-code surface"
+        );
+        assert!(dark.roles.contains_key("extension.example.badge"));
+        assert_eq!(
+            dark.glyphs.len(),
+            dark.ascii_glyphs.len(),
+            "every unicode glyph has an ASCII fallback"
+        );
+
+        // The file must compile through the real bounded loader, not just parse.
+        let compiled = load_resolved_theme_for(
+            &path,
+            &source,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        )
+        .unwrap();
+        assert!(matches!(compiled.source(), ThemeSource::File(_)));
+        assert_eq!(compiled.metadata().name, "octet default reference");
+        assert_eq!(
+            compiled.resolve::<String>("md_code_bg").as_deref(),
+            Some("#202630")
+        );
+    }
+
+    #[test]
+    fn active_theme_reload_poll_applies_edits_and_retains_last_good() {
+        use crate::tui::theme_reload::{try_send_change, FileChangeEvent, FileChangeKind};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active.toml");
+        std::fs::write(
+            &path,
+            "[metadata]\nname = 'Initial'\n[colors]\naccent = '#111111'\n",
+        )
+        .unwrap();
+        let theme = load_theme_path_for(
+            &path,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        )
+        .unwrap();
+
+        let (mut reload, sender) =
+            ThemeFileReload::new(&theme, ThemeReloadMode::Interactive, Duration::ZERO).unwrap();
+        let watch = reload.watch_spec().expect("interactive file theme watches");
+        assert_eq!(watch.directory(), directory.path());
+        assert!(!watch.recursive());
+
+        let now = Instant::now();
+        // A busy boundary drains the event but never admits a reload.
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Modify)
+        ));
+        assert!(reload.poll(now, ReloadBoundary::Busy).is_none());
+
+        // A real edit loads through OctetTheme::reload at the idle boundary.
+        std::fs::write(
+            &path,
+            "[metadata]\nname = 'Edited'\n[colors]\naccent = '#222222'\n",
+        )
+        .unwrap();
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Modify)
+        ));
+        match reload.poll(now, ReloadBoundary::Idle).expect("applied") {
+            ReloadDecision::Applied(theme) => assert_eq!(theme.metadata().name, "Edited"),
+            other => panic!("expected an applied theme, got {other:?}"),
+        }
+
+        // An invalid edit retains the last-good theme instead of applying it.
+        std::fs::write(&path, "[metadata]\nname = 7\n").unwrap();
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Modify)
+        ));
+        assert!(matches!(
+            reload.poll(now, ReloadBoundary::Idle),
+            Some(ReloadDecision::RetainedLastGood {
+                failure: ReloadFailureKind::Invalid
+            })
+        ));
+        assert_eq!(reload.last_good().metadata().name, "Edited");
+
+        // A removed source installs the compiled fallback.
+        std::fs::remove_file(&path).unwrap();
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Remove)
+        ));
+        assert!(matches!(
+            reload.poll(now, ReloadBoundary::Idle),
+            Some(ReloadDecision::FellBackToCompiledDefault(_))
+        ));
+
+        // Non-interactive modes stay inert.
+        reload.set_mode(ThemeReloadMode::Print);
+        assert!(reload.watch_spec().is_none());
+        assert!(reload.poll(now, ReloadBoundary::Idle).is_none());
+    }
+
+    #[test]
+    fn published_semantic_role_vocabulary_is_closed_and_accepted() {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in SEMANTIC_ROLE_VOCABULARY {
+            assert!(seen.insert(*name), "duplicate published role {name}");
+            assert!(
+                semantic_text_role(name).is_some(),
+                "published role {name} is not a mapped semantic role"
+            );
+            let source = format!("[roles.{name}]\nbold = true\n");
+            let parsed =
+                theme_schema::parse_theme(&source, "vocabulary", TerminalBackground::Unknown)
+                    .unwrap_or_else(|error| panic!("role {name}: {error}"));
+            assert!(parsed.roles.contains_key(*name));
+            let theme = load_theme_source_for(
+                &source,
+                "vocabulary",
+                ThemeSource::CompiledDefault,
+                "Vocabulary",
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                TerminalBackground::Unknown,
+            )
+            .unwrap_or_else(|error| panic!("role {name}: {error}"));
+            assert!(
+                theme.semantic_styles.contains_key(*name),
+                "role {name} was not retained as a semantic style"
+            );
+        }
+
+        // The extension-namespaced channel is open but still typed.
+        let extension = "[roles.\"extension.git.branch\"]\nforeground = \"accent\"\n";
+        let parsed =
+            theme_schema::parse_theme(extension, "extension", TerminalBackground::Unknown).unwrap();
+        assert!(parsed.roles.contains_key("extension.git.branch"));
+        assert!(theme_schema::parse_theme(
+            "[roles.\"private state\"]\nbold = true\n",
+            "bad-role",
+            TerminalBackground::Unknown,
+        )
+        .is_err());
     }
 
     #[test]

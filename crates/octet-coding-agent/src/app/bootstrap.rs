@@ -285,7 +285,8 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // discovery. Version 7 invalidates inventories created before the built-in
 // Apple Foundation Models metadata was applied to sparse model responses.
 // Version 8 gives PCC its distinct 32,768-token context window.
-const CUSTOM_MODEL_CACHE_VERSION: u8 = 8;
+// Version 9 decodes endpoint-owned v1 self-descriptions instead of sparse defaults.
+const CUSTOM_MODEL_CACHE_VERSION: u8 = 9;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
 const MAX_PROVIDER_INVENTORY_CACHE_BYTES: usize = MAX_DISCOVERY_BODY_BYTES + 1024 * 1024;
 const PROVIDER_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -384,6 +385,17 @@ struct ProviderInventoryCache {
     inventory_url: String,
     credential_fingerprint: String,
     body: Option<serde_json::Value>,
+    /// An opaque HTTP validator; preserve quotes and weak-validator prefixes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    etag: Option<String>,
+    /// Unix milliseconds of the last successful 200/304 catalog check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checked_at: Option<u64>,
+}
+
+enum ProviderInventoryResponse {
+    Modified { body: serde_json::Value, etag: Option<String> },
+    NotModified { etag: Option<String> },
 }
 
 enum CachedProviderInventory {
@@ -481,6 +493,19 @@ fn load_provider_inventory_cache(
     inventory_url: &str,
     credential_fingerprint: &str,
 ) -> anyhow::Result<Option<CachedProviderInventory>> {
+    Ok(load_provider_inventory_record(path, provider_id, inventory_url, credential_fingerprint)?
+        .map(|cache| match cache.body {
+            Some(body) => CachedProviderInventory::Available(body),
+            None => CachedProviderInventory::Unavailable,
+        }))
+}
+
+fn load_provider_inventory_record(
+    path: &std::path::Path,
+    provider_id: &str,
+    inventory_url: &str,
+    credential_fingerprint: &str,
+) -> anyhow::Result<Option<ProviderInventoryCache>> {
     let Some(bytes) = crate::auth::read_bounded_private(path, MAX_PROVIDER_INVENTORY_CACHE_BYTES)?
     else {
         return Ok(None);
@@ -494,10 +519,14 @@ fn load_provider_inventory_cache(
     {
         return Ok(None);
     }
-    Ok(Some(match cache.body {
-        Some(body) => CachedProviderInventory::Available(body),
-        None => CachedProviderInventory::Unavailable,
-    }))
+    Ok(Some(cache))
+}
+
+fn inventory_checked_at() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn save_provider_inventory_cache(
@@ -513,6 +542,8 @@ fn save_provider_inventory_cache(
         inventory_url: inventory_url.to_owned(),
         credential_fingerprint: credential_fingerprint.to_owned(),
         body: body.cloned(),
+        etag: None,
+        checked_at: body.map(|_| inventory_checked_at()),
     };
     crate::auth::write_private_atomic(path, &serde_json::to_vec(&cache)?, ".provider-models-")
 }
@@ -533,11 +564,31 @@ fn provider_inventory_cache_is_stale(path: &std::path::Path) -> bool {
         })
 }
 
+fn inventory_etag(value: Option<&str>) -> Option<String> {
+    value.filter(|value| {
+        !value.is_empty() && value.len() <= 4096 && value.is_ascii()
+            && http::HeaderValue::from_str(value).is_ok()
+    }).map(str::to_owned)
+}
+
 fn fetch_provider_inventory(
     inventory_url: String,
     headers: http::HeaderMap,
-) -> anyhow::Result<serde_json::Value> {
-    get_models_json_blocking(&inventory_url, headers)
+) -> anyhow::Result<ProviderInventoryResponse> {
+    let response = blocking_discovery_client(DISCOVERY_TIMEOUT)?
+        .get(inventory_url)
+        .headers(headers)
+        .send()
+        .map_err(|_| anyhow::anyhow!("model discovery request failed"))?;
+    let etag = inventory_etag(response.headers().get(http::header::ETAG)
+        .and_then(|value| value.to_str().ok()));
+    match response.status() {
+        http::StatusCode::NOT_MODIFIED => Ok(ProviderInventoryResponse::NotModified { etag }),
+        http::StatusCode::OK => Ok(ProviderInventoryResponse::Modified {
+            body: bounded_discovery_json(response, "model discovery")?, etag,
+        }),
+        _ => anyhow::bail!("model discovery request was rejected"),
+    }
 }
 
 fn schedule_provider_inventory_refresh(
@@ -554,19 +605,14 @@ fn schedule_provider_inventory_refresh(
     let _ = std::thread::Builder::new()
         .name(format!("octet-{provider_id}-catalog-refresh"))
         .spawn(move || {
-            if let Ok(body) = get_models_json_blocking(&inventory_url, headers) {
-                let _ = save_provider_inventory_cache(
-                    &path,
-                    provider_id,
-                    &inventory_url,
-                    &credential_fingerprint,
-                    Some(&body),
-                );
-            }
+            let _ = refresh_provider_inventory_with(
+                &path, provider_id, inventory_url, headers,
+                &credential_fingerprint, fetch_provider_inventory,
+            );
         });
 }
 
-fn fetch_and_cache_provider_inventory_with<F>(
+fn refresh_provider_inventory_with<F>(
     path: &std::path::Path,
     provider_id: &'static str,
     inventory_url: String,
@@ -575,23 +621,46 @@ fn fetch_and_cache_provider_inventory_with<F>(
     fetch: F,
 ) -> anyhow::Result<serde_json::Value>
 where
-    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<ProviderInventoryResponse>,
 {
-    match fetch(inventory_url.clone(), headers) {
-        Ok(body) => {
-            if let Err(error) = save_provider_inventory_cache(
-                path,
-                provider_id,
-                &inventory_url,
-                credential_fingerprint,
-                Some(&body),
-            ) {
-                crate::output::stderr!(
-                    "warning: could not persist {provider_id} model metadata: {error}"
-                );
+    // Validators are scoped to the same provider, URL and credential as the body.
+    // A corrupt/foreign cache must never send its validator to another endpoint.
+    let cached = load_provider_inventory_record(path, provider_id, &inventory_url,
+        credential_fingerprint).ok().flatten();
+    let validator = cached.as_ref().filter(|cache| cache.body.is_some())
+        .and_then(|cache| inventory_etag(cache.etag.as_deref()));
+    let mut headers = headers;
+    headers.remove(http::header::IF_NONE_MATCH);
+    if let Some(etag) = &validator {
+        headers.insert(http::header::IF_NONE_MATCH, http::HeaderValue::from_str(etag)?);
+    }
+    let fetched = fetch(inventory_url.clone(), headers).and_then(|response| {
+        let (body, etag) = match response {
+            ProviderInventoryResponse::Modified { body, etag } => (body, inventory_etag(etag.as_deref())),
+            ProviderInventoryResponse::NotModified { etag } => {
+                let Some(cache) = cached.filter(|_| validator.is_some()) else {
+                    anyhow::bail!("model discovery returned 304 without a scoped validator");
+                };
+                let body = cache.body.expect("validator requires a cached body");
+                (body, inventory_etag(etag.as_deref()).or(validator))
             }
-            Ok(body)
+        };
+        let cache = ProviderInventoryCache {
+            version: PROVIDER_INVENTORY_CACHE_VERSION,
+            provider_id: provider_id.to_owned(),
+            inventory_url: inventory_url.clone(),
+            credential_fingerprint: credential_fingerprint.to_owned(),
+            body: Some(body.clone()), etag, checked_at: Some(inventory_checked_at()),
+        };
+        if let Err(error) = crate::auth::write_private_atomic(
+            path, &serde_json::to_vec(&cache)?, ".provider-models-",
+        ) {
+            crate::output::stderr!("warning: could not persist {provider_id} model metadata: {error}");
         }
+        Ok(body)
+    });
+    match fetched {
+        Ok(body) => Ok(body),
         // Never replace a last-good inventory with failure state. A concurrent
         // refresh may have installed one while this request was in flight, so
         // re-read once and use it before surfacing the transient error. Legacy
@@ -615,7 +684,7 @@ fn cached_provider_inventory(
     credential: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let path = provider_inventory_cache_path(provider_id);
-    cached_provider_inventory_with_fetch(
+    cached_provider_inventory_with_response_fetch(
         path,
         provider_id,
         inventory_url,
@@ -625,7 +694,7 @@ fn cached_provider_inventory(
     )
 }
 
-fn cached_provider_inventory_with_fetch<F>(
+fn cached_provider_inventory_with_response_fetch<F>(
     path: PathBuf,
     provider_id: &'static str,
     inventory_url: String,
@@ -634,7 +703,7 @@ fn cached_provider_inventory_with_fetch<F>(
     fetch: F,
 ) -> anyhow::Result<Option<serde_json::Value>>
 where
-    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<ProviderInventoryResponse>,
 {
     let fingerprint = credential_fingerprint(credential);
     match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
@@ -654,7 +723,7 @@ where
             // Retry in the foreground so a recovered endpoint becomes usable
             // in this launch, rather than refreshing a file that only a later
             // process could observe.
-            fetch_and_cache_provider_inventory_with(
+            refresh_provider_inventory_with(
                 &path,
                 provider_id,
                 inventory_url,
@@ -664,7 +733,7 @@ where
             )
             .map(Some)
         }
-        Ok(None) => fetch_and_cache_provider_inventory_with(
+        Ok(None) => refresh_provider_inventory_with(
             &path,
             provider_id,
             inventory_url,
@@ -675,7 +744,7 @@ where
         .map(Some),
         Err(cache_error) => {
             crate::output::stderr!("warning: {provider_id} model cache unavailable: {cache_error}");
-            fetch_and_cache_provider_inventory_with(
+            refresh_provider_inventory_with(
                 &path,
                 provider_id,
                 inventory_url,
@@ -686,6 +755,26 @@ where
             .map(Some)
         }
     }
+}
+
+#[cfg(test)]
+fn fetch_and_cache_provider_inventory_with<F>(
+    path: &std::path::Path, provider_id: &'static str, inventory_url: String,
+    headers: http::HeaderMap, fingerprint: &str, fetch: F,
+) -> anyhow::Result<serde_json::Value>
+where F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value> {
+    refresh_provider_inventory_with(path, provider_id, inventory_url, headers, fingerprint,
+        |url, headers| fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None }))
+}
+
+#[cfg(test)]
+fn cached_provider_inventory_with_fetch<F>(
+    path: PathBuf, provider_id: &'static str, inventory_url: String,
+    headers: http::HeaderMap, credential: &str, fetch: F,
+) -> anyhow::Result<Option<serde_json::Value>>
+where F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value> {
+    cached_provider_inventory_with_response_fetch(path, provider_id, inventory_url, headers, credential,
+        |url, headers| fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None }))
 }
 
 fn cached_provider_inventory_offline(
@@ -1168,6 +1257,94 @@ fn builtin_display_entry(
     result
 }
 
+/// Normalize only a declaration returned by the selected endpoint. Legacy
+/// assertions (including null/false/malformed) retain precedence per leaf; the
+/// pinned display/pricing supplement never enters this authority boundary.
+fn self_described_entry(
+    entry: &serde_json::Value,
+    endpoint: EndpointId,
+    api_name: &str,
+    protocol: Protocol,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    use octet_ai::discovery::{DiscoverySource, ModelSelfDescription};
+    let Some(description) = ModelSelfDescription::from_entry(
+        entry,
+        DiscoverySource {
+            endpoint,
+            api_name: api_name.to_owned(),
+            protocol,
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    let capabilities = description.capabilities();
+    let mut result = entry.clone();
+    for (names, key, value) in [
+        (
+            &[
+                "context_window",
+                "context_length",
+                "max_model_len",
+                "max_context_tokens",
+                "limit/context",
+                "meta/n_ctx",
+                "meta/n_ctx_train",
+                "status",
+            ][..],
+            "context_window",
+            serde_json::json!(description.limits().context_window),
+        ),
+        (
+            &["max_output_tokens", "max_completion_tokens", "limit/output"][..],
+            "max_output_tokens",
+            serde_json::json!(description.limits().max_output_tokens),
+        ),
+        (TOOL_FIELDS, "tools", serde_json::json!(capabilities.tools)),
+        (
+            &["parallel_tool_calls", "supported_parameters"][..],
+            "parallel_tool_calls",
+            serde_json::json!(capabilities.parallel_tool_calls),
+        ),
+        (
+            &[
+                "structured_output",
+                "supports_structured_output",
+                "supported_parameters",
+            ][..],
+            "structured_output",
+            serde_json::json!(capabilities.structured_output),
+        ),
+    ] {
+        if !has_metadata_assertion(entry, names) {
+            result[key] = value;
+        }
+    }
+    if !has_metadata_assertion(entry, MODALITY_FIELDS) {
+        result["input_modalities"] = if capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Image)
+        {
+            serde_json::json!(["text", "image"])
+        } else {
+            serde_json::json!(["text"])
+        };
+    }
+    if !has_reasoning_assertion(entry) {
+        result["reasoning"] = match &capabilities.reasoning {
+            Some(reasoning) => {
+                let options = reasoning
+                    .options
+                    .as_ref()
+                    .expect("validated exact effort description");
+                serde_json::json!({"supported":true,"control":"effort","values":options.values,"default":options.default})
+            }
+            None => serde_json::json!(false),
+        };
+    }
+    Ok(Some(result))
+}
+
 fn has_reasoning_assertion(entry: &serde_json::Value) -> bool {
     has_metadata_assertion(entry, REASONING_FIELDS)
         || [
@@ -1214,6 +1391,7 @@ struct DiscoveredApiModel {
     context_window: Option<u64>,
     max_output_tokens: Option<u64>,
     tools: bool,
+    parallel_tool_calls: Option<bool>,
     #[cfg(test)]
     reasoning: bool,
     reasoning_metadata: DiscoveredReasoning,
@@ -1420,6 +1598,14 @@ fn api_models_from_response_for(
         else {
             continue;
         };
+        let described = declaration
+            .and_then(|d| d.route_for_model(id))
+            .map(|route| {
+                self_described_entry(entry, EndpointId(route.endpoint_id.into()), id, route.protocol)
+            })
+            .transpose()?
+            .flatten();
+        let entry = described.as_ref().unwrap_or(entry);
         let snapshot = declaration.and_then(|d| {
             d.route_for_model(id)?;
             octet_ai::model_metadata::model_capability_metadata(d.id, id)
@@ -1465,6 +1651,7 @@ fn api_models_from_response_for(
                         .and_then(|provider| positive_u64(provider, &["max_completion_tokens"]))
                 }),
             tools: custom_model_metadata_supports_tools(entry),
+            parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"]),
             #[cfg(test)]
             reasoning: model_metadata_supports_reasoning(entry),
             reasoning_metadata,
@@ -1882,7 +2069,8 @@ fn register_openai_compatible_models_from_response(
                 input_modalities,
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
-                parallel_tool_calls: model.tools && protocol != Protocol::OpenAiChat,
+                parallel_tool_calls: model.tools
+                    && model.parallel_tool_calls.unwrap_or(protocol != Protocol::OpenAiChat),
                 reasoning,
                 responses_lite: false,
                 agent_delegation: None,
@@ -1964,7 +2152,7 @@ fn register_anthropic_compatible_models_from_response(
                 },
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
-                parallel_tool_calls: model.tools,
+                parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(true),
                 // Only a separately declared native contract is a fallback;
                 // a source boolean cannot invent adaptive-thinking support.
                 reasoning: discovered_reasoning_capability(
@@ -2199,7 +2387,7 @@ fn register_deepseek_models_from_response(
                 },
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
-                parallel_tool_calls: false,
+                parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(false),
                 reasoning,
                 responses_lite: false,
                 agent_delegation: None,
@@ -2408,6 +2596,16 @@ fn openrouter_models_from_response(
         if api_name.trim().is_empty() {
             continue;
         }
+        let Some(route) = declaration.route_for_model(api_name) else {
+            continue;
+        };
+        let described = self_described_entry(
+            entry,
+            EndpointId(route.endpoint_id.into()),
+            api_name,
+            route.protocol,
+        )?;
+        let entry = described.as_ref().unwrap_or(entry);
         let snapshot =
             octet_ai::model_metadata::model_capability_metadata(declaration.id, api_name);
         let reasoning_metadata = builtin_discovery_reasoning(entry)?;
@@ -2443,9 +2641,6 @@ fn openrouter_models_from_response(
         }
         let supports_tools = model_metadata_supports_tools(entry);
 
-        let Some(route) = declaration.route_for_model(api_name) else {
-            continue;
-        };
         models.push(ModelSpec {
             id: ModelId(format!("{}/{api_name}", declaration.id)),
             endpoint: EndpointId(route.endpoint_id.into()),
@@ -2456,7 +2651,8 @@ fn openrouter_models_from_response(
                 input_modalities,
                 output_modalities: ModalitySet::none(),
                 tools: supports_tools,
-                parallel_tool_calls: false,
+                parallel_tool_calls: supports_tools
+                    && asserted_capability(entry, &["parallel_tool_calls"]).unwrap_or(false),
                 reasoning: discovered_reasoning_capability(
                     declaration,
                     route.protocol,
@@ -2942,7 +3138,10 @@ fn schedule_custom_model_cache_refresh_for(
         .name(format!("octet-custom-{provider_id}-catalog-refresh"))
         .spawn(move || {
             let discovered = apply_configured_custom_model_overrides(
-                apply_known_custom_model_defaults(&cred, discover_models_blocking(&cred, false)),
+                apply_known_custom_model_defaults(
+                    &cred,
+                    discover_models_blocking(&cred, &provider_id, false),
+                ),
                 &configured,
             );
             if !discovered.is_empty() {
@@ -3696,7 +3895,7 @@ fn register_custom_openai_provider(
                     &cache_fingerprint,
                     models,
                     PROVIDER_INVENTORY_REFRESH_INTERVAL,
-                    discover_models,
+                    |cred| discover_models(cred, provider_id),
                 )
             }
         }
@@ -3709,7 +3908,7 @@ fn register_custom_openai_provider(
                 &cred,
                 &cache_fingerprint,
                 false,
-                discover_models,
+                |cred| discover_models(cred, provider_id),
             );
             if !discovered.is_empty() {
                 discovered
@@ -3736,7 +3935,7 @@ fn register_custom_openai_provider(
                 &cred,
                 &cache_fingerprint,
                 true,
-                discover_models,
+                |cred| discover_models(cred, provider_id),
             );
             if discovered.is_empty() {
                 configured
@@ -3813,6 +4012,7 @@ fn register_custom_openai_provider(
 /// `CustomModel` entries. Returns an empty Vec on any error (non-fatal).
 fn discover_models(
     cred: &crate::auth::custom::CustomCredential,
+    provider_id: &str,
 ) -> Vec<crate::auth::custom::CustomModel> {
     // Apple Foundation Models is an optional local integration. Its health
     // endpoint gives us a cheap, exact readiness signal, so do not issue the
@@ -3829,13 +4029,15 @@ fn discover_models(
     // outer #[tokio::main] async context, avoiding:
     //   "Cannot drop a runtime in a context where blocking is not allowed."
     let cred = cred.clone();
-    std::thread::spawn(move || discover_models_blocking(&cred, true))
+    let provider_id = provider_id.to_owned();
+    std::thread::spawn(move || discover_models_blocking(&cred, &provider_id, true))
         .join()
         .unwrap_or_default()
 }
 
 fn discover_models_blocking(
     cred: &crate::auth::custom::CustomCredential,
+    provider_id: &str,
     report_errors: bool,
 ) -> Vec<crate::auth::custom::CustomModel> {
     use crate::auth::custom::CustomModel;
@@ -3933,6 +4135,21 @@ fn discover_models_blocking(
             continue;
         }
 
+        let described = match self_described_entry(
+            entry,
+            EndpointId(crate::auth::custom::endpoint_id(provider_id)),
+            id,
+            Protocol::OpenAiChat,
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                if report_errors {
+                    crate::output::stderr!("warning: invalid endpoint capability self-description");
+                }
+                continue;
+            }
+        };
+        let entry = described.as_ref().unwrap_or(entry);
         let ctx = extract_ctx_from_model_entry(entry);
         let vision = entry
             .get("architecture")
@@ -3940,7 +4157,9 @@ fn discover_models_blocking(
             .and_then(|m| m.as_array())
             .map(|arr| arr.iter().any(|v| v.as_str() == Some("image")))
             .unwrap_or(false)
-            || model_id_implies_vision(id);
+            || input_modalities_from_entry(entry).contains(octet_ai::Modality::Image)
+            || (!has_metadata_assertion(entry, MODALITY_FIELDS) && model_id_implies_vision(id));
+        let vision = asserted_capability(entry, &["vision"]).unwrap_or(vision);
 
         let supported_parameters = entry
             .get("supported_parameters")
@@ -3962,9 +4181,11 @@ fn discover_models_blocking(
             context_window: ctx,
             max_output_tokens,
             tools: custom_model_metadata_supports_tools(entry),
-            parallel_tool_calls: supports("parallel_tool_calls"),
+            parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"])
+                .unwrap_or_else(|| supports("parallel_tool_calls")),
             vision,
-            structured_output: supports("response_format"),
+            structured_output: discovered_structured_output(entry)
+                .unwrap_or_else(|| supports("response_format")),
             reasoning: false,
             reasoning_configurable: true,
             reasoning_values: Vec::new(),
@@ -6185,3 +6406,11 @@ mod reasoning_ingress_review_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../providers/self_description_tests.rs"]
+mod provider_self_description_tests;
+
+#[cfg(test)]
+#[path = "../providers/conditional_inventory_tests.rs"]
+mod provider_conditional_inventory_tests;

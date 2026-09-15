@@ -51,16 +51,19 @@ enum RpcInput {
 
 struct RpcOutput {
     stdout: Box<dyn std::io::Write>,
+    delta_only: bool,
 }
 
 impl RpcOutput {
     fn new() -> Self {
         Self {
             stdout: Box::new(std::io::BufWriter::new(std::io::stdout())),
+            delta_only: false,
         }
     }
 
-    fn send(&mut self, value: Value) -> anyhow::Result<()> {
+    fn send(&mut self, mut value: Value) -> anyhow::Result<()> {
+        if self.delta_only { compact_json_event(&mut value); }
         serde_json::to_writer(&mut self.stdout, &value)?;
         self.stdout.write_all(b"\n")?;
         self.stdout.flush()?;
@@ -101,6 +104,72 @@ impl RpcOutput {
         response.insert("success".into(), Value::Bool(false));
         response.insert("error".into(), Value::String(error.into()));
         self.send(Value::Object(response))
+    }
+}
+
+/// Pi's JSON mode removes cumulative snapshots from delta records. Native
+/// session persistence and authoritative message_end records remain unchanged.
+fn compact_json_event(value: &mut Value) {
+    if value["type"] != "message_update" { return; }
+    let message = value.as_object_mut().expect("event object").remove("message").unwrap_or(Value::Null);
+    value["usage"] = message["usage"].clone();
+    let event = &mut value["assistantMessageEvent"];
+    if event["type"] == "toolcall_start" {
+        if let Some(index) = event["contentIndex"].as_u64() {
+            let content = &message["content"][index as usize];
+            event["id"] = content["id"].clone();
+            event["toolName"] = content["name"].clone();
+        }
+    }
+    if let Some(object) = event.as_object_mut() { object.remove("partial"); }
+}
+
+/// Reuse the RPC semantic projection, without its command/response protocol.
+/// JSONL writes are flushed per event and backpressure remains synchronous.
+pub(crate) struct JsonEventStream {
+    output: RpcOutput,
+    translator: EventTranslator,
+    queue: QueueState,
+}
+
+impl JsonEventStream {
+    pub(crate) fn header(app: &App) -> anyhow::Result<()> {
+        RpcOutput::new().send(json!({
+            "type": "session", "version": 1, "format": "octet-json-events",
+            "id": session_id(app), "cwd": app.config.workspace,
+            "timestamp": now_millis(),
+            "usageUncertain": app.agent.session().has_uncertain_usage()
+        }))
+    }
+
+    pub(crate) fn new(app: &App, input: &UserInput) -> Self {
+        let mut output = RpcOutput::new();
+        output.delta_only = true;
+        Self { output, translator: EventTranslator::new(app, user_input_value(input)), queue: QueueState::default() }
+    }
+
+    pub(crate) fn start(&mut self, input: &UserInput) -> anyhow::Result<()> {
+        self.output.send(json!({"type": "agent_start"}))?;
+        self.output.send(json!({"type": "turn_start"}))?;
+        let message = user_input_value(input);
+        self.output.send(json!({"type": "message_start", "message": message}))?;
+        self.output.send(json!({"type": "message_end", "message": message}))
+    }
+
+    pub(crate) fn observe(&mut self, event: AgentEvent) -> anyhow::Result<Option<HostRunOutcome>> {
+        self.translator.observe(event, &mut self.output, &mut self.queue)
+    }
+
+    pub(crate) fn finish(&mut self, outcome: &HostRunOutcome) -> anyhow::Result<()> {
+        // observe(RunFinished) already settles the translator. Abnormal host
+        // termination must close an unfinished message explicitly as well.
+        if matches!(outcome, HostRunOutcome::StreamLost | HostRunOutcome::Shutdown) {
+            self.translator.settle(outcome.clone(), &mut self.output)?;
+        }
+        self.output.send(json!({"type": "agent_end", "messages": self.translator.run_messages, "willRetry": false,
+            "usageUncertain": self.translator.usage_uncertain}))?;
+        if let Some(event) = self.translator.pending_retry_end.take() { self.output.send(event)?; }
+        Ok(())
     }
 }
 
@@ -2818,6 +2887,7 @@ mod tests {
         }
         let capture = Capture::default();
         let mut output = RpcOutput {
+            delta_only: false,
             stdout: Box::new(capture.clone()),
         };
         let model = octet_ai::ModelCatalog::builtin()

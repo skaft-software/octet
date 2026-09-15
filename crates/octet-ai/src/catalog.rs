@@ -316,6 +316,7 @@ fn google_api_name_is_safe(name: &str) -> bool {
 
 pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
     if spec.api_name.is_empty()
+        || spec.capabilities.deferred_tool_loading
         || !spec.capabilities.input_modalities.is_valid()
         || !spec.capabilities.output_modalities.is_valid()
         || spec.limits.context_window == 0

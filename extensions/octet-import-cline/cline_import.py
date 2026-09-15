@@ -985,6 +985,7 @@ def _extract_mcp(
         for raw_arg in raw_args:
             argument = _safe_text(raw_arg, MAX_ARGUMENT_BYTES)
             if argument is None:
+                _add_diagnostic(diagnostics, path, "warning", _REASON_MCP_ARGS)
                 invalid_args = True
                 break
             if previous_sensitive_flag or _sensitive_argument(argument):

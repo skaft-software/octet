@@ -7,12 +7,22 @@
 
 mod bash;
 mod edit;
+mod ls;
+mod find;
+mod grep;
+mod powershell;
+mod shell_environment;
 mod read;
 mod search;
 mod write;
 
 pub use bash::BashTool;
 pub use edit::EditTool;
+pub use ls::LsTool;
+pub use find::FindTool;
+pub use grep::GrepTool;
+pub use powershell::PowerShellTool;
+pub use shell_environment::{ShellSessionEnvironment, SessionShellTool};
 pub use read::ReadTool;
 pub use search::SearchTool;
 pub use write::WriteTool;
@@ -120,6 +130,12 @@ impl Extension for CoreTools {
         // The coding product disables this redundant schema by default, while
         // keeping it available to embedders and explicit tool allowlists.
         host.tool(SearchTool);
+        host.tool(LsTool);
+        host.tool(FindTool);
+        host.tool(GrepTool);
+        // Optional at the product allowlist boundary; never a bash fallback.
+        #[cfg(windows)]
+        host.tool(PowerShellTool);
     }
 }
 

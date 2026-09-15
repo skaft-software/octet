@@ -2,7 +2,10 @@
 
 use std::io::{IsTerminal, Write};
 
-use octet_agent::{AgentEvent, OutputChannel};
+use octet_agent::{AgentEvent, InputPart, OutputChannel, UserInput};
+use octet_ai::Media;
+use crate::app::App;
+use crate::modes::rpc::JsonEventStream;
 
 use crate::app::bootstrap::{build_app, resolve_launch_print, Bootstrap};
 use crate::modes::{timestamp, HostRunOutcome};
@@ -38,6 +41,10 @@ fn terminal_safe_output(text: &str, terminal: bool) -> std::borrow::Cow<'_, str>
 /// Stream a persistent Agent session to standard output without constructing a
 /// terminal UI.
 pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
+    run_invocation(boot, prompt, Vec::new(), Vec::new(), false).await
+}
+
+pub(crate) async fn run_invocation(boot: Bootstrap, prompt: String, remaining: Vec<String>, media: Vec<Media>, json: bool) -> anyhow::Result<()> {
     // Explicit template arguments are data, not local commands.
     if boot.config.prompt_template.is_none() {
         crate::commands::reject_tui_changelog(&prompt)?;
@@ -45,7 +52,21 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;
     let mut app = build_app(boot, launch, system)?;
-    let prompt = match crate::prompts::render_configured(&mut app, &prompt)? {
+    if json { JsonEventStream::header(&app)?; }
+    let result = async {
+        run_prompt(&mut app, prompt, media, json).await?;
+        for prompt in remaining {
+            run_prompt(&mut app, prompt, Vec::new(), json).await?;
+        }
+        Ok(())
+    }.await;
+    app.executable_extensions.shutdown().await;
+    result
+}
+
+async fn run_prompt(app: &mut App, prompt: String, media: Vec<Media>, json: bool) -> anyhow::Result<()> {
+    if app.config.prompt_template.is_none() { crate::commands::reject_tui_changelog(&prompt)?; }
+    let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
             if app.config.debug_prompt {
                 crate::output::stderr_multiline(crate::prompts::debug_expansion(&rendered));
@@ -95,7 +116,11 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
     }
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(display_prompt));
-    let mut run = match app.agent.prompt(composition.prompt).await {
+    let mut parts = vec![InputPart::Text(composition.prompt)];
+    parts.extend(media.into_iter().map(InputPart::Media));
+    let input = UserInput::from(parts);
+    let mut events = json.then(|| JsonEventStream::new(app, &input));
+    let mut run = match app.agent.prompt(input.clone()).await {
         Ok(run) => run,
         Err(error) => anyhow::bail!(
             "{}",
@@ -106,12 +131,13 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
             )
         ),
     };
+    if let Some(events) = events.as_mut() { events.start(&input)?; }
     let extension_turn = app.executable_extensions.begin_turn().await;
     app.executable_extensions
         .commit_prompt_context(pending_context_count);
     let control = run.control();
     let stdout_is_terminal = std::io::stdout().is_terminal();
-    let mut output = std::io::stdout().lock();
+    let mut output = std::io::stdout();
     let mut pending_output = String::new();
     let mut limit_reached = false;
     let mut last_run_cost = 0u64;
@@ -132,6 +158,16 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
         let Some(event) = event else {
             break HostRunOutcome::stream_lost();
         };
+        if let Some(events) = events.as_mut() {
+            if let AgentEvent::TurnFinished { message, session_cost_microdollars, .. } = &event {
+                response_text = crate::extensions::assistant_text(message);
+                if let (Some(limit), Some(total)) = (app.config.max_cost_microdollars, *session_cost_microdollars) {
+                    if total >= limit { limit_reached = true; control.abort(); }
+                }
+            }
+            if let Some(outcome) = events.observe(event)? { break outcome; }
+            continue;
+        }
         if let Some(outcome) =
             HostRunOutcome::from_event(&event, &app.model.endpoint.id.0, &app.model.spec.id.0)
         {
@@ -241,6 +277,7 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
         }
     };
     drop(run);
+    if let Some(events) = events.as_mut() { events.finish(&outcome)?; }
     app.executable_extensions
         .settle_turn(extension_turn, &outcome)
         .await;
@@ -281,7 +318,6 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
     };
     // A tool error is model-visible and may be recovered by a later turn; the
     // final run outcome, not an intermediate attempt, determines exit status.
-    app.executable_extensions.shutdown().await;
     result
 }
 

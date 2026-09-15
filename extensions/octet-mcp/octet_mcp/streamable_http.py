@@ -13,12 +13,15 @@ import http.client
 import json
 import socket
 import ssl
+import subprocess
 import threading
 import time
 from typing import Any, Callable, Mapping, Optional, Protocol
 from urllib.parse import urlsplit
 
 from .config import Limits, ServerConfig
+from .http_network import PinnedConnection, resolve_addresses
+from .ownership import ResourceOwner
 from .protocol import (
     BoundedLog,
     CLIENT_NAME,
@@ -39,6 +42,7 @@ MAX_HTTP_SESSION_ID_BYTES = 512
 MAX_HTTP_EVENT_ID_BYTES = 1024
 MAX_HTTP_EVENTS = 256
 MAX_CREDENTIAL_BYTES = 64 * 1024
+MAX_HTTP_CONTROLS = 16
 
 
 class CredentialProvider(Protocol):
@@ -50,15 +54,15 @@ class CredentialProvider(Protocol):
     this adapter and are intentionally not implemented by this transport.
     """
 
-    def bearer_token(self, credential: str, *, server_id: str) -> Optional[str]:
-        """Return an ephemeral token for one configured logical reference."""
+    def bearer_token(self, credential: str, *, server_id: str, resource_owner: ResourceOwner) -> Optional[str]:
+        """Return a token for this immutable host owner; must be bounded/nonblocking."""
 
 
 class UnavailableCredentialProvider:
     """The safe default when no credential broker was explicitly composed."""
 
-    def bearer_token(self, credential: str, *, server_id: str) -> Optional[str]:
-        del credential, server_id
+    def bearer_token(self, credential: str, *, server_id: str, resource_owner: ResourceOwner) -> Optional[str]:
+        del credential, server_id, resource_owner
         return None
 
 
@@ -92,6 +96,14 @@ class _HttpOperation:
         self.result: Any = None
         self._aborted = threading.Event()
         self._connections: list[http.client.HTTPConnection] = []
+        self._sockets: list[socket.socket] = []
+        self._processes: set[subprocess.Popen] = set()
+        # One budget for the POST and all GET resumptions, not one per socket.
+        self.body_bytes = 0
+        self.events = 0
+        self.controls = 0
+        self.progress_token = ""
+        self.progress: Optional[Callable[[Mapping[str, Any]], None]] = None
         self._lock = threading.Lock()
 
     @property
@@ -115,10 +127,51 @@ class _HttpOperation:
             except ValueError:
                 return
 
+    def check(self, deadline: float) -> None:
+        _check_operation_deadline(self, deadline)
+
+    def add_socket(self, sock: socket.socket) -> None:
+        with self._lock:
+            if self.aborted:
+                sock.close()
+                raise McpTransportError("operation_interrupted", "MCP HTTP operation was interrupted")
+            self._sockets.append(sock)
+
+    def add_process(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._processes.add(process)
+            if self.aborted and process.poll() is None:
+                process.kill()
+
+    def remove_process(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._processes.discard(process)
+
+    def consume(self, amount: int, maximum: int) -> None:
+        self.body_bytes += amount
+        if self.body_bytes > maximum:
+            raise McpProtocolError("http_body_too_large", "MCP HTTP operation exceeded the frame limit", permanent=True)
+
     def abort(self) -> None:
         self._aborted.set()
         with self._lock:
             connections = tuple(self._connections)
+            sockets = tuple(self._sockets)
+            processes = tuple(self._processes)
+        for process in processes:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+        # shutdown is essential: close alone does not interrupt a blocked read
+        # held by HTTPResponse's makefile, including Connection: close responses.
+        for sock in sockets:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
         for connection in connections:
             try:
                 connection.close()
@@ -140,18 +193,24 @@ class McpStreamableHttpClient:
         config: ServerConfig,
         limits: Limits,
         *,
+        resource_owner: ResourceOwner,
         credential_provider: Optional[CredentialProvider] = None,
         on_failure: Optional[Callable[["McpStreamableHttpClient", McpError], None]] = None,
         on_tools_changed: Optional[Callable[["McpStreamableHttpClient"], None]] = None,
     ) -> None:
         if config.transport != "streamable-http" or config.url is None:
             raise ValueError("Streamable HTTP client requires a streamable-http server configuration")
+        self.resource_owner = resource_owner
         self.config = config
         self.limits = limits
         self.on_failure = on_failure
         self.on_tools_changed = on_tools_changed
         self._credential_provider = credential_provider or UnavailableCredentialProvider()
         self._endpoint = _endpoint(config.url)
+        self._addresses: Optional[tuple[str, ...]] = None
+        self._address_lock = threading.Lock()
+        self._control_slots = threading.BoundedSemaphore(MAX_HTTP_CONTROLS)
+        self._startup_deadline: Optional[float] = None
         self.logs = BoundedLog(limits.max_log_entries, limits.max_log_line_bytes)
         self._pending_slots = threading.BoundedSemaphore(limits.max_pending_requests_per_server)
         self._lock = threading.RLock()
@@ -163,7 +222,6 @@ class McpStreamableHttpClient:
         # These server-issued values are intentionally memory-only and never
         # enter logging, presentation, configuration, or result metadata.
         self._session_id: Optional[str] = None
-        self._last_event_id: Optional[str] = None
         self.server_info: dict[str, Any] = {}
         self.server_capabilities: dict[str, Any] = {}
         self.protocol_version: Optional[str] = None
@@ -185,6 +243,7 @@ class McpStreamableHttpClient:
             if self._started:
                 raise RuntimeError("MCP client is already started")
             self._started = True
+            self._startup_deadline = time.monotonic() + self.config.startup_timeout_ms / 1000
         try:
             result = self.request(
                 "initialize",
@@ -194,6 +253,7 @@ class McpStreamableHttpClient:
                     "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
                 },
                 timeout_ms=self.config.startup_timeout_ms,
+                deadline=self._startup_deadline,
             )
             if not isinstance(result, Mapping):
                 raise McpProtocolError(
@@ -216,14 +276,15 @@ class McpStreamableHttpClient:
                 self.protocol_version = str(protocol_version)
                 self.server_info = dict(server_info)
                 self.server_capabilities = dict(capabilities)
-            self.notify("notifications/initialized", {})
+            self.notify("notifications/initialized", {}, deadline=self._startup_deadline)
         except BaseException:
-            self.close()
+            self.close(terminate_session=False)
             raise
 
     def list_tools(self) -> list[dict[str, Any]]:
         """Read a bounded, cycle-checked MCP tool catalog."""
 
+        deadline = self._startup_deadline or (time.monotonic() + self.config.startup_timeout_ms / 1000)
         cursor: Optional[str] = None
         seen_cursors: set[str] = set()
         tools: list[dict[str, Any]] = []
@@ -233,7 +294,7 @@ class McpStreamableHttpClient:
             if cursor is not None:
                 params["cursor"] = cursor
             result = self.request(
-                "tools/list", params, timeout_ms=self.config.startup_timeout_ms
+                "tools/list", params, timeout_ms=self.config.startup_timeout_ms, deadline=deadline
             )
             if not isinstance(result, Mapping) or not isinstance(result.get("tools"), list):
                 raise McpProtocolError(
@@ -263,6 +324,8 @@ class McpStreamableHttpClient:
                     )
             next_cursor = result.get("nextCursor")
             if next_cursor is None:
+                _remaining_timeout(deadline)
+                self._startup_deadline = None
                 return tools
             if (
                 not isinstance(next_cursor, str)
@@ -308,12 +371,13 @@ class McpStreamableHttpClient:
         cancellation: Any = None,
         progress: Optional[Callable[[Mapping[str, Any]], None]] = None,
         include_progress_token: bool = False,
+        deadline: Optional[float] = None,
     ) -> Any:
         """Send one JSON-RPC request without replaying it after uncertainty."""
 
         if not isinstance(method, str) or not method:
             raise ValueError("MCP request method must be non-empty")
-        deadline = time.monotonic() + timeout_ms / 1000
+        deadline = min(deadline or float("inf"), time.monotonic() + timeout_ms / 1000)
         self._acquire_slot(deadline, cancellation)
         launched = False
         try:
@@ -345,6 +409,8 @@ class McpStreamableHttpClient:
                     request_id,
                     method,
                     deadline,
+                    progress_token,
+                    progress,
                 ),
                 release_slot=True,
             )
@@ -355,6 +421,7 @@ class McpStreamableHttpClient:
                 cancellation=cancellation,
                 cancellation_request=(request_id, method),
             )
+            _remaining_timeout(deadline)
             return self._route_request_messages(
                 messages,
                 request_id=request_id,
@@ -368,12 +435,12 @@ class McpStreamableHttpClient:
             if not launched:
                 self._pending_slots.release()
 
-    def notify(self, method: str, params: Mapping[str, Any]) -> None:
+    def notify(self, method: str, params: Mapping[str, Any], *, deadline: Optional[float] = None) -> None:
         """Send one bounded notification and accept the protocol's 202 response."""
 
         if not isinstance(method, str) or not method:
             raise ValueError("MCP notification method must be non-empty")
-        deadline = time.monotonic() + self.config.request_timeout_ms / 1000
+        deadline = min(deadline or float("inf"), time.monotonic() + self.config.request_timeout_ms / 1000)
         self._acquire_slot(deadline, None)
         launched = False
         try:
@@ -403,9 +470,10 @@ class McpStreamableHttpClient:
             if not launched:
                 self._pending_slots.release()
 
-    def close(self) -> None:
+    def close(self, *, terminate_session: bool = True) -> None:
         """Abort active sockets and best-effort DELETE the negotiated session."""
 
+        deadline = time.monotonic() + self.limits.shutdown_timeout_ms / 1000
         with self._lock:
             if self._closing:
                 return
@@ -417,8 +485,7 @@ class McpStreamableHttpClient:
 
         # Streamable HTTP permits (but does not require) session termination.
         # It is deliberately bounded and ignores unavailable/revoked credentials.
-        if session_id is not None:
-            deadline = time.monotonic() + self.limits.shutdown_timeout_ms / 1000
+        if terminate_session and session_id is not None:
             try:
                 operation = self._launch(
                     lambda active: self._exchange(
@@ -438,9 +505,10 @@ class McpStreamableHttpClient:
                 self._await(operation, deadline)
             except McpError:
                 pass
+        for active in operations:
+            active.done.wait(max(0, deadline - time.monotonic()))
         with self._lock:
             self._session_id = None
-            self._last_event_id = None
 
     def _post_request(
         self,
@@ -449,7 +517,11 @@ class McpStreamableHttpClient:
         request_id: int,
         method: str,
         deadline: float,
+        progress_token: str,
+        progress: Optional[Callable[[Mapping[str, Any]], None]],
     ) -> list[dict[str, Any]]:
+        operation.progress_token = progress_token
+        operation.progress = progress
         first = self._exchange(
             operation,
             verb="POST",
@@ -495,8 +567,12 @@ class McpStreamableHttpClient:
             messages.extend(resumed.messages)
             if resumed.complete:
                 return messages
-            if resumed.last_event_id is not None:
-                last_event_id = resumed.last_event_id
+            if resumed.last_event_id is None:
+                raise McpTransportError(
+                    "sse_response_interrupted", "MCP SSE resume cursor was reset; request was not replayed",
+                    ambiguous=method == "tools/call",
+                )
+            last_event_id = resumed.last_event_id
             retry_ms = resumed.retry_ms if resumed.retry_ms is not None else retry_ms
         raise McpTransportError(
             "sse_resumption_exhausted",
@@ -518,6 +594,8 @@ class McpStreamableHttpClient:
         last_event_id: Optional[str] = None,
         allow_closing: bool = False,
     ) -> _HttpRead:
+        operation.check(deadline)
+        # Credential resolution remains ahead of DNS when an adapter is absent.
         headers, redactions = self._request_headers(
             verb=verb,
             has_payload=payload is not None,
@@ -527,9 +605,10 @@ class McpStreamableHttpClient:
         connection: Optional[http.client.HTTPConnection] = None
         response: Optional[http.client.HTTPResponse] = None
         try:
-            timeout = _remaining_timeout(deadline)
-            connection = self._connection(timeout)
+            operation.check(deadline)
+            connection = self._connection(operation, deadline)
             operation.add_connection(connection)
+            operation.check(deadline)
             connection.request(verb, self._endpoint.target, body=payload, headers=headers)
             response = connection.getresponse()
             session_id = None
@@ -544,6 +623,7 @@ class McpStreamableHttpClient:
                 response_required=response_required,
                 phase=phase,
                 redactions=response_redactions,
+                last_event_id=last_event_id,
             )
         except McpError:
             raise
@@ -589,6 +669,7 @@ class McpStreamableHttpClient:
         response_required: bool,
         phase: str,
         redactions: tuple[str, ...],
+        last_event_id: Optional[str] = None,
     ) -> _HttpRead:
         status = response.status
         if status == 202:
@@ -634,6 +715,7 @@ class McpStreamableHttpClient:
                 expected_id=expected_id,
                 deadline=deadline,
                 redactions=redactions,
+                last_event_id=last_event_id,
             )
         _close_response(response)
         raise McpProtocolError(
@@ -650,91 +732,71 @@ class McpStreamableHttpClient:
         expected_id: Optional[int],
         deadline: float,
         redactions: tuple[str, ...],
+        last_event_id: Optional[str] = None,
     ) -> _HttpRead:
-        _validate_content_length(response, self.limits.max_frame_bytes)
-        result = _HttpRead(is_sse=True)
+        length = _validate_content_length(response, self.limits.max_frame_bytes)
+        result = _HttpRead(is_sse=True, last_event_id=last_event_id)
         data_lines: list[str] = []
         event_type = "message"
+        event_id = last_event_id
         event_bytes = 0
-        event_count = 0
+        total_bytes = 0
 
-        def dispatch() -> bool:
-            nonlocal data_lines, event_type, event_bytes, event_count
-            if not data_lines:
-                event_type = "message"
-                event_bytes = 0
-                return False
-            event_count += 1
-            if event_count > MAX_HTTP_EVENTS:
-                raise McpProtocolError(
-                    "sse_event_limit", "MCP SSE response exceeded the event limit", permanent=True
-                )
-            event_redactions = self._redactions((*redactions, result.last_event_id))
-            data = _redact_text("\n".join(data_lines), event_redactions)
+        def dispatch() -> None:
+            nonlocal data_lines, event_type, event_bytes
+            operation.events += 1
+            if operation.events > MAX_HTTP_EVENTS:
+                raise McpProtocolError("sse_event_limit", "MCP SSE operation exceeded the event limit", permanent=True)
+            # Commit IDs only at a complete event boundary. Empty id clears the
+            # cursor; absence on the next response preserves the incoming cursor.
+            result.last_event_id = event_id
+            if data_lines and event_type in {"", "message"}:
+                event_redactions = self._redactions((*redactions, event_id))
+                # Parse before redaction: credentials must never rewrite peer
+                # request IDs, methods, or the JSON-RPC version on the wire.
+                message = _decode_json_message("\n".join(data_lines).encode("utf-8"), event_redactions, sse=True)
+                if "method" in message:
+                    if "id" in message or message["method"] == "notifications/tools/list_changed":
+                        operation.controls += 1
+                        if operation.controls > MAX_HTTP_CONTROLS:
+                            raise McpProtocolError("control_message_limit", "MCP SSE operation exceeded the control limit", permanent=True)
+                    self._route_server_message(
+                        message, progress_token=operation.progress_token, progress=operation.progress,
+                        deadline=deadline,
+                    )
+                else:
+                    if not _matching_response_id(message, expected_id):
+                        raise McpProtocolError("unexpected_response", "MCP stream returned a foreign response", permanent=True)
+                    result.messages.append(message)
+                    result.complete = True
             data_lines = []
-            current_event_type = event_type
             event_type = "message"
             event_bytes = 0
-            if current_event_type not in {"", "message"}:
-                return False
-            try:
-                message = json.loads(data)
-            except (json.JSONDecodeError, RecursionError) as error:
-                raise McpProtocolError(
-                    "malformed_sse_event", "MCP SSE event contained malformed JSON", permanent=True
-                ) from error
-            try:
-                message = _redact_jsonrpc_message(message, event_redactions)
-            except RecursionError as error:
-                raise McpProtocolError(
-                    "invalid_sse_event", "MCP SSE event exceeded the nesting limit", permanent=True
-                ) from error
-            if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-                raise McpProtocolError(
-                    "invalid_sse_event", "MCP SSE event was not a JSON-RPC message", permanent=True
-                )
-            result.messages.append(message)
-            return expected_id is not None and _matching_response_id(message, expected_id)
 
-        total_bytes = 0
         while True:
-            _check_operation_deadline(operation, deadline)
+            operation.check(deadline)
             try:
                 line = response.readline(self.limits.max_frame_bytes + 1)
-            except (socket.timeout, TimeoutError) as error:
-                raise McpTimeout(
-                    "request_timeout",
-                    "MCP SSE response timed out; its external outcome was not retried",
-                    ambiguous=expected_id is not None,
-                ) from error
+            except http.client.IncompleteRead:
+                raise McpProtocolError("truncated_http_body", "MCP HTTP response framing was truncated", permanent=True) from None
             if not line:
-                if dispatch():
-                    result.complete = True
+                _check_body_length(length, total_bytes)
+                if event_bytes:
+                    raise McpProtocolError("truncated_sse_event", "MCP SSE event lacked a final blank line", permanent=True)
                 break
             total_bytes += len(line)
+            operation.consume(len(line), self.limits.max_frame_bytes)
             event_bytes += len(line)
-            if total_bytes > self.limits.max_frame_bytes:
-                raise McpProtocolError(
-                    "http_body_too_large", "MCP HTTP response exceeded the frame limit", permanent=True
-                )
-            if len(line) > self.limits.max_frame_bytes or event_bytes > self.limits.max_frame_bytes:
-                raise McpProtocolError(
-                    "sse_event_too_large", "MCP SSE event exceeded the frame limit", permanent=True
-                )
+            if event_bytes > self.limits.max_frame_bytes:
+                raise McpProtocolError("sse_event_too_large", "MCP SSE event exceeded the frame limit", permanent=True)
+            if not line.endswith(b"\n"):
+                raise McpProtocolError("truncated_sse_event", "MCP SSE event line was truncated", permanent=True)
             try:
-                text = line.decode("utf-8")
-            except UnicodeDecodeError as error:
-                raise McpProtocolError(
-                    "malformed_sse_event", "MCP SSE event was not UTF-8", permanent=True
-                ) from error
-            if text.endswith("\n"):
-                text = text[:-1]
-            if text.endswith("\r"):
-                text = text[:-1]
+                text = line.decode("utf-8").removesuffix("\n").removesuffix("\r")
+            except UnicodeDecodeError:
+                raise McpProtocolError("malformed_sse_event", "MCP SSE event was not UTF-8", permanent=True) from None
             if not text:
-                if dispatch():
-                    result.complete = True
-                    break
+                dispatch()
                 continue
             if text.startswith(":"):
                 continue
@@ -746,10 +808,9 @@ class McpStreamableHttpClient:
             elif field_name == "event":
                 event_type = field_value
             elif field_name == "id":
-                result.last_event_id = _validate_event_id(field_value)
-                self._remember_event_id(result.last_event_id)
+                event_id = _validate_event_id(field_value)
             elif field_name == "retry" and field_value.isascii() and field_value.isdecimal():
-                result.retry_ms = min(int(field_value), self.limits.backoff_max_ms)
+                result.retry_ms = self.limits.backoff_max_ms if len(field_value) > 10 else min(int(field_value), self.limits.backoff_max_ms)
         return result
 
     def _route_request_messages(
@@ -809,6 +870,7 @@ class McpStreamableHttpClient:
         *,
         progress_token: str,
         progress: Optional[Callable[[Mapping[str, Any]], None]],
+        deadline: Optional[float] = None,
     ) -> None:
         method = message.get("method")
         if not isinstance(method, str) or not method:
@@ -821,7 +883,7 @@ class McpStreamableHttpClient:
                 raise McpProtocolError(
                     "invalid_request", "MCP server request id was invalid", permanent=True
                 )
-            self._reply_method_not_found(request_id)
+            self._reply_method_not_found(request_id, deadline=deadline)
             return
         params = message.get("params", {})
         if method == "notifications/tools/list_changed":
@@ -844,65 +906,42 @@ class McpStreamableHttpClient:
             # Never retain untrusted remote log text (which may contain a token).
             self.logs.append(b"MCP HTTP log notification received")
 
-    def _reply_method_not_found(self, request_id: Any) -> None:
-        payload = _encode_message(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32601, "message": "Method not found"},
-            },
-            self.limits.max_frame_bytes,
-        )
-        deadline = time.monotonic() + min(0.5, self.limits.shutdown_timeout_ms / 1000)
+    def _control(self, payload: bytes, *, phase: str, deadline: Optional[float] = None) -> None:
+        # Control paths must not bypass the operation registry or create one
+        # thread per hostile event. No queue: saturation fails closed.
+        if not self._control_slots.acquire(blocking=False):
+            raise McpProtocolError("control_message_limit", "MCP control concurrency limit reached", permanent=True)
+        expires = min(deadline or float("inf"), time.monotonic() + min(0.5, self.limits.shutdown_timeout_ms / 1000))
         try:
             self._launch(
                 lambda active: self._exchange(
-                    active,
-                    verb="POST",
-                    payload=payload,
-                    expected_id=None,
-                    deadline=deadline,
-                    accept_session=False,
-                    response_required=False,
-                    phase="server_request_reply",
+                    active, verb="POST", payload=payload, expected_id=None,
+                    deadline=expires, accept_session=False, response_required=False, phase=phase,
                 ),
-                release_slot=False,
+                release_slot=False, release_control=True, deadline=expires,
             )
-        except McpError:
-            return
+        except BaseException:
+            self._control_slots.release()
+            raise
+
+    def _reply_method_not_found(self, request_id: Any, *, deadline: Optional[float] = None) -> None:
+        payload = _encode_message(
+            {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found"}},
+            self.limits.max_frame_bytes,
+        )
+        self._control(payload, phase="server_request_reply", deadline=deadline)
 
     def _send_cancellation(self, request_id: int, reason: str) -> None:
         payload = _encode_message(
-            {
-                "jsonrpc": "2.0",
-                "method": "notifications/cancelled",
-                "params": {"requestId": request_id, "reason": reason[:256]},
-            },
+            {"jsonrpc": "2.0", "method": "notifications/cancelled",
+             "params": {"requestId": request_id, "reason": reason[:256]}},
             self.limits.max_frame_bytes,
         )
-        deadline = time.monotonic() + min(0.5, self.limits.shutdown_timeout_ms / 1000)
-
-        def send() -> None:
-            try:
-                self._exchange(
-                    _HttpOperation(),
-                    verb="POST",
-                    payload=payload,
-                    expected_id=None,
-                    deadline=deadline,
-                    accept_session=False,
-                    response_required=False,
-                    phase="cancellation",
-                    allow_closing=True,
-                )
-            except McpError:
-                return
-
-        threading.Thread(
-            target=send,
-            name=f"mcp-{self.config.id}-http-cancel",
-            daemon=True,
-        ).start()
+        try:
+            self._control(payload, phase="cancellation")
+        except McpError:
+            # Best effort only; never promise delivery or rollback.
+            return
 
     def _await(
         self,
@@ -947,6 +986,8 @@ class McpStreamableHttpClient:
         task: Callable[[_HttpOperation], Any],
         *,
         release_slot: bool,
+        release_control: bool = False,
+        deadline: Optional[float] = None,
         allow_closing: bool = False,
     ) -> _HttpOperation:
         operation = _HttpOperation()
@@ -955,23 +996,44 @@ class McpStreamableHttpClient:
                 raise McpTransportError("server_stopped", "MCP server is stopped")
             self._operations.add(operation)
 
+        watchdog = None
+        if deadline is not None:
+            watchdog = threading.Timer(max(0, deadline - time.monotonic()), operation.abort)
+            watchdog.daemon = True
+
         def run() -> None:
             try:
                 operation.result = task(operation)
             except BaseException as error:
                 operation.error = error
             finally:
+                if watchdog is not None:
+                    watchdog.cancel()
+                operation.abort()
                 with self._lock:
                     self._operations.discard(operation)
                 operation.done.set()
                 if release_slot:
                     self._pending_slots.release()
+                if release_control:
+                    self._control_slots.release()
 
-        threading.Thread(
-            target=run,
-            name=f"mcp-{self.config.id}-http",
-            daemon=True,
-        ).start()
+        try:
+            if watchdog is not None:
+                watchdog.start()
+            threading.Thread(
+                target=run,
+                name=f"mcp-{self.config.id}-http",
+                daemon=True,
+            ).start()
+        except BaseException:
+            if watchdog is not None:
+                watchdog.cancel()
+            operation.abort()
+            with self._lock:
+                self._operations.discard(operation)
+            operation.done.set()
+            raise
         return operation
 
     def _acquire_slot(self, deadline: float, cancellation: Any) -> None:
@@ -1006,7 +1068,6 @@ class McpStreamableHttpClient:
                 raise self._fatal
             session_id = self._session_id
             protocol_version = self.protocol_version
-            remembered_event_id = self._last_event_id
         headers = {
             "Accept": "text/event-stream" if verb == "GET" else "application/json, text/event-stream",
             "User-Agent": f"{CLIENT_NAME}/{CLIENT_VERSION}",
@@ -1023,7 +1084,7 @@ class McpStreamableHttpClient:
         if self.config.auth is not None:
             try:
                 token = self._credential_provider.bearer_token(
-                    self.config.auth.credential, server_id=self.config.id
+                    self.config.auth.credential, server_id=self.config.id, resource_owner=self.resource_owner
                 )
             except Exception:
                 raise McpAuthenticationError(
@@ -1038,7 +1099,7 @@ class McpStreamableHttpClient:
                     permanent=True,
                 )
             headers["Authorization"] = f"Bearer {token}"
-        return headers, self._redactions((token, session_id, remembered_event_id, last_event_id))
+        return headers, self._redactions((token, session_id, last_event_id))
 
     def _consume_session_header(
         self, response: http.client.HTTPResponse, *, accept_session: bool
@@ -1071,24 +1132,23 @@ class McpStreamableHttpClient:
                 )
         return value
 
-    def _remember_event_id(self, event_id: Optional[str]) -> None:
-        if event_id is None:
-            return
-        with self._lock:
-            self._last_event_id = event_id
-
     def _redactions(self, values: tuple[Optional[str], ...]) -> tuple[str, ...]:
         return tuple(value for value in values if isinstance(value, str) and value)
 
-    def _connection(self, timeout: float) -> http.client.HTTPConnection:
-        if self._endpoint.scheme == "https":
-            return http.client.HTTPSConnection(
-                self._endpoint.host,
-                self._endpoint.port,
-                timeout=timeout,
-                context=ssl.create_default_context(),
-            )
-        return http.client.HTTPConnection(self._endpoint.host, self._endpoint.port, timeout=timeout)
+    def _connection(self, operation: _HttpOperation, deadline: float) -> http.client.HTTPConnection:
+        while not self._address_lock.acquire(timeout=min(0.05, _remaining_timeout(deadline))):
+            operation.check(deadline)
+        try:
+            operation.check(deadline)
+            if self._addresses is None:
+                self._addresses = resolve_addresses(self._endpoint.host, operation, deadline)
+            address = self._addresses[0]
+        finally:
+            self._address_lock.release()
+        return PinnedConnection(
+            self._endpoint.host, self._endpoint.port or (443 if self._endpoint.scheme == "https" else 80),
+            address=address, tls=self._endpoint.scheme == "https", operation=operation, deadline=deadline,
+        )
 
     def _wait_for_resumption(
         self, operation: _HttpOperation, deadline: float, retry_ms: Optional[int]
@@ -1232,18 +1292,23 @@ def _content_type(response: http.client.HTTPResponse) -> str:
     return value.split(";", 1)[0].strip().lower()
 
 
-def _validate_content_length(response: http.client.HTTPResponse, maximum: int) -> None:
+def _validate_content_length(response: http.client.HTTPResponse, maximum: int) -> Optional[int]:
     values = response.headers.get_all("Content-Length", [])
+    encodings = response.headers.get_all("Transfer-Encoding", [])
+    if encodings and (values or len(encodings) != 1 or encodings[0].lower() != "chunked"):
+        raise McpProtocolError("invalid_http_framing", "MCP HTTP response framing was ambiguous", permanent=True)
     if not values:
-        return
-    if len(values) != 1 or not values[0].isdigit():
-        raise McpProtocolError(
-            "invalid_content_length", "MCP HTTP response had an invalid content length", permanent=True
-        )
+        return None
+    if len(values) != 1 or not values[0].isascii() or not values[0].isdigit():
+        raise McpProtocolError("invalid_content_length", "MCP HTTP response had an invalid content length", permanent=True)
     if len(values[0]) > 10 or int(values[0]) > maximum:
-        raise McpProtocolError(
-            "http_body_too_large", "MCP HTTP response exceeded the frame limit", permanent=True
-        )
+        raise McpProtocolError("http_body_too_large", "MCP HTTP response exceeded the frame limit", permanent=True)
+    return int(values[0])
+
+
+def _check_body_length(expected: Optional[int], actual: int) -> None:
+    if expected is not None and expected != actual:
+        raise McpProtocolError("truncated_http_body", "MCP HTTP response framing was truncated", permanent=True)
 
 
 def _read_bounded_body(
@@ -1252,7 +1317,7 @@ def _read_bounded_body(
     deadline: float,
     maximum: int,
 ) -> bytes:
-    _validate_content_length(response, maximum)
+    length = _validate_content_length(response, maximum)
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -1261,9 +1326,13 @@ def _read_bounded_body(
             chunk = response.read(min(64 * 1024, maximum + 1 - total))
         except (socket.timeout, TimeoutError) as error:
             raise McpTimeout("request_timeout", "MCP HTTP request timed out") from error
+        except http.client.IncompleteRead:
+            raise McpProtocolError("truncated_http_body", "MCP HTTP response framing was truncated", permanent=True) from None
         if not chunk:
+            _check_body_length(length, total)
             break
         total += len(chunk)
+        operation.consume(len(chunk), maximum)
         if total > maximum:
             raise McpProtocolError(
                 "http_body_too_large", "MCP HTTP response exceeded the frame limit", permanent=True
@@ -1288,12 +1357,12 @@ def _close_response(response: http.client.HTTPResponse) -> None:
         pass
 
 
-def _decode_json_message(raw: bytes, redactions: tuple[str, ...]) -> dict[str, Any]:
+def _decode_json_message(raw: bytes, redactions: tuple[str, ...], *, sse: bool = False) -> dict[str, Any]:
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise McpProtocolError(
-            "malformed_http_body", "MCP HTTP response contained malformed JSON", permanent=True
+            "malformed_sse_event" if sse else "malformed_http_body", "MCP HTTP response contained malformed JSON", permanent=True
         ) from error
     try:
         value = _redact_jsonrpc_message(value, redactions)
@@ -1308,9 +1377,9 @@ def _decode_json_message(raw: bytes, redactions: tuple[str, ...]) -> dict[str, A
     return value
 
 
-def _matching_response_id(message: Mapping[str, Any], request_id: int) -> bool:
+def _matching_response_id(message: Mapping[str, Any], request_id: Optional[int]) -> bool:
     value = message.get("id")
-    return isinstance(value, int) and not isinstance(value, bool) and value == request_id
+    return "method" not in message and isinstance(value, int) and not isinstance(value, bool) and value == request_id
 
 
 def _validate_result_size(result: Any, maximum: int) -> None:

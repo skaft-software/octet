@@ -3,20 +3,20 @@
 // Verify that all public API re-exports are accessible and compile.
 #[allow(unused_imports)]
 use octet_ai::{
-    AiClient, AiError, AssistantMessage, AssistantPart, AudioFormat, AudioMedia,
-    AudioOutputOptions, AudioPayload, AudioVoice, Auth, AuthConfig, AuthError, Capabilities,
-    CatalogConfig, CompatibilityMode, ConfigError, Cost, CredentialResolver,
-    CredentialResolverRegistry, CredentialScheme, DecodeError, Diagnostic, Endpoint,
-    EndpointConfig, EndpointId, HttpError, ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat,
-    Media, Message, Mime, Modality, ModalitySet, Model, ModelCatalog, ModelConfig, ModelId,
-    ModelLimits, ModelSpec, OutputFormat, OutputModalities, Pricing, PricingError, PricingTier,
-    Protocol, ProviderError, ProviderMediaRef, ReasoningCapability, ReasoningConfig,
-    ReasoningControl, ReasoningEffort, ReasoningEffortBudgets, ReasoningPart, ReasoningState,
-    ReasoningStateKind, Request, RequestBodyEncoding, RequestRuntime, ResolvedCredential, Response,
-    ResponseStream, ResponsesRuntimeProfile, Secret, StopReason, StreamEvent, StreamProtocolError,
-    TokenRate, ToolCall, ToolCallId, ToolChoice, ToolDef, ToolResult, ToolResultPart,
-    TransportError, TransportPhase, UnsupportedError, Usage, UserMessage, UserPart,
-    ValidationError,
+    reduce_assistant_message_frames, AiClient, AiError, AssistantMessage, AssistantMessageFrame,
+    AssistantMessageFrameEncoder, AssistantPart, AudioFormat, AudioMedia, AudioOutputOptions,
+    AudioPayload, AudioVoice, Auth, AuthConfig, AuthError, Capabilities, CatalogConfig,
+    CompatibilityMode, ConfigError, Cost, CredentialResolver, CredentialResolverRegistry,
+    CredentialScheme, DecodeError, Diagnostic, Endpoint, EndpointConfig, EndpointId, HttpError,
+    ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message, Mime, Modality,
+    ModalitySet, Model, ModelCatalog, ModelConfig, ModelId, ModelLimits, ModelSpec, OutputFormat,
+    OutputModalities, Pricing, PricingError, PricingTier, Protocol, ProviderError, ProviderMediaRef,
+    ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort, ReasoningEffortBudgets,
+    ReasoningPart, ReasoningState, ReasoningStateKind, Request, RequestBodyEncoding, RequestRuntime,
+    ResolvedCredential, Response, ResponseStream, ResponsesRuntimeProfile, Secret, StopReason,
+    StreamEvent, StreamProtocolError, TokenRate, ToolCall, ToolCallId, ToolChoice, ToolDef,
+    ToolResult, ToolResultPart, TransportError, TransportPhase, UnsupportedError, Usage, UserMessage,
+    UserPart, ValidationError,
 };
 
 // A compile-time proof that every public re-export above is nameable. Referencing

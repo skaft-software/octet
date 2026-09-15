@@ -4260,6 +4260,85 @@ mod tests {
     }
 
     #[test]
+    fn usage_totals_fold_tool_turns_and_summaries_and_preserve_uncertainty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        session.append(user("prompt")).unwrap();
+        let assistant = session.append(assistant("answer")).unwrap();
+        session
+            .record_assistant_usage(
+                assistant,
+                EndpointId("provider".into()),
+                ModelId("m".into()),
+                Usage {
+                    input_tokens: 100,
+                    cache_read_tokens: 50,
+                    cache_write_tokens: 30,
+                    cache_write_1h_tokens: 25,
+                    output_tokens: 20,
+                    reasoning_tokens: 5,
+                    total_tokens: 200,
+                },
+                None,
+            )
+            .unwrap();
+        session
+            .record_compaction_usage(
+                EndpointId("provider".into()),
+                ModelId("m".into()),
+                Usage {
+                    input_tokens: 75,
+                    output_tokens: 10,
+                    total_tokens: 85,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        session
+            .record_delegated_agent_usage(DelegatedUsage {
+                agent_id: "child".into(),
+                turn_count: 1,
+                tool_call_count: 2,
+                endpoint: EndpointId("provider".into()),
+                model: ModelId("m".into()),
+                usage: Usage {
+                    total_tokens: 40,
+                    ..Usage::default()
+                },
+                cost: None,
+            })
+            .unwrap();
+
+        let totals = crate::telemetry::schema::UsageTotals::from_records(session.usage_records());
+        assert_eq!(totals.assistant_records, 1);
+        assert_eq!(totals.summary_records, 1);
+        assert_eq!(totals.delegated_records, 1);
+        assert_eq!(totals.total_tokens, 200 + 85 + 40);
+        assert_eq!(totals.own_context_total_tokens, 200 + 85);
+        assert_eq!(totals.cache_write_tokens, 30);
+        assert_eq!(totals.cache_write_1h_tokens, 25);
+        assert_eq!(totals.cache_hit_rate(), Some(50.0 / 255.0));
+
+        // Known usage is only a subtotal: durable uncertainty is preserved and
+        // never rewritten as fabricated zero usage.
+        assert!(!session.has_uncertain_usage());
+        record_unknown_attempt(&mut session).unwrap();
+        assert!(session.has_uncertain_usage());
+        assert_eq!(
+            crate::telemetry::schema::UsageTotals::from_records(session.usage_records()),
+            totals,
+            "recording uncertainty must not fabricate or alter known totals"
+        );
+        let durable = session.usage_records().to_vec();
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert!(reopened.has_uncertain_usage());
+        assert_eq!(reopened.usage_records(), durable);
+    }
+
+    #[test]
     fn delegated_usage_is_durable_and_contributes_exact_session_cost() {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_path(&dir);

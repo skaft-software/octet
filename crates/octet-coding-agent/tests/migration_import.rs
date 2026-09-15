@@ -4,6 +4,21 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn pi_adapter_source_package_manifest_validates_without_model_tools() {
+    let manifest = octet_agent::ExtensionManifest::parse(include_str!(
+        "../../../extensions/octet-import-pi/extension.toml"
+    ))
+    .unwrap();
+    assert_eq!(manifest.name, "octet-import-pi");
+    assert_eq!(manifest.api_version, "0.3");
+    assert_eq!(manifest.entrypoint.command, "extension.sh");
+    assert!(manifest.entrypoint.args.is_empty());
+    assert!(manifest.contributes.tools.is_empty());
+    assert!(!manifest.capabilities.process);
+    assert!(!manifest.capabilities.network);
+}
+
+#[test]
 fn dry_run_import_maps_canonical_model_without_destination_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("pi");

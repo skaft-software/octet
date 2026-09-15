@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""API 0.3 process entry point for the source-only computer-use boundary.
+"""API 0.3 entry point with optional trusted-local lifecycle composition.
 
-This entry point deliberately has no desktop, browser, screenshot, filesystem,
-process, or network implementation. A runtime owner may import
-``ComputerUseExtension`` and inject a host policy adapter plus a backend
-callback. When run as a standalone extension, every action is denied closed.
+Standalone startup has no target, scoped evaluator or backend factory and is
+inert. A trusted embedding can supply MacOSRuntime; this is not a negotiated
+API 0.3 host service and does not qualify live native input or model code.
 """
 
 from __future__ import annotations
@@ -20,9 +19,12 @@ from octet_computer_use.policy import (
     Decision,
     PolicyDenied,
     PolicyGate,
+    PolicyError,
     TargetIdentity,
     make_action_request,
 )
+from octet_computer_use.lifecycle import LifecycleError
+from octet_computer_use.runtime import MacOSRuntime
 from octet_computer_use.protocol import (
     API_VERSION,
     ProtocolFailure,
@@ -98,8 +100,9 @@ class ActiveCall:
 class ComputerUseExtension:
     """Canonical API 0.3 server with policy/backend dependencies injected.
 
-    The default process has neither dependency and therefore cannot execute an
-    action. ``dispatcher`` must not be used to smuggle provider credentials or
+    The default process has no authority dependency and cannot execute an
+    action. A supplied runtime owns its own gate and lifecycle. ``dispatcher``
+    must not be used to smuggle provider credentials or
     transport authority; it is an owner-controlled local backend callback.
     """
 
@@ -110,12 +113,14 @@ class ComputerUseExtension:
         *,
         policy_gate: Optional[PolicyGate] = None,
         dispatcher: Optional[Dispatcher] = None,
+        runtime: Optional[MacOSRuntime] = None,
     ) -> None:
         self.stdin = stdin
         self.stdout = stdout
         self.state = ProtocolState()
         self.policy_gate = policy_gate or PolicyGate()
         self.dispatcher = dispatcher
+        self.runtime = runtime
         self.stop_event = threading.Event()
         self.output_lock = threading.Lock()
         self.active_lock = threading.Lock()
@@ -126,11 +131,17 @@ class ComputerUseExtension:
         print(f"octet-computer-use: {message}", file=sys.stderr, flush=True)
 
     def send(self, value: Any) -> None:
-        frame = canonical_bytes(value)
-        if len(frame) > self.state.max_frame_bytes:
-            raise failure("resource_exhausted", "outbound frame exceeds max_frame_bytes")
-        with self.output_lock:
-            write_frame(self.stdout, value, self.state.max_frame_bytes)
+        try:
+            frame = canonical_bytes(value)
+            if len(frame) > self.state.max_frame_bytes:
+                raise failure("resource_exhausted", "outbound frame exceeds max_frame_bytes")
+            with self.output_lock:
+                write_frame(self.stdout, value, self.state.max_frame_bytes)
+        except (OSError, ProtocolFailure):
+            # Result delivery failure after input is an unknown-effect boundary.
+            self.stop_event.set()
+            self._cancel_all("response_unavailable")
+            raise
 
     def send_error(self, request_id: Any, error: ProtocolFailure) -> None:
         try:
@@ -168,7 +179,13 @@ class ComputerUseExtension:
         }
         if required - set(value):
             raise failure("invalid_params", "computer tool context is missing host identity")
-        target = TargetIdentity.from_wire(value["target"])
+        for field in ("extension_generation", "frame_generation"):
+            if type(value[field]) is not int or not 1 <= value[field] <= 9_007_199_254_740_991:
+                raise failure("invalid_params", "host generations must be positive portable integers")
+        try:
+            target = TargetIdentity.from_wire(value["target"])
+        except PolicyError as error:
+            raise failure("invalid_params", str(error)) from error
         trusted = value.get("trusted_data_classes", [])
         if not isinstance(trusted, list) or len(trusted) > 32:
             raise failure("invalid_params", "trusted_data_classes must be a bounded array")
@@ -230,11 +247,29 @@ class ComputerUseExtension:
             raise failure("invalid_params", "computer_use arguments have an invalid shape")
         operation = arguments["operation"]
         action_arguments = arguments["arguments"]
-        if operation not in OPERATIONS:
+        if not isinstance(operation, str) or operation not in OPERATIONS:
             raise failure("invalid_params", "computer_use.operation is unsupported")
         if not isinstance(action_arguments, dict):
             raise failure("invalid_params", "computer_use.arguments must be an object")
         context = self._context(params["context"])
+        if self.runtime is not None:
+            try:
+                result = self.runtime.call(operation, action_arguments, context,
+                                           cancel_event or threading.Event())
+            except (LifecycleError, PolicyDenied, PolicyError) as error:
+                return self._denied(operation, str(error))
+            response = {
+                "content": [{"type": "text", "text": "Computer-use " + result["status"] + "."}],
+                "is_error": result["status"] != "completed",
+                "metadata": {"status": result["status"], "operation": operation},
+                "structured_content": result,
+            }
+            try:
+                validate_tool_call_result(response)
+            except ProtocolFailure:
+                self.runtime.stop("response_unavailable")
+                raise
+            return response
         if cancel_event is not None and cancel_event.is_set():
             return self._cancelled(operation, "request cancelled before policy evaluation")
         try:
@@ -267,7 +302,7 @@ class ComputerUseExtension:
             # Consume the one-use local guard immediately before dispatch. The
             # backend still receives the cancellation event and must stop at
             # its next safe boundary.
-            self.policy_gate.authorize(action, decision)
+            self.policy_gate.authorize(action, decision, parent_request_id=context["parent_request_id"])
             result = self.dispatcher(action, action_arguments, cancel_event or threading.Event())
         except PolicyDenied as error:
             return self._denied(operation, str(error))
@@ -286,7 +321,10 @@ class ComputerUseExtension:
                 current = self.active.pop(request_id, None)
             if current is None:
                 return
-            self.send(success_response(request_id, result))
+            if call.cancelled.is_set():
+                self.send_error(request_id, failure("request_cancelled"))
+            else:
+                self.send(success_response(request_id, result))
         except ProtocolFailure as error:
             with self.active_lock:
                 current = self.active.pop(request_id, None)
@@ -321,6 +359,7 @@ class ComputerUseExtension:
             name=f"octet-computer-use-{request_id}",
             daemon=True,
         )
+        self.workers = [old for old in self.workers if old.is_alive()]
         self.workers.append(worker)
         try:
             worker.start()
@@ -337,12 +376,19 @@ class ComputerUseExtension:
             if call is not None:
                 call.reason = params.get("reason") or "request cancelled"
                 call.cancelled.set()
+        if call is not None:
+            self.policy_gate.revoke()
+            if self.runtime is not None:
+                self.runtime.stop("request_cancelled")
 
     def _cancel_all(self, reason: str) -> None:
+        self.policy_gate.revoke()
         with self.active_lock:
             for call in self.active.values():
                 call.reason = reason
                 call.cancelled.set()
+        if self.runtime is not None:
+            self.runtime.stop(reason)
 
     def _shutdown(self, params: Any, request_id: Any) -> None:
         self.state.begin_shutdown()

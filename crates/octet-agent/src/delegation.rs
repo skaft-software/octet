@@ -4994,6 +4994,7 @@ fn target_message_schema() -> Value {
 
 fn tool_def(name: &str, description: &str, input_schema: Value) -> ToolDef {
     ToolDef {
+        constrained_sampling: None,
         name: name.into(),
         description: description.into(),
         parameters: input_schema,

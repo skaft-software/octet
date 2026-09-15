@@ -94,7 +94,9 @@ class ConformanceHarnessTests(unittest.TestCase):
         self.assertEqual(78, len(examples))
         for layout in ("monorepo", "wrong-root", "missing-entry"):
             with self.subTest(layout=layout), tempfile.TemporaryDirectory() as temporary:
-                checkout = Path(temporary) / "source"
+                # Match the full gate's canonical source-root boundary, including
+                # macOS /var -> /private/var aliases; retain exact path assertions.
+                checkout = Path(temporary).resolve() / "source"
                 relative = (
                     "examples/extensions" if layout == "wrong-root"
                     else "packages/coding-agent/examples/extensions"
