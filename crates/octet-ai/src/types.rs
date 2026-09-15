@@ -206,6 +206,51 @@ impl ResponsesRuntimeProfile {
     pub const fn omits_max_output_tokens(self) -> bool {
         matches!(self, Self::Codex)
     }
+
+    /// Whether this profile declares the Responses `service_tier` request
+    /// field.
+    ///
+    /// The tier changes provider routing and billing, so the codec emits it
+    /// only for a profile that declares the field and fails closed for every
+    /// other route rather than silently dropping a caller's control. Only the
+    /// Codex subscription profile declares it today; widening this is an
+    /// endpoint declaration, never a provider-name branch.
+    pub const fn accepts_service_tier(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+}
+
+/// OpenAI Responses service tier requested for a single request.
+///
+/// This mirrors the Responses `service_tier` request parameter. Values are
+/// typed rather than free-form so an unknown tier fails at the boundary instead
+/// of reaching the wire; the endpoint's declared
+/// [`ResponsesRuntimeProfile::accepts_service_tier`] decides whether the codec
+/// may send it at all.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    /// Let the provider pick the cheapest capacity it can serve.
+    Auto,
+    /// The provider's standard service tier.
+    Default,
+    /// Discounted flex processing on slower, interruptible capacity.
+    Flex,
+    /// Premium priority processing.
+    Priority,
+}
+
+impl ServiceTier {
+    /// Exact Responses wire value for this tier.
+    pub const fn wire_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Priority => "priority",
+        }
+    }
 }
 
 /// Content encoding supported by an endpoint's request runtime.

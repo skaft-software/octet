@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OpenFlags};
 
 const CATALOG_DIRECTORY: &str = ".catalog";
 const CATALOG_FILE: &str = "sessions-v1.sqlite3";
-const CATALOG_SCHEMA_VERSION: i64 = 3;
+const CATALOG_SCHEMA_VERSION: i64 = 4;
 const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
 const STATUS_SUMMARY: i64 = 0;
 const STATUS_UNREADABLE: i64 = 1;
@@ -47,6 +47,66 @@ pub(crate) struct CatalogUpdate {
     pub(crate) fingerprint: CatalogFingerprint,
     pub(crate) summary: CachedTranscriptSummary,
 }
+
+/// Which conversation role produced an indexed entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IndexedEntryKind {
+    User,
+    Assistant,
+}
+
+impl IndexedEntryKind {
+    fn as_status(self) -> i64 {
+        match self {
+            Self::User => ENTRY_KIND_USER,
+            Self::Assistant => ENTRY_KIND_ASSISTANT,
+        }
+    }
+
+    fn from_status(status: i64) -> Option<Self> {
+        match status {
+            ENTRY_KIND_USER => Some(Self::User),
+            ENTRY_KIND_ASSISTANT => Some(Self::Assistant),
+            _ => None,
+        }
+    }
+}
+
+/// One bounded, user-visible transcript entry projection. Only submitted user
+/// text and assistant-visible text are retained; reasoning, tool arguments,
+/// media and provider metadata are never indexed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexedEntry {
+    pub(crate) entry_id: String,
+    pub(crate) kind: IndexedEntryKind,
+    pub(crate) text: String,
+}
+
+/// One incremental refresh of a single session's entry projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexedEntryUpdate {
+    pub(crate) session_id: String,
+    pub(crate) fingerprint: CatalogFingerprint,
+    pub(crate) entries: Vec<IndexedEntry>,
+}
+
+/// One entry-level search hit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexedEntryHit {
+    pub(crate) session_id: String,
+    pub(crate) entry_id: String,
+    pub(crate) kind: IndexedEntryKind,
+    /// Declaration order of the entry within its session.
+    pub(crate) ordinal: usize,
+    pub(crate) text: String,
+}
+/// Which conversation role produced an indexed entry.
+const ENTRY_KIND_USER: i64 = 0;
+const ENTRY_KIND_ASSISTANT: i64 = 1;
+/// Hard bound for indexed searchable text in one entry.
+pub(crate) const MAX_INDEXED_ENTRY_CHARS: usize = 512;
+/// Hard bound for indexed entries per session.
+pub(crate) const MAX_INDEXED_ENTRIES_PER_SESSION: usize = 4_096;
 
 pub(crate) struct SessionCatalog {
     connection: Connection,
@@ -120,8 +180,7 @@ impl SessionCatalog {
                      configured_model TEXT,
                      configured_reasoning TEXT,
                      message_count INTEGER NOT NULL CHECK (message_count >= 0)
-                 ) WITHOUT ROWID;
-                 PRAGMA user_version = 3;",
+                 ) WITHOUT ROWID;",
             )?;
         } else {
             connection.execute_batch(
@@ -137,6 +196,31 @@ impl SessionCatalog {
                  ) WITHOUT ROWID;",
             )?;
         }
+
+        // Additive entry-level search projection (schema 4). It accelerates
+        // bounded incremental entry search and is rebuilt from JSONL whenever a
+        // session's fingerprint changes; it is still disposable.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS indexed_entries (
+                 session_id TEXT NOT NULL,
+                 entry_id TEXT NOT NULL,
+                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                 kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+                 text TEXT NOT NULL,
+                 PRIMARY KEY (session_id, entry_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS indexed_entry_sessions (
+                 session_id TEXT PRIMARY KEY NOT NULL,
+                 file_size INTEGER NOT NULL CHECK (file_size >= 0),
+                 modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS catalog_meta (
+                 key TEXT PRIMARY KEY NOT NULL,
+                 value INTEGER NOT NULL
+             ) WITHOUT ROWID;
+             INSERT OR IGNORE INTO catalog_meta (key, value) VALUES ('entry_revision', 1);
+             PRAGMA user_version = 4;",
+        )?;
 
         Ok(Self { connection })
     }
@@ -275,6 +359,151 @@ impl SessionCatalog {
         Ok(())
     }
 
+    /// Fingerprint recorded for each session's current entry projection. A
+    /// session is re-indexed only when its candidate fingerprint differs.
+    pub(crate) fn entry_fingerprints(&self) -> anyhow::Result<HashMap<String, CatalogFingerprint>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT session_id, file_size, modified_ns FROM indexed_entry_sessions")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut fingerprints = HashMap::new();
+        for row in rows {
+            let (session_id, file_size, modified_ns) = row?;
+            let Ok(file_size) = u64::try_from(file_size) else {
+                continue;
+            };
+            fingerprints.insert(
+                session_id,
+                CatalogFingerprint {
+                    file_size,
+                    modified_ns,
+                },
+            );
+        }
+        Ok(fingerprints)
+    }
+
+    /// Apply one bounded incremental entry-index refresh.
+    ///
+    /// Replaces the entries for every updated session, drops the sessions that
+    /// no longer exist, and advances the change revision only when something
+    /// actually changed. Returns whether the revision advanced.
+    pub(crate) fn apply_entries(
+        &mut self,
+        updates: &[IndexedEntryUpdate],
+        stale_ids: &HashSet<String>,
+    ) -> anyhow::Result<bool> {
+        if updates.is_empty() && stale_ids.is_empty() {
+            return Ok(false);
+        }
+        let transaction = self.connection.transaction()?;
+        {
+            let mut delete_entries =
+                transaction.prepare("DELETE FROM indexed_entries WHERE session_id = ?1")?;
+            let mut delete_session =
+                transaction.prepare("DELETE FROM indexed_entry_sessions WHERE session_id = ?1")?;
+            let mut insert_entry = transaction.prepare(
+                "INSERT INTO indexed_entries (session_id, entry_id, ordinal, kind, text) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            let mut insert_session = transaction.prepare(
+                "INSERT INTO indexed_entry_sessions (session_id, file_size, modified_ns) VALUES (?1, ?2, ?3)",
+            )?;
+            for update in updates {
+                delete_entries.execute([&update.session_id])?;
+                delete_session.execute([&update.session_id])?;
+                insert_session.execute(params![
+                    update.session_id,
+                    i64::try_from(update.fingerprint.file_size).map_err(|_| {
+                        anyhow::anyhow!("session size does not fit SQLite INTEGER")
+                    })?,
+                    update.fingerprint.modified_ns,
+                ])?;
+                for (ordinal, entry) in update.entries.iter().enumerate() {
+                    insert_entry.execute(params![
+                        update.session_id,
+                        entry.entry_id,
+                        i64::try_from(ordinal)
+                            .map_err(|_| anyhow::anyhow!("entry ordinal does not fit INTEGER"))?,
+                        entry.kind.as_status(),
+                        entry.text,
+                    ])?;
+                }
+            }
+            for id in stale_ids {
+                delete_entries.execute([id])?;
+                delete_session.execute([id])?;
+            }
+        }
+        // Any real change advances the revision so watchers observe it exactly
+        // once, even when a session shrank to zero indexed entries.
+        transaction.execute(
+            "UPDATE catalog_meta SET value = value + 1 WHERE key = 'entry_revision'",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// The current entry-index revision. A watcher that stored a previous value
+    /// knows the index changed when the revision advances.
+    pub(crate) fn entry_revision(&self) -> anyhow::Result<i64> {
+        let revision = self.connection.query_row(
+            "SELECT value FROM catalog_meta WHERE key = 'entry_revision'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(revision)
+    }
+
+    /// Bounded substring search over the indexed entry projection, ordered by
+    /// `(session_id, ordinal)` so results are deterministic.
+    pub(crate) fn search_entries(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<IndexedEntryHit>> {
+        let pattern = format!("%{}%", escape_like(query));
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = self.connection.prepare(
+            "SELECT session_id, entry_id, ordinal, kind, text FROM indexed_entries
+             WHERE text LIKE ?1 ESCAPE '\\'
+             ORDER BY session_id, ordinal LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![pattern, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (session_id, entry_id, ordinal, kind, text) = row?;
+            let Some(kind) = IndexedEntryKind::from_status(kind) else {
+                continue;
+            };
+            let Ok(ordinal) = usize::try_from(ordinal) else {
+                continue;
+            };
+            hits.push(IndexedEntryHit {
+                session_id,
+                entry_id,
+                kind,
+                ordinal,
+                text,
+            });
+        }
+        Ok(hits)
+    }
+
     pub(crate) fn exists(workspace_store: &Path) -> bool {
         Self::path(workspace_store)
             .symlink_metadata()
@@ -284,6 +513,18 @@ impl SessionCatalog {
     pub(crate) fn path(workspace_store: &Path) -> std::path::PathBuf {
         workspace_store.join(CATALOG_DIRECTORY).join(CATALOG_FILE)
     }
+}
+
+/// Escape LIKE metacharacters so a user query is matched literally.
+fn escape_like(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len());
+    for ch in query.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn catalog_error_is_rebuildable(error: &anyhow::Error) -> bool {

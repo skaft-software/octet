@@ -9389,5 +9389,263 @@ async fn opening_outage_deadlines_preserve_unknown_usage_in_main_local_and_gate(
     }
 }
 
+// ── Row 3.5: typed provider/turn/tool/compaction/delegation spans ──────────
+
+fn recorded_span_names(
+    spans: &[octet_agent::telemetry::spans::RecordedTelemetrySpan],
+) -> Vec<&str> {
+    spans.iter().map(|span| span.name.as_str()).collect()
+}
+
+fn span_index(
+    spans: &[octet_agent::telemetry::spans::RecordedTelemetrySpan],
+    name: &str,
+) -> usize {
+    spans
+        .iter()
+        .position(|span| span.name == name)
+        .unwrap_or_else(|| panic!("span {name} missing from {:?}", recorded_span_names(spans)))
+}
+
+#[tokio::test]
+async fn typed_spans_nest_run_turn_provider_and_tool_boundaries() {
+    use octet_agent::telemetry::spans::{AttributeValue, InMemoryTelemetryContext, SpanStatus};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[(
+                    "call_span",
+                    "read",
+                    serde_json::json!({"path": "probe.txt"}),
+                )]),
+                text_turn("read it"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    std::fs::write(workspace.join("probe.txt"), b"probe contents").unwrap();
+    let session_path = session_dir.path().join("span-boundaries.jsonl");
+    let mut agent = build_agent(&server.uri(), &workspace, &session_path, Some(4));
+    let fixture = InMemoryTelemetryContext::default();
+    agent.set_telemetry_context(fixture.context());
+
+    let mut run = agent.prompt("read the probe").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+
+    let spans = fixture.get_spans();
+    assert_eq!(
+        recorded_span_names(&spans),
+        vec![
+            "octet.agent.run",
+            "octet.agent.turn",
+            "octet.ai.request",
+            "octet.ai.stream",
+            "octet.agent.tool",
+            "octet.agent.turn",
+            "octet.ai.request",
+            "octet.ai.stream",
+        ],
+        "one run, one turn per provider turn, and a nested provider stream and tool"
+    );
+    assert_eq!(spans[0].parent_id, None, "the run span is the root");
+    for index in [1usize, 5] {
+        assert_eq!(spans[index].parent_id, Some(spans[0].id), "turns nest under the run");
+    }
+    for index in [2usize, 6] {
+        let turn = if index == 2 { 1 } else { 5 };
+        assert_eq!(spans[index].parent_id, Some(spans[turn].id));
+    }
+    assert_eq!(spans[3].parent_id, Some(spans[2].id), "the stream nests under its request");
+    assert_eq!(spans[7].parent_id, Some(spans[6].id));
+    assert_eq!(spans[4].parent_id, Some(spans[1].id), "the tool nests under its turn");
+
+    assert!(
+        spans.iter().all(|span| span.settled),
+        "every boundary settles when the run finishes: {spans:#?}"
+    );
+    assert!(
+        spans.iter().all(|span| span.status == SpanStatus::Ok),
+        "a tool-continuation turn is a completed turn, not a dropped guard: {spans:#?}"
+    );
+    assert_eq!(
+        spans[4].attributes.get("name"),
+        Some(&AttributeValue::String("read".to_string())),
+        "the tool span carries the registered name and never arguments"
+    );
+    let request = &spans[2].attributes;
+    assert_eq!(request.get("input_tokens"), Some(&AttributeValue::Number(5.0)));
+    assert_eq!(request.get("output_tokens"), Some(&AttributeValue::Number(3.0)));
+    assert_eq!(
+        request.get("has_uncertain_usage"),
+        Some(&AttributeValue::Boolean(false)),
+        "reported usage is recorded with its uncertainty flag"
+    );
+
+    // Settlement order follows the nested boundaries: the stream closes before
+    // its request, the tool before its turn, and the run last of all.
+    assert!(spans[3].end_sequence < spans[2].end_sequence);
+    assert!(spans[4].end_sequence < spans[1].end_sequence);
+    assert!(spans[1].end_sequence < spans[5].end_sequence);
+    assert_eq!(
+        spans[0].end_sequence,
+        Some(spans.len() as u64),
+        "the run span settles last"
+    );
+}
+
+/// The same scripted failure twice: the inert context must not lose accounting,
+/// and the recording context must label the failed boundaries as errors while
+/// leaving the provider attempt that actually completed marked ok.
+#[tokio::test]
+async fn typed_spans_label_failed_runs_without_changing_accounting() {
+    use octet_agent::telemetry::spans::{InMemoryTelemetryContext, SpanStatus};
+
+    let mut observed: Vec<(String, usize, bool, usize)> = Vec::new();
+    for record in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(Script {
+                bodies: vec![empty_turn()],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let workspace = workspace_dir.path().canonicalize().unwrap();
+        let session_path = session_dir.path().join("span-failure.jsonl");
+        let mut agent = build_agent(&server.uri(), &workspace, &session_path, Some(4));
+        let fixture = InMemoryTelemetryContext::default();
+        if record {
+            agent.set_telemetry_context(fixture.context());
+        }
+
+        let mut run = agent.prompt("answer nothing").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        let reason = format!("{:?}", assert_single_run_finished(&events));
+        assert!(reason.contains("no user-visible content"), "got {reason}");
+        observed.push((
+            reason,
+            agent.session().entries().len(),
+            agent.session().has_uncertain_usage(),
+            agent.session().usage_records().len(),
+        ));
+
+        if record {
+            let spans = fixture.get_spans();
+            assert_eq!(
+                recorded_span_names(&spans),
+                vec![
+                    "octet.agent.run",
+                    "octet.agent.turn",
+                    "octet.ai.request",
+                    "octet.ai.stream",
+                ]
+            );
+            assert_eq!(spans[0].status, SpanStatus::Error, "a failed run is an error span");
+            assert_eq!(spans[1].status, SpanStatus::Error, "a failed turn is an error span");
+            assert_eq!(
+                spans[2].status,
+                SpanStatus::Ok,
+                "the provider attempt itself completed"
+            );
+            assert_eq!(spans[3].status, SpanStatus::Ok);
+            assert!(spans.iter().all(|span| span.settled));
+        }
+    }
+    assert_eq!(
+        observed[0], observed[1],
+        "an installed observer must not change the durable outcome or accounting"
+    );
+}
+
+struct CompactionThenAnswer;
+
+impl Respond for CompactionThenAnswer {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let tools_empty = body
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty);
+        let body = if tools_empty {
+            text_turn("compacted summary")
+        } else {
+            text_turn("answer after compaction")
+        };
+        ResponseTemplate::new(200)
+            .set_body_string(body)
+            .insert_header("content-type", "text/event-stream")
+    }
+}
+
+#[tokio::test]
+async fn typed_spans_cover_compaction_and_summary_boundaries() {
+    use octet_agent::telemetry::spans::{InMemoryTelemetryContext, SpanStatus};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(CompactionThenAnswer)
+        .mount(&server)
+        .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session = session_with_authoritative_pressure(
+        &sessions.path().join("span-compaction.jsonl"),
+        180_000,
+    );
+    let mut agent = build_agent_from_session(&server.uri(), workspace.path(), session, Some(4));
+    agent.set_compaction_token_policy(true, 0.85, 10_000).unwrap();
+    let fixture = InMemoryTelemetryContext::default();
+    agent.set_telemetry_context(fixture.context());
+
+    let mut run = agent.prompt("new work").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+
+    let spans = fixture.get_spans();
+    let compaction = span_index(&spans, "octet.agent.compaction");
+    let summary = span_index(&spans, "octet.agent.summary");
+    assert!(
+        compaction < summary,
+        "the summary nests inside the compaction: {:?}",
+        recorded_span_names(&spans)
+    );
+    assert_eq!(spans[summary].parent_id, Some(spans[compaction].id));
+    let summary_request = (summary + 1..spans.len())
+        .find(|index| spans[*index].name == "octet.ai.request")
+        .expect("the summary issues one provider request");
+    assert_eq!(
+        spans[summary_request].parent_id,
+        Some(spans[summary].id),
+        "the summary request nests under the summary span"
+    );
+    assert_eq!(spans[compaction].parent_id, Some(spans[1].id), "compaction nests under the turn");
+    assert!(
+        spans.iter().all(|span| span.settled && span.status == SpanStatus::Ok),
+        "a completed compaction settles every boundary: {spans:#?}"
+    );
+}
 #[path = "support/extension_hooks.rs"]
 mod extension_hooks;

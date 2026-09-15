@@ -1,7 +1,9 @@
 import {
   Archive,
   ArchiveRestore,
+  ArrowLeftRight,
   ChevronDown,
+  Columns2,
   Download,
   Folder,
   GitBranch,
@@ -76,6 +78,18 @@ import {
 } from "./components/ComposerCommands/goal";
 import { applyStoredTypePreferences } from "./theme";
 import {
+  DEFAULT_DOCK_LAYOUT,
+  type DockLayout,
+  type DockPaneId,
+  type DockSlot,
+  dockSlotFor,
+  dockSplitVisible,
+  moveDockPane,
+  parseDockLayout,
+  serializeDockLayout,
+  setDockSplit,
+} from "./workspace-layout";
+import {
   GLOBAL_SHORTCUTS,
   registerGlobalShortcuts,
   type ShortcutAction,
@@ -117,6 +131,7 @@ const activityPaneStorageKey = "octet.ui.activity-width";
 const inspectorPaneStorageKey = "octet.ui.inspector-width";
 const terminalPaneStorageKey = "octet.ui.terminal-width";
 const terminalPaneOpenStorageKey = "octet.ui.terminal.open";
+const dockLayoutStorageKey = "octet.ui.dock.layout";
 const notificationPreferenceKey = (hostId: string) =>
   `octet.notifications.enabled.${encodeURIComponent(hostId)}`;
 
@@ -135,6 +150,7 @@ const MemoizedInspector = memo(
     previous.selection === next.selection &&
     previous.closing === next.closing &&
     previous.modal === next.modal &&
+    previous.dockSlot === next.dockSlot &&
     previous.previewsAvailable === next.previewsAvailable &&
     previous.resourceContentUrl === next.resourceContentUrl &&
     previous.onRestoreFocus === next.onRestoreFocus &&
@@ -163,6 +179,25 @@ function storedBoolean(key: string): boolean {
     return window.localStorage.getItem(key) === "true";
   } catch {
     return false;
+  }
+}
+
+function storedDockLayout(): DockLayout {
+  try {
+    return parseDockLayout(window.localStorage.getItem(dockLayoutStorageKey));
+  } catch {
+    return DEFAULT_DOCK_LAYOUT;
+  }
+}
+
+function persistDockLayout(layout: DockLayout): void {
+  try {
+    window.localStorage.setItem(
+      dockLayoutStorageKey,
+      serializeDockLayout(layout),
+    );
+  } catch {
+    // A hardened browser may disable storage; the layout still works in memory.
   }
 }
 
@@ -357,6 +392,12 @@ interface HeaderProps {
   activityButtonRef: RefObject<HTMLButtonElement | null>;
   sidebarButtonRef: RefObject<HTMLButtonElement | null>;
   terminalButtonRef?: RefObject<HTMLButtonElement | null>;
+  /** User-created dock split: the second pane column exists only when enabled. */
+  dockSplitAvailable?: boolean;
+  dockSplitOn?: boolean;
+  dockOrder?: readonly DockPaneId[];
+  onToggleDockSplit?: () => void;
+  onMoveDockPane?: (pane: DockPaneId, offset: -1 | 1) => void;
   onOpenSidebar: () => void;
   onToggleActivity: () => void;
   onToggleTerminal: () => void;
@@ -386,6 +427,11 @@ export function SessionHeader({
   activityButtonRef,
   sidebarButtonRef,
   terminalButtonRef,
+  dockSplitAvailable = false,
+  dockSplitOn = false,
+  dockOrder = [],
+  onToggleDockSplit,
+  onMoveDockPane,
   onOpenSidebar,
   onToggleActivity,
   onToggleTerminal,
@@ -506,6 +552,46 @@ export function SessionHeader({
           >
             <PanelRight aria-hidden="true" />
           </button>
+        ) : null}
+        {dockSplitAvailable && onToggleDockSplit ? (
+          <button
+            className={`icon-button ${dockSplitOn ? "is-active" : ""}`}
+            onClick={onToggleDockSplit}
+            aria-pressed={dockSplitOn}
+            aria-label={
+              dockSplitOn ? "Merge dock panes" : "Split dock into two panes"
+            }
+            title={
+              dockSplitOn
+                ? "Merge dock panes into one column"
+                : "Show two dock panes side by side"
+            }
+          >
+            <Columns2 aria-hidden="true" />
+          </button>
+        ) : null}
+        {dockSplitAvailable && onMoveDockPane ? (
+          dockOrder.map((pane, index) => (
+            <button
+              key={`dock-move-${pane}`}
+              className="icon-button"
+              onClick={() =>
+                onMoveDockPane(pane, index === 0 ? 1 : -1)
+              }
+              aria-label={
+                index === 0
+                  ? "Move the first dock pane right"
+                  : "Move the second dock pane left"
+              }
+              title={
+                index === 0
+                  ? "Move the left dock pane right"
+                  : "Move the right dock pane left"
+              }
+            >
+              <ArrowLeftRight aria-hidden="true" />
+            </button>
+          ))
         ) : null}
         {sessionActionsAvailable ? (
           <div className="menu-anchor">
@@ -802,6 +888,9 @@ export default function App() {
   const [terminalPaneWidth, setTerminalPaneWidth] = useState(() =>
     storedPaneWidth(terminalPaneStorageKey, 460),
   );
+  const [dockLayout, setDockLayoutState] = useState<DockLayout>(
+    storedDockLayout,
+  );
   const [surface, setSurface] = useState<Surface>(() =>
     window.location.pathname === "/overview" ? "fleet" : "session",
   );
@@ -1001,6 +1090,30 @@ export default function App() {
   );
   const visibleActivityOpen =
     surface === "session" && activityOpen && activityAvailable;
+  // The dock hosts at most two panes. The default (unsplit) layout keeps the
+  // historical single-column behaviour; a user-created split shows the activity
+  // rail and the inspector side by side in the persisted order.
+  const dockPanesOpen = [visibleActivityOpen, Boolean(inspector)].filter(
+    Boolean,
+  ).length;
+  const dockSplitActive =
+    surface === "session" &&
+    wideLayout &&
+    !visibleTerminalOpen &&
+    dockSplitVisible(dockLayout, dockPanesOpen);
+  const updateDockLayout = useCallback((next: DockLayout) => {
+    setDockLayoutState(next);
+    persistDockLayout(next);
+  }, []);
+  const toggleDockSplit = useCallback(() => {
+    updateDockLayout(setDockSplit(dockLayout, !dockLayout.split));
+  }, [dockLayout, updateDockLayout]);
+  const reorderDockPane = useCallback(
+    (pane: DockPaneId, offset: -1 | 1) => {
+      updateDockLayout(moveDockPane(dockLayout, pane, offset));
+    },
+    [dockLayout, updateDockLayout],
+  );
   const modalWorkspaceOpen =
     surface === "session" &&
     (branchHistoryOpen ||
@@ -1285,12 +1398,45 @@ export default function App() {
     [activityPaneWidth, inspectorPaneWidth, paneBounds, terminalPaneWidth],
   );
 
+  const dockResizeTargets = useMemo(() => {
+    if (surface !== "session" || !wideLayout || visibleTerminalOpen) return [];
+    if (dockSplitActive) {
+      return [
+        { pane: dockLayout.order[0], slot: "a" as DockSlot },
+        { pane: dockLayout.order[1], slot: "b" as DockSlot },
+      ];
+    }
+    if (visibleActivityOpen && !inspector) {
+      return [{ pane: "activity" as DockPaneId, slot: "a" as DockSlot }];
+    }
+    if (inspector) {
+      return [{ pane: "inspector" as DockPaneId, slot: "a" as DockSlot }];
+    }
+    return [];
+  }, [
+    dockLayout.order,
+    dockSplitActive,
+    inspector,
+    surface,
+    visibleActivityOpen,
+    visibleTerminalOpen,
+    wideLayout,
+  ]);
+  const dockWidthFor = useCallback(
+    (pane: DockPaneId | undefined) =>
+      pane === "inspector" ? inspectorPaneWidth : activityPaneWidth,
+    [activityPaneWidth, inspectorPaneWidth],
+  );
   const appClass = useMemo(
     () =>
       [
         "app-shell",
         sidebarOpen ? "has-sidebar" : "",
-        visibleActivityOpen && !inspector ? "has-activity" : "",
+        dockSplitActive
+          ? "has-dock-split"
+          : visibleActivityOpen && !inspector
+            ? "has-activity"
+            : "",
         inspector ? "has-inspector" : "",
         visibleTerminalOpen ? "has-terminal" : "",
         `surface-${surface}`,
@@ -1298,6 +1444,7 @@ export default function App() {
         .filter(Boolean)
         .join(" "),
     [
+      dockSplitActive,
       inspector,
       sidebarOpen,
       surface,
@@ -1308,6 +1455,8 @@ export default function App() {
   const appStyle = {
     "--activity-width": `${activityPaneWidth}px`,
     "--inspector-width": `${inspectorPaneWidth}px`,
+    "--dock-a-width": `${dockWidthFor(dockLayout.order[0])}px`,
+    "--dock-b-width": `${dockWidthFor(dockLayout.order[1])}px`,
     "--terminal-width": `${terminalPaneWidth}px`,
   } as CSSProperties;
   const selectionError = state.selectionError;
@@ -1936,6 +2085,13 @@ export default function App() {
               setActivityOpen((open) => !open);
             }}
             onToggleTerminal={toggleTerminal}
+            dockSplitAvailable={
+              activityAvailable && state.bootstrap.capabilities.previews
+            }
+            dockSplitOn={dockLayout.split}
+            dockOrder={dockLayout.order}
+            onToggleDockSplit={toggleDockSplit}
+            onMoveDockPane={reorderDockPane}
             onRename={(title) => void store.rename(title)}
             onPin={(pinned) => {
               void store.pin(pinned);
@@ -2119,28 +2275,35 @@ export default function App() {
 
       {surface === "session" && session ? (
         <>
-          {wideLayout &&
-          !visibleTerminalOpen &&
-          ((visibleActivityOpen && !inspector) || inspector) ? (
+          {dockResizeTargets.map((target) => (
             <div
-              className="pane-resize-handle"
+              key={target.slot}
+              data-dock-slot={target.slot}
+              className={
+                target.slot === "b"
+                  ? "pane-resize-handle dock-split-resize-handle"
+                  : "pane-resize-handle"
+              }
               role="separator"
               aria-label={
-                inspector ? "Resize inspector" : "Resize task activity"
+                target.pane === "inspector"
+                  ? target.slot === "b"
+                    ? "Resize inspector (second pane)"
+                    : "Resize inspector"
+                  : target.slot === "b"
+                    ? "Resize task activity (second pane)"
+                    : "Resize task activity"
               }
               aria-orientation="vertical"
-              aria-valuemin={inspector ? 520 : 280}
-              aria-valuemax={paneBounds(inspector ? "inspector" : "activity").max}
+              aria-valuemin={target.pane === "inspector" ? 520 : 280}
+              aria-valuemax={paneBounds(target.pane).max}
               aria-valuenow={
-                inspector ? inspectorPaneWidth : activityPaneWidth
+                target.pane === "inspector" ? inspectorPaneWidth : activityPaneWidth
               }
               tabIndex={0}
               onPointerDown={(event) => {
                 event.preventDefault();
-                beginPaneResize(
-                  inspector ? "inspector" : "activity",
-                  event.clientX,
-                );
+                beginPaneResize(target.pane, event.clientX);
               }}
               onKeyDown={(event) => {
                 if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
@@ -2148,17 +2311,22 @@ export default function App() {
                 }
                 event.preventDefault();
                 resizePaneBy(
-                  inspector ? "inspector" : "activity",
+                  target.pane,
                   event.key === "ArrowLeft" ? 16 : -16,
                 );
               }}
             />
-          ) : null}
+          ))}
           <ActivityRail
             session={session}
+            dockSlot={
+              dockSplitActive
+                ? (dockSlotFor(dockLayout, "activity") ?? undefined)
+                : undefined
+            }
             open={
               visibleActivityOpen &&
-              !inspector &&
+              (dockSplitActive || !inspector) &&
               !(mobileLayout && sidebarOpen)
             }
             onClose={closeActivity}
@@ -2180,6 +2348,11 @@ export default function App() {
             selection={inspector}
             closing={inspectorClosing}
             modal={!wideLayout}
+            dockSlot={
+              dockSplitActive
+                ? (dockSlotFor(dockLayout, "inspector") ?? undefined)
+                : undefined
+            }
             previewsAvailable={state.bootstrap.capabilities.previews}
             resourceContentUrl={resourceContentUrl}
             onRestoreFocus={restoreActivityFocus}

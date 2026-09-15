@@ -334,3 +334,34 @@ describe("activity rail", () => {
     );
   });
 });
+
+describe("activity rail dock split", () => {
+  afterEach(cleanup);
+
+  it("occupies the dock column the persisted layout assigns", () => {
+    const session = structuredClone(fixtureSessions["session-live"]!);
+    session.items = [];
+    session.progress = [];
+    session.outputs = [];
+    session.sources = [];
+
+    render(
+      <ActivityRail
+        session={session}
+        open
+        dockSlot="b"
+        onClose={vi.fn()}
+        onOpenOutput={vi.fn()}
+        onOpenSource={vi.fn()}
+        modal={false}
+        onRestoreFocus={vi.fn()}
+        resourcesAvailable
+      />,
+    );
+
+    expect(screen.getByLabelText("Task activity")).toHaveAttribute(
+      "data-dock-slot",
+      "b",
+    );
+  });
+});

@@ -109,3 +109,7 @@ deletions), so it was left untouched.
 - fix(octet-agent): repair `ToolDef.constrained_sampling` initialisation in the two
   concurrency/agent-run test suites (17 sites were left with stray field lines that broke
   every downstream `cargo check`).
+START 2026-09-15T15:43:44Z agent5 alive
+STEP 2026-09-15T15:48:20Z agent5: wired run/turn/provider-request/provider-stream/tool/compaction/summary spans in agent.rs; cargo check hit a TRANSIENT error from another worker in src/tools/durability.rs (not my path); retrying.
+STEP 2026-09-15T15:49:12Z agent5: agent.rs + delegation.rs boundary wiring compiles GREEN (`cargo check -p octet-agent --lib` finished, 0 errors). Transient durability.rs error from another worker resolved itself.
+START 2026-09-15T16:28:32Z agent6 alive

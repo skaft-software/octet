@@ -54,6 +54,15 @@ ACTIVE_STATES = frozenset({"queued", "running", "waiting", "stopping"})
 _NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$")
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_./:-]{1,512}$")
+# Provider and model ids as the product spells them (`provider/model`), never a
+# free-form command line. `inherit` means "the parent session's selection".
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$")
+INHERIT = "inherit"
+# The state the host produces when an owning run retires a child record before
+# the extension observes it. It means "still owned by this session, currently
+# detached from any run" -- a recoverable state, not a dead one.
+DETACHED_STATE = "orphaned"
+DETACHED_LABEL = "detached"
 
 
 class SubagentError(Exception):
@@ -140,7 +149,10 @@ class SpawnRequest:
     name: str
     task: str
     profile: str
+    provider: str
     model: str
+    reasoning: str
+    reasoning_capability: "Any"
     tools: Tuple[str, ...]
     timeout_seconds: Optional[int]
     max_turns: Optional[int]
@@ -150,6 +162,22 @@ class SpawnRequest:
     idempotency_key: str
     fingerprint: str
 
+    @property
+    def effective_reasoning(self) -> str:
+        from .reasoning import clamp_and_describe
+
+        return clamp_and_describe(self.reasoning, self.reasoning_capability)[0]
+
+    @property
+    def reasoning_note(self) -> Optional[str]:
+        from .reasoning import clamp_and_describe
+
+        return clamp_and_describe(self.reasoning, self.reasoning_capability)[1]
+
+    @property
+    def inherits_model_policy(self) -> bool:
+        return self.provider == INHERIT and self.model == INHERIT and self.reasoning == INHERIT
+
     @classmethod
     def parse(cls, arguments: Mapping[str, Any]) -> "SpawnRequest":
         if not isinstance(arguments, Mapping):
@@ -158,7 +186,10 @@ class SpawnRequest:
             "name",
             "task",
             "profile",
+            "provider",
             "model",
+            "reasoning",
+            "reasoning_capability",
             "tools",
             "timeout_seconds",
             "max_turns",
@@ -188,10 +219,22 @@ class SpawnRequest:
             raise SubagentError(
                 "profile must be one of: %s" % ", ".join(sorted(PROFILE_INSTRUCTIONS))
             )
-        model = arguments.get("model", "inherit")
-        if model != "inherit":
+
+        # Per-worker orchestration selection. Unset means "inherit the parent
+        # session's provider/model/reasoning"; anything else is validated
+        # fail-closed against bounded ids and the mirrored effort ladder, and an
+        # unknown provider, model, or level is refused rather than coerced.
+        provider = _model_id(arguments.get("provider", INHERIT), "provider")
+        model = _model_id(arguments.get("model", INHERIT), "model")
+        from .reasoning import ReasoningCapability, clamp_and_describe, parse_level
+
+        reasoning = parse_level(arguments.get("reasoning", INHERIT))
+        capability = ReasoningCapability.parse(arguments.get("reasoning_capability"))
+        # Clamping is applied lazily by `effective_reasoning` so the request and
+        # its effective selection are both visible without duplicating policy.
+        if model == INHERIT and provider != INHERIT:
             raise SubagentError(
-                "API 0.2 agent_sessions can only inherit the parent model; model must be 'inherit'",
+                "provider selection requires an explicit model; pass provider and model together",
                 code="unsupported_model",
             )
 
@@ -250,7 +293,18 @@ class SpawnRequest:
             "name": name,
             "task": task,
             "profile": profile,
+            "provider": provider,
             "model": model,
+            "reasoning": reasoning,
+            "reasoning_capability": (
+                None
+                if capability == ReasoningCapability()
+                else {
+                    "ceiling": capability.ceiling,
+                    "floor": capability.floor,
+                    "ultra": capability.ultra_advertised,
+                }
+            ),
             "tools": tools,
             "timeout_seconds": timeout_seconds,
             "max_turns": max_turns,
@@ -271,7 +325,10 @@ class SpawnRequest:
             name=name,
             task=task,
             profile=profile,
+            provider=provider,
             model=model,
+            reasoning=reasoning,
+            reasoning_capability=capability,
             tools=tuple(tools),
             timeout_seconds=timeout_seconds,
             max_turns=max_turns,
@@ -402,6 +459,24 @@ class Worker:
     generation: int = 0
     delivery_state: str = "host_managed"
     host_present: bool = True
+    # Per-worker orchestration selection. `provider`/`model`/`reasoning` are the
+    # request; `effective_*` is what this process believes the worker runs with
+    # (today: the parent's inherited selection, because API 0.2 `agent/spawn`
+    # carries no model field). `model_policy_applied` is False until the host
+    # reports a per-worker selection, so the panel can never imply that a
+    # requested model took effect.
+    requested_provider: str = INHERIT
+    effective_provider: str = "inherited"
+    requested_reasoning: str = INHERIT
+    effective_reasoning: str = "inherited"
+    model_policy_applied: bool = False
+    reasoning_note: Optional[str] = None
+    # Session-scoped delegation: a worker whose host record disappeared is
+    # *detached*, not dead. It stays visible, keeps its evidence, and can be
+    # reattached once the host exposes its live session again.
+    detached_at_ms: Optional[int] = None
+    reattach_count: int = 0
+    last_reattached_at_ms: Optional[int] = None
 
     @property
     def terminal(self) -> bool:
@@ -415,6 +490,16 @@ class Worker:
     def read_only(self) -> bool:
         return all(tool in READ_ONLY_TOOLS for tool in self.tools)
 
+    @property
+    def detached(self) -> bool:
+        """Session-owned but currently not attached to any host run."""
+        return self.state == DETACHED_STATE
+
+    @property
+    def reattachable(self) -> bool:
+        """A detached worker keeps its durable session reference for reattachment."""
+        return self.detached and bool(self.session)
+
     def elapsed_ms(self, now_ms: int) -> int:
         end = self.completed_at_ms if self.completed_at_ms is not None else now_ms
         return max(0, end - self.started_at_ms)
@@ -427,8 +512,14 @@ class Worker:
             "depth": self.depth,
             "name": self.name,
             "profile": self.profile,
+            "provider": self.effective_provider,
+            "provider_policy": self.requested_provider,
             "model": self.effective_model,
             "model_policy": self.requested_model,
+            "model_policy_applied": self.model_policy_applied,
+            "reasoning": self.effective_reasoning,
+            "reasoning_policy": self.requested_reasoning,
+            "reasoning_note": self.reasoning_note,
             "tools": list(self.tools),
             "state": self.state,
             "phase": self.phase,
@@ -457,6 +548,11 @@ class Worker:
             "recent_tools": list(self.recent_tools),
             "recovered_after_restart": self.recovered,
             "restart_count": self.restart_count,
+            "detached": self.detached,
+            "reattachable": self.reattachable,
+            "detached_at_ms": self.detached_at_ms,
+            "reattach_count": self.reattach_count,
+            "last_reattached_at_ms": self.last_reattached_at_ms,
             "delivery": self.delivery_state,
         }
         if include_summary:
@@ -486,6 +582,20 @@ def bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
         or value > maximum
     ):
         raise SubagentError(f"{name} must be an integer between {minimum} and {maximum}")
+    return value
+
+
+def _model_id(value: Any, name: str) -> str:
+    """Validate a requested provider/model id; `inherit` is the default."""
+    if value is None:
+        return INHERIT
+    if not isinstance(value, str) or (
+        value != INHERIT and _MODEL_ID_RE.fullmatch(value) is None
+    ):
+        raise SubagentError(
+            "%s must be `inherit` or a bounded provider/model id" % name,
+            code="unsupported_model",
+        )
     return value
 
 

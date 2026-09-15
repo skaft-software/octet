@@ -44,6 +44,19 @@ pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
     run_invocation(boot, prompt, Vec::new(), Vec::new(), false).await
 }
 
+/// Persist durable accounting for an ephemeral (`--no-session`) run and report
+/// any unknown usage. A no-op for ordinary sessions.
+pub(crate) fn finish_ephemeral_accounting() -> anyhow::Result<()> {
+    if let Some(record) = crate::session_store::finish_ephemeral_run()? {
+        if record.has_uncertain_usage {
+            crate::output::stderr!(
+                "warning: this ephemeral run had unknown provider usage; the durable accounting record is marked uncertain and any cost total is a known subtotal"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_invocation(boot: Bootstrap, prompt: String, remaining: Vec<String>, media: Vec<Media>, json: bool) -> anyhow::Result<()> {
     // Explicit template arguments are data, not local commands.
     if boot.config.prompt_template.is_none() {
@@ -61,7 +74,20 @@ pub(crate) async fn run_invocation(boot: Bootstrap, prompt: String, remaining: V
         Ok(())
     }.await;
     app.executable_extensions.shutdown().await;
-    result
+    // An ephemeral run discards its transcript but must still persist accounting,
+    // even when the run itself failed.
+    let accounting = finish_ephemeral_accounting();
+    match result {
+        Ok(()) => accounting,
+        Err(error) => {
+            if let Err(accounting_error) = accounting {
+                crate::output::stderr_line(format!(
+                    "warning: ephemeral accounting failed: {accounting_error:#}"
+                ));
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn run_prompt(app: &mut App, prompt: String, media: Vec<Media>, json: bool) -> anyhow::Result<()> {

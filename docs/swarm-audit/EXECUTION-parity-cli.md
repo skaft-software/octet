@@ -140,3 +140,114 @@ image-admission refusal path), 5.6 verified, 5.7 verified for scope/default sele
 handoff still blocked, 5.8 verified, #180 verified at the parse + fail-closed dispatch level, #313 verified
 by its six process-boundary tests. 5.4, 5.9, 5.10, 5.11 are recorded as blocked with the exact missing
 primitive in `docs/parity/cli.md`.
+
+START 2026-09-15T15:43:46Z cli5 alive
+
+### Round 4 (cli5) — row 1 (Codex context override) + row 5.10 (catalog publish gates)
+
+Framing received from the maintainer: the 272K Codex cap is DELIBERATE (websocket drops on
+long-running sessions, OpenAI's 272K recommendation, double pricing above 272K). Nothing here
+calls it a bug or regression.
+
+Files added (both mine):
+- `crates/octet-coding-agent/src/cli/codex_context.rs` — pure opt-in override policy for
+  `--codex-context-window <TOKENS>`: only ever RAISES the deliberate 272K cap, requires a
+  Pro/ProLite entitlement above the cap, requires the explicit
+  `--codex-context-window-acknowledge-cost-cliff`, fails closed above the model's entitlement
+  ceiling, and marks `has_uncertain_usage = true` above the cap (double-priced; no exact cost).
+- `crates/octet-coding-agent/src/cli/catalog_publish.rs` — `octet catalog publish` with five
+  fail-closed gates (checksum, schema, min-client-version, required-provider, entry-count,
+  immutable-path) and an atomic create-if-absent install that never replaces an existing catalog.
+
+Wiring: `src/cli.rs` registers both modules and adds `TopLevelCommand::Catalog`; `src/cli/parity.rs`
+parses/validates the two Codex flags in `ParityOptions::validate()`; `src/lib.rs` dispatches
+`Catalog` to `cli::catalog_publish::run`.
+
+Command: `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo check -p octet-coding-agent --all-targets --message-format short`
+Observed (exact):
+```
+crates/octet-agent/src/tools/durability.rs:505:5: error[E0277]: `DurableInvocationStore` doesn't implement `Debug`: unsatisfied trait bound
+error: could not compile `octet-agent` (lib) due to 1 previous error
+```
+`crates/octet-agent/src/tools/durability.rs` is a NEW untracked file owned by another worker
+(parity-tools). It does not type-check, so `octet-coding-agent` cannot be checked in the shared
+worktree. Recorded, NOT fixed (not my path). I verify my code in a scratch clone instead.
+
+### Round 5 (cli5) — my code type-checks and its tests pass (scratch clone)
+
+Clone: `rsync -a --exclude target --exclude .git ./ /tmp/cli5-verify/`, then
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo check -p octet-coding-agent --all-targets`
+-> `Finished dev profile`, zero errors (the clone compiles `octet-agent` fine; the shared-worktree
+error seen in Round 4 was a mid-edit state of the other worker's untracked `durability.rs`).
+
+Command: `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p octet-coding-agent --test parity_cli -- --test-threads=1`
+Observed (exact):
+```
+running 13 tests
+test catalog_publish_gates_are_fail_closed_and_the_path_is_immutable ... ok
+test codex_context_window_override_fails_closed_without_acknowledgement ... ok
+test codex_context_window_override_is_accepted_with_the_acknowledgement ... ok
+test ... (10 pre-existing parity tests) ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+`cargo test -p octet-coding-agent --lib -- cli::catalog_publish` -> `7 passed; 0 failed`.
+`cargo test -p octet-coding-agent --lib -- cli::tests::codex_context_window_flag_parses` -> `1 passed`.
+
+Integration with ctx5's exported policy: the duplicated CLI-local policy module was DELETED.
+The flags now parse into `crate::codex_context::CodexContextOverride` and are validated with
+ctx5's constants (`CODEX_CONTEXT_WINDOW_CAP`, `CODEX_PRO_CONTEXT_WINDOW`,
+`CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING`). `ParityOptions::install_codex_context_env()` publishes the
+value through ctx5's stable env bridge (`CODEX_CONTEXT_OVERRIDE_ENV`,
+`CODEX_CONTEXT_ACKNOWLEDGE_ENV`) from `lib.rs` before bootstrap, so `resolve_codex_context_window`
+sees it without a persisted config change.
+
+NOTES / BLOCKERS seen while verifying (NOT my paths, NOT fixed):
+- `crates/octet-coding-agent/src/codex_context.rs` (ctx5, untracked): test
+  `codex_context::tests::deliberate_cap_is_kept_and_reported_as_a_clamp` FAILS at line 534
+  (`assert!(resolved.has_uncertain_usage)`) because a session clamped to exactly 272K has
+  `context_window == CODEX_CONTEXT_WINDOW_CAP`, so `context_window > CAP` is false. I did not touch
+  ctx5's file.
+- Also failing in the clone lib test run (other workers, not mine):
+  `app::bootstrap::tests::{disabled_tools_are_absent_from_both_schema_and_execution_registry,
+  tool_schema_reserve_is_positive_and_deterministic,
+  unknown_api_03_last_initial_provider_model_preflights_restarts_and_reloads_with_fresh_routes}`,
+  `modes::interactive::clipboard_read::tests::a_real_helper_is_read_bounded_and_its_exit_status_is_honoured`,
+  `modes::interactive::tests::active_session_commands_report_through_the_read_only_session`.
+
+### Round 6 (cli5) — row 5.9 incremental session/entry search + change notification
+
+Files (mine):
+- `crates/octet-coding-agent/src/session_catalog.rs` — catalog schema 4 adds
+  `indexed_entries` (bounded user/assistant text, `(session_id, entry_id)`
+  primary key), `indexed_entry_sessions` (per-session file fingerprint) and
+  `catalog_meta.entry_revision`. New: `entry_fingerprints`, `apply_entries`
+  (returns whether anything changed; bumps the revision only on a real change),
+  `entry_revision`, `search_entries` (escaped bounded `LIKE`), `escape_like`.
+- `crates/octet-coding-agent/src/session_store.rs` — `index_session_entries`
+  (lenient bounded extractor that keeps only `{"Text": ...}` parts, so reasoning,
+  tool calls/arguments, media and provider metadata are never indexed),
+  `indexed_entry_from_record`, `EntrySearchHit`/`EntryKind`/`EntrySearchOutcome`,
+  `SessionSearchWatcher`, and `search_entries`/`search_entries_with`. Only
+  sessions whose fingerprint changed are re-read; unchanged sessions are served
+  from the disposable catalog.
+- `crates/octet-coding-agent/src/session_commands.rs` — `octet sessions search
+  <QUERY> [--limit N]`, plus `EntryKind` import.
+
+Command: `cargo test -p octet-coding-agent --lib -- session_store:: session_catalog::`
+Observed: `test result: ok. 36 passed; 0 failed`. Targeted:
+`entry_search_is_incremental_and_notifies_only_on_change ... ok`,
+`indexed_entries_keep_only_user_and_assistant_text ... ok`.
+
+Command: `cargo test -p octet-coding-agent --test parity_cli -- --test-threads=1`
+Observed (exact):
+```
+running 14 tests
+test sessions_search_is_incremental_and_reports_the_index_change ... ok
+... (13 others) ...
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+The process-boundary test proves: the cold search indexes 2 sessions, a repeat
+search prints **no** re-index notice, after one transcript changes only 1 session
+is re-read, and a miss is explicit.
+
+START 2026-09-15T16:28:32Z cli6 alive

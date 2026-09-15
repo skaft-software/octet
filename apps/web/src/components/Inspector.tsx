@@ -10,6 +10,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getFixturePreviewMarkup } from "../fixtures";
 import type { OutputRef, PreviewRef, SessionSnapshot, SourceRef } from "../protocol";
+import type { DockSlot } from "../workspace-layout";
 
 export type InspectorSelection =
   | { type: "output"; id: string }
@@ -30,6 +31,8 @@ interface InspectorProps {
   resourceContentUrl: (sessionId: string, handle: string) => string;
   onRestoreFocus: () => void;
   onClose: () => void;
+  /** Grid column of the user-created dock split; absent in the default layout. */
+  dockSlot?: DockSlot;
 }
 
 const maxRenderedDiffLines = 5_000;
@@ -588,6 +591,7 @@ export function Inspector({
   resourceContentUrl,
   onRestoreFocus,
   onClose,
+  dockSlot,
 }: InspectorProps) {
   const inspectorRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
@@ -673,6 +677,7 @@ export function Inspector({
   return (
     <aside
       ref={inspectorRef}
+      data-dock-slot={dockSlot}
       className={`inspector ${closing ? "is-closing" : "is-opening"}`}
       aria-label={`${title} inspector`}
       aria-hidden={closing || undefined}

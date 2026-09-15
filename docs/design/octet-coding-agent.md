@@ -383,12 +383,14 @@ closed.
 
 Authenticated Codex discovery sends compatibility client version `0.153.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 6 invalidates inventories
-queried with older compatibility or context-window policies. It preserves those
-fields, uses a 372K working window for GPT-5.6 Luna and 272K for other Codex
-models, and remains scoped to the authenticated account context. Only fresh,
-complete, account-matched metadata is registered. Stale or future-dated cache
-entries are refreshed synchronously before online catalog construction;
+`multi_agent_version: "v2"`. Cache schema version 7 invalidates inventories
+queried with older compatibility or context-window policies; entries carry the
+pre-cap backend default window so the deliberate Codex cap can be reported and an
+explicit operator override resolved exactly (`docs/codex-context.md`). It
+preserves those fields, uses a 372K working window for GPT-5.6 Luna and 272K for
+other Codex models, and remains scoped to the authenticated account context. Only
+fresh, complete, account-matched metadata is registered. Stale or future-dated
+cache entries are refreshed synchronously before online catalog construction;
 malformed, incomplete, duplicate, or inconsistent entries fail closed. Offline
 launches may retain fresh cached model identities and limits but strip Ultra,
 Responses Lite, and delegation. octet never infers those dynamic capabilities

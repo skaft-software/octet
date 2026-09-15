@@ -1244,6 +1244,36 @@ impl AdaptivePreviewCoalescer {
     }
 }
 
+/// Host-owned sink for durable partial-output checkpoints of a running tool.
+///
+/// Pi's `tool-durability.md` gives a tool an opt-in `checkpoint: true` request on
+/// its update callback: every update stays a live publication, and the request
+/// additionally asks the harness to durably *replace* this invocation's bounded
+/// progress snapshot at `pendingToolOutput(operationId, invocationId)`. octet
+/// delivers the same request through an explicit handle, because a tool cannot
+/// reach the session log through [`ToolContext`].
+///
+/// Contract:
+///
+/// * the tool owns snapshot bounding, checkpoint cadence, and duplicate
+///   suppression; it hands the sink a bounded *complete* snapshot, never a
+///   growing value and never an append-only chunk;
+/// * `Ok(())` means the replacement was accepted, not that it is already durable
+///   — the sink owns enqueueing and promise tracking;
+/// * `Err(..)` is a storage fault. It never means the command failed, never
+///   proves the effect settled, and never becomes the tool's result;
+/// * a checkpoint is auxiliary observation data. Recovery may preserve it, but
+///   may never infer success or failure from it, and it is deleted when the
+///   invocation's outcome becomes known.
+///
+/// An implementation is provided by
+/// [`InvocationHandle`](crate::tools::durability::InvocationHandle), and tests or
+/// hosts may implement it directly.
+pub trait PartialOutputCheckpointSink: Send + Sync {
+    /// Replaces this invocation's durable partial-output snapshot.
+    fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError>;
+}
+
 /// Canonical tool output: compact text plus optional structured media and a
 /// semantic error marker. Transport-level failures still use [`ToolError`]; a
 /// completed tool may return a rich error envelope without losing its media or

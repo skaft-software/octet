@@ -331,6 +331,12 @@ where
                     shell.render();
                     continue;
                 }
+                // The clipboard gesture is resolved before translation: the
+                // native read is asynchronous and the translator has no action
+                // that can await it. A failed read falls through untouched.
+                if paste_clipboard_text(shell, &event).await {
+                    continue;
+                }
                 let pending = if shell.pending_is_empty() {
                     String::new()
                 } else {
@@ -704,6 +710,11 @@ where
             }
             event = input.next(), if input_open => match event {
                 Some(Ok(event)) => {
+                    // A clipboard paste is still admitted while a cancellable
+                    // operation runs; a failed read keeps the event unchanged.
+                    if paste_clipboard_text(shell, &event).await {
+                        continue;
+                    }
                     if handle_cancellable_wait_input(shell, event) {
                         return None;
                     }
@@ -818,6 +829,374 @@ fn is_ctrl_c(key: &crossterm::event::KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+/// Declared clipboard paste gesture. `app.clipboard.pasteImage` defaults to
+/// ctrl+v, or alt+v on Windows (`tui/keymap/keybindings.rs`). The gesture is
+/// resolved here rather than in the keymap because the native read is
+/// asynchronous: the translator has no action that can await it. The event is
+/// otherwise unbound, so this consumes nothing the translator would deliver.
+///
+/// Required keymap change (recorded, not made — another worker owns
+/// `keymap.rs`): add `InputAction::PasteImage`, return it from
+/// `translate_with_popup` for this same key, and reserve the key in
+/// `is_reserved_extension_shortcut`; then this predicate can be deleted.
+fn is_clipboard_paste_key(key: &crossterm::event::KeyEvent) -> bool {
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return false;
+    }
+    let expected = if cfg!(target_os = "windows") {
+        KeyModifiers::ALT
+    } else {
+        KeyModifiers::CONTROL
+    };
+    key.code == KeyCode::Char('v') && key.modifiers == expected
+}
+
+/// Insert native clipboard text into the composer through the bracketed-paste
+/// path, so consent, path attachment, and large-paste classification stay
+/// identical to a terminal-originated paste. Returns `true` only when the
+/// gesture was consumed: an unavailable, empty, or oversized clipboard falls
+/// through to the existing behaviour (terminal bracketed paste plus the
+/// retained copy buffer) instead of reporting a paste that did not happen.
+async fn paste_clipboard_text(shell: &mut InteractiveShell, event: &Event) -> bool {
+    if !matches!(event, Event::Key(key) if is_clipboard_paste_key(key)) {
+        return false;
+    }
+    let Some(text) = clipboard_read::read_text().await else {
+        return false;
+    };
+    shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+    shell.render();
+    true
+}
+
+/// Native **text** clipboard read (parity row 2c.6). Clipboard image capture is
+/// an explicit exclusion, so only text ever leaves the clipboard and nothing in
+/// this module writes to it. The existing write transport (pbcopy plus OSC 52 in
+/// `tui/view.rs`) is untouched and remains the fallback.
+///
+/// Every helper is bounded by a deadline and a byte cap, and every failure fails
+/// closed. A helper that blocks — a disconnected display, a wedged Wayland
+/// compositor, no `pbpaste` on PATH — must never hold the interactive loop.
+mod clipboard_read {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    /// Deadline for one helper process.
+    const READ_TIMEOUT: Duration = Duration::from_millis(600);
+    /// Accepted clipboard text. A larger payload fails closed rather than
+    /// pasting a silently truncated document.
+    const MAX_TEXT_BYTES: usize = 1024 * 1024;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Platform {
+        MacOs,
+        Linux,
+        Windows,
+    }
+
+    fn host_platform() -> Platform {
+        if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else if cfg!(target_os = "windows") {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Helper {
+        program: String,
+        args: Vec<String>,
+    }
+
+    fn helper(program: &str, args: &[&str]) -> Helper {
+        Helper {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        }
+    }
+
+    /// Declared helper order. A platform helper is used when it exists, so an
+    /// environment that declares no display yields no helper at all and the read
+    /// fails closed instead of scraping an unrelated transport.
+    fn helpers(platform: Platform, env: impl Fn(&str) -> Option<String>) -> Vec<Helper> {
+        match platform {
+            Platform::MacOs => vec![helper("pbpaste", &[])],
+            // `clip` writes only; PowerShell is the declared text reader.
+            Platform::Windows => vec![helper(
+                "powershell",
+                &["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+            )],
+            Platform::Linux => {
+                let mut helpers = Vec::new();
+                if env("TERMUX_VERSION").is_some() {
+                    helpers.push(helper("termux-clipboard-get", &[]));
+                }
+                if env("WAYLAND_DISPLAY").is_some() {
+                    helpers.push(helper("wl-paste", &["--no-newline", "--type", "text"]));
+                }
+                if env("DISPLAY").is_some() {
+                    helpers.push(helper("xclip", &["-selection", "clipboard", "-out"]));
+                    helpers.push(helper("xsel", &["--clipboard", "--output"]));
+                }
+                helpers
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        /// The helper exited successfully and produced bytes.
+        Text(Vec<u8>),
+        /// The helper exited successfully and produced nothing.
+        Empty,
+        /// The helper is missing, failed, timed out, or exceeded the byte cap.
+        Failed,
+    }
+
+    /// Decide one helper's contribution. `Err(())` means "try the next helper";
+    /// every other outcome settles the read, matching the reference loop, where
+    /// a successful helper that printed nothing reports an empty clipboard
+    /// rather than leaking into the next transport.
+    fn settle(outcome: Outcome) -> Result<Option<String>, ()> {
+        match outcome {
+            Outcome::Failed => Err(()),
+            Outcome::Empty => Ok(None),
+            Outcome::Text(bytes) => Ok(decode(&bytes)),
+        }
+    }
+
+    /// Invalid UTF-8 is replaced rather than dropped, matching the reference
+    /// reader's `toString("utf8")`. At this point the payload is already
+    /// bounded, so only a genuinely empty clipboard yields `None`.
+    fn decode(bytes: &[u8]) -> Option<String> {
+        if bytes.is_empty() || bytes.len() > MAX_TEXT_BYTES {
+            return None;
+        }
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    fn classify(bytes: Vec<u8>) -> Outcome {
+        if bytes.len() > MAX_TEXT_BYTES {
+            Outcome::Failed
+        } else if bytes.is_empty() {
+            Outcome::Empty
+        } else {
+            Outcome::Text(bytes)
+        }
+    }
+
+    async fn run(helper: &Helper) -> Outcome {
+        let command = tokio::process::Command::new(&helper.program)
+            .args(&helper.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            // A helper that ignores the deadline is killed when its future is
+            // dropped, so cancellation cannot leak a blocked child.
+            .kill_on_drop(true)
+            .spawn();
+        let Ok(mut child) = command else {
+            return Outcome::Failed;
+        };
+        let Some(mut stdout) = child.stdout.take() else {
+            return Outcome::Failed;
+        };
+        let operation = async move {
+            use tokio::io::AsyncReadExt;
+            let mut bytes = Vec::new();
+            let mut bounded = (&mut stdout).take(MAX_TEXT_BYTES as u64 + 1);
+            bounded.read_to_end(&mut bytes).await?;
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((bytes, status))
+        };
+        match tokio::time::timeout(READ_TIMEOUT, operation).await {
+            // A helper that reports failure is transport failure, not an empty
+            // clipboard: `settle` then tries the next declared helper.
+            Ok(Ok((bytes, status))) if status.success() => classify(bytes),
+            _ => Outcome::Failed,
+        }
+    }
+
+    pub(super) async fn read_text() -> Option<String> {
+        #[cfg(test)]
+        if let Some(overridden) = test_override() {
+            return overridden;
+        }
+        for helper in helpers(host_platform(), |name| std::env::var(name).ok()) {
+            if let Ok(text) = settle(run(&helper).await) {
+                return text;
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// Test-only stand-in for the platform helper. The outer `None` means no
+        /// override is installed; per-thread state keeps parallel tests apart.
+        static OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    fn test_override() -> Option<Option<String>> {
+        OVERRIDE.with(|slot| slot.borrow().clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_text(text: Option<String>) {
+        OVERRIDE.with(|slot| *slot.borrow_mut() = Some(text));
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_test_text() {
+        OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+            move |name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        }
+
+        #[test]
+        fn linux_helper_order_follows_the_declared_environment_gates() {
+            let all = helpers(
+                Platform::Linux,
+                env(&[
+                    ("TERMUX_VERSION", "1"),
+                    ("WAYLAND_DISPLAY", "wayland-0"),
+                    ("DISPLAY", ":0"),
+                ]),
+            );
+            let programs: Vec<&str> = all.iter().map(|helper| helper.program.as_str()).collect();
+            assert_eq!(
+                programs,
+                [
+                    "termux-clipboard-get",
+                    "wl-paste",
+                    "xclip",
+                    "xsel"
+                ]
+            );
+            assert_eq!(
+                all[1].args,
+                ["--no-newline".to_owned(), "--type".to_owned(), "text".to_owned()]
+            );
+            assert_eq!(all[2].args, ["-selection", "clipboard", "-out"].map(str::to_owned));
+        }
+
+        #[test]
+        fn a_session_with_no_declared_display_yields_no_helper() {
+            assert!(helpers(Platform::Linux, env(&[])).is_empty());
+            assert_eq!(helpers(Platform::Linux, env(&[("DISPLAY", ":0")])).len(), 2);
+            assert_eq!(
+                helpers(Platform::Linux, env(&[("WAYLAND_DISPLAY", "wayland-1")])).len(),
+                1
+            );
+        }
+
+        #[test]
+        fn macos_and_windows_read_through_one_declared_helper() {
+            assert_eq!(helpers(Platform::MacOs, env(&[]))[0].program, "pbpaste");
+            let windows = helpers(Platform::Windows, env(&[]));
+            assert_eq!(windows[0].program, "powershell");
+            assert!(windows[0].args.iter().any(|arg| arg.contains("Get-Clipboard")));
+            assert!(!windows[0].args.iter().any(|arg| arg.contains("clip\"")));
+        }
+
+        #[test]
+        fn helper_failure_tries_the_next_transport_and_empty_success_settles() {
+            assert_eq!(settle(Outcome::Failed), Err(()));
+            assert_eq!(settle(Outcome::Empty), Ok(None));
+            assert_eq!(
+                settle(Outcome::Text(b"from clipboard".to_vec())),
+                Ok(Some("from clipboard".to_owned()))
+            );
+        }
+
+        #[test]
+        fn oversized_payloads_fail_closed_instead_of_pasting_a_prefix() {
+            assert_eq!(classify(vec![b'x'; MAX_TEXT_BYTES + 1]), Outcome::Failed);
+            assert_eq!(classify(Vec::new()), Outcome::Empty);
+            assert_eq!(decode(&[]), None);
+            assert_eq!(decode(&vec![b'x'; MAX_TEXT_BYTES + 1]), None);
+            // The reference reader replaces invalid UTF-8 instead of dropping
+            // the whole clipboard.
+            assert_eq!(decode(&[0xff, 0xfe]), Some("\u{fffd}\u{fffd}".to_owned()));
+        }
+
+        #[tokio::test]
+        async fn a_missing_helper_fails_closed_without_panicking() {
+            let missing = Helper {
+                program: "octet-no-such-clipboard-helper".to_owned(),
+                args: Vec::new(),
+            };
+            assert_eq!(run(&missing).await, Outcome::Failed);
+        }
+
+        /// Exercise the real spawn/decode/reap path against throwaway helper
+        /// programs. The developer's own clipboard is never read or written.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_real_helper_is_read_bounded_and_its_exit_status_is_honoured() {
+            let text = Helper {
+                program: "/bin/echo".to_owned(),
+                args: vec!["clipboard text".to_owned()],
+            };
+            assert_eq!(run(&text).await, Outcome::Text(b"clipboard text\n".to_vec()));
+            assert_eq!(
+                settle(Outcome::Text(b"clipboard text\n".to_vec())),
+                Ok(Some("clipboard text\n".to_owned()))
+            );
+
+            let empty = Helper {
+                program: "/bin/true".to_owned(),
+                args: Vec::new(),
+            };
+            assert_eq!(run(&empty).await, Outcome::Empty);
+
+            let failing = Helper {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "exit 3".to_owned()],
+            };
+            assert_eq!(run(&failing).await, Outcome::Failed);
+
+            // A helper that never returns is killed at the deadline instead of
+            // holding the interactive loop.
+            let wedged = Helper {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "sleep 30".to_owned()],
+            };
+            let started = std::time::Instant::now();
+            assert_eq!(run(&wedged).await, Outcome::Failed);
+            assert!(
+                started.elapsed() < READ_TIMEOUT * 6,
+                "bounded helper read took {:?}",
+                started.elapsed()
+            );
+        }
+
+        #[tokio::test]
+        async fn the_test_override_replaces_the_platform_read() {
+            set_test_text(Some("overridden".to_owned()));
+            assert_eq!(read_text().await, Some("overridden".to_owned()));
+            set_test_text(None);
+            assert_eq!(read_text().await, None);
+            clear_test_text();
+        }
+    }
+}
+
 /// Forward only normalized, bounded observations. Extensions never receive the
 /// terminal event itself and cannot influence the host keymap or resize path.
 fn observe_extension_terminal_event(
@@ -911,6 +1290,10 @@ where
                 Some(Ok(event)) => {
                     // Submission is not admitted during lifecycle work, but
                     // ordinary editing must not lose the probe's saved input.
+                    // The same holds for a native clipboard paste.
+                    if paste_clipboard_text(shell, &event).await {
+                        continue;
+                    }
                     let _ = handle_cancellable_wait_input(shell, event);
                 }
                 Some(Err(error)) => {
@@ -1145,9 +1528,14 @@ async fn logout_custom(
 ///
 /// The fast service tier is a Codex-route capability, so the command is gated
 /// on the declared protocol and endpoint runtime profile rather than a provider
-/// name, and it fails closed: no octet-ai codec emits the Codex `service_tier`
-/// request field yet, so the switch is rejected instead of reporting a change
-/// the wire never made.
+/// name, and it fails closed. The codec side is now landed — `octet-ai` carries
+/// a typed `ServiceTier` field that is emitted when a caller sets
+/// `ResponsesOptions::service_tier` on a profile whose
+/// `ResponsesRuntimeProfile::accepts_service_tier()` is true. The remaining
+/// missing primitive is the caller: every live run's `ResponsesOptions` is built
+/// in `crates/octet-agent/src/agent.rs` (`durable_responses_options` /
+/// `native_responses_options`) without a tier, so the switch still changes
+/// nothing on the wire and must not claim otherwise.
 fn apply_fast_command(shell: &mut InteractiveShell, model: &Model, requested: Option<bool>) {
     if !commands::codex_fast_tier_endpoint(model) {
         shell.error(format!(
@@ -1158,14 +1546,17 @@ fn apply_fast_command(shell: &mut InteractiveShell, model: &Model, requested: Op
         ));
         return;
     }
-    let request = match requested {
-        Some(true) => "on",
-        Some(false) => "off",
-        None => "status",
-    };
-    shell.error(format!(
-        "`/fast {request}` is unavailable: no octet-ai codec emits the Codex `service_tier` request field"
-    ));
+    let detail = concat!(
+        "the Codex `service_tier` field exists in octet-ai, but the live request ",
+        "path never sets `ResponsesOptions::service_tier` ",
+        "(missing primitive: the `ResponsesOptions` builders in ",
+        "crates/octet-agent/src/agent.rs), so nothing changed on the wire"
+    );
+    match requested {
+        Some(true) => shell.error(format!("`/fast on` not applied: {detail}")),
+        Some(false) => shell.error(format!("`/fast off` not applied: {detail}")),
+        None => shell.error(format!("`/fast` is inert: {detail}")),
+    }
 }
 
 /// Apply a terminal keyboard-focus transition (`?1004` reporting).
@@ -1733,6 +2124,12 @@ where
                         shortcut.extension, shortcut.description
                     ));
                     shell.render();
+                    continue;
+                }
+                // Native clipboard paste reaches the composer during a live run
+                // too; the draft it edits is the same one a queued follow-up
+                // uses. A failed read falls through untouched.
+                if paste_clipboard_text(shell, &event).await {
                     continue;
                 }
                 let pending = if shell.pending_is_empty() {
@@ -2851,8 +3248,60 @@ struct SubagentViewEntry {
     node_id: String,
     label: String,
     description: String,
+    /// Declared generic presentation state, lowercased. The panel derives its
+    /// group headings from this and never from the row text.
+    state: String,
     session_reference: Option<String>,
     fallback_detail: String,
+}
+
+/// Display group for one declared generic presentation state.
+///
+/// Live work is expanded by default; terminal states collapse behind their
+/// heading so a long-lived parent session cannot bury its running workers under
+/// finished ones. `openall` is adding per-worker model/reasoning to the typed
+/// presentation, so the group table stays separate from the row text.
+fn subagent_group_for(state: &str) -> (&'static str, u8, bool) {
+    match state {
+        "running" => ("Running", 0, false),
+        "pending" => ("Queued", 1, false),
+        "degraded" => ("Blocked", 2, false),
+        "active" => ("Active", 3, false),
+        "succeeded" => ("Done", 4, true),
+        "failed" => ("Failed", 5, true),
+        "stopped" | "cancelled" => ("Stopped", 6, true),
+        "unavailable" => ("Unavailable", 7, true),
+        "empty" | "loading" => ("Pending state", 8, false),
+        _ => ("Other", 9, true),
+    }
+}
+
+/// Order entries into their display groups and derive the group index ranges.
+///
+/// Only ordering changes here: every worker keeps its stable node id and its
+/// opaque session reference, and no session identifier enters the display text.
+fn order_subagent_entries(entries: Vec<SubagentViewEntry>) -> (Vec<SubagentViewEntry>, Vec<crate::tui::view::SubagentGroup>) {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|index| {
+        let (_, priority, _) = subagent_group_for(&entries[*index].state);
+        (priority, *index)
+    });
+    let mut groups: Vec<crate::tui::view::SubagentGroup> = Vec::new();
+    let mut ordered: Vec<SubagentViewEntry> = Vec::with_capacity(entries.len());
+    for (position, source) in order.into_iter().enumerate() {
+        let entry = &entries[source];
+        let (label, _, collapsible) = subagent_group_for(&entry.state);
+        match groups.last_mut() {
+            Some(group) if group.label == label => group.indices.push(position),
+            _ => groups.push(crate::tui::view::SubagentGroup {
+                label: label.to_owned(),
+                indices: vec![position],
+                collapsible,
+            }),
+        }
+        ordered.push(entry.clone());
+    }
+    (ordered, groups)
 }
 
 fn subagent_view_entries_from_presentation(
@@ -2893,6 +3342,7 @@ fn subagent_view_entries_from_presentation(
                 node_id: node.id,
                 label: node.label,
                 description,
+                state,
                 session_reference,
                 fallback_detail,
             }
@@ -2916,16 +3366,44 @@ fn subagent_picker_snapshot(
     entries: &[SubagentViewEntry],
     notices: Vec<String>,
 ) -> SubagentPickerSnapshot {
+    let (ordered, groups) = order_subagent_entries(entries.to_vec());
     SubagentPickerSnapshot {
-        title: format!("{title} · Enter views transcript · Esc closes"),
-        items: entries.iter().map(|entry| entry.label.clone()).collect(),
-        descriptions: entries
+        title: subagent_panel_title(title, &groups),
+        items: ordered.iter().map(|entry| entry.label.clone()).collect(),
+        descriptions: ordered
             .iter()
             .map(|entry| Some(entry.description.clone()))
             .collect(),
-        node_ids: entries.iter().map(|entry| entry.node_id.clone()).collect(),
+        node_ids: ordered.iter().map(|entry| entry.node_id.clone()).collect(),
+        groups,
         notices,
     }
+}
+
+/// Panel title with the group counts the maintainer asked for, e.g.
+/// `Subagents · 8 running · 22 finished`. Counts come from the declared states,
+/// not from the row text.
+fn subagent_panel_title(title: &str, groups: &[crate::tui::view::SubagentGroup]) -> String {
+    let live: usize = groups
+        .iter()
+        .filter(|group| !group.collapsible)
+        .map(|group| group.indices.len())
+        .sum();
+    let finished: usize = groups
+        .iter()
+        .filter(|group| group.collapsible)
+        .map(|group| group.indices.len())
+        .sum();
+    let mut title = format!("{title} · Enter views transcript · Esc closes");
+    if groups.is_empty() {
+        return title;
+    }
+    let mut pieces = vec![format!("{live} live")];
+    if finished > 0 {
+        pieces.push(format!("{finished} finished"));
+    }
+    title.push_str(&format!(" · {}", pieces.join(" · ")));
+    title
 }
 
 struct SubagentRefreshContext<'a> {
@@ -2975,6 +3453,7 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
                 items: Vec::new(),
                 descriptions: Vec::new(),
                 node_ids: Vec::new(),
+                groups: Vec::new(),
                 notices,
             },
         }
@@ -7302,6 +7781,121 @@ mod tests {
         assert!(!shell.slash_popup_open());
     }
 
+    /// Drive the idle input owner with a fixed event list and return the shell.
+    async fn idle_shell_after(events: Vec<Event>) -> (InteractiveShell, Idle) {
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let mut shell = InteractiveShell::test_shell();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for event in events {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+        let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let idle = wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut extensions,
+            None,
+        )
+        .await
+        .unwrap();
+        (shell, idle)
+    }
+
+    fn ctrl_key(character: char) -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::CONTROL,
+        ))
+    }
+
+    #[tokio::test]
+    async fn idle_clipboard_gesture_inserts_native_text_without_submitting() {
+        clipboard_read::set_test_text(Some("pasted from the clipboard".to_owned()));
+        // Ctrl-D settles the idle wait without submitting or discarding the
+        // draft the paste created.
+        let (shell, idle) = idle_shell_after(vec![ctrl_key('v'), ctrl_key('d')]).await;
+        clipboard_read::clear_test_text();
+
+        assert!(matches!(idle, Idle::Quit));
+        assert_eq!(shell.pending(), "pasted from the clipboard");
+    }
+
+    #[tokio::test]
+    async fn idle_clipboard_gesture_without_text_keeps_the_existing_fallback() {
+        clipboard_read::set_test_text(None);
+        let (shell, idle) = idle_shell_after(vec![
+            ctrl_key('v'),
+            // The terminal-originated bracketed paste remains the fallback when
+            // no native transport produced text.
+            Event::Paste("terminal bracketed paste".to_owned()),
+            ctrl_key('d'),
+        ])
+        .await;
+        clipboard_read::clear_test_text();
+
+        assert!(matches!(idle, Idle::Quit));
+        assert_eq!(shell.pending(), "terminal bracketed paste");
+    }
+
+    #[tokio::test]
+    async fn clipboard_gesture_is_consumed_on_the_active_run_path_too() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        let gesture = ctrl_key('v');
+
+        clipboard_read::set_test_text(Some("steer text".to_owned()));
+        assert!(paste_clipboard_text(&mut shell, &gesture).await);
+        assert_eq!(shell.pending(), "steer text");
+
+        // Only the declared gesture is consumed.
+        let typed = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ));
+        assert!(!paste_clipboard_text(&mut shell, &typed).await);
+
+        // A failed read reports that nothing was pasted and leaves the draft.
+        clipboard_read::set_test_text(None);
+        assert!(!paste_clipboard_text(&mut shell, &gesture).await);
+        assert_eq!(shell.pending(), "steer text");
+        clipboard_read::clear_test_text();
+    }
+
+    /// `/fast` is gated on the declared endpoint capability and, while the
+    /// caller side is missing, reports the exact dependency instead of claiming
+    /// a wire change that did not happen.
+    #[test]
+    fn fast_reports_its_activation_dependency_and_rejects_other_routes() {
+        let mut shell = InteractiveShell::test_shell();
+        let codex = scripted_codex_model("http://127.0.0.1:1");
+        assert!(commands::codex_fast_tier_endpoint(&codex));
+
+        apply_fast_command(&mut shell, &codex, Some(true));
+        let on = shell.debug_error().expect("`/fast on` must report a state");
+        assert!(on.contains("not applied"), "{on}");
+        assert!(on.contains("service_tier"), "{on}");
+        assert!(on.contains("octet-agent"), "{on}");
+
+        apply_fast_command(&mut shell, &codex, None);
+        let status = shell.debug_error().expect("`/fast` must report a state");
+        assert!(status.contains("inert"), "{status}");
+        assert!(status.contains("nothing changed on the wire"), "{status}");
+
+        // A non-Codex route is refused with its declared protocol and profile.
+        let anthropic = scripted_model("http://127.0.0.1:1");
+        apply_fast_command(&mut shell, &anthropic, Some(true));
+        let rejected = shell.debug_error().expect("rejection must report a state");
+        assert!(rejected.contains("AnthropicMessages"), "{rejected}");
+        assert!(rejected.contains("Default"), "{rejected}");
+    }
+
     #[tokio::test]
     async fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
         let mut shell = InteractiveShell::test_shell();
@@ -7553,11 +8147,20 @@ mod tests {
         }
     }
 
+    /// The same scripted fixture on the Codex Responses route, the only profile
+    /// that declares the `service_tier` capability.
+    fn scripted_codex_model(uri: &str) -> octet_ai::Model {
+        let mut model = scripted_model(uri);
+        std::sync::Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        std::sync::Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Codex;
+        model
+    }
+
     /// Inspection facts for tests that drive `drive_active_run` directly. The
     /// paths do not exist: only the mechanics tests use this, and none of them
     /// issue an inspection command.
-    fn test_run_inspection() -> &'static ActiveRunInspection {
-        static INSPECTION: std::sync::OnceLock<ActiveRunInspection> = std::sync::OnceLock::new();
+    fn test_run_inspection() -> &'static ActiveRunInspection {        static INSPECTION: std::sync::OnceLock<ActiveRunInspection> = std::sync::OnceLock::new();
         INSPECTION.get_or_init(|| {
             let missing = PathBuf::from("/nonexistent/octet-run-inspection");
             ActiveRunInspection {

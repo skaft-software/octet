@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::session_store::{
-    active_branch_title, SessionMeta, SessionStore, SessionUserMetadata, MAX_SESSION_FILE_BYTES,
+    active_branch_title, EntryKind, SessionMeta, SessionStore, SessionUserMetadata,
+    MAX_SESSION_FILE_BYTES,
 };
 use crate::session_tree::render_session_tree;
 
@@ -34,6 +35,14 @@ pub enum SessionCommand {
     },
     /// Inspect one session without modifying it.
     Inspect { id: String },
+    /// Incrementally search session entry text (user and assistant messages).
+    Search {
+        /// Case-insensitive literal substring to match.
+        query: String,
+        /// Maximum number of hits to print.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Give a session a readable name (an empty name clears it).
     Rename { id: String, name: String },
     /// Replace a session's searchable tags.
@@ -64,6 +73,7 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
     match command {
         SessionCommand::List { query } => list(&store, query.as_deref()),
         SessionCommand::Inspect { id } => inspect(&store, &id),
+        SessionCommand::Search { query, limit } => search(&store, &query, limit),
         SessionCommand::Rename { id, name } => rename(&store, &id, &name),
         SessionCommand::Tag { id, tags } => tag(&store, &id, tags),
         SessionCommand::Export {
@@ -129,6 +139,42 @@ fn matches_query(session: &SessionMeta, query: Option<&str>) -> bool {
     )
     .to_ascii_lowercase();
     haystack.contains(query)
+}
+
+/// Bounded incremental entry search. Reports the index change so a caller can
+/// notify on a real transcript change.
+fn search(store: &SessionStore, query: &str, limit: usize) -> anyhow::Result<()> {
+    if query.trim().is_empty() {
+        anyhow::bail!("sessions search requires a non-empty query");
+    }
+    let outcome = store.search_entries(query, limit.clamp(1, 200))?;
+    if outcome.hits.is_empty() {
+        crate::output::stdout_line(format!("No session entries match {query:?}."));
+    } else {
+        let terminal = crate::output::stdout_is_terminal();
+        crate::output::stdout_table_line("SESSION\tENTRY\tROLE\tTEXT");
+        for hit in &outcome.hits {
+            let role = match hit.kind {
+                EntryKind::User => "user",
+                EntryKind::Assistant => "assistant",
+            };
+            let text = hit.text.replace('\n', " ");
+            crate::output::stdout_table_line(format!(
+                "{}\t{}\t{}\t{}",
+                crate::output::table_field(&hit.session_id, terminal),
+                crate::output::table_field(&hit.entry_id, terminal),
+                role,
+                crate::output::table_field(&text, terminal),
+            ));
+        }
+    }
+    if outcome.index_changed {
+        crate::output::stderr_line(format!(
+            "Indexed {} session(s); entry-index revision {}.",
+            outcome.scanned_sessions, outcome.revision
+        ));
+    }
+    Ok(())
 }
 
 fn inspect(store: &SessionStore, id: &str) -> anyhow::Result<()> {

@@ -86,10 +86,17 @@ arguments.
 privileged networks, or sensitive credentials.** Its process-owner-only
 experimental switch is not a safety qualification. The [nine-defect remediation
 record and remaining closure gates](REFERENCE.md#known-streamable-http-defects)
-describe the tested safeguards and outstanding qualification work.
-The stock runtime has no remote credential provider. Legacy SSE, OAuth/browser
-authorization, resources, prompts, sampling, elicitation, and ambient discovery
-are unsupported.
+describe the tested safeguards and outstanding qualification work. The supported
+remote surface stays deliberately narrow: one exact URL with no
+redirects/proxies/cookies, one negotiated session, static extension-scoped
+credentials only, and an optional permanent GET stream for a server that declares
+a change notification. A remote descriptor may name one `OCTET_MCP_*` environment
+variable that the bridge reads per request and never logs, echoes, or stores. The
+stock runtime has no credential broker and no OAuth flow: `CredentialProvider`
+adapters must be composed explicitly, and OAuth/browser authorization stays
+policy-gated because the extension API has no host-brokered authorization
+primitive. Legacy SSE authorization, resources, prompts, sampling, elicitation,
+and ambient discovery are unsupported.
 
 ## Reference
 

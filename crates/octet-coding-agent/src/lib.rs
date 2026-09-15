@@ -7,6 +7,9 @@ mod auth;
 mod batch;
 mod cli;
 mod commands;
+/// Codex context-window policy, deliberate clamp notices, and the explicit
+/// opt-in override entry point (`resolve_codex_context_window`).
+pub mod codex_context;
 mod compaction;
 mod config;
 mod doctor;
@@ -73,6 +76,9 @@ async fn run() -> anyhow::Result<()> {
     let top_level_command = cli.command.clone();
     let parity = cli.parity.clone();
     parity.validate()?;
+    // Bridge the opt-in Codex context-window override to the resolution policy
+    // before any bootstrap or mode dispatch reads it.
+    parity.install_codex_context_env();
 
     // Subscription auth commands run and exit before any run configuration is
     // built — they need neither a workspace nor a session.
@@ -148,6 +154,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(cli::TopLevelCommand::Sessions { command }) = top_level_command.clone() {
         return session_commands::run(command, &config);
+    }
+    if let Some(cli::TopLevelCommand::Catalog { command }) = top_level_command.clone() {
+        return cli::catalog_publish::run(command, &config);
     }
     if let Some(cli::TopLevelCommand::Setup { options }) = top_level_command.clone() {
         // Provider setup owns a synchronous HTTP client and its runtime. Keep that

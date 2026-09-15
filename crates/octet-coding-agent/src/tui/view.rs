@@ -63,7 +63,7 @@ use self::output_window::bounded_tail_rows;
 pub(crate) use self::panel_render::panel_render_test_hook;
 #[cfg(test)]
 use self::panel_render::render_panel;
-use self::panel_render::{filtered_indices, filtered_indices_for_action, session_picker_ordering};
+use self::panel_render::{filtered_indices_for_action, session_picker_ordering};
 use self::reasoning_render::collapsed_reasoning_lines;
 #[cfg(test)]
 use self::renderer_runtime::{
@@ -593,6 +593,102 @@ pub(crate) enum Panel {
     },
 }
 
+/// One declared state group in the live `/subagents` panel.
+///
+/// Grouping is a display concern: the extension protocol keeps sending a flat
+/// node list and the panel derives headings from the declared generic state, so
+/// a heading is never a selectable row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubagentGroup {
+    /// Heading text, e.g. `Running` or `Done`.
+    pub label: String,
+    /// Raw item indices in this group, in panel order.
+    pub indices: Vec<usize>,
+    /// Terminal groups collapse by default so finished workers cannot bury the
+    /// live ones.
+    pub collapsible: bool,
+}
+
+/// Selectable subagent nodes plus the grouping and collapse state that the
+/// select-list panel renders as chrome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubagentPanel {
+    /// Stable node id per raw item index.
+    pub node_ids: Vec<String>,
+    pub groups: Vec<SubagentGroup>,
+    /// Whether collapsible groups are currently hidden.
+    pub collapsed: bool,
+    /// Active declared-state view filter. `None` shows every group;
+    /// `Some(label)` shows only workers in that group. Stored by group label,
+    /// never by index, so a refresh that reorders or drops groups cannot
+    /// silently retarget the reader's view.
+    pub state_filter: Option<String>,
+}
+
+impl SubagentPanel {
+    /// True when the item is hidden behind a collapsed group heading.
+    fn hides(&self, index: usize) -> bool {
+        self.collapsed
+            && self
+                .groups
+                .iter()
+                .any(|group| group.collapsible && group.indices.contains(&index))
+    }
+
+    fn group_of(&self, index: usize) -> Option<usize> {
+        self.groups
+            .iter()
+            .position(|group| group.indices.contains(&index))
+    }
+
+    /// Declared group label the item belongs to, when it belongs to a group.
+    fn group_label(&self, index: usize) -> Option<&str> {
+        self.group_of(index)
+            .map(|group| self.groups[group].label.as_str())
+    }
+
+    /// The active state view filter label, or `None` when every group shows.
+    pub(crate) fn state_filter_label(&self) -> Option<&str> {
+        self.state_filter.as_deref()
+    }
+
+    /// Cycle the state view filter through `All` and every non-empty group.
+    ///
+    /// Cycling past the last group returns to `All`, so a reader can always
+    /// restore the full list without remembering how many groups exist.
+    pub(crate) fn cycle_state_filter(&mut self) {
+        let mut order: Vec<Option<String>> = vec![None];
+        order.extend(
+            self.groups
+                .iter()
+                .filter(|group| !group.indices.is_empty())
+                .map(|group| Some(group.label.clone())),
+        );
+        let position = order
+            .iter()
+            .position(|candidate| candidate.as_deref() == self.state_filter.as_deref())
+            .unwrap_or(0);
+        self.state_filter = order.get(position + 1).cloned().flatten();
+    }
+
+    fn counts(&self, visible: &[usize]) -> Vec<usize> {
+        self.groups
+            .iter()
+            .map(|group| {
+                group
+                    .indices
+                    .iter()
+                    .filter(|index| visible.contains(index))
+                    .count()
+            })
+            .collect()
+    }
+
+    pub(crate) fn toggle_collapsed(&mut self) {
+        self.collapsed = !self.collapsed;
+    }
+}
+
 /// What happens when the user confirms a panel selection.
 #[derive(Clone, Debug)]
 #[allow(dead_code, clippy::enum_variant_names)]
@@ -614,8 +710,9 @@ pub(crate) enum PanelAction {
     SelectReasoningMode(Vec<octet_ai::ReasoningMode>),
     /// Select an installed executable-extension bundle.
     SelectExtension(Vec<String>),
-    /// Select one subagent presentation node.
-    SelectSubagent(Vec<String>),
+    /// Select one subagent presentation node, grouped and collapsible by
+    /// declared state.
+    SelectSubagent(SubagentPanel),
     /// Select one step in guided provider onboarding. Kept distinct from
     /// extension selection so ordinary-surface consumers retain the workflow
     /// purpose rather than inferring it from labels.
@@ -638,6 +735,15 @@ impl PanelAction {
     pub(crate) fn model_provider_groups(&self) -> Option<&[String]> {
         match self {
             Self::SelectGroupedModel { providers, .. } => Some(providers),
+            _ => None,
+        }
+    }
+
+    /// Subagent grouping and collapse state, when this is the live `/subagents`
+    /// panel.
+    pub(crate) fn subagent_panel(&self) -> Option<&SubagentPanel> {
+        match self {
+            Self::SelectSubagent(panel) => Some(panel),
             _ => None,
         }
     }
@@ -4892,14 +4998,15 @@ impl InteractiveShell {
         invalidate_editor_autocomplete(&mut state);
     }
 
-    /// Replace a live subagent list without losing its filter or stable-node
-    /// selection while presentation revisions arrive in the background.
+    /// Replace a live subagent list without losing its filter, stable-node
+    /// selection, or the reader's expand/collapse choice while presentation
+    /// revisions arrive in the background.
     pub fn refresh_subagent_panel(
         &mut self,
         title: String,
         items: Vec<String>,
         descriptions: Vec<Option<String>>,
-        node_ids: Vec<String>,
+        next: SubagentPanel,
     ) {
         let mut state = self.state.borrow_mut();
         let Some(Panel::SelectList {
@@ -4913,24 +5020,52 @@ impl InteractiveShell {
         else {
             return;
         };
-        let PanelAction::SelectSubagent(current_ids) = action else {
+        if action.subagent_panel().is_none() {
             return;
-        };
-        let current_raw = filtered_indices(current_items, current_descriptions, filter)
-            .get(*selected)
-            .copied();
-        let current_id = current_raw
-            .and_then(|index| current_ids.get(index))
-            .cloned();
+        }
+        // Selection is tracked by stable node id and mapped through the visible
+        // (collapse-aware) positions the picker actually navigates, so it can
+        // never land on a row hidden behind a collapsed heading.
+        let previous_visible =
+            filtered_indices_for_action(current_items, current_descriptions, action, filter);
+        let current_id = action.subagent_panel().and_then(|panel| {
+            previous_visible
+                .get(*selected)
+                .and_then(|index| panel.node_ids.get(*index))
+                .cloned()
+        });
+        // A refresh must not silently re-open a collapsed group: only the node
+        // list and its grouping come from the new revision.
+        let collapsed = action
+            .subagent_panel()
+            .is_some_and(|panel| panel.collapsed);
+        // Preserve the reader's state view filter, but only while the group it
+        // names still exists in the new revision.
+        let state_filter = action
+            .subagent_panel()
+            .and_then(|panel| panel.state_filter.clone())
+            .filter(|label| next.groups.iter().any(|group| &group.label == label));
 
         current_surface.title = title;
         *current_items = items;
         *current_descriptions = descriptions;
-        *current_ids = node_ids;
-        let filtered = filtered_indices(current_items, current_descriptions, filter);
+        if let PanelAction::SelectSubagent(current) = action {
+            *current = next;
+            current.collapsed = collapsed;
+            current.state_filter = state_filter;
+        }
+        let filtered =
+            filtered_indices_for_action(current_items, current_descriptions, action, filter);
         *selected = current_id
             .as_ref()
-            .and_then(|id| current_ids.iter().position(|candidate| candidate == id))
+            .and_then(|id| {
+                action.subagent_panel().and_then(|panel| {
+                    panel
+                        .node_ids
+                        .iter()
+                        .position(|candidate| candidate == id)
+                })
+            })
             .and_then(|raw| filtered.iter().position(|candidate| *candidate == raw))
             .unwrap_or_else(|| (*selected).min(filtered.len().saturating_sub(1)));
     }
@@ -5080,11 +5215,12 @@ impl InteractiveShell {
         let confirmation = matches!(&action, PanelAction::Confirmation);
         match panel {
             Panel::SelectList {
+                surface: _,
                 items,
                 descriptions,
                 selected,
                 filter,
-                ..
+                action: panel_action,
             } => {
                 use crossterm::event::{Event, KeyCode, KeyModifiers};
                 match event {
@@ -5178,6 +5314,26 @@ impl InteractiveShell {
                                     .len()
                                 {
                                     *selected += 1;
+                                }
+                            }
+                            KeyCode::Char('t') if key.modifiers == KeyModifiers::CONTROL => {
+                                // Collapse/expand the terminal subagent groups.
+                                // The visible index set changes, so the
+                                // selection restarts at the first row instead
+                                // of pointing at a row that is now hidden.
+                                if let PanelAction::SelectSubagent(subagents) = panel_action {
+                                    subagents.toggle_collapsed();
+                                    *selected = 0;
+                                }
+                            }
+                            KeyCode::Char('f') if key.modifiers == KeyModifiers::CONTROL => {
+                                // Cycle the declared-state view filter:
+                                // All -> each non-empty group -> All. The
+                                // visible index set changes, so the selection
+                                // restarts at the first visible row.
+                                if let PanelAction::SelectSubagent(subagents) = panel_action {
+                                    subagents.cycle_state_filter();
+                                    *selected = 0;
                                 }
                             }
                             KeyCode::Char(c)

@@ -50,6 +50,14 @@ use crate::session::{
     DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
     ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, UsageRecordKind,
 };
+use crate::telemetry::{
+    schema::{
+        CompactionSpan, CompletionAttributes, EmptyAttributes, ProviderOperation as SpanOperation,
+        ProviderRequestSpan, ProviderStreamSpan, RequestAttributes, RunSpan, SummarySpan,
+        ToolAttributes, ToolSpan, TurnSpan,
+    },
+    spans::{SpanGuard, TelemetryContext},
+};
 use crate::tool::{
     content_hash, CancellationToken, ReplaySafety, Tool, ToolConcurrency, ToolContext, ToolError,
     ToolOutput, ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
@@ -688,6 +696,11 @@ pub struct Agent {
     ultra_observation_managed: bool,
     delegation: Option<DelegationBinding>,
     last_run_lifecycle: Option<Arc<RunLifecycle>>,
+    /// Explicit, caller-owned span observer for the run/turn/provider/tool
+    /// boundaries. Inert by default: dropping to
+    /// [`NOOP_TELEMETRY_CONTEXT`](crate::telemetry::spans::NOOP_TELEMETRY_CONTEXT)
+    /// loses observations, never accounting.
+    telemetry: TelemetryContext,
 }
 
 impl Drop for Agent {
@@ -1270,6 +1283,15 @@ struct DeferredParallelAfterToolCall {
 struct ParallelReadWaveExecution {
     execution: CompletedToolExecution,
     after: Option<DeferredParallelAfterToolCall>,
+}
+
+/// Terminal status of one tool boundary: a hard error or a tool-reported
+/// error result is an error span; a tool-reported success is not.
+fn tool_execution_failed(result: &Result<ToolOutput, ToolError>) -> bool {
+    match result {
+        Ok(output) => output.is_error(),
+        Err(_) => true,
+    }
 }
 
 struct AdmittedParallelReadCall {
@@ -4297,6 +4319,8 @@ struct CompactionContext<'a> {
     context: &'a ContextTracker,
     tool_generation: u64,
     capacity: &'a mut ContextCapacityCache,
+    /// Explicit span observer copied from the owning agent for this compaction.
+    telemetry: TelemetryContext,
 }
 
 struct CapacityEstimate {
@@ -4509,6 +4533,14 @@ impl CompactionContext<'_> {
         messages: Vec<Message>,
         output_tokens: u64,
     ) -> Result<Option<String>, AgentError> {
+        // Row 3.5: the summary boundary owns its own provider request, which
+        // nests under it. Both settle explicitly on every returned outcome.
+        let summary_guard = self.telemetry.begin_typed::<SummarySpan>(EmptyAttributes {});
+        let summary_request_guard = summary_guard.context().begin_typed::<ProviderRequestSpan>(
+            RequestAttributes {
+                operation: SpanOperation::Summary,
+            },
+        );
         // Compaction is a normal provider request: retaining the stable session
         // affinity lets compatible providers reuse any common prefix and keeps
         // its accounting visible alongside autonomous turns.
@@ -4614,9 +4646,19 @@ impl CompactionContext<'_> {
             response.stop_reason,
             StopReason::EndTurn | StopReason::StopSequence
         ) {
+            summary_request_guard.finish(false);
+            summary_guard.finish(false);
             return Ok(None);
         }
-        Ok(assistant_text(&response))
+        let text = assistant_text(&response);
+        if text.is_some() {
+            CompletionAttributes::usage(&response.usage)
+                .with_uncertainty(self.session.has_uncertain_usage())
+                .record(&summary_request_guard.span);
+        }
+        summary_request_guard.finish(false);
+        summary_guard.finish(false);
+        Ok(text)
     }
 
     /// Generate a Pi-compatible structured handoff, including a dedicated
@@ -4733,6 +4775,11 @@ impl CompactionContext<'_> {
         reason: CompactionReason,
     ) -> Result<CompactionInfo, AgentError> {
         let id = self.begin_compaction(system, tools, reason)?;
+        // Row 3.5: one compaction boundary. Dropped guards settle as
+        // errors, so the explicit settle below marks only real success.
+        let compaction_guard = self
+            .telemetry
+            .begin_typed::<CompactionSpan>(EmptyAttributes {});
         let operation_started = std::time::Instant::now();
         let usage_before = *self.usage;
         let cost_before = self.run_cost.microdollars;
@@ -4878,6 +4925,7 @@ impl CompactionContext<'_> {
         }
 
         self.finish_compaction(id, system, tools, reason, &operation, self.model);
+        compaction_guard.finish(operation.is_err());
         operation
     }
 
@@ -4889,6 +4937,15 @@ impl CompactionContext<'_> {
         reason: CompactionReason,
     ) -> Result<CompactionInfo, AgentError> {
         let id = self.begin_compaction(system, tools, reason)?;
+        // Row 3.5: one compaction boundary. Dropped guards settle as
+        // errors, so the explicit settle below marks only real success.
+        let compaction_guard = self
+            .telemetry
+            .begin_typed::<CompactionSpan>(EmptyAttributes {});
+        // Summary requests issued inside this operation are children of the
+        // compaction boundary, not of the turn that triggered the compaction.
+        // The caller's scope is restored before the settled status is written.
+        let turn_scope = std::mem::replace(&mut self.telemetry, compaction_guard.context());
         let operation_started = std::time::Instant::now();
         let usage_before = *self.usage;
         let cost_before = self.run_cost.microdollars;
@@ -4942,7 +4999,9 @@ impl CompactionContext<'_> {
                 .map(|_| self.run_cost.microdollars.saturating_sub(cost_before));
         }
 
+        self.telemetry = turn_scope;
         self.finish_compaction(id, system, tools, reason, &operation, self.compaction_model);
+        compaction_guard.finish(operation.is_err());
         operation
     }
 
@@ -5250,7 +5309,29 @@ impl Agent {
             ultra_observation_managed: false,
             delegation: None,
             last_run_lifecycle: None,
+            telemetry: TelemetryContext::default(),
         })
+    }
+
+    /// Installs the explicit span observer used by runs of this agent.
+    ///
+    /// The context is inert by default. Spans observe boundaries only: they
+    /// never write durable session accounting, so an installed observer (or a
+    /// missing one) cannot change usage, cost or uncertainty outcomes. A
+    /// delegated child agent receives the parent's delegation-span context when
+    /// its run is driven, so child spans nest under `octet.agent.delegation`.
+    pub fn set_telemetry_context(&mut self, telemetry: TelemetryContext) {
+        if let Some(delegation) = &self.delegation {
+            // Child runs are driven outside this agent's own stream, so the
+            // bound delegation runtime observes with the same explicit context.
+            delegation.set_span_context(telemetry.clone());
+        }
+        self.telemetry = telemetry;
+    }
+
+    /// Returns the span observer currently installed for this agent.
+    pub fn telemetry_context(&self) -> &TelemetryContext {
+        &self.telemetry
     }
 
     /// Builds an owned startup request that can establish the Responses
@@ -6286,6 +6367,7 @@ impl Agent {
             .as_ref()
             .and_then(DelegationBinding::telemetry_receiver);
         let stream_lifecycle = lifecycle.clone();
+        let telemetry = self.telemetry.clone();
         let session = &mut self.session;
 
         let stream = async_stream::stream! {
@@ -6299,6 +6381,11 @@ impl Agent {
             };
             let session = &mut *session_guard;
             let mut context_capacity = initial_capacity;
+            // Row 3.5: one run span owns the generated stream's lifetime. Its
+            // children (turns) are derived only from this explicit context, and
+            // the guard is settled explicitly at the durable run boundary.
+            let run_guard = telemetry.begin_typed::<RunSpan>(EmptyAttributes {});
+            let run_context = run_guard.context();
 
             let (mut tool_revision, tools) = extension_host.tool_snapshot();
             let mut tool_defs: Vec<ToolDef> = if tools_enabled {
@@ -6352,7 +6439,27 @@ impl Agent {
             let mut recent_tool_calls: VecDeque<(String, String)> =
                 VecDeque::with_capacity(MAX_RECENT_TOOL_CALLS);
 
+            // Row 3.5 boundary state: the live turn guard and its derived child
+            // context, plus the per-attempt outcome that decides whether the
+            // previous turn settled as a completed or a failed attempt.
+            let mut previous_turn: Option<SpanGuard> = None;
+            let mut turn_attempt_opened = false;
+            let mut turn_attempt_succeeded = false;
+
             let mut reason: FinishReason = 'run: loop {
+                // Row 3.5: an iteration is one turn boundary. The previous
+                // turn is settled here (a `continue 'run` continuation is a
+                // completed turn, not an error) and the current one begins.
+                // A turn that opened a provider attempt without a finished
+                // response is reported as an error attempt.
+                if let Some(settled) = previous_turn.take() {
+                    settled.finish(turn_attempt_opened && !turn_attempt_succeeded);
+                }
+                turn_attempt_opened = false;
+                turn_attempt_succeeded = false;
+                let turn_guard = run_context.begin_typed::<TurnSpan>(EmptyAttributes {});
+                let turn_context = turn_guard.context();
+                previous_turn = Some(turn_guard);
                 if let Some(recovery) = pending_recovery.take() {
                     if recovery.usage_unknown() {
                         let first = !session.has_uncertain_usage();
@@ -6621,6 +6728,7 @@ impl Agent {
                         context: &stream_context,
                         tool_generation: tool_revision,
                         capacity: &mut context_capacity,
+                        telemetry: turn_context.clone(),
                     };
                     let operation = compaction.ensure_capacity(
                         &system,
@@ -6747,6 +6855,15 @@ impl Agent {
                 }
 
                 // ── Open the provider stream (abortable) ───────────────────
+                // Row 3.5: one logical provider request. It is opened here so
+                // that turn iterations that never reach the provider (steering
+                // or a stale prepared turn) do not fabricate a request span.
+                let request_guard = turn_context.begin_typed::<ProviderRequestSpan>(
+                    RequestAttributes {
+                        operation: SpanOperation::Assistant,
+                    },
+                );
+                turn_attempt_opened = true;
                 // A new provider request for this model turn starts here.
                 // Anchor first-token-latency measurement for consumers that
                 // track it per attempt: the first OutputDelta of this stream
@@ -6807,6 +6924,7 @@ impl Agent {
                                 context: &stream_context,
                                 tool_generation: tool_revision,
                                 capacity: &mut context_capacity,
+                                telemetry: turn_context.clone(),
                             };
                             let operation = compaction.force_one_boundary(
                                 &system,
@@ -6879,6 +6997,11 @@ impl Agent {
                     Abort,
                 }
                 let mut attempt_saw_generation = false;
+                // Row 3.5: the streaming response is its own boundary nested
+                // under the request that produced it.
+                let stream_guard = request_guard
+                    .context()
+                    .begin_typed::<ProviderStreamSpan>(EmptyAttributes {});
                 let turn = loop {
                     let next = tokio::select! {
                         biased;
@@ -6963,6 +7086,7 @@ impl Agent {
                                         context: &stream_context,
                                         tool_generation: tool_revision,
                                         capacity: &mut context_capacity,
+                                        telemetry: turn_context.clone(),
                                     };
                                     let operation = compaction.force_one_boundary(
                                         &system,
@@ -7062,7 +7186,15 @@ impl Agent {
                     }
                 };
                 let response = match turn {
-                    Ok(r) => r,
+                    Ok(response) => {
+                        turn_attempt_succeeded = true;
+                        CompletionAttributes::usage(&response.usage)
+                            .with_uncertainty(session.has_uncertain_usage())
+                            .record(&request_guard.span);
+                        stream_guard.finish(false);
+                        request_guard.finish(false);
+                        response
+                    }
                     Err(reason) => break 'run reason,
                 };
                 // Context-recovery attempts are scoped to one logical provider
@@ -7628,7 +7760,16 @@ impl Agent {
                         // A single eligible call gains no overlap and keeps the
                         // ordinary sequential path's hook/control behavior.
                         if wave_end - call_index > 1 {
+                            // Row 3.5: one tool boundary per call in the wave.
+                            // They are settled together once the wave resolves.
+                            let mut wave_tool_guards =
+                                Vec::with_capacity(wave_end - call_index);
                             for call in &calls[call_index..wave_end] {
+                                wave_tool_guards.push(turn_context.begin_typed::<ToolSpan>(
+                                    ToolAttributes {
+                                        name: call.name.clone(),
+                                    },
+                                ));
                                 let parsed = call
                                     .arguments_value()
                                     .expect("parallel read wave validates arguments");
@@ -7684,6 +7825,11 @@ impl Agent {
                                     },
                                 }
                             };
+                            for (guard, entry) in
+                                wave_tool_guards.into_iter().zip(completed.iter())
+                            {
+                                guard.finish(tool_execution_failed(&entry.execution.result));
+                            }
                             parallel_results.extend(completed);
                         }
                     }
@@ -7715,7 +7861,15 @@ impl Agent {
                             }
                             None => (None, None),
                         };
+                    let mut tool_guard: Option<SpanGuard> = None;
                     if preexecuted.is_none() {
+                        // Row 3.5: one tool boundary per executed call, settled
+                        // at the durable result boundary below.
+                        tool_guard = Some(turn_context.begin_typed::<ToolSpan>(
+                            ToolAttributes {
+                                name: call.name.clone(),
+                            },
+                        ));
                         stream_context.tool_started();
                         let ev = AgentEvent::ToolStarted {
                             id: call.id.clone(),
@@ -8139,6 +8293,7 @@ impl Agent {
                             .with_is_error(is_error)),
                         Err(error) => Err(error),
                     };
+                    let tool_failed = tool_execution_failed(&result);
                     let mut ev = AgentEvent::ToolFinished {
                         id: call.id.clone(),
                         result,
@@ -8151,6 +8306,9 @@ impl Agent {
                         output.attach_owner_presentation_images(images);
                     }
                     yield ev;
+                    if let Some(guard) = tool_guard {
+                        guard.finish(tool_failed);
+                    }
                     call_index += 1;
 
                 }
@@ -8178,6 +8336,15 @@ impl Agent {
                 // entries into the provider-required single user message.
             };
 
+            // Row 3.5: settle the final turn before the run boundary. A turn
+            // that never opened a provider attempt is not an error; one that
+            // opened an attempt without a finished response is.
+            if let Some(settled) = previous_turn.take() {
+                settled.finish(
+                    matches!(reason, FinishReason::Failed(_))
+                        || (turn_attempt_opened && !turn_attempt_succeeded),
+                );
+            }
             *control_admission.lock().unwrap_or_else(|error| error.into_inner()) = false;
             // A fully driven prompt always leaves an explicit durable restore
             // point, including controlled abort/max-turn/failure outcomes. A
@@ -8260,6 +8427,9 @@ impl Agent {
             }
             let head = session.head().unwrap_or(first_entry);
             stream_context.run_finished(&reason);
+            // Row 3.5: the run span settles at the durable run boundary, after
+            // every recovery and checkpoint path has finalized `reason`.
+            run_guard.finish(matches!(reason, FinishReason::Failed(_)));
             stream_lifecycle.finished.store(true, Ordering::Release);
             let ev = AgentEvent::RunFinished { head, reason };
             notify_observers(&observers, &ev);

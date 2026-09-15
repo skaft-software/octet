@@ -236,7 +236,7 @@ class PresentationTests(unittest.TestCase):
                 self.assertNotIn(entry["name"], compact)
                 self.assertNotIn(entry["args"], compact)
         self.assertEqual(activity["summary"], "fixture-worker · running")
-        self.assertIn("2 tool calls", node["secondary"])
+        self.assertIn("2 calls", node["secondary"])
         self.assertIn("1/8 turns", node["secondary"])
         self.assertIn("1000 tok", node["secondary"])
         self.assertIn("$0.0012", node["secondary"])
@@ -284,6 +284,71 @@ class PresentationTests(unittest.TestCase):
         detail = snapshot["collection"]["detail"]["body"]
         self.assertIn("[error] bash command=make test", detail)
         self.assertIn(worker.last_error, detail)
+
+    def test_worker_rows_omit_absence_and_human_format_bounded_values(self):
+        # Every ceiling is inherited and no counter is exposed: absence must be
+        # omitted, never rendered as `no ceiling` or a `?` placeholder.
+        bare = self.worker(
+            "running",
+            max_turns=None,
+            max_tokens=None,
+            max_cost_microdollars=None,
+            turn_count=None,
+            tokens_used=None,
+            cost_microdollars=None,
+            tool_call_count=0,
+            phase="thinking",
+        )
+        snapshot = build_snapshot(
+            [bare], selected_agent_id=bare.agent_id, now_ms=1_700_000_004_000
+        )
+        secondary = snapshot["collection"]["nodes"][0]["secondary"]
+        self.assertEqual(secondary, "running · 4s · explore/claude-sonnet-test · 0 calls")
+        for absent in ("no ceiling", "?", "inherited", "unlimited", "not exposed"):
+            self.assertNotIn(absent, secondary)
+
+        long_running = self.worker(
+            "running",
+            turn_count=349,
+            max_turns=None,
+            tokens_used=263_229,
+            max_tokens=None,
+            cost_microdollars=7_200,
+            max_cost_microdollars=None,
+            tool_call_count=1,
+        )
+        snapshot = build_snapshot(
+            [long_running],
+            selected_agent_id=long_running.agent_id,
+            now_ms=1_700_000_349_000,
+        )
+        secondary = snapshot["collection"]["nodes"][0]["secondary"]
+        self.assertIn("5m49s", secondary)
+        self.assertIn("349 turns", secondary)
+        self.assertIn("263K tok", secondary)
+        self.assertIn("$0.0072", secondary)
+        self.assertNotIn("no ceiling", secondary)
+        self.assertIn("1 call ·", secondary)
+
+    def test_failed_rows_carry_a_bounded_reason_without_placeholders(self):
+        worker = self.worker(
+            "failed",
+            max_turns=None,
+            max_tokens=None,
+            turn_count=None,
+            tokens_used=None,
+            cost_microdollars=None,
+            last_error="provider boundary rejected the request: " + "x" * 400,
+        )
+        snapshot = build_snapshot(
+            [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_004_000
+        )
+        secondary = snapshot["collection"]["nodes"][0]["secondary"]
+        self.assertIn("failed", secondary)
+        self.assertIn("provider boundary rejected the request", secondary)
+        self.assertNotIn("x" * 200, secondary)
+        self.assertNotIn("?", secondary)
+        self.assertLessEqual(len(secondary.encode("utf-8")), 1024)
 
     def test_checked_in_presentation_fixtures_cover_live_tree_resync_and_inspection(self):
         live = json.loads(

@@ -876,14 +876,46 @@ fn live_subagent_refresh_preserves_selection_by_stable_node_id() {
         descriptions: vec![Some("running".into()), Some("done".into())],
         selected: 1,
         filter: String::new(),
-        action: PanelAction::SelectSubagent(vec!["node-a".into(), "node-b".into()]),
+        action: PanelAction::SelectSubagent(super::SubagentPanel {
+            node_ids: vec!["node-a".into(), "node-b".into()],
+            groups: vec![
+                super::SubagentGroup {
+                    label: "Running".into(),
+                    indices: vec![0],
+                    collapsible: false,
+                },
+                super::SubagentGroup {
+                    label: "Done".into(),
+                    indices: vec![1],
+                    collapsible: true,
+                },
+            ],
+            collapsed: true,
+            state_filter: None,
+        }),
     });
 
     shell.refresh_subagent_panel(
         "Subagents · refreshed".into(),
         vec!["beta".into(), "gamma".into()],
         vec![Some("done".into()), Some("running".into())],
-        vec!["node-b".into(), "node-c".into()],
+        super::SubagentPanel {
+            node_ids: vec!["node-b".into(), "node-c".into()],
+            groups: vec![
+                super::SubagentGroup {
+                    label: "Running".into(),
+                    indices: vec![0],
+                    collapsible: false,
+                },
+                super::SubagentGroup {
+                    label: "Done".into(),
+                    indices: vec![1],
+                    collapsible: true,
+                },
+            ],
+            collapsed: true,
+            state_filter: None,
+        },
     );
 
     let (result, action) = shell
@@ -892,8 +924,188 @@ fn live_subagent_refresh_preserves_selection_by_stable_node_id() {
     assert_eq!(result, PanelResult::Confirm(0));
     assert!(matches!(
         action,
-        PanelAction::SelectSubagent(ids) if ids == ["node-b", "node-c"]
+        PanelAction::SelectSubagent(panel) if panel.node_ids == ["node-b", "node-c"]
     ));
+}
+
+/// Open a grouped `/subagents` panel: `live` running workers followed by one
+/// worker in each terminal group.
+fn open_grouped_subagent_panel(shell: &mut InteractiveShell, live: usize, finished: usize) {
+    let mut items: Vec<String> = Vec::new();
+    let mut groups: Vec<super::SubagentGroup> = Vec::new();
+    let mut running = Vec::new();
+    for index in 0..live {
+        running.push(index);
+        items.push(format!("live-{index}"));
+    }
+    groups.push(super::SubagentGroup {
+        label: "Running".into(),
+        indices: running,
+        collapsible: false,
+    });
+    for label in ["Done", "Failed", "Stopped"] {
+        let start = items.len();
+        for index in 0..finished {
+            items.push(format!("{}-{index}", label.to_lowercase()));
+        }
+        let indices: Vec<usize> = (start..items.len()).collect();
+        groups.push(super::SubagentGroup {
+            label: label.into(),
+            indices,
+            collapsible: true,
+        });
+    }
+    let node_ids = items.iter().map(|item| format!("node-{item}")).collect();
+    let descriptions = items
+        .iter()
+        .map(|item| Some(format!("{item} · 42s · explore/inherited · 4 calls")))
+        .collect();
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Subagents · Enter views transcript"),
+        items,
+        descriptions,
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectSubagent(super::SubagentPanel {
+            node_ids,
+            groups,
+            collapsed: true,
+            state_filter: None,
+        }),
+    });
+}
+
+#[test]
+fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(110, 40);
+    // 8 live workers and 6 finished ones, mirroring the reported 32-row panel.
+    open_grouped_subagent_panel(&mut shell, 8, 2);
+
+    let rows = render_panel(&shell.state.borrow(), 110);
+    let plain = strip_terminal_sequences(&rows.join("\n"));
+    // Live work is expanded, with its own counted heading.
+    assert!(plain.contains("Running · 8"), "{plain}");
+    for index in 0..8 {
+        assert!(plain.contains(&format!("live-{index}")), "{plain}");
+    }
+    // Finished work is collapsed behind one bounded, counted summary line.
+    for hidden in ["done-0", "failed-0", "stopped-0", "done-1", "failed-1", "stopped-1"] {
+        assert!(!plain.contains(hidden), "collapsed row rendered: {plain}");
+    }
+    assert!(plain.contains("2 Done"), "{plain}");
+    assert!(plain.contains("2 Failed"), "{plain}");
+    assert!(plain.contains("2 Stopped"), "{plain}");
+    assert!(plain.contains("ctrl+t shows all"), "{plain}");
+    // Bounded: the panel never renders past its row allowance.
+    assert!(rows.len() <= 36, "{} panel rows", rows.len());
+
+    // The toggle expands every group with its own counted heading.
+    assert!(shell
+        .panel_input(&panel_key_with_modifiers(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+        .is_none());
+    let rows = render_panel(&shell.state.borrow(), 110);
+    let plain = strip_terminal_sequences(&rows.join("\n"));
+    for visible in ["done-0", "failed-1", "stopped-1"] {
+        assert!(plain.contains(visible), "{plain}");
+    }
+    assert!(plain.contains("Done · 2"), "{plain}");
+    assert!(plain.contains("Failed · 2"), "{plain}");
+    assert!(plain.contains("Stopped · 2"), "{plain}");
+    assert!(!plain.contains("ctrl+t shows all"), "{plain}");
+
+    // Collapsing again still lets a typed filter reach a hidden worker.
+    assert!(shell
+        .panel_input(&panel_key_with_modifiers(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+        .is_none());
+    for character in "failed-1".chars() {
+        shell.panel_input(&panel_key(crossterm::event::KeyCode::Char(character)));
+    }
+    let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 110).join("\n"));
+    assert!(plain.contains("failed-1"), "{plain}");
+    assert!(!plain.contains("live-0"), "the filter still narrows live rows: {plain}");
+}
+
+#[test]
+fn subagent_panel_refresh_keeps_collapsed_groups_and_a_visible_selection() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(110, 40);
+    open_grouped_subagent_panel(&mut shell, 2, 1);
+    // Select the second live worker, then refresh with a new revision whose live
+    // worker order changed and whose finished worker count grew.
+    shell.panel_input(&panel_key(crossterm::event::KeyCode::Down));
+    let selected_id = {
+        let state = shell.state.borrow();
+        let Some(Panel::SelectList { action, selected, .. }) = state.panel.as_ref() else {
+            panic!("subagent panel is open");
+        };
+        let panel = action.subagent_panel().expect("subagent action");
+        panel.node_ids[(*selected).min(panel.node_ids.len() - 1)].clone()
+    };
+
+    let items = vec![
+        "live-0".to_owned(),
+        "live-1".to_owned(),
+        "done-0".to_owned(),
+        "done-1".to_owned(),
+    ];
+    let descriptions = items.iter().map(|_| Some("48s".to_owned())).collect();
+    shell.refresh_subagent_panel(
+        "Subagents · refreshed".into(),
+        items,
+        descriptions,
+        super::SubagentPanel {
+            node_ids: vec![
+                "node-live-0".into(),
+                "node-live-1".into(),
+                "node-done-0".into(),
+                "node-done-1".into(),
+            ],
+            groups: vec![
+                super::SubagentGroup {
+                    label: "Running".into(),
+                    indices: vec![0, 1],
+                    collapsible: false,
+                },
+                super::SubagentGroup {
+                    label: "Done".into(),
+                    indices: vec![2, 3],
+                    collapsible: true,
+                },
+            ],
+            collapsed: false,
+            state_filter: None,
+        },
+    );
+
+    let state = shell.state.borrow();
+    let Some(Panel::SelectList {
+        action,
+        selected,
+        filter,
+        items,
+        ..
+    }) = state.panel.as_ref()
+    else {
+        panic!("subagent panel is still open");
+    };
+    let panel = action.subagent_panel().expect("subagent action");
+    // The refresh never re-opens a group the reader collapsed.
+    assert!(panel.collapsed);
+    assert_eq!(panel.group_of(2), Some(1));
+    // Selection stays on the same stable node and on a row that is visible.
+    assert_eq!(panel.node_ids[*selected], selected_id);
+    assert!(!panel.hides(*selected));
+    assert!(filter.is_empty());
+    let plain = strip_terminal_sequences(&render_panel(&state, 110).join("\n"));
+    assert!(plain.contains(&items[*selected]), "{plain}");
+    assert!(!plain.contains("done-1"), "{plain}");
 }
 
 #[test]

@@ -147,3 +147,44 @@ Observed commands and per-item status are appended below as they are run.
   terminal Mermaid graph-layout engine. Upstream depends on the external
   `grok-mermaid` package (`render` -> `MermaidArt`); nothing equivalent exists
   in the workspace.
+
+START 2026-09-15T15:43:44Z editor5 alive
+
+## editor5 ROW 2c.3 LaTeX port — LANDED (in progress notes)
+
+2026-09-15T15:43Z..16:20Z editor5.
+
+- Files: `crates/sexy-tui-rs/src/rich_text/latex/mod.rs` (new, port of the
+  1394-line upstream `packages/tui/src/latex.ts`: symbol tables, `LatexParser`,
+  fraction/operator/matrix layout), `crates/sexy-tui-rs/src/rich_text/latex/tables.rs`
+  (new, 224 symbols + 88 relation commands + 32 named operators + sub/superscript,
+  blackboard, negated, accent tables generated mechanically from upstream),
+  `crates/sexy-tui-rs/src/rich_text/mod.rs` (`pub mod latex;`),
+  `crates/sexy-tui-rs/tests/latex_render.rs` (new behavioral goldens).
+- API: `sexy_tui_rs::rich_text::latex::render_latex(&str, RenderLatexOptions) -> Option<String>`
+  — same contract as upstream `renderLatex` (`undefined` => `None`, never a panic).
+- Commands run + observed output:
+  - `cargo test -p sexy-tui-rs --test latex_render` =>
+    `test result: ok. 11 passed; 0 failed` (144-case upstream
+    `packages/tui/test/latex.test.ts` corpus + 5 fail-closed cases + 19
+    display-mode/box-drawing cases captured from the upstream implementation).
+  - Differential oracle: ran the real upstream `latex.ts` under Node 26 type
+    stripping with only `utils.ts`'s `visibleWidth` shimmed (upstream tui deps
+    are not installed), captured `(source, display, output)`; 278 hand-built
+    edge cases + 600 randomized token-soup cases produced **zero** divergences
+    from the Rust port (`cargo test -p sexy-tui-rs --test _latex_diff` ok).
+    Harness lives in /tmp (not committed).
+- Observed box-drawing output (from the oracle, asserted in the committed test):
+  `\begin{pmatrix}a & b \\ c & d\end{pmatrix}` display =>
+  `⎛ a │ b ⎞\n⎝ c │ d ⎠`;
+  `x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}` display =>
+  `    -b ± √(b²-4ac)\nx = ──────────────\n          2a`;
+  `\sum_{i=1}^{n} i = \frac{n(n+1)}{2}` display =>
+  ` n      n(n+1)\n ∑  i = ──────\ni=1       2`;
+  `\begin{pmatrix}界&a\\b&c\end{pmatrix}` display =>
+  `⎛ 界 │ a ⎞\n⎝ b  │ c ⎠`.
+- Port bug found + fixed by the oracle: the single-line
+  `NEGATIVE_SPACING_COMMANDS` set was mis-parsed by the table generator
+  (`\!` fell through to "unsupported"); `\det\!\left(...\right)` now renders.
+
+START 2026-09-15T16:28:34Z editor6 alive

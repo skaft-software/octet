@@ -9,7 +9,8 @@ import unittest
 from unittest import mock
 
 from octet_mcp.config import ConfigError, STREAMABLE_HTTP_GATE_ERROR, load_config
-from octet_mcp.runtime import build_runtime
+from octet_mcp.runtime import build_runtime, static_credential_provider
+from octet_mcp.streamable_http import StaticEnvironmentCredentialProvider
 
 from .helpers import ROOT
 
@@ -107,6 +108,90 @@ class ConfigTests(unittest.TestCase):
                 load_config(path, experimental_streamable_http_mcp=True).servers[0].url,
                 "https://mcp.wix.com/mcp",
             )
+
+    def test_static_bearer_credentials_are_extension_scoped_and_never_echoed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            base = {
+                "version": 1,
+                "servers": {
+                    "remote": {
+                        "transport": "streamable-http",
+                        "label": "Reviewed remote",
+                        "url": "http://127.0.0.1:9876/mcp",
+                        "auth": {"type": "static-bearer", "environment": "OCTET_MCP_REMOTE_TOKEN"},
+                    }
+                },
+            }
+            self.write_json(path, base)
+            with self.assertRaisesRegex(ConfigError, "process owner"):
+                load_config(path)
+            config = load_config(path, experimental_streamable_http_mcp=True)
+            remote = config.servers[0]
+            self.assertEqual(remote.auth.type, "static-bearer")
+            self.assertEqual(remote.auth.credential, "OCTET_MCP_REMOTE_TOKEN")
+            self.assertNotIn("OCTET_MCP_REMOTE_TOKEN", repr(remote))
+            self.assertNotIn("OCTET_MCP_REMOTE_TOKEN", repr(remote.auth))
+            self.assertIsInstance(
+                static_credential_provider(config), StaticEnvironmentCredentialProvider
+            )
+
+            # A disabled descriptor never composes the bundled source.
+            disabled = {
+                "version": 1,
+                "servers": {
+                    "remote": {**base["servers"]["remote"], "enabled": False},
+                },
+            }
+            self.write_json(path, disabled)
+            self.assertIsNone(
+                static_credential_provider(
+                    load_config(path, experimental_streamable_http_mcp=True)
+                )
+            )
+
+            # An adapter reference is never upgraded to a static source: the
+            # stock runtime keeps failing closed until a host adapter exists.
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {
+                        "remote": {
+                            **base["servers"]["remote"],
+                            "auth": {"type": "bearer", "credential": "reviewed_mcp"},
+                        }
+                    },
+                },
+            )
+            adapter_config = load_config(path, experimental_streamable_http_mcp=True)
+            self.assertIsNone(static_credential_provider(adapter_config))
+            self.assertEqual(adapter_config.servers[0].auth.type, "bearer")
+
+            invalid_auth = [
+                {"type": "static-bearer"},
+                {"type": "static-bearer", "environment": "OPENAI_API_KEY"},
+                {"type": "static-bearer", "environment": "OCTET_MCP_lower"},
+                {"type": "static-bearer", "environment": "OCTET_MCP_"},
+                {"type": "static-bearer", "environment": "OCTET_MCP_" + "A" * 49},
+                {"type": "static-bearer", "environment": "OCTET_MCP_TOKEN", "credential": "x"},
+                {"type": "static-bearer", "environment": "OCTET_MCP_TOKEN", "header": "x"},
+                {"type": "bearer", "environment": "OCTET_MCP_TOKEN"},
+                {"type": "bearer", "credential": "reviewed_mcp", "environment": "OCTET_MCP_T"},
+                {"type": "oauth", "credential": "reviewed_mcp"},
+            ]
+            for auth in invalid_auth:
+                self.write_json(
+                    path,
+                    {
+                        "version": 1,
+                        "servers": {
+                            "remote": {**base["servers"]["remote"], "auth": auth},
+                        },
+                    },
+                )
+                with self.assertRaises(ConfigError):
+                    load_config(path, experimental_streamable_http_mcp=True)
 
     def test_remote_gate_is_visible_to_the_product_runtime(self):
         with tempfile.TemporaryDirectory() as directory:

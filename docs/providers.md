@@ -441,6 +441,15 @@ remain in the [Lite contract](design/octet-ai.md#responses-lite) and
 Only explicitly parallel-safe pure/workspace-read effects overlap; shell and
 mutation effects remain serialized regardless of model batching.
 
+The Responses `service_tier` request field (`auto`, `default`, `flex`,
+`priority`) is a declared endpoint capability, not a provider identity: the
+codec sends it only when the caller selects one **and** the route's declared
+`runtime.responses_profile` accepts it (`Codex` today, the same gate `/fast`
+uses). Any other profile fails closed with a typed unsupported error instead of
+silently dropping a caller's billing-changing control. Octet does not yet apply
+the provider's tier cost multipliers to reported usage cost; see the
+[providers parity ledger](parity/providers.md#codex-service_tier).
+
 `previous_response_id` is a best-effort process-local live-WebSocket optimization
 only when fixed parameters and the prior input/output prefix match. It is not
 a durable cursor: resume or mismatch uses full local replay; native Responses

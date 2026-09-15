@@ -2756,7 +2756,7 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
                 "presentations": extension_presentations,
             }))?;
             app.executable_extensions.shutdown().await;
-            return Ok(());
+            return crate::modes::print::finish_ephemeral_accounting();
         }
         deferred.extend(queued);
         eof = input_eof;
@@ -2788,7 +2788,7 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
     }
 
     app.executable_extensions.shutdown().await;
-    Ok(())
+    crate::modes::print::finish_ephemeral_accounting()
 }
 
 #[cfg(test)]

@@ -1,9 +1,18 @@
-//! The built-in tools (`read`, `edit`, `write`, `bash`, `search`) and the [`CoreTools`]
-//! extension that registers them.
+//! The built-in tools (`read`, `edit`, `write`, `bash`, `search`), the [`CoreTools`]
+//! extension that registers them, and the tool-layer durability primitives they
+//! need.
 //!
 //! Core tools are not special: they implement the same [`Tool`](crate::Tool)
 //! trait and register through the same [`ExtensionHost::tool`] method as any
 //! third-party tool.
+//!
+//! Three modules here are not tools but the harness-side primitives Pi defines
+//! next to them, landed in the tool layer because `session.rs`/`agent.rs` are
+//! outside this change's scope: [`durability`] (durable invocation-scoped
+//! partial-output checkpoints and replay memos), [`deferred`] (durable
+//! suspend/resume with poll permits), and [`summarization`] (the shared
+//! summarization retry policy and its typed outcomes). Each documents the
+//! consumer that still has to be wired.
 
 mod bash;
 mod edit;
@@ -16,7 +25,14 @@ mod read;
 mod search;
 mod write;
 
-pub use bash::BashTool;
+pub mod durability;
+pub mod deferred;
+pub mod summarization;
+
+pub use bash::{
+    BashCheckpointPublisher, BashCheckpointStats, BashTool, CheckpointedBashTool,
+    BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES, MIN_BASH_CHECKPOINT_INTERVAL,
+};
 pub use edit::EditTool;
 pub use ls::LsTool;
 pub use find::FindTool;
@@ -26,6 +42,25 @@ pub use shell_environment::{ShellSessionEnvironment, SessionShellTool};
 pub use read::ReadTool;
 pub use search::SearchTool;
 pub use write::WriteTool;
+pub use durability::{
+    DurableInvocationStore, InterruptedInvocation, InvocationError, InvocationHandle,
+    InvocationOutcome, InvocationScope, InvocationState, MemoLookup, Settlement, StoreLimits,
+    UnsafeRecovery, INTERRUPTED_OUTCOME_UNKNOWN_MARKER, MEMO_NAMESPACE, PARTIAL_OUTPUT_NAMESPACE,
+};
+pub use deferred::{
+    prepare_deferred_poll, suspend_deferred_response, DeferredHandle, DeferredHandleRejection,
+    DeferredPhase, DeferredPollIntent, DeferredPollOutcome, DeferredPollPermit,
+    DeferredPollPreparation, DeferredPollRefusal, DeferredPollRefusalKind, DeferredResume,
+    DeferredResponseDeclaration, DeferredStopReason, DeferredSuspendDecision,
+    DeferredSuspendFailure, DeferredSuspendFailureKind, DeferredSuspended, ModelIdentity,
+    SuspendedRunObservation, UnknownPollReplacement, INVALID_DEFERRED_HANDLE_DIAGNOSTIC,
+};
+pub use summarization::{
+    run_summarization_with_retry, CompactionFailure, CompactionFailureKind,
+    CompactionStepOutcome, SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure,
+    SummarizationFailureKind, SummarizationOutcome, SummarizationRetryPolicy,
+    SummarizationRetryScheduled, SummarizationRun,
+};
 
 use crate::effect::ToolPolicyDenialCode;
 use crate::extension::{Extension, ExtensionHost};

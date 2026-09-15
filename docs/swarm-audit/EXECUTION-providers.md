@@ -285,3 +285,41 @@ section tracks the parity ledger rows assigned to providers.
 - NOTE: a later re-run was blocked by an unrelated in-flight `octet-ai` edit
   (`assistant_frame.rs:109` `Media` missing `PartialEq`); my own files compiled
   in the preceding runs.
+
+START 2026-09-15T15:43:45Z ai5 alive
+
+## ai5 (2026-09-15T15:5xZ): 1a.1 Codex `service_tier` — LANDED (unblocks roadmap #175 `/fast`)
+
+- Files: `crates/octet-ai/src/types.rs` (`ServiceTier` enum + `ResponsesRuntimeProfile::accepts_service_tier`),
+  `crates/octet-ai/src/responses.rs` (`ResponsesOptions::service_tier` + `with_service_tier`),
+  `crates/octet-ai/src/error.rs` (`UnsupportedError::ServiceTier`),
+  `crates/octet-ai/src/protocol/openai_responses.rs` (typed body field + fail-closed gate),
+  `crates/octet-ai/src/lib.rs` (re-export).
+- Gate: the field is emitted only when `request.responses.service_tier` is set AND the
+  endpoint's declared `runtime.responses_profile` accepts it
+  (`ResponsesRuntimeProfile::accepts_service_tier()`; today only `Codex`, exactly the
+  TUI's `/fast` gate). Every other profile returns
+  `AiError::Unsupported(UnsupportedError::ServiceTier)` — never a silent drop.
+  No provider-name branching; the declaration is the endpoint profile already emitted
+  by `crates/octet-coding-agent/build.rs`.
+- Wire values: `auto | default | flex | priority` (upstream
+  `ResponseCreateParamsStreaming["service_tier"]`, `packages/ai/src/api/openai-responses.ts:321`
+  and `openai-codex-responses.ts:566`).
+- Command: `cargo test -p octet-ai --lib service_tier` -> observed
+  `3 passed; 0 failed` (`service_tier_is_absent_unless_the_caller_requests_it`,
+  `codex_service_tier_wire_values_match_the_declared_tiers`,
+  `service_tier_fails_closed_on_a_profile_that_does_not_declare_it`).
+- Command: `cargo test -p octet-ai --lib` -> observed `342 passed; 0 failed`.
+- Activation seam for `/fast`: `request.responses.get_or_insert_with(Default::default).service_tier =
+  Some(octet_ai::ServiceTier::Priority)` for `on`, `= None`/omitted for `off`, after checking
+  `model.endpoint.runtime.responses_profile.accepts_service_tier()`.
+- Bounded gap (recorded, not silently claimed): upstream also runs
+  `applyServiceTierPricing` (multiplier 0.5 flex / 2 priority / 2.5 `gpt-5.5` priority,
+  `openai-responses.ts:362-389`) over usage cost. octet does not yet scale `Response.cost`
+  for a non-standard tier; the named missing primitive is threading the requested/echoed
+  tier into `ResponseBuilder::finish` (`crates/octet-ai/src/stream.rs:809-822`), which owns
+  the only `cost_of` call on the Responses streaming path.
+
+ai5: service_tier landed
+
+START 2026-09-15T16:28:32Z ai6 alive

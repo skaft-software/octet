@@ -11,8 +11,8 @@ use crate::protocol::{
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
     AssistantPart, CacheRetention, ImageSource, Media, Message, OutputFormat, Protocol,
-    ReasoningConfig, ReasoningMode, ReasoningState, ReasoningStateKind, Request, StopReason,
-    ToolCallId, ToolChoice, ToolDef, ToolResultPart, Usage, UserPart,
+    ReasoningConfig, ReasoningMode, ReasoningState, ReasoningStateKind, Request, ServiceTier,
+    StopReason, ToolCallId, ToolChoice, ToolDef, ToolResultPart, Usage, UserPart,
 };
 use crate::validate::{
     normalize_request_reasoning, validate_reasoning_selection, validate_request,
@@ -40,6 +40,8 @@ struct ResponsesRequest {
     max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<ServiceTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ResponsesReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -953,6 +955,19 @@ pub(crate) fn build_request(
     .flatten();
 
     let responses_options = req.responses.as_ref();
+    // Codex `service_tier`: a declared endpoint capability, never a provider
+    // identity. A route whose profile does not declare the field fails closed
+    // instead of silently dropping a caller's billing-changing control.
+    let service_tier = responses_options.and_then(|options| options.service_tier);
+    if service_tier.is_some()
+        && !model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_service_tier()
+    {
+        return Err(crate::error::UnsupportedError::ServiceTier.into());
+    }
     let raw_input = responses_options.and_then(|options| options.input.as_ref());
     let refresh_instructions = raw_input
         .is_some_and(crate::responses::ResponsesInput::contains_compaction)
@@ -1001,6 +1016,7 @@ pub(crate) fn build_request(
         },
         reasoning: reasoning_opt,
         text: text_opt,
+        service_tier,
         prompt_cache_key: prompt_cache_key(&req),
         prompt_cache_retention: (req.cache_retention == crate::types::CacheRetention::Long
             && model.spec.cache.supports_long_retention)
@@ -2770,6 +2786,73 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == "dropped_image_media_type"));
+    }
+
+    // --- Codex `service_tier` (declared endpoint capability) ---
+
+    fn with_responses_profile(model: &Model, profile: ResponsesRuntimeProfile) -> Model {
+        let mut endpoint = (*model.endpoint).clone();
+        endpoint.runtime.responses_profile = profile;
+        Model {
+            spec: model.spec.clone(),
+            endpoint: Arc::new(endpoint),
+        }
+    }
+
+    fn body_of(parts: &HttpRequestParts) -> serde_json::Value {
+        serde_json::from_slice(&parts.body).unwrap()
+    }
+
+    #[test]
+    fn service_tier_is_absent_unless_the_caller_requests_it() {
+        let model = with_responses_profile(&make_test_model(true), ResponsesRuntimeProfile::Codex);
+        let parts = build_request(&model, &user_req(vec![], CompatibilityMode::Lossy)).unwrap();
+        assert!(body_of(&parts).get("service_tier").is_none());
+    }
+
+    #[test]
+    fn codex_service_tier_wire_values_match_the_declared_tiers() {
+        let model = with_responses_profile(&make_test_model(true), ResponsesRuntimeProfile::Codex);
+        for tier in [
+            crate::types::ServiceTier::Auto,
+            crate::types::ServiceTier::Default,
+            crate::types::ServiceTier::Flex,
+            crate::types::ServiceTier::Priority,
+        ] {
+            let mut req = user_req(vec![], CompatibilityMode::Lossy);
+            req.responses =
+                Some(crate::responses::ResponsesOptions::default().with_service_tier(tier));
+            let parts = build_request(&model, &req).unwrap();
+            assert_eq!(body_of(&parts)["service_tier"], tier.wire_value());
+        }
+    }
+
+    #[test]
+    fn service_tier_fails_closed_on_a_profile_that_does_not_declare_it() {
+        // The default (public OpenAI Responses) profile does not declare the
+        // field, so a caller request is rejected instead of silently dropped.
+        let model = make_test_model(true);
+        assert!(!model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_service_tier());
+        let mut req = user_req(vec![], CompatibilityMode::Lossy);
+        req.responses = Some(
+            crate::responses::ResponsesOptions::default()
+                .with_service_tier(crate::types::ServiceTier::Priority),
+        );
+        let err = match build_request(&model, &req) {
+            Err(err) => err,
+            Ok(_) => panic!("expected a fail-closed service tier error"),
+        };
+        assert!(
+            matches!(
+                err,
+                AiError::Unsupported(crate::error::UnsupportedError::ServiceTier)
+            ),
+            "expected a fail-closed service tier error, got {err:?}"
+        );
     }
 }
 

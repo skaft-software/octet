@@ -48,3 +48,94 @@
   `theme/select` method with bounded `ThemeSelectParams`/`ThemeSelectResult`; generated
   `resolve_theme_selection` rejects unknown role/scope/theme id and trust-widening themes with typed
   errors, never mutates persisted project trust.
+START 2026-09-15T15:43:50Z ext5 alive
+
+## ext5 — Roadmap #179 octet-mcp Streamable HTTP (static credentials + permanent GET stream)
+
+- 2026-09-15T15:48:33Z files: extensions/octet-mcp/octet_mcp/{config.py,config.schema.json,streamable_http.py,runtime.py}
+- Implemented: `auth.type = "static-bearer"` + `auth.environment` (extension-scoped `OCTET_MCP_*`
+  name only; `bearer` + `credential` unchanged and still adapter-only/fail-closed), new
+  `StaticEnvironmentCredentialProvider` (reads exactly that one variable per request, retains
+  nothing, refuses non-namespaced names, never logged/echoed), `runtime.static_credential_provider`
+  composition; permanent GET notification stream with committed cursor, `Last-Event-ID`
+  reconnection, replayed-identity fail-closed, 405 => unsupported (non-fatal), per-connection
+  frame/event/control bounds and `MAX_HTTP_STREAM_CONNECTIONS = 64`.
+- Command: `cd extensions/octet-mcp && PYTHONPATH=vendor:. python3 -m pytest tests -q`
+  -> `67 passed, 57 subtests passed` (baseline HEAD copy: `1 failed, 66 passed` where the single
+  failure is the missing out-of-tree release-catalog.txt in the archive copy).
+- 2026-09-15T16:02Z Row 1 tests added: `extensions/octet-mcp/tests/test_config.py`
+  (`test_static_bearer_credentials_are_extension_scoped_and_never_echoed`) and
+  `extensions/octet-mcp/tests/test_streamable_http.py`
+  (`test_static_environment_credential_is_scoped_read_per_request_and_never_echoed`,
+  `test_static_source_is_not_composed_without_an_explicit_descriptor`,
+  `test_permanent_get_stream_reconnects_with_the_committed_cursor`,
+  `test_permanent_get_stream_replayed_event_identity_fails_closed`,
+  `test_permanent_get_stream_is_absent_without_declared_notifications`,
+  `test_permanent_get_stream_405_is_inert_and_never_retried`,
+  `test_manager_refreshes_the_catalog_from_the_permanent_stream`).
+- Command: `PYTHONPATH=vendor:. python3 -m pytest tests -q` (3 consecutive runs)
+  -> `75 passed, 57 subtests passed` each time (no flakes).
+- Docs updated: extensions/octet-mcp/{README.md,REFERENCE.md,CHANGELOG.md,config.example.json,config.schema.json}.
+  OAuth stays policy-gated with the exact missing primitive recorded (host-brokered
+  `authorization/request` capability + host-owned token store); the transport stays behind
+  `--experimental-streamable-http-mcp` and is still NOT production-qualified.
+- Hardware/policy-gated (not claimed): live external MCP server interoperability, real OAuth
+  server/credential, long-duration stream pressure, Linux/macOS platform cleanup.
+
+## ext5 — Roadmap #65 octet-serve multi-pane workspace layout (apps/web)
+
+- 2026-09-15T15:58:04Z files: apps/web/src/workspace-layout.ts (new), workspace-layout.test.ts (new),
+  apps/web/src/App.tsx, apps/web/src/components/{ActivityRail.tsx,Inspector.tsx}, apps/web/src/styles.css,
+  apps/web/src/App.test.tsx, apps/web/src/components/ActivityRail.test.tsx.
+- Implemented: user-created dock split + rearrangeable persisted layout. New bounded layout model
+  (`parseDockLayout` fail-closed on unknown/oversized/wrong-version/duplicate values, `moveDockPane`,
+  `setDockSplit`, `dockSlotFor`, `dockSplitVisible`, max 2 panes, `MAX_DOCK_LAYOUT_BYTES=256`),
+  persisted at `octet.ui.dock.layout` following the existing `storedPaneWidth`/`persistPaneWidth`
+  idiom. Session header gains a Split/Merge toggle and per-pane move buttons; the split renders the
+  activity rail and inspector in two grid columns (`data-dock-slot`, `.app-shell.has-dock-split`,
+  `@media (min-width: 761px)`) with a second resize handle for the second column. Default
+  (unsplit) behaviour is byte-for-byte the previous single-column dock.
+- Commands and observed results:
+  - `npm test` -> `Test Files 35 passed (35)`, `Tests 299 passed (299)` (baseline was 291 unit tests).
+  - `npx tsc -b --pretty false` -> exit 0, no diagnostics.
+  - `npm run build` -> `✓ built in 608ms`, `production fixture boundary verified (6 text assets)`.
+  - `npx eslint .` -> exit 0, no findings.
+- Mechanical derivative (NOT in my exclusive list, like the landed generated-artifact precedent):
+  `npm run bundle:sync` regenerated the tracked embedded copy under `extensions/octet-serve/web/**`
+  (`assets/app.js`, `assets/app.css`, `SHA256SUMS`, `bundle.sha256`) because
+  `extensions/octet-serve/src/embedded_web.rs` include_str!s it and validates the hashes;
+  `npm run bundle:check` now reports `embedded web bundle matches Vite output
+  (d23a4571b5908fdfe79624ff2b6e097ded506dc00a8e1bfc92c93a1d56ce60e5)`.
+- Hardware-gated (not claimed): no live Playwright browser run was attempted for the new interaction
+  (unit + typecheck + build only); the e2e workspace spec was not re-run.
+
+## ext5 — Roadmap #383/#386 computer use
+
+- 2026-09-15T15:59:42Z Verified at HEAD (checkpoint fa4a7617) that the ledger rows are STALE:
+  `extensions/octet-computer-use/octet_computer_use/lifecycle.py` IS wired —
+  `main.py` dispatches tool calls through `runtime.MacOSRuntime`, which owns the `LifecycleSession`
+  and the exact-action `PolicyGate`; `tests/test_policy.py`, `tests/test_lifecycle.py` and
+  `tests/test_runtime.py` already exist as test targets.
+- Added the fail-closed regressions the row asked for (extension owns them):
+  `tests/test_runtime.py::RuntimeTests::test_unknown_or_replaced_scope_identifier_dispatches_nothing`,
+  `::test_stopped_binding_cannot_redeem_a_captured_grant_or_frame`,
+  `::test_stop_and_takeover_are_trusted_entry_points_not_tool_arguments`
+  (unknown/replaced scope => deny before policy/factory/input; stopped or replaced binding and a
+  replayed scope id/frame/grant never reuse authority; stop/takeover only reachable as trusted entry
+  points, never as tool operations or host-context fields).
+- `docs/CONTRACT.md` (extension, not repo docs/) gained the exact host-integration blocker, the
+  stop/scope lifetime contract and the new regression names.
+- Command: `python3 -m unittest discover -s tests -p 'test_*.py'` -> `Ran 93 tests ... OK`
+  (was 90); `python3 -m py_compile main.py octet_computer_use/*.py` -> OK.
+- ROW #383 REMAINS PARTIAL / HOST-GATED. The exact missing primitive is a negotiated API 0.3
+  host-brokered automation authorization service (typed `policy/evaluate` + host-owned
+  approval/target-selection + owner settlement) supplying `PolicyEvaluator.evaluate_action`, `Scope`
+  and owner/target to the extension process. `crates/octet-coding-agent/src/host/policy.rs` is the
+  separate native protocol-1 host and deliberately never starts executable extensions; API 0.3 has
+  no such capability. Not fabricated here.
+- ROWS #385/#389/#390 (and #383's live evidence): HARDWARE/QUALIFICATION-GATED. Exact missing
+  primitives: a real macOS host with Accessibility/AX trust for a selected window, a real Windows
+  UIA/Composition host, physical human takeover observation and hard process-loss release evidence.
+  No live native run was performed and none is claimed.
+
+## ext6 — START 2026-09-15T16:28:37Z ext6 alive

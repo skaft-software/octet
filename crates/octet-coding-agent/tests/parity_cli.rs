@@ -453,6 +453,162 @@ fn no_session_fails_closed_because_accounting_shares_the_session_ledger() {
     assert!(stderr.contains("accounting"), "diagnostic names the missing primitive: {stderr}");
 }
 
+/// 5.9 — `sessions search` uses the disposable entry index incrementally (a
+/// repeat search does not re-index) and reports the change when the index
+/// advances.
+#[test]
+fn sessions_search_is_incremental_and_reports_the_index_change() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    for (id, prompt) in [("search-a", "alpha needle one"), ("search-b", "beta needle two")] {
+        let run = fixture.run(&["--model", "custom/probe", "--print", "--session-id", id, prompt]);
+        assert_success(&run);
+    }
+
+    let cold = fixture.run(&["sessions", "search", "needle"]);
+    assert_success(&cold);
+    let listing = stdout_of(&cold);
+    assert!(
+        listing.contains("search-a") && listing.contains("search-b"),
+        "both sessions match: {listing}"
+    );
+    assert!(
+        stderr_of(&cold).contains("Indexed 2 session(s)"),
+        "the cold search indexes both sessions: {}",
+        stderr_of(&cold)
+    );
+
+    let warm = fixture.run(&["sessions", "search", "needle"]);
+    assert_success(&warm);
+    assert!(
+        !stderr_of(&warm).contains("Indexed"),
+        "a repeat search must not re-index: {}",
+        stderr_of(&warm)
+    );
+
+    let changed = fixture.run(&[
+        "--model",
+        "custom/probe",
+        "--print",
+        "--session-id",
+        "search-a",
+        "gamma needle three",
+    ]);
+    assert_success(&changed);
+    let delta = fixture.run(&["sessions", "search", "needle"]);
+    assert_success(&delta);
+    assert!(
+        stderr_of(&delta).contains("Indexed 1 session(s)"),
+        "only the changed session is re-read: {}",
+        stderr_of(&delta)
+    );
+
+    let miss = fixture.run(&["sessions", "search", "zzz-no-match"]);
+    assert_success(&miss);
+    assert!(
+        stdout_of(&miss).contains("No session entries match"),
+        "a miss is explicit: {}",
+        stdout_of(&miss)
+    );
+}
+
+/// Row 1 — the Codex context-window flag is an explicit opt-in override of the
+/// deliberate 272K cap: above the cap without the acknowledgement it fails
+/// closed before any run, and zero is refused.
+#[test]
+fn codex_context_window_override_fails_closed_without_acknowledgement() {
+    let fixture = Fixture::new(None);
+
+    let unacknowledged = fixture.run(&["--codex-context-window", "500000", "--print", "hello"]);
+    assert!(!unacknowledged.status.success(), "an unacknowledged raise must fail closed");
+    let stderr = stderr_of(&unacknowledged);
+    assert!(stderr.contains("double-priced"), "diagnostic names the cost cliff: {stderr}");
+    assert!(stderr.contains("acknowledge-cost-cliff"), "diagnostic names the flag: {stderr}");
+
+    let zero = fixture.run(&["--codex-context-window", "0", "--print", "hello"]);
+    assert!(!zero.status.success(), "zero must fail closed");
+    assert!(stderr_of(&zero).contains("greater than zero"), "{}", stderr_of(&zero));
+
+    let oversized = fixture.run(&["--codex-context-window", "2000000", "--print", "hello"]);
+    assert!(!oversized.status.success(), "above every entitlement must fail closed");
+}
+
+/// Row 1 — with the acknowledgement the opt-in is accepted and a non-Codex run
+/// is unaffected (the deliberate default stays untouched without the flag).
+#[test]
+fn codex_context_window_override_is_accepted_with_the_acknowledgement() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let accepted = fixture.run(&[
+        "--model",
+        "custom/probe",
+        "--codex-context-window",
+        "500000",
+        "--codex-context-window-acknowledge-cost-cliff",
+        "--print",
+        "hello",
+    ]);
+    assert_success(&accepted);
+    assert!(stdout_of(&accepted).contains(ASSISTANT_TEXT));
+}
+
+/// 5.10 — `catalog publish` fails closed on a checksum mismatch, publishes the
+/// exact bytes once every gate agrees, and refuses to replace the immutable
+/// destination afterwards.
+#[test]
+fn catalog_publish_gates_are_fail_closed_and_the_path_is_immutable() {
+    let fixture = Fixture::new(None);
+    let document = r#"{"schema":"octet-catalog-1","min_client_version":"0.1.0","required_providers":["openai"],"entries":[{"provider":"openai","model":"gpt-5"}]}"#;
+    let source = fixture.workspace.join("catalog.json");
+    std::fs::write(&source, document).unwrap();
+    let destination = fixture.workspace.join("published.catalog.json");
+    let source = source.to_str().unwrap().to_owned();
+    let destination = destination.to_str().unwrap().to_owned();
+
+    let wrong_checksum = "00".repeat(32);
+    let publish = |checksum: &str| {
+        fixture.run(&[
+            "catalog",
+            "publish",
+            &source,
+            "--destination",
+            &destination,
+            "--min-client-version",
+            "0.1.0",
+            "--require-provider",
+            "openai",
+            "--expected-count",
+            "1",
+            "--expected-checksum",
+            checksum,
+        ])
+    };
+
+    let refused = publish(&wrong_checksum);
+    assert!(!refused.status.success(), "a bad checksum must refuse to publish");
+    let stderr = stderr_of(&refused);
+    assert!(stderr.contains("checksum"), "diagnostic: {stderr}");
+    assert!(!std::path::Path::new(&destination).exists(), "a refusal leaves no catalog");
+
+    // The refusal reports the computed digest; a matching checksum now publishes.
+    let computed = stderr
+        .split("computed ")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("the refusal reports the computed checksum")
+        .to_owned();
+    assert_eq!(computed.len(), 64, "sha256 hex: {computed}");
+    let published = publish(&computed);
+    assert_success(&published);
+    assert!(stdout_of(&published).contains("Published catalog"));
+    assert_eq!(std::fs::read_to_string(&destination).unwrap(), document);
+
+    let immutable = publish(&computed);
+    assert!(!immutable.status.success(), "an existing catalog must never be replaced");
+    assert!(stderr_of(&immutable).contains("immutable-path"), "{}", stderr_of(&immutable));
+    assert_eq!(std::fs::read_to_string(&destination).unwrap(), document);
+}
+
 /// 5.7 — `--models` matches `provider/model` or the bare model id with globs,
 /// selects the first scoped model as the default, and warns (without discarding
 /// the rest of the scope) for a pattern that matches nothing.

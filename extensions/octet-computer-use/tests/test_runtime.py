@@ -8,7 +8,7 @@ from unittest.mock import Mock
 from main import ComputerUseExtension
 from octet_computer_use.backend_macos import MacOSBackend, MacOSBackendError
 from octet_computer_use.lifecycle import OwnerIdentity
-from octet_computer_use.policy import PolicyGate
+from octet_computer_use.policy import PolicyDenied, PolicyGate
 from octet_computer_use.protocol import ProtocolFailure, canonical_bytes
 from octet_computer_use.runtime import MacOSRuntime
 from test_backend_macos import MockNative, TARGET, OWNER
@@ -294,4 +294,64 @@ class RuntimeTests(unittest.TestCase):
         self.native.accessibility_tree = capture
         result = self.call("click", {"x": 70, "y": 50})
         self.assertTrue(result["is_error"])
+        self.assertEqual(self.click_count(), 0)
+
+    def test_unknown_or_replaced_scope_identifier_dispatches_nothing(self):
+        # A host scope identifier the selected runtime never accepted is denied
+        # before policy evaluation, before the native factory, and before input.
+        self.context["scope"] = "replaced-scope"
+        self.assertTrue(self.call()["is_error"])
+        self.factory.assert_not_called()
+        self.assertEqual(self.evaluator.calls, [])
+        self.assertEqual(self.native.calls, [])
+
+        # A replaced scope binding cannot be reused to compose a new runtime:
+        # the owner generation in the scope must match the supplied owner.
+        replaced = scope(scope_id="scope-2", extension_generation=2,
+                         owner_id="test")
+        with self.assertRaises(PolicyDenied):
+            MacOSRuntime(enabled=True, owner=OwnerIdentity.from_value(OWNER),
+                native_target=TARGET, policy_gate=PolicyGate(Evaluator(), scope=replaced),
+                backend_factory=self.factory)
+        with self.assertRaises(PolicyDenied):
+            MacOSRuntime(enabled=True,
+                owner=OwnerIdentity("session", "test", 2), native_target=TARGET,
+                policy_gate=PolicyGate(Evaluator(), scope=scope()),
+                backend_factory=self.factory)
+
+    def test_stopped_binding_cannot_redeem_a_captured_grant_or_frame(self):
+        observed = self.call()
+        self.assertFalse(observed["is_error"], observed)
+        frame = self.runtime.session.last_observation.target.frame_generation
+        grants = len(self.evaluator.calls)
+        self.runtime.stop("host_stop")
+        self.gate._clock_ms = lambda: 1  # Stop, not expiry, is what must deny.
+
+        for scope_id in ("scope", "replaced-scope"):
+            self.context["scope"] = scope_id
+            self.context["frame_generation"] = frame
+            self.assertTrue(self.call("click", {"x": 70, "y": 50})["is_error"])
+        self.context["scope"] = "scope"
+        self.assertTrue(self.call()["is_error"])
+        self.assertEqual(self.evaluator.calls.__len__(), grants)
+        self.assertEqual(self.click_count(), 0)
+        self.assertIsNone(self.runtime.session.last_observation)
+
+    def test_stop_and_takeover_are_trusted_entry_points_not_tool_arguments(self):
+        for field in ("stop", "takeover", "release_input"):
+            hostile = dict(self.context, **{field: True})
+            with self.assertRaises(ProtocolFailure):
+                self.server.handle_tool_call({"name": "computer_use",
+                    "arguments": {"operation": "observe", "arguments": {}},
+                    "context": hostile})
+        self.factory.assert_not_called()
+
+        self.call()
+        taken = self.runtime.takeover()
+        self.assertTrue(taken["settled"])
+        self.assertEqual(taken["settlement_reason"], "host_takeover")
+        self.assertIn(taken["state"], {"paused", "degraded"})
+        self.assertTrue(self.runtime.session.settled)
+        self.assertTrue(any(name == "release_all" for name, _ in self.native.calls))
+        self.assertTrue(self.call()["is_error"])
         self.assertEqual(self.click_count(), 0)

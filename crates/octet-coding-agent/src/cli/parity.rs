@@ -7,7 +7,11 @@ use octet_agent::Session;
 use octet_ai::{Media, Modality, ModelId};
 
 use super::Cli;
-use crate::config::{Config, ResumeSelector};
+use crate::codex_context::{
+    CodexContextOverride, CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV,
+    CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW,
+};
+use crate::config::{Config, Mode, ResumeSelector};
 use crate::session_store::SessionStore;
 
 const MAX_INPUT_BYTES: u64 = 20 * 1024 * 1024;
@@ -31,12 +35,27 @@ pub struct ParityOptions {
     /// model selection and cycling to the credential-filtered catalog.
     #[arg(long, value_name = "PATTERNS")]
     pub models: Option<String>,
+    /// Raise the deliberate 272K Codex context cap. Above 272K the whole request
+    /// is double-priced (about 2x input / 1.5x output, not only the excess) and
+    /// long-running sessions are more likely to lose their websocket. Requires a
+    /// Pro/ProLite plan and, above the cap, an explicit acknowledgement.
+    #[arg(long = "codex-context-window", value_name = "TOKENS")]
+    pub codex_context_window: Option<u64>,
+    /// Acknowledge the double-priced cost cliff and increased websocket-drop
+    /// risk of raising the Codex context window above the deliberate 272K cap.
+    #[arg(
+        long = "codex-context-window-acknowledge-cost-cliff",
+        requires = "codex_context_window"
+    )]
+    pub codex_context_window_acknowledge_cost_cliff: bool,
 }
 
 impl ParityOptions {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.no_session {
-            anyhow::bail!("--no-session is unavailable: conversation persistence and durable usage/usage_uncertainty accounting share one Session ledger; an accounting-preserving ephemeral backend is required");
+            if self.name.is_some() {
+                anyhow::bail!("--no-session cannot name a session because no transcript is persisted");
+            }
         }
         if let Some(patterns) = &self.models {
             model_patterns(patterns)?;
@@ -46,7 +65,62 @@ impl ParityOptions {
                 anyhow::bail!("--name requires a non-empty name without controls (at most 256 bytes)");
             }
         }
+        if let Some(tokens) = self.codex_context_window {
+            self.validate_codex_context(tokens)?;
+        } else {
+            debug_assert!(
+                !self.codex_context_window_acknowledge_cost_cliff,
+                "clap requires --codex-context-window for the acknowledgement flag"
+            );
+        }
         Ok(())
+    }
+
+    /// Fail-closed validation of `--codex-context-window`, independent of the
+    /// model. Entitlement/ceiling checks that need the resolved model run later
+    /// in `codex_context::resolve_codex_context_window`.
+    fn validate_codex_context(&self, tokens: u64) -> anyhow::Result<()> {
+        if tokens == 0 {
+            anyhow::bail!("--codex-context-window must be greater than zero");
+        }
+        if tokens > CODEX_PRO_CONTEXT_WINDOW {
+            anyhow::bail!(
+                "--codex-context-window {tokens} is above the {CODEX_PRO_CONTEXT_WINDOW}-token maximum any Codex model is entitled to"
+            );
+        }
+        if tokens > CODEX_CONTEXT_WINDOW_CAP
+            && !self.codex_context_window_acknowledge_cost_cliff
+        {
+            anyhow::bail!(
+                "--codex-context-window {tokens} is above the deliberate {CODEX_CONTEXT_WINDOW_CAP}-token Codex cap: {} Re-run with --codex-context-window-acknowledge-cost-cliff to accept the cost cliff and the websocket-drop risk",
+                crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING
+            );
+        }
+        Ok(())
+    }
+
+    /// The parsed opt-in Codex context-window override, when the flag is set.
+    ///
+    /// Uses the shared `codex_context` policy type so the CLI, TUI and the
+    /// resolution entry point cannot drift.
+    pub fn codex_context_override(&self) -> Option<CodexContextOverride> {
+        self.codex_context_window.map(|tokens| {
+            CodexContextOverride::raising(tokens, self.codex_context_window_acknowledge_cost_cliff)
+        })
+    }
+
+    /// Publish the opt-in override through the stable environment bridge that the
+    /// Codex context-window policy reads, so the value reaches resolution
+    /// without a persisted config change. Only set when the flag is present; a
+    /// user-provided environment value is otherwise left untouched.
+    pub fn install_codex_context_env(&self) {
+        if let Some(tokens) = self.codex_context_window {
+            std::env::set_var(CODEX_CONTEXT_OVERRIDE_ENV, tokens.to_string());
+            std::env::set_var(
+                CODEX_CONTEXT_ACKNOWLEDGE_ENV,
+                if self.codex_context_window_acknowledge_cost_cliff { "1" } else { "0" },
+            );
+        }
     }
 
     /// Apply the `--models` scope: resolve every pattern against the
@@ -86,6 +160,9 @@ impl ParityOptions {
     }
 
     pub fn select_session(&self, config: &mut Config) -> anyhow::Result<()> {
+        if self.no_session {
+            return self.begin_ephemeral(config);
+        }
         if self.session_id.is_none() && self.name.is_none() {
             return Ok(());
         }
@@ -122,6 +199,36 @@ impl ParityOptions {
             store.rename(&id, name.trim())?;
         }
         config.resume = ResumeSelector::Resume(Some(id));
+        Ok(())
+    }
+
+    /// `--no-session`: run in a private temporary store so no conversation is
+    /// persisted in the workspace, while durable accounting is preserved.
+    ///
+    /// The real session directory is captured so the post-run hook can append an
+    /// accounting-only record there and then discard the temporary transcript.
+    fn begin_ephemeral(&self, config: &mut Config) -> anyhow::Result<()> {
+        if matches!(config.mode, Mode::Interactive) {
+            anyhow::bail!(
+                "--no-session requires a headless frontend (--print, --mode json, or --mode rpc)"
+            );
+        }
+        let accounting_session_dir = config.session_dir.clone();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let transcript_root = std::env::temp_dir().join(format!(
+            "octet-no-session-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&transcript_root)?;
+        config.session_dir = transcript_root.clone();
+        config.resume = ResumeSelector::New;
+        crate::session_store::begin_ephemeral_run(
+            transcript_root,
+            accounting_session_dir,
+            config.workspace.clone(),
+        );
         Ok(())
     }
 }

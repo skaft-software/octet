@@ -28,6 +28,10 @@ use crate::extension::ExtensionHost;
 use crate::sandbox::EffectiveToolPolicy;
 use crate::secure_fs::{self, SecureFileError};
 use crate::session::{Session, SessionError};
+use crate::telemetry::{
+    schema::{DelegationSpan, EmptyAttributes},
+    spans::TelemetryContext,
+};
 use crate::tool::{Tool, ToolContext, ToolError, ToolOutput};
 
 const ROOT_AGENT_ID: &str = "root";
@@ -347,6 +351,13 @@ pub(crate) struct DelegationBinding {
     manager: Arc<DelegationManager>,
     identity: AgentIdentity,
     system_instructions: Arc<str>,
+}
+
+impl DelegationBinding {
+    /// Installs the owning agent's explicit span observer for child runs.
+    pub(crate) fn set_span_context(&self, context: TelemetryContext) {
+        self.manager.set_span_context(context);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1088,6 +1099,10 @@ pub(crate) struct DelegationManager {
     changed: Notify,
     /// Lock order when both are needed: `state` → `telemetry`.
     telemetry: Mutex<DelegationTelemetryState>,
+    /// Explicit span observer owned by the root agent, copied in when
+    /// delegation is enabled. Inert unless the host installed one; it never
+    /// participates in worker accounting, admission or budgeting.
+    span_context: RwLock<TelemetryContext>,
 }
 
 struct DelegationTelemetryState {
@@ -1597,6 +1612,7 @@ impl DelegationManager {
                     revision: 0,
                     sender: None,
                 }),
+                span_context: RwLock::new(TelemetryContext::default()),
             });
             manager.journal.append(&ProvenanceEvent::TeamStarted {
                 timestamp_ms: timestamp_ms(),
@@ -1635,6 +1651,22 @@ impl DelegationManager {
                 String::new()
             }),
         }
+    }
+
+    /// Installs the owning agent's explicit span observer for child runs.
+    pub(crate) fn set_span_context(&self, context: TelemetryContext) {
+        *self
+            .span_context
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = context;
+    }
+
+    /// Returns the installed span observer (inert by default).
+    fn span_context(&self) -> TelemetryContext {
+        self.span_context
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     fn create_team_file(&self, path: &Path) -> Result<File, SecureFileError> {
@@ -2655,6 +2687,13 @@ impl DelegationManager {
         if self.interrupt_requested(&identity.id) {
             return WorkerExecution::new(WorkerOutcome::Interrupted);
         }
+        // Row 3.5: one delegation boundary per driven child run. The child
+        // agent observes with the span's derived context, so every span it
+        // records nests under `octet.agent.delegation`.
+        let delegation_guard = self
+            .span_context()
+            .begin_typed::<DelegationSpan>(EmptyAttributes {});
+        agent.set_telemetry_context(delegation_guard.context());
         let entries_before_prompt = agent.session().entries().len();
         let session_path = agent.session().path().to_path_buf();
         // Bind prompt-error inspection to the exact session object already
@@ -2937,6 +2976,11 @@ impl DelegationManager {
         // after the control queue filled, so prepend it to retain acceptance
         // order for the next child run.
         submitted_follow_ups.extend(deferred_follow_ups);
+        // Row 3.5: settle the child span at its single driven outcome.
+        delegation_guard.finish(matches!(
+            outcome,
+            WorkerOutcome::Failed(_) | WorkerOutcome::TimedOut
+        ));
         WorkerExecution {
             outcome,
             deferred_follow_ups: submitted_follow_ups,
@@ -4306,6 +4350,7 @@ impl WorkerExecution {
     }
 }
 
+#[derive(Debug)]
 enum WorkerOutcome {
     Completed(String),
     /// The run exhausted its configured per-run turn budget after producing
@@ -4539,6 +4584,9 @@ pub(crate) fn enable_root_delegation(
         }
     }
     let manager = DelegationManager::create(config, template, agent.session().path(), root_tools)?;
+    // Row 3.5: delegated child runs are observed with the owner's explicit
+    // context. The observer is inert unless the host installed one.
+    manager.set_span_context(agent.telemetry_context().clone());
     let binding = manager.root_binding();
     if manager.root_tools {
         agent.append_system_instructions(binding.system_instructions().to_owned());
@@ -5307,6 +5355,7 @@ mod tests {
                 revision: 0,
                 sender: None,
             }),
+            span_context: RwLock::new(TelemetryContext::default()),
         })
     }
 
@@ -5434,6 +5483,7 @@ mod tests {
                 revision: 0,
                 sender: None,
             }),
+            span_context: RwLock::new(TelemetryContext::default()),
         })
     }
 
@@ -6595,6 +6645,106 @@ mod tests {
             service.list("root-owner").is_ok(),
             "owner-scoped observation must remain available after root settlement"
         );
+    }
+
+    #[tokio::test]
+    async fn delegation_span_owns_the_child_run_and_nests_child_spans() {
+        use crate::telemetry::spans::{InMemoryTelemetryContext, SpanStatus};
+
+        let directory = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_bytes(
+                        b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n",
+                    ),
+            )
+            .mount(&server)
+            .await;
+
+        let mut manager = writable_manager(directory.path());
+        {
+            let manager_mut = Arc::get_mut(&mut manager).expect("new manager is uniquely owned");
+            let mut model = octet_ai::ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&octet_ai::ModelId("gpt-6-astra".into()))
+                .unwrap();
+            let spec = Arc::make_mut(&mut model.spec);
+            spec.id = octet_ai::ModelId("codex/gpt-6-astra".into());
+            spec.capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+            let endpoint = Arc::make_mut(&mut model.endpoint);
+            endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+            endpoint.auth = octet_ai::Auth::None;
+            manager_mut
+                .template
+                .runtime
+                .get_mut()
+                .unwrap()
+                .max_output_tokens = model.spec.limits.max_output_tokens;
+            manager_mut.template.model = model;
+        }
+
+        let fixture = InMemoryTelemetryContext::default();
+        manager.set_span_context(fixture.context());
+        let (identity, mut commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        let session = Session::create(directory.path().join("span-child.jsonl")).unwrap();
+        let mut child = manager.build_child_agent(session, &identity, None).unwrap();
+        let shutdown = crate::CancellationToken::default();
+        let execution = manager
+            .execute_child_run(
+                &mut child,
+                "report ok".into(),
+                ChildRunContext {
+                    identity: &identity,
+                    commands: &mut commands,
+                    shutdown: &shutdown,
+                    extension_policy: None,
+                    deadline: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(execution.outcome, WorkerOutcome::Completed(_)),
+            "the scripted child run must complete: {:?}",
+            execution.outcome
+        );
+
+        let spans = fixture.get_spans();
+        let names: Vec<&str> = spans.iter().map(|span| span.name.as_str()).collect();
+        assert_eq!(
+            names[0], "octet.agent.delegation",
+            "the child run is observed through one delegation boundary: {names:?}"
+        );
+        assert_eq!(spans[0].parent_id, None);
+        let run = spans
+            .iter()
+            .position(|span| span.name == "octet.agent.run")
+            .expect("the driven child run is spanned");
+        assert_eq!(
+            spans[run].parent_id,
+            Some(spans[0].id),
+            "the child's own run nests under the delegation boundary: {names:?}"
+        );
+        let turn = spans
+            .iter()
+            .position(|span| span.name == "octet.agent.turn")
+            .expect("the child turn is spanned");
+        assert_eq!(spans[turn].parent_id, Some(spans[run].id));
+        let request = spans
+            .iter()
+            .position(|span| span.name == "octet.ai.request")
+            .expect("the child provider request is spanned");
+        assert_eq!(spans[request].parent_id, Some(spans[turn].id));
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.settled && span.status == SpanStatus::Ok),
+            "every delegated boundary settles with the child run: {spans:#?}"
+        );
+        assert_eq!(fixture.dropped_spans(), 0);
     }
 
     #[tokio::test]
