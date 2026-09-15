@@ -12,7 +12,10 @@ acceptance or release-qualification claim is made.
   adapter over the shared transactional `ProviderSetupService`; it does not
   create a second registry or an `Agent`.
 - `crates/octet-coding-agent/src/lib.rs:135` dispatches `setup` after ordinary
-  configuration resolution and before any frontend launch.
+  configuration resolution and before any frontend launch. Its synchronous
+  provider-setup adapter runs inside an awaited `spawn_blocking` boundary, so
+  the blocking HTTP client cannot construct or drop a Tokio runtime on the
+  executor.
 - `crates/octet-coding-agent/src/app/bootstrap.rs:5395` keeps print/RPC model
   resolution non-interactive and names the deterministic `octet setup --yes`
   recovery command when no model is available.

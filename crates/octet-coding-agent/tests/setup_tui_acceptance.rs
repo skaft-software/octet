@@ -72,6 +72,9 @@ impl SetupServer {
             while !thread_stopped.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        if thread_stopped.load(Ordering::Acquire) {
+                            return;
+                        }
                         thread_requests.fetch_add(1, Ordering::SeqCst);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -457,10 +460,7 @@ impl PtyOctet {
                 break status;
             }
             if Instant::now() >= deadline {
-                unsafe {
-                    let _ = libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-                }
-                let _ = self.child.wait();
+                terminate_child(&mut self.child);
                 panic!(
                     "octet did not stop after Ctrl-D; output: {}",
                     visible_bytes(&self.terminal.output)
@@ -489,13 +489,19 @@ impl PtyOctet {
     }
 }
 
+fn terminate_child(child: &mut Child) {
+    let pid = child.id() as libc::pid_t;
+    let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if result == -1 {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                let _ = libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-            }
-            let _ = self.child.wait();
+            terminate_child(&mut self.child);
         }
     }
 }

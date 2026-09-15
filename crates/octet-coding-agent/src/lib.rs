@@ -133,7 +133,11 @@ async fn run() -> anyhow::Result<()> {
         return session_commands::run(command, &config);
     }
     if let Some(cli::TopLevelCommand::Setup { options }) = top_level_command.clone() {
-        return provider_setup::run_cli(&options, &config);
+        // Provider setup owns a synchronous HTTP client and its runtime. Keep that
+        // boundary off the Tokio executor so reqwest::blocking cannot construct or
+        // drop a runtime from within an async context.
+        return tokio::task::spawn_blocking(move || provider_setup::run_cli(&options, &config))
+            .await?;
     }
     if let Some(cli::TopLevelCommand::Batch { command }) = top_level_command.clone() {
         return batch::run(command, &config).await;
