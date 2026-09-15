@@ -59,6 +59,20 @@ class ConformanceHarnessTests(unittest.TestCase):
         self.assertEqual(33, report["tui_audit_rows"])
         self.assertEqual(6, report["plan_journeys"])
 
+    def test_real_runtime_aggregate_fixture_is_ordered_and_explicitly_unrun(self) -> None:
+        module = conformance_module()
+        fixture = fixture_document("real-runtime-aggregate.json")
+
+        self.assertEqual(fixture, module.check_real_runtime_aggregate_fixture())
+        self.assertEqual(
+            [source["id"] for source in fixture["sources"]],
+            ["hello", "plan-mode"],
+        )
+        self.assertEqual(
+            fixture["evidence"]["status"],
+            "unrun_until_explicit_real_package_and_source_root_are_supplied",
+        )
+
     def test_full_gate_refuses_before_loading_without_network_isolation(self) -> None:
         completed = subprocess.run(
             [sys.executable, str(CONFORMANCE), "--full", "--json"],

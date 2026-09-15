@@ -1,0 +1,8 @@
+# Strict-identity fixture manifest for the real Pi aggregate journey.
+name = "pi-real-aggregate"
+version = "0.84.4"
+api_version = "0.2"
+
+[entrypoint]
+command = "node"
+args = []
