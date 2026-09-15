@@ -674,13 +674,13 @@ fn lifecycle_transitions_freeze_terminal_elapsed_and_reject_late_updates() {
             reason: "fixture failure".to_owned(),
         }
     );
+    assert!(!tracker.awaiting_provider_at(id, instant_after(origin, 101)));
     let run = tracker.current().unwrap();
     assert!(!run.is_active());
     assert_eq!(
         run.elapsed_at(instant_after(origin, 100)),
         Duration::from_millis(7)
     );
-    assert!(!tracker.awaiting_provider_at(id, instant_after(origin, 101)));
     assert_eq!(run.phase(), &RunPhase::Finished(outcome));
 }
 

@@ -2,7 +2,7 @@
 
 use crate::error::DecodeError;
 use crate::pricing::Pricing;
-use crate::CompatibilityMode;
+pub use crate::CompatibilityMode;
 use serde::{Deserialize, Serialize};
 
 /// Newtype representing an endpoint identifier.

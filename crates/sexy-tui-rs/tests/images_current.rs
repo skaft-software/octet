@@ -235,10 +235,11 @@ fn planner_revalidates_images_and_keeps_fallback_semantic() {
         ImageCapabilities::forced(Some(ImageProtocol::Kitty), Some(cell)),
         ImageLimits::default(),
     );
+    let second_image = image(png(16, 33, 16));
     let plan = planner
         .plan_place(
             image_id(2),
-            &image(png(16, 33, 16)),
+            &second_image,
             ImageViewport::new(40, 20, Some(cell)).unwrap(),
         )
         .unwrap();
