@@ -157,10 +157,10 @@ pub struct Cli {
     /// An initial prompt. In interactive mode it is submitted after startup.
     #[arg(value_name = "PROMPT")]
     pub message: Option<String>,
-    /// Sign in to a subscription provider (e.g. `codex`) and exit.
+    /// Sign in to a subscription provider (`codex` or `copilot`) and exit.
     #[arg(long, value_name = "PROVIDER")]
     pub login: Option<String>,
-    /// Sign out of a subscription provider (e.g. `codex`) and exit.
+    /// Sign out of a subscription provider (`codex` or `copilot`) and exit.
     #[arg(long, value_name = "PROVIDER")]
     pub logout: Option<String>,
     /// With `--login`, print the device URL/code without opening a browser.

@@ -149,9 +149,7 @@ pub(crate) fn aws_bedrock_auth(region: &str) -> anyhow::Result<Option<Auth>> {
         return Ok(None);
     }
     Ok(Some(Auth::request_signer(std::sync::Arc::new(
-        AwsBedrockSigner {
-            region: region.to_owned(),
-        },
+        AwsBedrockSigner::new(region.to_owned()),
     ))))
 }
 
@@ -196,9 +194,31 @@ pub(crate) fn aws_bedrock_region() -> anyhow::Result<String> {
     Ok("us-east-1".to_owned())
 }
 
-#[derive(Debug)]
+type AwsCredentialsResolver = std::sync::Arc<
+    dyn Fn() -> anyhow::Result<Option<octet_ai::AwsCredentials>> + Send + Sync,
+>;
+
 struct AwsBedrockSigner {
     region: String,
+    resolver: AwsCredentialsResolver,
+}
+
+impl fmt::Debug for AwsBedrockSigner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AwsBedrockSigner")
+            .field("region", &self.region)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AwsBedrockSigner {
+    fn new(region: String) -> Self {
+        Self {
+            region,
+            resolver: std::sync::Arc::new(resolve_aws_credentials),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -207,7 +227,8 @@ impl octet_ai::RequestSigner for AwsBedrockSigner {
         &self,
         request: &octet_ai::SigningRequest,
     ) -> Result<octet_ai::SignedRequestHeaders, octet_ai::AuthError> {
-        let credentials = tokio::task::spawn_blocking(resolve_aws_credentials)
+        let resolver = self.resolver.clone();
+        let credentials = tokio::task::spawn_blocking(move || resolver())
             .await
             .map_err(|_| octet_ai::AuthError::Resolve)?
             .map_err(|_| octet_ai::AuthError::Resolve)?
@@ -222,19 +243,42 @@ const MAX_AWS_METADATA_BYTES: usize = 64 * 1024;
 const AWS_METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn resolve_aws_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
-    if let Some(credentials) = aws_environment_credentials()? {
+    resolve_aws_credentials_with(
+        aws_environment_credentials,
+        aws_profile_credentials,
+        aws_metadata_credentials,
+    )
+}
+
+fn resolve_aws_credentials_with<E, P, M>(
+    environment: E,
+    profile: P,
+    metadata: M,
+) -> anyhow::Result<Option<octet_ai::AwsCredentials>>
+where
+    E: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
+    P: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
+    M: FnOnce() -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
+{
+    if let Some(credentials) = environment()? {
         return Ok(Some(credentials));
     }
-    if let Some(credentials) = aws_profile_credentials()? {
+    if let Some(credentials) = profile()? {
         return Ok(Some(credentials));
     }
-    aws_metadata_credentials()
+    metadata()
 }
 
 fn aws_environment_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
-    let access_key_id = optional_bounded_env("AWS_ACCESS_KEY_ID")?;
-    let secret_access_key = optional_bounded_env("AWS_SECRET_ACCESS_KEY")?;
-    let session_token = optional_bounded_env("AWS_SESSION_TOKEN")?;
+    aws_environment_credentials_with(|variable| optional_bounded_env(variable))
+}
+
+fn aws_environment_credentials_with(
+    mut read_env: impl FnMut(&str) -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
+    let access_key_id = read_env("AWS_ACCESS_KEY_ID")?;
+    let secret_access_key = read_env("AWS_SECRET_ACCESS_KEY")?;
+    let session_token = read_env("AWS_SESSION_TOKEN")?;
     match (access_key_id, secret_access_key) {
         (None, None) => Ok(None),
         (Some(access_key_id), Some(secret_access_key)) => {
@@ -250,6 +294,12 @@ fn aws_profile_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>>
     let Some(values) = aws_profile_values(false)? else {
         return Ok(None);
     };
+    aws_profile_credentials_from_values(&values)
+}
+
+fn aws_profile_credentials_from_values(
+    values: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
     let access_key_id = values.get("aws_access_key_id").cloned();
     let secret_access_key = values.get("aws_secret_access_key").cloned();
     let session_token = values
@@ -444,7 +494,13 @@ fn metadata_http_client() -> anyhow::Result<reqwest::blocking::Client> {
 }
 
 fn ecs_metadata_url() -> anyhow::Result<Option<url::Url>> {
-    if let Some(relative) = optional_bounded_env("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")? {
+    ecs_metadata_url_with(|variable| optional_bounded_env(variable))
+}
+
+fn ecs_metadata_url_with(
+    mut read_env: impl FnMut(&str) -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<Option<url::Url>> {
+    if let Some(relative) = read_env("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")? {
         if relative.len() > 2048 || !relative.starts_with('/') || relative.contains(['\r', '\n']) {
             anyhow::bail!("invalid AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
         }
@@ -452,7 +508,7 @@ fn ecs_metadata_url() -> anyhow::Result<Option<url::Url>> {
             .map(Some)
             .map_err(Into::into);
     }
-    let Some(full) = optional_bounded_env("AWS_CONTAINER_CREDENTIALS_FULL_URI")? else {
+    let Some(full) = read_env("AWS_CONTAINER_CREDENTIALS_FULL_URI")? else {
         return Ok(None);
     };
     let url = url::Url::parse(&full)
@@ -555,19 +611,31 @@ fn credentials_from_metadata_body(body: String) -> anyhow::Result<octet_ai::AwsC
     let access_key_id = value
         .get("AccessKeyId")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= octet_ai::auth::MAX_ENV_VALUE_BYTES)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= octet_ai::auth::MAX_ENV_VALUE_BYTES
+                && !value.chars().any(char::is_control)
+        })
         .ok_or_else(|| anyhow::anyhow!("AWS metadata returned incomplete credentials"))?
         .to_owned();
     let secret_access_key = value
         .get("SecretAccessKey")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= octet_ai::auth::MAX_ENV_VALUE_BYTES)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= octet_ai::auth::MAX_ENV_VALUE_BYTES
+                && !value.chars().any(char::is_control)
+        })
         .ok_or_else(|| anyhow::anyhow!("AWS metadata returned incomplete credentials"))?
         .to_owned();
     let token = value
         .get("Token")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= octet_ai::auth::MAX_ENV_VALUE_BYTES)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= octet_ai::auth::MAX_ENV_VALUE_BYTES
+                && !value.chars().any(char::is_control)
+        })
         .map(str::to_owned);
     aws_credentials(access_key_id, secret_access_key, token)
 }
@@ -584,6 +652,15 @@ pub(crate) fn missing_environment_diagnostic(
 mod tests {
     use super::*;
     use crate::providers::contract::{ANTHROPIC, CLOUDFLARE_AI_GATEWAY, GEMINI, OPENAI};
+
+    fn fixture_credentials(label: &str) -> octet_ai::AwsCredentials {
+        octet_ai::AwsCredentials::new(
+            format!("{label}-access"),
+            format!("{label}-secret"),
+            None,
+        )
+        .expect("fixture AWS credentials")
+    }
 
     #[test]
     fn aws_profile_parser_selects_only_the_requested_bounded_section() {
@@ -615,6 +692,173 @@ ignored key = ignored
     }
 
     #[test]
+    fn aws_chain_precedence_is_ordered_without_metadata_fallback() {
+        let profile_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let metadata_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let profile_flag = profile_called.clone();
+        let metadata_flag = metadata_called.clone();
+        let selected = resolve_aws_credentials_with(
+            || Ok(Some(fixture_credentials("environment"))),
+            move || {
+                profile_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("profile")))
+            },
+            move || {
+                metadata_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("metadata")))
+            },
+        )
+        .unwrap();
+        assert!(selected.is_some());
+        assert!(!profile_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!metadata_called.load(std::sync::atomic::Ordering::SeqCst));
+
+        let metadata_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let metadata_flag = metadata_called.clone();
+        let selected = resolve_aws_credentials_with(
+            || Ok(None),
+            || Ok(Some(fixture_credentials("profile"))),
+            move || {
+                metadata_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("metadata")))
+            },
+        )
+        .unwrap();
+        assert!(selected.is_some());
+        assert!(!metadata_called.load(std::sync::atomic::Ordering::SeqCst));
+
+        let selected = resolve_aws_credentials_with(
+            || Ok(None),
+            || Ok(None),
+            || Ok(Some(fixture_credentials("metadata"))),
+        )
+        .unwrap();
+        assert!(selected.is_some());
+
+        let profile_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let profile_flag = profile_called.clone();
+        assert!(resolve_aws_credentials_with(
+            || Err(anyhow::anyhow!("environment source failed")),
+            move || {
+                profile_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("profile")))
+            },
+            || Ok(None),
+        )
+        .is_err());
+        assert!(!profile_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn partial_environment_credentials_are_rejected_without_process_fallback() {
+        let error = aws_environment_credentials_with(|name| {
+            Ok(match name {
+                "AWS_ACCESS_KEY_ID" => Some("environment-access".to_owned()),
+                _ => None,
+            })
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("configured together"));
+    }
+
+    #[test]
+    fn profile_credential_process_is_not_executed_or_selected() {
+        let values = parse_aws_ini_section(
+            "[default]\ncredential_process = touch /tmp/must-not-run\n",
+            "default",
+        )
+        .unwrap();
+        assert!(values.contains_key("credential_process"));
+        assert!(aws_profile_credentials_from_values(&values)
+            .unwrap()
+            .is_none());
+
+        let values = parse_aws_ini_section(
+            "[default]\naws_access_key_id = profile-access\naws_secret_access_key = profile-secret\ncredential_process = touch /tmp/must-not-run\n",
+            "default",
+        )
+        .unwrap();
+        assert!(aws_profile_credentials_from_values(&values)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn container_metadata_urls_are_allowlisted_and_proxy_independent() {
+        let relative = ecs_metadata_url_with(|name| {
+            Ok(match name {
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" => Some("/v2/credentials".to_owned()),
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI" => {
+                    Some("http://example.invalid/should-not-win".to_owned())
+                }
+                _ => None,
+            })
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(relative.host_str(), Some("169.254.170.2"));
+        assert_eq!(relative.path(), "/v2/credentials");
+
+        let local = ecs_metadata_url_with(|name| {
+            Ok(if name == "AWS_CONTAINER_CREDENTIALS_FULL_URI" {
+                Some("http://localhost:1234/credentials".to_owned())
+            } else {
+                None
+            })
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(local.host_str(), Some("localhost"));
+        assert_eq!(local.port(), Some(1234));
+
+        for value in [
+            "http://example.invalid/credentials",
+            "http://user@localhost/credentials",
+            "http://localhost/credentials#fragment",
+            "http://[::1]/credentials",
+        ] {
+            let result = ecs_metadata_url_with(|name| {
+                Ok(if name == "AWS_CONTAINER_CREDENTIALS_FULL_URI" {
+                    Some(value.to_owned())
+                } else {
+                    None
+                })
+            });
+            assert!(result.is_err(), "metadata URL must be rejected: {value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn aws_bedrock_signer_resolves_current_credentials_for_each_request() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_resolver = calls.clone();
+        let resolver: AwsCredentialsResolver = std::sync::Arc::new(move || {
+            let call = calls_for_resolver.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(fixture_credentials(&format!("refresh-{call}"))))
+        });
+        let signer = AwsBedrockSigner {
+            region: "us-west-2".to_owned(),
+            resolver,
+        };
+        let request = octet_ai::SigningRequest::new(
+            http::Method::POST,
+            url::Url::parse(
+                "https://bedrock-runtime.us-west-2.amazonaws.com/model/example/converse-stream",
+            )
+            .unwrap(),
+            bytes::Bytes::from_static(b"{}"),
+            http::HeaderMap::new(),
+        );
+        octet_ai::RequestSigner::sign(&signer, &request)
+            .await
+            .unwrap();
+        octet_ai::RequestSigner::sign(&signer, &request)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn aws_metadata_credentials_are_bounded_and_require_both_key_components() {
         assert!(credentials_from_metadata_body(
             r#"{"AccessKeyId":"metadata-access","SecretAccessKey":"metadata-secret","Token":"metadata-token"}"#
@@ -629,6 +873,11 @@ ignored key = ignored
         assert!(credentials_from_metadata_body(format!(
             r#"{{"AccessKeyId":"{oversized}","SecretAccessKey":"metadata-secret"}}"#
         ))
+        .is_err());
+        assert!(credentials_from_metadata_body(
+            r#"{"AccessKeyId":"metadata\naccess","SecretAccessKey":"metadata-secret"}"#
+                .to_owned(),
+        )
         .is_err());
     }
 

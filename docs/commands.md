@@ -2,7 +2,9 @@
 
 [Documentation](README.md) · [CLI flags](cli.md) · [Terminal](terminal.md)
 
-Type `/` in the composer for live command discovery. For example:
+Type `/` in the composer for live command discovery. Tab completes a
+slash-command name without invoking it; Enter invokes the highlighted command
+through its normal dispatcher. For example:
 
 ```text
 /status
@@ -76,7 +78,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 
 | Key | Action |
 | --- | --- |
-| Enter | Submit; while active, queue a follow-up. In a picker, select the visible action. |
+| Enter | Submit; while active, queue a follow-up. In a picker, select the visible action; in the slash-command popup, invoke the highlighted command. |
 | Shift+Enter | Newline when enhanced terminal key events are available. |
 | Ctrl+S | Steer at the next model boundary; in the resume picker, cycle sorting. |
 | Escape | Interrupt active work; close/back out of a panel. |
@@ -85,7 +87,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 | Ctrl+O | Globally disclose retained reasoning, compaction, delegated activity, tool commands, tool evidence, and shell output. Cannot recover discarded capture bytes. |
 | PageUp / PageDown | Semantic transcript navigation; PageUp claims the bounded viewport, PageDown returns toward live output. |
 | Up / Down | Select a path or `@` file suggestion while its menu is visible; otherwise move through the editor. |
-| Tab | Insert the selected path or `@` file suggestion. Keep directory completion open; backslash-escape spaces. |
+| Tab | Complete the selected slash command without invoking it, or insert the selected path/`@` file suggestion. Keep directory completion open; backslash-escape spaces. |
 | `@` | Fuzzy gitignore-aware workspace file mentions; path-prefixed mentions use filesystem completion. |
 
 [Resume picker keys](sessions.md#resume-and-branch) and

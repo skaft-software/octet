@@ -16,7 +16,9 @@ const contract = negotiate(offer, selectRequired(offer));
 
 This is a contract-binding example, **not a complete runnable extension**. It
 does not demonstrate a manifest, stdio process loop, tool dispatch, cancellation,
-or shutdown. Do not infer a complete extension runtime from generated bindings.
+or shutdown. The qualified dependency-free process reference is the
+[API `0.3` minimal example](../../examples/extensions/api-v03-minimal/README.md);
+do not infer a complete extension runtime from these generated bindings.
 
 The source package distribution version is `0.7.6`, independent of extension
 API `0.3`. The package name does not assert npm publication or registry

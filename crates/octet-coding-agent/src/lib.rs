@@ -133,7 +133,11 @@ async fn run() -> anyhow::Result<()> {
         return session_commands::run(command, &config);
     }
     if let Some(cli::TopLevelCommand::Setup { options }) = top_level_command.clone() {
-        return provider_setup::run_cli(&options, &config);
+        // Provider setup owns a synchronous HTTP client and its runtime. Keep that
+        // boundary off the Tokio executor so reqwest::blocking cannot construct or
+        // drop a runtime from within an async context.
+        return tokio::task::spawn_blocking(move || provider_setup::run_cli(&options, &config))
+            .await?;
     }
     if let Some(cli::TopLevelCommand::Batch { command }) = top_level_command.clone() {
         return batch::run(command, &config).await;
@@ -184,6 +188,13 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 AuthCommand::Logout => auth::codex::logout(&store).await,
             }
         }
+        "copilot" | "github-copilot" => {
+            let store = auth::copilot::CredentialStore::new(auth::copilot::default_path()?);
+            match command {
+                AuthCommand::Login { headless } => auth::copilot::login(&store, headless).await,
+                AuthCommand::Logout => auth::copilot::logout(&store).await,
+            }
+        }
         "custom" | "openai-custom" => {
             let store = auth::custom::CredentialStore::new(auth::custom::default_path());
             match command {
@@ -228,6 +239,6 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 }
             }
         }
-        other => anyhow::bail!("unknown provider {other:?}; supported: codex, custom"),
+        other => anyhow::bail!("unknown provider {other:?}; supported: codex, copilot, custom"),
     }
 }

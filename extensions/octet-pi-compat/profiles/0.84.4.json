@@ -244,7 +244,9 @@
       "tests/fixtures/conformance/public-surfaces.json",
       "tests/fixtures/conformance/official-examples.json",
       "tests/fixtures/conformance/plan-mode-journey.json",
-      "tests/fixtures/conformance/tui-audit.json"
+      "tests/fixtures/conformance/tui-audit.json",
+      "tests/fixtures/conformance/real-runtime.json",
+      "tests/fixtures/conformance/real-runtime-aggregate.json"
     ],
     "runner": "../conformance.py"
   }

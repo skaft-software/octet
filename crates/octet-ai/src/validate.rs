@@ -474,6 +474,8 @@ pub(crate) fn validate_request(
                                         // documented tool-result media mapping.
                                         Protocol::BedrockConverse
                                         | Protocol::GoogleGenerativeAi => false,
+                                        // No evidenced native Conversations tool-result media schema.
+                                        Protocol::MistralConversations => false,
                                     },
                                     ToolResultPart::Media(Media::Audio(_)) => false,
                                 };

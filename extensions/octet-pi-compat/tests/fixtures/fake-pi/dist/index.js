@@ -44,7 +44,6 @@ let fixtureProviderSetupAbortObserved = false;
 let fixtureProviderLateIteratorClosed = false;
 let fixtureProviderActions = null;
 let fixtureProviderSetupMutationTriggered = false;
-
 function fixtureModeForPath(path) {
   const value = String(path ?? "");
   if (value.endsWith("unsafe-provider-extension.mjs")) return "unsafe-provider";
@@ -225,7 +224,18 @@ async function loadFixtureExtensions(paths, eventBus) {
       if (typeof module.installFakePiAggregate === "function") {
         await module.installFakePiAggregate({ eventBus, runtime });
       }
-      extensions.push(fixtureExtension(path, fixtureModeForPath(path)));
+      const extension = fixtureExtension(path, fixtureModeForPath(path));
+      if (extension.fixtureMode === "ui-bridge") {
+        // Opt-in fixture loader: execute the selected extension's real command
+        // registration, rather than replacing its UI behavior with canned calls.
+        extension.commands = new Map();
+        await module.default({
+          registerCommand(name, definition) {
+            extension.commands.set(name, { ...definition, name });
+          },
+        });
+      }
+      extensions.push(extension);
     } catch (error) {
       errors.push({ path, error });
     }
@@ -513,7 +523,7 @@ export class ExtensionRunner {
       description: "Exercise one declared Pi public-surface fixture",
       handler: async (argumentsText, context) => this.probeSurface(String(argumentsText).trim(), context),
     });
-    return commands;
+    return [...commands, ...this.extensions.flatMap((extension) => [...(extension.commands?.values() ?? [])])];
   }
 
   setFlagValue(name, value) {

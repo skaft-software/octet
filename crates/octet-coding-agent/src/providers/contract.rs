@@ -1438,6 +1438,9 @@ mod tests {
                     segments.push(&fixture.model_id);
                     segments.push("converse-stream");
                 }
+                // URL path segments permit literal colons, but Bedrock's wire
+                // model-id segment uses %3A (not SigV4's canonical %253A).
+                url.set_path(&url.path().replace(':', "%3A"));
                 url
             }
             other => panic!("unknown fixture protocol: {other}"),

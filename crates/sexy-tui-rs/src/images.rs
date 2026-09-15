@@ -476,7 +476,7 @@ impl ImageLimits {
 
     /// Set a smaller accepted filename length.
     pub fn with_max_filename_bytes(mut self, value: usize) -> Result<Self, ImageError> {
-        if value > HARD_MAX_FILENAME_BYTES {
+        if value == 0 || value > HARD_MAX_FILENAME_BYTES {
             return Err(ImageError::InvalidLimit);
         }
         self.max_filename_bytes = value;
@@ -1703,6 +1703,11 @@ impl ImagePlanner {
         image: &'a TerminalImage,
         viewport: ImageViewport,
     ) -> Result<ImageRenderPlan<'a>, ImageError> {
+        // Validate even fallback-only plans against this planner's limits. A
+        // TerminalImage can be handed across components that chose different
+        // bounds, and unsupported terminals must not become a validation
+        // bypass merely because they emit text instead of protocol bytes.
+        validate_existing_image(image, &self.limits)?;
         let Some(protocol) = self.capabilities.protocol() else {
             return Ok(fallback_plan(
                 image,
@@ -2090,17 +2095,31 @@ fn parse_gif(bytes: &[u8], limits: &ImageLimits) -> Result<ImageDimensions, Imag
                     let fixed_len =
                         usize::from(*bytes.get(offset).ok_or(ImageError::InvalidImage)?);
                     offset = offset.checked_add(1).ok_or(ImageError::InvalidImage)?;
-                    if matches!(label, 0xf9) && fixed_len != 4
-                        || matches!(label, 0xff) && fixed_len != 11
-                        || matches!(label, 0x01) && fixed_len != 12
+                    if (matches!(label, 0xf9) && fixed_len != 4)
+                        || (matches!(label, 0xff) && fixed_len != 11)
+                        || (matches!(label, 0x01) && fixed_len != 12)
                     {
                         return Err(ImageError::InvalidImage);
                     }
+                    let fixed_start = offset;
                     offset = offset
                         .checked_add(fixed_len)
                         .ok_or(ImageError::InvalidImage)?;
                     if offset > bytes.len() {
                         return Err(ImageError::InvalidImage);
+                    }
+                    if label == 0xff {
+                        let application = &bytes[fixed_start..offset];
+                        // These registered application identifiers carry the
+                        // Netscape/ANIMEXTS loop instructions. Reject them even
+                        // when a malformed producer includes only one frame;
+                        // accepting a loop marker would make the terminal
+                        // decide whether to animate an otherwise bounded input.
+                        if application.starts_with(b"NETSCAPE")
+                            || application.starts_with(b"ANIMEXTS")
+                        {
+                            return Err(ImageError::UnsupportedAnimation);
+                        }
                     }
                 }
                 skip_gif_subblocks(bytes, &mut offset, &mut items, limits)?;

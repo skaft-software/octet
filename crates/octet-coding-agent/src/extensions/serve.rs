@@ -258,146 +258,20 @@ fn goal_mutation_outcome(
     )]))
 }
 
-async fn wait_for_serve_shutdown_signal() -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            interrupted = tokio::signal::ctrl_c() => interrupted,
-            _ = sigterm.recv() => Ok(()),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await
-    }
-}
+mod conversations;
+use conversations::*;
+mod projects;
+use projects::*;
+mod recovery;
+use recovery::*;
+mod runs;
+use runs::{run_worker, WorkerCommand, WorkerMessage, WorkerPlan};
+mod sessions;
+use sessions::*;
+mod routing;
+mod startup;
 
-pub async fn run(
-    config: Config,
-    port: u16,
-    no_open: bool,
-    web_root: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    let _host_lock = ServeHostLock::acquire(&config)?;
-    let terminal =
-        config
-            .sandbox
-            .process_execution_allowed()
-            .then(|| octet_serve_backend::TerminalConfig {
-                cwd: config.workspace.clone(),
-                shell: config.sandbox.shell_path.clone(),
-            });
-    let host = Arc::new(OctetHost::new(config)?);
-    let goal_store_root = host.serve_state_dir.join("goals");
-    let supervisor = Arc::new(SessionSupervisor::new(
-        Arc::clone(&host),
-        SupervisorConfig {
-            fresh_session_authority: host.authority_ceiling(),
-            ..SupervisorConfig::default()
-        },
-    ));
-    let server = LoopbackServer::start(
-        Arc::clone(&supervisor),
-        LoopbackConfig {
-            port,
-            web_root: web_root.clone(),
-            terminal,
-            goal_store_root,
-        },
-    )
-    .await?;
-    let pull_request_refresh = tokio::spawn(run_pull_request_catalog_refresh(host, supervisor));
-    let clean_url = server.url();
-    if let Some(root) = web_root {
-        crate::output::stdout_line(format!("Web app: {}", root.display()));
-    } else {
-        crate::output::stdout_line("Web app: embedded");
-    }
-    if no_open {
-        // Explicit trusted terminal output: the launch capability is one-use,
-        // process-local, and stripped from the browser address bar by an immediate
-        // redirect. It is never persisted or included in server errors.
-        crate::output::stdout_line(format!("Open octet once: {}", server.launch_url()));
-    } else {
-        if let Err(error) = open_browser(&server.launch_url()) {
-            crate::output::stderr_line(format!(
-                "warning: could not open the browser automatically: {error}"
-            ));
-        }
-        crate::output::stdout_line(format!("octet graphical host: {clean_url}"));
-    }
-    let shutdown_requested = wait_for_serve_shutdown_signal().await;
-    pull_request_refresh.abort();
-    let _ = pull_request_refresh.await;
-    shutdown_requested?;
-    server.shutdown().await?;
-    Ok(())
-}
-
-/// One graphical host per octet session root.
-///
-/// This intentionally does not claim that legacy TUI processes participate in
-/// the same host lock. Individual session opens still surface the underlying
-/// octet session lock/concurrent-modification failure rather than crossing into
-/// `octet-agent` core to change legacy ownership semantics.
-struct ServeHostLock {
-    _file: std::fs::File,
-}
-
-impl ServeHostLock {
-    fn acquire(config: &Config) -> anyhow::Result<Self> {
-        Self::acquire_at(&config.session_dir)
-    }
-
-    fn acquire_at(session_dir: &Path) -> anyhow::Result<Self> {
-        use fs2::FileExt as _;
-
-        let state_dir = secure_serve_state_dir(session_dir)?;
-        let path = state_dir.join("host.lock");
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let file = options.open(&path)?;
-        if !file.metadata()?.is_file() {
-            anyhow::bail!("octet serve host lock must be a regular file");
-        }
-        file.try_lock_exclusive().map_err(|error| {
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
-            ) {
-                anyhow::anyhow!("another octet serve process already owns this session catalog")
-            } else {
-                anyhow::Error::from(error)
-            }
-        })?;
-        Ok(Self { _file: file })
-    }
-}
-
-fn open_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).spawn()?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
-    }
-    Ok(())
-}
+pub use startup::{run, run_with_session_name};
 
 fn authority_profiles_from_sandbox(
     sandbox: &crate::config::SandboxPolicy,
@@ -441,6 +315,7 @@ struct OctetHost {
     pull_requests: Arc<Mutex<PullRequestStore>>,
     serve_state_dir: PathBuf,
     session_deletion_lock: Arc<tokio::sync::Mutex<()>>,
+    startup_session_name: Arc<Mutex<Option<String>>>,
     #[cfg(test)]
     checkout_hooks: Arc<Mutex<VecDeque<CheckoutTestHooks>>>,
     #[cfg(test)]
@@ -1155,45 +1030,17 @@ enum PullRequestObservation {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PendingSessionDeletion {
-    version: u16,
-    session_id: String,
-    project_id: String,
-    trashed_at_ms: u64,
-    committed: bool,
-}
-
-impl PendingSessionDeletion {
-    fn new(
-        session_id: &SessionId,
-        project_id: &ProjectId,
-        trashed_at_ms: u64,
-    ) -> PendingSessionDeletion {
-        Self {
-            version: SESSION_DELETION_VERSION,
-            session_id: session_id.as_str().to_owned(),
-            project_id: project_id.as_str().to_owned(),
-            trashed_at_ms,
-            committed: false,
-        }
-    }
-
-    fn validate(&self) -> bool {
-        self.version == SESSION_DELETION_VERSION
-            && self.trashed_at_ms > 0
-            && SessionId::new(self.session_id.clone()).is_ok()
-            && ProjectId::new(self.project_id.clone()).is_ok()
-    }
-}
-
 impl OctetHost {
     fn new(config: Config) -> anyhow::Result<Self> {
+        Self::new_with_session_name(config, None)
+    }
+
+    fn new_with_session_name(config: Config, session_name: Option<String>) -> anyhow::Result<Self> {
         #[cfg(not(unix))]
         anyhow::bail!(
             "octet serve project trust is unavailable on this platform because stable directory identity checks are not implemented"
         );
+        let startup_session_name = startup::normalize_startup_session_name(session_name)?;
         let boot = crate::app::bootstrap::bootstrap(config.clone())?;
         let models = graphical_model_catalog(&boot.catalog, &config);
         if models.is_empty() {
@@ -1283,6 +1130,7 @@ impl OctetHost {
             pull_requests: Arc::new(Mutex::new(pull_requests)),
             serve_state_dir: state_dir,
             session_deletion_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup_session_name: Arc::new(Mutex::new(startup_session_name)),
             #[cfg(test)]
             checkout_hooks: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(test)]
@@ -1843,26 +1691,60 @@ impl OctetHost {
                 .bind_session(session_id.as_str(), &registry_id)
                 .map_err(project_registry_service_error)?;
         }
+        // A named launch is durable before bootstrap, without constructing an
+        // App or contacting a provider. Keep the prepared session's lock until
+        // the worker takes ownership; unnamed provisional sessions stay lazy.
+        let (session_name, prepared_session) = if request.provisional {
+            let mut pending_name = self
+                .startup_session_name
+                .lock()
+                .map_err(|_| ServiceError::Internal)?;
+            let prepared = if let Some(name) = pending_name.as_deref() {
+                let session = crate::app::bootstrap::open_launch_session(
+                    &mut None,
+                    SessionSelection::CreateNew(session_path.clone()),
+                )
+                .map_err(|_| ServiceError::Internal)?;
+                context
+                    .sessions
+                    .rename(session_id.as_str(), name)
+                    .map_err(|_| ServiceError::Internal)?;
+                Some(session)
+            } else {
+                None
+            };
+            (pending_name.take(), prepared)
+        } else {
+            (None, None)
+        };
+        let launch_session = if prepared_session.is_some() {
+            SessionSelection::OpenExisting(session_path)
+        } else {
+            SessionSelection::CreateNew(session_path)
+        };
         let generation = next_actor_generation();
         let selection = selection_for_model(&resolved, &reasoning, &context.config);
         let project_id = Some(context.project_id.clone());
-        let seed = empty_seed(
+        let mut seed = empty_seed(
             session_id,
             project_id.clone(),
             selection.clone(),
             request.authority,
             generation,
         );
+        if let Some(name) = session_name.as_deref() {
+            seed.summary.title = name.to_owned();
+        }
         let plan = WorkerPlan {
             config: context.config,
             sessions: context.sessions,
             launch: LaunchSelection {
                 model: resolved.spec.id.clone(),
-                session: SessionSelection::CreateNew(session_path),
+                session: launch_session,
                 reasoning,
                 reasoning_mode: self.config.reasoning_mode,
             },
-            prepared_session: Mutex::new(None),
+            prepared_session: Mutex::new(prepared_session),
             authority: request.authority,
             available_models: self.models.clone(),
             actor_generation: generation,
@@ -1978,234 +1860,6 @@ impl OctetHost {
                 .unwrap_or_default(),
         };
         Ok(OctetSessionDriver::spawn(seed, plan, known_entries))
-    }
-}
-
-fn reconcile_session_bindings(
-    config: &Config,
-    projects: &mut ProjectRegistry,
-    include_untrusted: Option<&RegistryProjectId>,
-) -> Result<(), ProjectRegistryError> {
-    let eligible = projects
-        .list()
-        .into_iter()
-        .filter_map(|project| {
-            let explicitly_included = include_untrusted == Some(&project.id);
-            (project.state == RegistryProjectState::Trusted || explicitly_included)
-                .then_some((project.id, explicitly_included))
-        })
-        .collect::<Vec<_>>();
-    let mut candidates = BTreeMap::<String, RegistryProjectId>::new();
-    let mut ambiguous = BTreeSet::new();
-
-    for (project_id, explicitly_included) in &eligible {
-        let root = if *explicitly_included {
-            projects.resolve_root(project_id)
-        } else {
-            projects.resolve_trusted_root(project_id)
-        };
-        let Ok(root) = root else {
-            continue;
-        };
-        let sessions = SessionStore::new(&config.session_dir, root.as_path());
-        for session_id in sessions.session_file_ids() {
-            if projects.project_for_session(&session_id).is_some()
-                || SessionId::new(session_id.clone()).is_err()
-                || ambiguous.contains(&session_id)
-            {
-                continue;
-            }
-            match candidates.get(&session_id) {
-                Some(existing) if existing != project_id => {
-                    candidates.remove(&session_id);
-                    ambiguous.insert(session_id);
-                }
-                Some(_) => {}
-                None => {
-                    candidates.insert(session_id, project_id.clone());
-                }
-            }
-        }
-    }
-
-    for (project_id, _) in eligible {
-        let session_ids = candidates
-            .iter()
-            .filter_map(|(session_id, candidate)| {
-                (candidate == &project_id).then_some(session_id.as_str())
-            })
-            .collect::<Vec<_>>();
-        projects.bind_sessions(&project_id, session_ids)?;
-    }
-    Ok(())
-}
-
-fn backfill_usage_store(
-    config: &Config,
-    projects: &ProjectRegistry,
-    usage: &mut InferenceRequestStore,
-) -> anyhow::Result<()> {
-    for project in projects.list() {
-        let session_ids = projects.sessions_for_project(&project.id);
-        if session_ids.is_empty() {
-            continue;
-        }
-        // Archived projects still own accounting evidence. Unavailable roots
-        // are not proof that their separately stored transcripts were deleted.
-        let Ok(root) = projects.resolve_root_for_cleanup(&project.id) else {
-            usage.mark_backfill_incomplete();
-            continue;
-        };
-        let sessions = SessionStore::new(&config.session_dir, root.as_path());
-        for session_id in session_ids {
-            let inspection = match sessions.inspect_by_id(&session_id) {
-                Ok(inspection) => inspection,
-                Err(_) => {
-                    if !matches!(sessions.session_file_exists(&session_id), Ok(false)) {
-                        usage.mark_backfill_incomplete();
-                    }
-                    continue;
-                }
-            };
-            if !inspection.usage_uncertainty_records.is_empty() {
-                usage.record_uncertainty(&session_id)?;
-            }
-            usage.record_all(project_catalog_usage(
-                &session_id,
-                &inspection.usage_records,
-            )?)?;
-        }
-    }
-    Ok(())
-}
-
-fn project_session_usage(
-    session_id: &str,
-    session: &Session,
-) -> Result<Vec<InferenceRequest>, UsageStoreError> {
-    session
-        .usage_records()
-        .iter()
-        .enumerate()
-        .map(|(ordinal, record)| {
-            let request_ordinal =
-                u64::try_from(ordinal).map_err(|_| UsageStoreError::InvalidRecord)?;
-            Ok(InferenceRequest {
-                session_id: session_id.to_owned(),
-                request_ordinal,
-                provider: record
-                    .endpoint
-                    .as_ref()
-                    .map_or("unknown", |endpoint| endpoint.0.as_str())
-                    .to_owned(),
-                model: record
-                    .model
-                    .as_ref()
-                    .map_or("unknown", |model| model.0.as_str())
-                    .to_owned(),
-                timestamp_ms: record.completed_at_unix_ms.unwrap_or_default(),
-                prompt_tokens: record.usage.input_tokens,
-                completion_tokens: record.usage.output_tokens,
-                cache_read_tokens: record.usage.cache_read_tokens,
-                cache_write_tokens: record.usage.cache_write_tokens,
-                cache_write_1h_tokens: record.usage.cache_write_1h_tokens,
-                reasoning_tokens: record.usage.reasoning_tokens,
-                total_tokens: record.usage.total_tokens,
-            })
-        })
-        .collect()
-}
-
-fn project_catalog_usage(
-    session_id: &str,
-    records: &[SessionUsageRecord],
-) -> Result<Vec<InferenceRequest>, UsageStoreError> {
-    records
-        .iter()
-        .enumerate()
-        .map(|(ordinal, record)| {
-            let request_ordinal =
-                u64::try_from(ordinal).map_err(|_| UsageStoreError::InvalidRecord)?;
-            Ok(InferenceRequest {
-                session_id: session_id.to_owned(),
-                request_ordinal,
-                provider: record.endpoint.as_deref().unwrap_or("unknown").to_owned(),
-                model: record.model.as_deref().unwrap_or("unknown").to_owned(),
-                timestamp_ms: record.completed_at_unix_ms.unwrap_or_default(),
-                prompt_tokens: record.input_tokens,
-                completion_tokens: record.output_tokens,
-                cache_read_tokens: record.cache_read_tokens,
-                cache_write_tokens: record.cache_write_tokens,
-                cache_write_1h_tokens: record.cache_write_1h_tokens,
-                reasoning_tokens: record.reasoning_tokens,
-                total_tokens: record.total_tokens,
-            })
-        })
-        .collect()
-}
-
-fn sync_session_usage(
-    usage: &Arc<Mutex<InferenceRequestStore>>,
-    session_id: &SessionId,
-    session: &Session,
-) -> Result<(), ServiceError> {
-    let requests =
-        project_session_usage(session_id.as_str(), session).map_err(usage_store_service_error)?;
-    let mut usage = usage.lock().map_err(|_| ServiceError::Internal)?;
-    if session.has_uncertain_usage() {
-        usage
-            .record_uncertainty(session_id.as_str())
-            .map_err(usage_store_service_error)?;
-    }
-    usage
-        .record_all(requests)
-        .map_err(usage_store_service_error)?;
-    Ok(())
-}
-
-fn usage_store_service_error(error: UsageStoreError) -> ServiceError {
-    match error {
-        UsageStoreError::QuotaExceeded => ServiceError::Unavailable,
-        UsageStoreError::InvalidRecord
-        | UsageStoreError::Conflict
-        | UsageStoreError::Corrupt
-        | UsageStoreError::Storage => ServiceError::Internal,
-    }
-}
-
-fn registry_project_id(project_id: &ProjectId) -> Result<RegistryProjectId, ServiceError> {
-    RegistryProjectId::parse(project_id.as_str()).map_err(project_registry_service_error)
-}
-
-fn project_registry_service_error(error: ProjectRegistryError) -> ServiceError {
-    match error {
-        ProjectRegistryError::ProjectNotFound => ServiceError::NotFound,
-        ProjectRegistryError::ProjectUntrusted => ServiceError::Unauthorized,
-        ProjectRegistryError::ProjectArchived => ServiceError::InvalidBoundary,
-        ProjectRegistryError::RootUnavailable
-        | ProjectRegistryError::RootIdentityChanged
-        | ProjectRegistryError::RootSymlink
-        | ProjectRegistryError::RootNotDirectory => ServiceError::Unavailable,
-        ProjectRegistryError::RelativePath
-        | ProjectRegistryError::PathTraversal
-        | ProjectRegistryError::InvalidProjectId
-        | ProjectRegistryError::ProjectLimitReached
-        | ProjectRegistryError::InvalidDisplayName
-        | ProjectRegistryError::InvalidCanonicalRoot
-        | ProjectRegistryError::RootOverlapsState
-        | ProjectRegistryError::DuplicateRoot
-        | ProjectRegistryError::InvalidSessionId
-        | ProjectRegistryError::SessionAlreadyBound
-        | ProjectRegistryError::SessionBindingLimitReached => ServiceError::InvalidBoundary,
-        ProjectRegistryError::StateParentUnavailable
-        | ProjectRegistryError::UnsafeStatePath
-        | ProjectRegistryError::UnsafePermissions
-        | ProjectRegistryError::StateTooLarge
-        | ProjectRegistryError::CorruptState
-        | ProjectRegistryError::UnsupportedStateVersion
-        | ProjectRegistryError::RevisionExhausted
-        | ProjectRegistryError::RandomnessUnavailable
-        | ProjectRegistryError::Storage(_) => ServiceError::Internal,
     }
 }
 
@@ -2546,6 +2200,7 @@ fn export_delegated_session_bytes(
     export_session_bytes(&sessions, session_id, serve_state_dir, max_bytes)
 }
 
+#[cfg(any())]
 #[async_trait]
 impl HostService for OctetHost {
     type Driver = OctetSessionDriver;
@@ -3712,44 +3367,6 @@ impl SessionDriver for OctetSessionDriver {
     }
 }
 
-struct WorkerCommand {
-    command: SessionCommand,
-    response: oneshot::Sender<Result<DriverCommandOutcome, ServiceError>>,
-}
-
-enum WorkerMessage {
-    Command(WorkerCommand),
-    CommandDiscovery {
-        response: oneshot::Sender<Result<CommandDiscovery, ServiceError>>,
-    },
-}
-
-struct WorkerPlan {
-    config: Config,
-    sessions: SessionStore,
-    launch: LaunchSelection,
-    prepared_session: Mutex<Option<Session>>,
-    authority: AuthorityProfile,
-    available_models: Vec<ModelSummary>,
-    actor_generation: u64,
-    session_id: SessionId,
-    project_id: Option<ProjectId>,
-    attachments: Option<AttachmentStore>,
-    documents: Option<DocumentStore>,
-    projects: Arc<Mutex<ProjectRegistry>>,
-    trusted_files: Arc<Mutex<HashMap<String, TrustedProjectFiles>>>,
-    search_index: Arc<Mutex<TranscriptSearchIndex>>,
-    resources: Option<octet_serve_backend::ResourceStore>,
-    goal_store: Option<GoalStore>,
-    usage: Arc<Mutex<InferenceRequestStore>>,
-    pull_requests: Arc<Mutex<PullRequestStore>>,
-    pull_request_projection: Arc<Mutex<Option<PullRequestSummary>>>,
-    pull_request_discovery_enabled: Arc<AtomicBool>,
-    pull_request_refresh_requested: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    checkout_hooks: CheckoutTestHooks,
-}
-
 #[derive(Clone)]
 struct PullRequestRefreshPlan {
     workspace: PathBuf,
@@ -4633,6 +4250,7 @@ fn schedule_goal(decision: Option<GoalDecision>) -> Option<tokio::time::Instant>
     }
 }
 
+#[cfg(any())]
 async fn run_worker(
     mut plan: WorkerPlan,
     mut commands: mpsc::Receiver<WorkerMessage>,
@@ -6439,12 +6057,13 @@ fn build_worker_app(plan: &mut WorkerPlan) -> anyhow::Result<App> {
     {
         boot.set_prepared_session(session);
     }
-    build_app_with_runtime_manager(
+    let app = build_app_with_runtime_manager(
         boot,
         plan.launch.clone(),
         system,
         Some(serve_runtime_manager(plan)?),
-    )
+    )?;
+    Ok(app)
 }
 
 fn command_name_is_claimed_by_builtin(name: &str) -> bool {
@@ -10137,220 +9756,6 @@ fn project_new_entries(
     Ok(items)
 }
 
-fn branch_graph(session: &Session) -> Result<SessionBranchGraph, ServiceError> {
-    let all_entries = session.entries();
-    let head = session.head();
-    let mut selected_indices = (all_entries
-        .len()
-        .saturating_sub(MAX_PROJECTED_BRANCH_ENTRIES)
-        ..all_entries.len())
-        .collect::<Vec<_>>();
-    if let Some(head) = head.as_ref() {
-        let head_index = all_entries
-            .iter()
-            .position(|entry| &entry.id == head)
-            .ok_or(ServiceError::InvalidSeed)?;
-        if !selected_indices.contains(&head_index) {
-            if selected_indices.len() == MAX_PROJECTED_BRANCH_ENTRIES {
-                selected_indices.remove(0);
-            }
-            selected_indices.push(head_index);
-            selected_indices.sort_unstable();
-        }
-    }
-    Ok(SessionBranchGraph {
-        head: head
-            .map(|head| DurableEntryId::new(head.0))
-            .transpose()
-            .map_err(|_| ServiceError::InvalidSeed)?,
-        entries: selected_indices
-            .iter()
-            .map(|index| project_branch_entry(&all_entries[*index]))
-            .collect::<Result<_, _>>()?,
-        truncated: selected_indices.len() < all_entries.len(),
-    })
-}
-
-fn branch_delta_events(
-    session: &Session,
-    start: usize,
-) -> Result<Vec<TimestampedEvent>, ServiceError> {
-    let entries = session.entries();
-    if start > entries.len() {
-        return Err(ServiceError::InvalidSeed);
-    }
-    let mut events = entries[start..]
-        .chunks(MAX_BRANCH_DELTA_ENTRIES)
-        .map(|chunk| {
-            Ok(event(EventPayload::SessionBranchEntriesAppended {
-                entries: chunk
-                    .iter()
-                    .map(project_branch_entry)
-                    .collect::<Result<_, _>>()?,
-            }))
-        })
-        .collect::<Result<Vec<_>, ServiceError>>()?;
-    let durable_entry_id = session
-        .head()
-        .map(|head| DurableEntryId::new(head.0))
-        .transpose()
-        .map_err(|_| ServiceError::Internal)?;
-    events.push(event(EventPayload::SessionDurableHeadChanged {
-        durable_entry_id,
-    }));
-    Ok(events)
-}
-
-fn project_branch_entry(entry: &Entry) -> Result<SessionBranchEntry, ServiceError> {
-    let kind = if is_local_synthetic_assistant(entry) {
-        SessionBranchEntryKind::Internal
-    } else {
-        match &entry.value {
-            EntryValue::Message(Message::User(_)) => SessionBranchEntryKind::UserMessage,
-            EntryValue::Message(Message::Assistant(_)) => SessionBranchEntryKind::AssistantMessage,
-            EntryValue::Compaction { .. } => SessionBranchEntryKind::Compaction,
-            _ => SessionBranchEntryKind::Internal,
-        }
-    };
-    Ok(SessionBranchEntry {
-        entry_id: DurableEntryId::new(entry.id.0.clone()).map_err(|_| ServiceError::InvalidSeed)?,
-        parent_entry_id: entry
-            .parent
-            .as_ref()
-            .map(|parent| DurableEntryId::new(parent.0.clone()))
-            .transpose()
-            .map_err(|_| ServiceError::InvalidSeed)?,
-        checkoutable: kind != SessionBranchEntryKind::Internal,
-        kind,
-        label: branch_entry_label(entry),
-    })
-}
-
-fn branch_entry_label(entry: &Entry) -> String {
-    if is_local_synthetic_assistant(entry) {
-        return "Internal session state".into();
-    }
-    let candidate = match &entry.value {
-        EntryValue::Message(Message::User(message)) => entry
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.display_text.as_deref())
-            .or_else(|| {
-                message.content.iter().find_map(|part| match part {
-                    UserPart::Text(text) => Some(text.as_str()),
-                    UserPart::Media(_) | UserPart::ToolResult(_) => None,
-                })
-            })
-            .unwrap_or("User input"),
-        EntryValue::Message(Message::Assistant(message)) => message
-            .content
-            .iter()
-            .find_map(|part| match part {
-                AssistantPart::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or("Assistant response"),
-        EntryValue::Config { .. } => "Internal session state",
-        EntryValue::Compaction { .. } => "Compaction",
-        EntryValue::ResponsesTurn { .. }
-        | EntryValue::ResponsesCompaction { .. }
-        | EntryValue::PromptTemplateSelected { .. }
-        | EntryValue::SkillActivated { .. }
-        | EntryValue::SkillResourceRead { .. }
-        | EntryValue::SkillDeactivated { .. } => "Internal session state",
-    };
-    let first_line = candidate.lines().find(|line| !line.trim().is_empty());
-    bounded_single_line_text(first_line.unwrap_or("Session entry"), 256)
-}
-
-fn attachment_refs_for_entry(
-    entry: &Entry,
-    attachment_store: Option<&AttachmentStore>,
-    session_id: &SessionId,
-    pending: &mut VecDeque<Vec<AttachmentRef>>,
-) -> Result<Vec<AttachmentRef>, ServiceError> {
-    let fingerprints = entry_image_fingerprints(entry)?;
-    if fingerprints.is_empty() {
-        return Ok(Vec::new());
-    }
-    let Some(store) = attachment_store else {
-        return Ok(Vec::new());
-    };
-    if let Some(references) = store
-        .refs_for_entry(session_id, &entry.id.0)
-        .map_err(attachment_service_error)?
-    {
-        if references_match_fingerprints(store, &references, &fingerprints)? {
-            return Ok(references);
-        }
-        return Err(ServiceError::Internal);
-    }
-    if let Some(references) = pending.front() {
-        if references_match_fingerprints(store, references, &fingerprints)? {
-            store
-                .associate(session_id, &entry.id.0, references)
-                .map_err(attachment_service_error)?;
-            return Ok(pending.pop_front().unwrap_or_default());
-        }
-    }
-    store
-        .recover_association(session_id, &entry.id.0, &fingerprints)
-        .map_err(attachment_service_error)
-        .map(|references| references.unwrap_or_default())
-}
-
-fn entry_image_fingerprints(entry: &Entry) -> Result<Vec<AttachmentFingerprint>, ServiceError> {
-    let EntryValue::Message(Message::User(message)) = &entry.value else {
-        return Ok(Vec::new());
-    };
-    message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            UserPart::Media(Media::Image(image)) => Some(image),
-            _ => None,
-        })
-        .filter_map(|image| match &image.source {
-            ImageSource::Inline(bytes) => Some((image, bytes)),
-            _ => None,
-        })
-        .map(|(image, bytes)| {
-            let media_type = image
-                .media_type
-                .as_ref()
-                .ok_or(ServiceError::InvalidSeed)?
-                .essence_str()
-                .to_owned();
-            Ok(AttachmentFingerprint {
-                media_type,
-                byte_len: bytes.len() as u64,
-                sha256: stable_hash(bytes),
-            })
-        })
-        .collect()
-}
-
-fn references_match_fingerprints(
-    store: &AttachmentStore,
-    references: &[AttachmentRef],
-    fingerprints: &[AttachmentFingerprint],
-) -> Result<bool, ServiceError> {
-    if references.len() != fingerprints.len() {
-        return Ok(false);
-    }
-    let resolved = store
-        .resolve_many(references)
-        .map_err(attachment_service_error)?;
-    Ok(resolved
-        .iter()
-        .zip(fingerprints)
-        .all(|(attachment, fingerprint)| {
-            attachment.reference.media_type == fingerprint.media_type
-                && attachment.reference.byte_len == fingerprint.byte_len
-                && attachment.sha256 == fingerprint.sha256
-        }))
-}
-
 // Entry projection has several independent identity hints and output indexes;
 // keeping them explicit avoids an ambiguous partially populated parameter bag.
 #[allow(clippy::too_many_arguments)]
@@ -10703,303 +10108,6 @@ fn entry_has_tool_call(entry: &Entry, tool_call_id: &str) -> bool {
                 )
             })
     )
-}
-
-struct SessionSeedOptions<'a> {
-    workspace: &'a Path,
-    project_id: Option<ProjectId>,
-    model: ModelSelection,
-    authority: AuthorityProfile,
-    generation: u64,
-    meta: Option<SessionMeta>,
-    attachment_store: Option<&'a AttachmentStore>,
-    resource_store: Option<&'a octet_serve_backend::ResourceStore>,
-}
-
-fn seed_from_session(
-    session: &Session,
-    session_id: SessionId,
-    options: SessionSeedOptions<'_>,
-) -> Result<SessionSeed, ServiceError> {
-    let SessionSeedOptions {
-        workspace,
-        project_id,
-        model,
-        authority,
-        generation,
-        meta,
-        attachment_store,
-        resource_store,
-    } = options;
-    let mut chain = Vec::new();
-    let mut cursor = session.head_ref();
-    while let Some(id) = cursor {
-        let entry = session.entry(id).ok_or(ServiceError::InvalidSeed)?;
-        chain.push(entry);
-        cursor = entry.parent.as_ref();
-    }
-    chain.reverse();
-    let active_entry_ids = chain
-        .iter()
-        .map(|entry| entry.id.0.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut items = Vec::new();
-    let mut sources = Vec::new();
-    let mut artifacts = Vec::new();
-    let mut tool_items = HashMap::new();
-    let mut tool_calls = HashMap::new();
-    let mut attributions = HashMap::<String, Vec<StoredRunItemAttribution>>::new();
-    let mut run_ids_by_entry = HashMap::<String, RunId>::new();
-    let mut reviews_by_outcome = HashMap::<String, CompletionReview>::new();
-    if let Some(resources) = resource_store {
-        for entry in &chain {
-            if entry
-                .metadata
-                .as_ref()
-                .is_none_or(|metadata| metadata.run_outcome.is_none())
-            {
-                continue;
-            }
-            let Ok(outcome_entry_id) = DurableEntryId::new(entry.id.0.clone()) else {
-                continue;
-            };
-            let Some(record) = load_stored_run_record(resources, &session_id, &outcome_entry_id)
-            else {
-                continue;
-            };
-            let Ok(run_id) = RunId::new(record.run_id.clone()) else {
-                continue;
-            };
-            reviews_by_outcome.insert(entry.id.0.clone(), record.review.clone());
-            for item in record.items {
-                if !active_entry_ids.contains(item.durable_entry_id.as_str()) {
-                    continue;
-                }
-                run_ids_by_entry.insert(item.durable_entry_id.clone(), run_id.clone());
-                attributions
-                    .entry(item.durable_entry_id.clone())
-                    .or_default()
-                    .push(item);
-            }
-            for tool in record.tools {
-                let Ok(item_id) = ItemId::new(tool.item_id.clone()) else {
-                    continue;
-                };
-                let Ok(turn_id) = TurnId::new(tool.turn_id.clone()) else {
-                    continue;
-                };
-                tool_items.insert(tool.tool_call_id.clone(), item_id);
-                tool_calls.insert(
-                    tool.tool_call_id,
-                    ProjectedToolCall {
-                        name: tool.activity.raw_tool_name.clone(),
-                        arguments: serde_json::Value::Null,
-                        activity: tool.activity,
-                        result: tool.result,
-                        turn_id,
-                    },
-                );
-            }
-        }
-    }
-    for entries in attributions.values_mut() {
-        entries.sort_by_key(|item| item.ordinal);
-    }
-    let mut pending_attachments = VecDeque::new();
-    for entry in chain {
-        if is_local_synthetic_assistant(entry) {
-            continue;
-        }
-        let attachments = attachment_refs_for_entry(
-            entry,
-            attachment_store,
-            &session_id,
-            &mut pending_attachments,
-        )?;
-        let run_id = run_ids_by_entry.get(&entry.id.0).cloned();
-        let review = reviews_by_outcome.get(&entry.id.0);
-        let mut projected = project_entry(
-            entry,
-            workspace,
-            run_id.clone(),
-            None,
-            None,
-            None,
-            &mut tool_items,
-            &mut tool_calls,
-            review,
-            attachments,
-        )?;
-        if let Some(stored) = attributions.get(&entry.id.0) {
-            for (item, attribution) in projected.iter_mut().zip(stored) {
-                item.id = ItemId::new(attribution.item_id.clone())
-                    .map_err(|_| ServiceError::InvalidSeed)?;
-                item.turn_id = Some(
-                    TurnId::new(attribution.turn_id.clone())
-                        .map_err(|_| ServiceError::InvalidSeed)?,
-                );
-                item.run_id = run_id.clone();
-                if let ItemPayload::UserMessage {
-                    delivery,
-                    documents,
-                    project_files,
-                    branch_provenance,
-                    ..
-                } = &mut item.payload
-                {
-                    *delivery = attribution.user_delivery;
-                    *documents = attribution.documents.clone();
-                    *project_files = attribution.project_files.clone();
-                    *branch_provenance = attribution.branch_provenance.clone();
-                }
-            }
-        }
-        items.extend(projected);
-        if let Some(projection) = resource_store.and_then(|store| {
-            rehydrate_stored_evidence(
-                store,
-                session,
-                &session_id,
-                entry,
-                &active_entry_ids,
-                &tool_items,
-            )
-        }) {
-            items.extend(projection.items);
-            sources.extend(projection.sources);
-            artifacts.extend(projection.artifacts);
-        }
-    }
-    // A legacy session may predate semantic run sidecars. Its result entry is
-    // encountered after the corresponding call entry, so apply the safe
-    // terminal fallback back onto the already-projected call. New sessions
-    // take the same path with the exact persisted activity.
-    let projected_tools = tool_items
-        .iter()
-        .filter_map(|(tool_call_id, item_id)| {
-            tool_calls
-                .get(tool_call_id)
-                .map(|tool| (item_id.clone(), tool.activity.clone()))
-        })
-        .collect::<HashMap<_, _>>();
-    for item in &mut items {
-        if let ItemPayload::ToolCall(activity) = &mut item.payload {
-            if let Some(projected) = projected_tools.get(&item.id) {
-                *activity = projected.clone();
-            }
-        }
-    }
-    if items.len() > MAX_PROJECTED_SESSION_ITEMS {
-        items = items.split_off(items.len() - MAX_PROJECTED_SESSION_ITEMS);
-    }
-    let modified_at_ms = meta
-        .as_ref()
-        .map(|meta| system_time_ms(meta.modified))
-        .unwrap_or_else(now_ms);
-    let title = meta
-        .as_ref()
-        .map(|meta| bounded_text(&meta.title, 512))
-        .unwrap_or_else(|| "Session".into());
-    let pinned = meta.as_ref().is_some_and(|meta| meta.pinned);
-    let archived = meta.as_ref().is_some_and(|meta| meta.archived);
-    let (lifecycle, retention, forked_from) = meta
-        .as_ref()
-        .map(|meta| session_catalog_metadata(meta, &session_id))
-        .transpose()?
-        .unwrap_or((SessionCatalogState::Active, None, None));
-    let summary = SessionSummary {
-        id: session_id.clone(),
-        project_id,
-        title,
-        tags: meta.map(|meta| meta.tags).unwrap_or_default(),
-        created_at_ms: modified_at_ms,
-        modified_at_ms,
-        pinned,
-        archived,
-        lifecycle,
-        retention,
-        forked_from,
-        provisional: false,
-        live_state: SessionLiveState::Idle,
-        attention: AttentionState::None,
-        pull_request: None,
-        owner: ActorOwnerState::Hosted,
-        model: model.clone(),
-    };
-    let branches = branch_graph(session)?;
-    let snapshot = SessionSnapshot {
-        session_id,
-        delegated_parent_session_id: None,
-        actor_generation: generation,
-        cursor: SessionCursor::zero(generation),
-        durable_head: branches.head.clone(),
-        branches,
-        live_state: SessionLiveState::Idle,
-        active_run_id: None,
-        model,
-        authority,
-        context: ContextUsage {
-            usage_uncertain: session.has_uncertain_usage(),
-            ..ContextUsage::default()
-        },
-        items,
-        extension_presentations: Vec::new(),
-        pending_requests: Vec::new(),
-        sources,
-        artifacts,
-    };
-    let seed = SessionSeed { summary, snapshot };
-    seed.validate()?;
-    Ok(seed)
-}
-
-fn empty_seed(
-    session_id: SessionId,
-    project_id: Option<ProjectId>,
-    model: ModelSelection,
-    authority: AuthorityProfile,
-    generation: u64,
-) -> SessionSeed {
-    let timestamp = now_ms();
-    SessionSeed {
-        summary: SessionSummary {
-            id: session_id.clone(),
-            project_id,
-            title: "New session".into(),
-            tags: Vec::new(),
-            created_at_ms: timestamp,
-            modified_at_ms: timestamp,
-            pinned: false,
-            archived: false,
-            lifecycle: SessionCatalogState::Active,
-            retention: None,
-            forked_from: None,
-            provisional: true,
-            live_state: SessionLiveState::Idle,
-            attention: AttentionState::None,
-            pull_request: None,
-            owner: ActorOwnerState::Hosted,
-            model: model.clone(),
-        },
-        snapshot: SessionSnapshot {
-            session_id,
-            delegated_parent_session_id: None,
-            actor_generation: generation,
-            cursor: SessionCursor::zero(generation),
-            durable_head: None,
-            branches: SessionBranchGraph::default(),
-            live_state: SessionLiveState::Idle,
-            active_run_id: None,
-            model,
-            authority,
-            context: ContextUsage::default(),
-            items: Vec::new(),
-            extension_presentations: Vec::new(),
-            pending_requests: Vec::new(),
-            sources: Vec::new(),
-            artifacts: Vec::new(),
-        },
-    }
 }
 
 fn graphical_input_pricing(pricing: Option<&octet_ai::Pricing>) -> Option<ModelInputPricing> {
@@ -11698,167 +10806,6 @@ fn secure_serve_state_dir(session_dir: &Path) -> anyhow::Result<PathBuf> {
         directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(state_dir)
-}
-
-fn session_deletion_directory(serve_state_dir: &Path) -> anyhow::Result<PathBuf> {
-    let directory = serve_state_dir.join(SESSION_DELETION_DIRECTORY);
-    match directory.symlink_metadata() {
-        Ok(metadata) => {
-            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-                anyhow::bail!("session deletion journal must be a real directory");
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt as _;
-                builder.mode(0o700);
-            }
-            builder.create(&directory)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(directory)
-}
-
-fn pending_session_deletion_path(directory: &Path, session_id: &str) -> PathBuf {
-    directory.join(format!("{}.json", stable_hash(session_id.as_bytes())))
-}
-
-fn write_pending_session_deletion(
-    serve_state_dir: &Path,
-    deletion: &PendingSessionDeletion,
-) -> anyhow::Result<()> {
-    if !deletion.validate() {
-        anyhow::bail!("invalid pending session deletion");
-    }
-    let directory = session_deletion_directory(serve_state_dir)?;
-    let file_key = stable_hash(deletion.session_id.as_bytes());
-    let destination = pending_session_deletion_path(&directory, &deletion.session_id);
-    match destination.symlink_metadata() {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-                anyhow::bail!("session deletion journal entry is unsafe");
-            }
-            let existing = read_pending_session_deletion(&destination, &file_key)?;
-            let same_intent = existing.version == deletion.version
-                && existing.session_id == deletion.session_id
-                && existing.project_id == deletion.project_id
-                && existing.trashed_at_ms == deletion.trashed_at_ms;
-            if !same_intent {
-                anyhow::bail!("session deletion journal intent cannot be replaced");
-            }
-            if existing.committed && !deletion.committed {
-                anyhow::bail!("committed session deletion cannot be downgraded");
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let bytes = serde_json::to_vec(deletion)?;
-    if bytes.len() as u64 > MAX_SESSION_DELETION_RECORD_BYTES {
-        anyhow::bail!("session deletion journal entry is too large");
-    }
-    let mut random = [0u8; 16];
-    getrandom::fill(&mut random)?;
-    let temporary = directory.join(format!(".tmp-{}", stable_hash(&random)));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options.open(&temporary)?;
-    let result = (|| -> anyhow::Result<()> {
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temporary, &destination)?;
-        std::fs::File::open(&directory)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
-}
-
-fn read_pending_session_deletion(
-    path: &Path,
-    expected_file_key: &str,
-) -> anyhow::Result<PendingSessionDeletion> {
-    let metadata = path.symlink_metadata()?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_SESSION_DELETION_RECORD_BYTES
-    {
-        anyhow::bail!("session deletion journal entry is unsafe");
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    options
-        .open(path)?
-        .take(MAX_SESSION_DELETION_RECORD_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_SESSION_DELETION_RECORD_BYTES {
-        anyhow::bail!("session deletion journal entry is too large");
-    }
-    let deletion = serde_json::from_slice::<PendingSessionDeletion>(&bytes)?;
-    if !deletion.validate() || stable_hash(deletion.session_id.as_bytes()) != expected_file_key {
-        anyhow::bail!("session deletion journal entry is invalid");
-    }
-    Ok(deletion)
-}
-
-fn load_pending_session_deletions(
-    serve_state_dir: &Path,
-) -> anyhow::Result<Vec<PendingSessionDeletion>> {
-    let directory = session_deletion_directory(serve_state_dir)?;
-    let mut deletions = Vec::new();
-    for entry in std::fs::read_dir(&directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(file_key) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
-            if name.to_string_lossy().starts_with(".tmp-") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-            continue;
-        };
-        if file_key.len() != 64 || !file_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            continue;
-        }
-        deletions.push(read_pending_session_deletion(&entry.path(), file_key)?);
-    }
-    deletions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    Ok(deletions)
-}
-
-fn remove_pending_session_deletion(serve_state_dir: &Path, session_id: &str) -> anyhow::Result<()> {
-    let directory = session_deletion_directory(serve_state_dir)?;
-    let path = pending_session_deletion_path(&directory, session_id);
-    match path.symlink_metadata() {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            std::fs::remove_file(path)?;
-            std::fs::File::open(directory)?.sync_all()?;
-            Ok(())
-        }
-        Ok(_) => anyhow::bail!("session deletion journal entry is unsafe"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
 }
 
 fn now_ms() -> u64 {
@@ -16096,15 +15043,6 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
             result: None,
             turn_id: TurnId::new("turn-test").unwrap(),
         }
-    }
-
-    #[test]
-    fn serve_host_lock_is_exclusive_for_the_session_root_lifetime() {
-        let directory = tempfile::tempdir().unwrap();
-        let first = ServeHostLock::acquire_at(directory.path()).unwrap();
-        assert!(ServeHostLock::acquire_at(directory.path()).is_err());
-        drop(first);
-        ServeHostLock::acquire_at(directory.path()).unwrap();
     }
 
     #[cfg(unix)]

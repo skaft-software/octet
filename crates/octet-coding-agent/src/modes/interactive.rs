@@ -341,7 +341,9 @@ where
                     shell.slash_popup_open(),
                 ) {
                     InputAction::SlashMenu(action) => {
-                        shell.slash_menu(action);
+                        if shell.slash_menu(action) {
+                            return Ok(Idle::Command(shell.drain_editor()));
+                        }
                         shell.render();
                     }
                     InputAction::CompleteSlashCommand => {
@@ -742,7 +744,9 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::Scroll(direction) => shell.scroll(direction),
         InputAction::ScrollLines(direction) => shell.scroll_lines(direction),
         InputAction::JumpToTail => shell.jump_to_tail(),
-        InputAction::SlashMenu(action) => shell.slash_menu(action),
+        InputAction::SlashMenu(action) => {
+            shell.slash_menu(action);
+        }
         InputAction::CompleteSlashCommand => shell.complete_slash_command(),
         InputAction::CompletePath => shell.complete_path(),
         InputAction::Steer(_) | InputAction::Submit(_) | InputAction::Command(_) => {
@@ -1392,16 +1396,23 @@ where
                 } else {
                     shell.pending()
                 };
-                match keymap::translate_with_popup(
+                let action = match keymap::translate_with_popup(
                     Some(event),
                     true,
                     &pending,
                     shell.slash_popup_open(),
                 ) {
                     InputAction::SlashMenu(action) => {
-                        shell.slash_menu(action);
-                        shell.render();
+                        if shell.slash_menu(action) {
+                            InputAction::Command(shell.pending())
+                        } else {
+                            shell.render();
+                            continue;
+                        }
                     }
+                    action => action,
+                };
+                match action {
                     InputAction::CompletePath => {
                         if shell.accept_extension_autocomplete() {
                             shell.render();
@@ -1582,6 +1593,9 @@ where
                         );
                     }
                     InputAction::Ignore | InputAction::Submit(_) => {}
+                    InputAction::SlashMenu(_) => unreachable!(
+                        "slash-menu actions are handled before active command dispatch"
+                    ),
                 }
             }
             event = run.next() => match event {
@@ -5862,8 +5876,7 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                 app.executable_extensions
                     .commit_prompt_context(pending_context_count);
                 prepare_prompt(&mut shell);
-                let display = retry_composed.transcript_text;
-                shell.on_prompt_submitted(&display);
+                shell.on_composed_prompt_submitted(&retry_composed);
                 let run_id = shell.begin_run(&app.model.endpoint.id.0);
                 shell.mark_prompt_persisted();
                 shell.set_awaiting_provider(run_id);
@@ -6848,6 +6861,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn idle_slash_enter_returns_the_highlighted_command_to_dispatch() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let mut shell = InteractiveShell::test_shell();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for event in [
+            Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ] {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+        let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+
+        let idle = wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut extensions,
+            None,
+        )
+        .await
+        .unwrap();
+        let Idle::Command(command) = idle else {
+            panic!("highlighted slash command was not handed to the idle dispatcher");
+        };
+        assert_eq!(command.trim(), "/resume");
+        assert!(shell.pending_is_empty());
+        assert!(!shell.slash_popup_open());
+    }
+
     #[test]
     fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
         let mut shell = InteractiveShell::test_shell();
@@ -7719,15 +7770,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        // The first Enter selects the inline completion; the second executes
-        // the selected no-argument command, like the ordinary composer path.
         sender
             .send(Ok(Event::Key(KeyEvent::new(
                 KeyCode::Enter,

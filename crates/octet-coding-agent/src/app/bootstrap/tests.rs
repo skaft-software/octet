@@ -885,34 +885,64 @@ fn third_party_gpt_6_astra_discovery_uses_its_pinned_provider_metadata() {
     });
     let models = openrouter_models_from_response(&crate::providers::OPENROUTER, &response).unwrap();
     assert_eq!(models.len(), 1);
-    assert!(models[0]
+    // A third-party Astra route does not inherit direct OpenAI or snapshot
+    // capabilities, even when its provider-scoped display metadata is known.
+    let snapshot = octet_ai::model_metadata::model_capability_metadata(
+        "openrouter",
+        "openai/gpt-6-astra",
+    )
+    .unwrap();
+    assert_eq!(
+        models[0].display_name.as_deref(),
+        Some(snapshot["name"].as_str().unwrap())
+    );
+    assert!(!models[0]
         .capabilities
         .input_modalities
         .contains(octet_ai::Modality::Image));
-    assert_eq!(
-        models[0]
-            .capabilities
-            .reasoning
-            .as_ref()
-            .unwrap()
-            .openai_chat_mode,
-        OpenAiChatReasoningMode::OpenRouter
-    );
+    assert!(models[0].capabilities.reasoning.is_none());
+    assert!(!models[0].capabilities.tools);
+    assert!(!models[0].capabilities.structured_output);
+    assert!(!models[0].capabilities.parallel_tool_calls);
+    assert_eq!(models[0].protocol, Protocol::OpenAiChat);
     assert_eq!(models[0].limits.context_window, 128_000);
+    assert_eq!(models[0].limits.max_output_tokens, 32_000);
     assert!(!models[0].capabilities.responses_lite);
     assert!(models[0].capabilities.agent_delegation.is_none());
 
     let mut advertised = response;
     advertised["data"][0]["architecture"] =
         serde_json::json!({"input_modalities": ["text", "image"]});
-    advertised["data"][0]["supported_parameters"] = serde_json::json!(["reasoning.effort"]);
+    advertised["data"][0]["supported_parameters"] =
+        serde_json::json!(["reasoning.effort", "tools", "response_format"]);
+    advertised["data"][0]["reasoning"] =
+        serde_json::json!({"supported":true,"values":["low","high"],"default":"high"});
     let models =
         openrouter_models_from_response(&crate::providers::OPENROUTER, &advertised).unwrap();
+    assert_eq!(models.len(), 1);
     assert!(models[0]
         .capabilities
         .input_modalities
         .contains(octet_ai::Modality::Image));
-    assert!(models[0].capabilities.reasoning.is_some());
+    assert!(models[0].capabilities.tools);
+    assert!(models[0].capabilities.structured_output);
+    let reasoning = models[0].capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(reasoning.openai_chat_mode, OpenAiChatReasoningMode::OpenRouter);
+    assert_eq!(reasoning.options.as_ref().unwrap().values, ["low", "high"]);
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().default.as_deref(),
+        Some("high")
+    );
+    assert!(reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)));
+    assert!(reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)));
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)));
+    assert_eq!(models[0].protocol, Protocol::OpenAiChat);
+    assert_eq!(models[0].limits.context_window, 128_000);
+    assert_eq!(models[0].limits.max_output_tokens, 32_000);
+    assert!(!models[0].capabilities.responses_lite);
+    assert!(models[0].capabilities.agent_delegation.is_none());
 }
 
 #[test]
@@ -1180,6 +1210,67 @@ fn codex_astra_fallback_is_conservative_and_retains_advertised_max() {
     assert_eq!(astra.max_effort, octet_ai::ReasoningEffort::Max);
     assert!(!astra.responses_lite);
     assert_eq!(astra.agent_delegation, None);
+}
+
+#[test]
+fn codex_luna_fallback_uses_exact_effort_choices_for_auxiliary_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let mut catalog = base_model_catalog(true).unwrap();
+    register_openai_codex(
+        &mut catalog,
+        crate::auth::codex::CredentialStore::new(path),
+        true,
+    )
+    .unwrap();
+
+    let luna = catalog
+        .resolve(&ModelId("gpt-5.6-luna".into()))
+        .expect("offline Codex Luna fallback");
+    assert_eq!(luna.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+    let capability = luna
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .expect("Luna reasoning capability");
+    let options = capability.options.as_ref().expect("exact Luna choices");
+    assert_eq!(
+        options.values,
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(options.default, None);
+    assert_eq!(capability.min_effort, octet_ai::ReasoningEffort::Low);
+    assert_eq!(capability.max_effort, octet_ai::ReasoningEffort::Max);
+    assert_eq!(
+        default_reasoning_for_model(&luna),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
+    );
+    assert_eq!(
+        octet_ai::select_auxiliary_reasoning(&luna).unwrap(),
+        ReasoningConfig::Off
+    );
+    assert_eq!(
+        capability.wire_value(&ReasoningConfig::Off),
+        Some("none".to_owned())
+    );
+    assert_eq!(
+        capability.wire_value(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
+        Some("max".to_owned())
+    );
+
+    // The observed correction is route-specific; generic sparse fallback keeps
+    // its prior conservative range and does not gain an inferred Off choice.
+    let sol = codex_fallback_reasoning_options("gpt-5.6-sol");
+    assert_eq!(
+        sol.values,
+        ["minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        codex_min_effort("gpt-5.6-sol"),
+        octet_ai::ReasoningEffort::Minimal
+    );
 }
 
 #[test]
@@ -3356,6 +3447,30 @@ fn reasoning_ingress_distinguishes_absent_unknown_false_and_malformed() {
 }
 
 #[test]
+fn mistral_conversations_discovery_does_not_invent_reasoning_controls() {
+    for provider in ["mistral", "openrouter"] {
+        let declaration = BUILTIN_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|d| d.id == provider)
+            .unwrap();
+        for value in [
+            serde_json::json!({"reasoning": true}),
+            serde_json::json!({"reasoning": {
+                "supported": true, "values": ["low", "high"], "default": "high"
+            }}),
+        ] {
+            assert!(discovered_reasoning_capability(
+                declaration,
+                Protocol::MistralConversations,
+                "mistral-small-latest",
+                &decode_reasoning_metadata(&value).unwrap(),
+            )
+            .is_none());
+        }
+    }
+}
+
+#[test]
 fn exact_codex_cache_roundtrip_retains_choices_default_label_and_offline_holes() {
     let fixture = thinking_hotfix_fixture();
     let models = codex_models_from_response(&fixture["codex_exact"], None).unwrap();
@@ -3880,7 +3995,38 @@ fn metadata_fixture_catalog(declaration: &ProviderDeclaration, base_url: &str) -
 }
 
 #[test]
-fn pinned_metadata_enriches_only_discovered_deepseek_flash() {
+fn pinned_metadata_display_merge_never_imports_functional_fields() {
+    let snapshot = serde_json::json!({
+        "name":"Snapshot label", "limit":{"context":1_000_000,"output":384_000},
+        "modalities":{"input":["text","image"]}, "tool_call":true,
+        "structured_output":true, "reasoning":true,
+        "reasoning_options":{"values":["low","max"],"default":"max"},
+        "interleaved":{"field":"reasoning_content"}
+    });
+    let sparse = serde_json::json!({"id":"fixture"});
+    assert_eq!(
+        builtin_display_entry(&sparse, &snapshot),
+        serde_json::json!({"id":"fixture","display_name":"Snapshot label"})
+    );
+    for assertion in [
+        serde_json::json!("Endpoint label"),
+        serde_json::Value::Null,
+        serde_json::json!(false),
+        serde_json::json!({"malformed":true}),
+    ] {
+        for entry in [
+            serde_json::json!({"id":"fixture","display_name":assertion}),
+            serde_json::json!({"id":"fixture","provider":{"name":assertion}}),
+            serde_json::json!({"id":"fixture","top_provider":{"name":assertion}}),
+            serde_json::json!({"id":"fixture","capabilities":{"name":assertion}}),
+        ] {
+            assert_eq!(builtin_display_entry(&entry, &snapshot), entry);
+        }
+    }
+}
+
+#[test]
+fn pinned_metadata_enriches_discovered_display_only() {
     let declaration = &crate::providers::DEEPSEEK;
     let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
     register_deepseek_models_from_response(
@@ -3905,11 +4051,13 @@ fn pinned_metadata_enriches_only_discovered_deepseek_flash() {
         model.spec.display_name.as_deref(),
         Some("DeepSeek V4.1 Flash")
     );
-    assert_eq!(model.spec.limits.context_window, 1_000_000);
-    assert_eq!(model.spec.limits.max_output_tokens, 384_000);
+    // Missing endpoint limits use the registration defaults, not models.dev.
+    assert_eq!(model.spec.limits.context_window, 128_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 64_000);
+    // The existing sparse tools default is independent of the supplement.
     assert!(model.spec.capabilities.tools);
-    assert!(model.spec.capabilities.structured_output);
-    assert!(model
+    assert!(!model.spec.capabilities.structured_output);
+    assert!(!model
         .spec
         .capabilities
         .input_modalities
@@ -3932,6 +4080,44 @@ fn pinned_metadata_enriches_only_discovered_deepseek_flash() {
     // A flat models.dev quote is not the official peak/off-peak tariff.
     assert!(model.spec.pricing.is_none());
     assert!(crate::providers::pricing_for(declaration, "deepseek-v4-pro").is_none());
+
+    // The same model may advertise richer functionality, without borrowing any
+    // missing field or extra reasoning choice from its pinned snapshot.
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_deepseek_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[{
+            "id":"deepseek-flash", "name":"Endpoint Flash",
+            "context_window":96_000, "max_output_tokens":8192,
+            "tools":true, "structured_output":true, "input_modalities":["text","image"],
+            "reasoning":{"supported":true,"values":["low","high"],"default":"high"}
+        }]}),
+    )
+    .unwrap();
+    let model = catalog
+        .resolve(&ModelId("deepseek/deepseek-flash".into()))
+        .unwrap();
+    assert_eq!(model.spec.display_name.as_deref(), Some("Endpoint Flash"));
+    assert_eq!(model.spec.limits.context_window, 96_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 8192);
+    assert!(model.spec.capabilities.tools);
+    assert!(model.spec.capabilities.structured_output);
+    assert!(model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(reasoning.options.as_ref().unwrap().values, ["low", "high"]);
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().default.as_deref(),
+        Some("high")
+    );
+    assert_eq!(reasoning.openai_chat_mode, OpenAiChatReasoningMode::DeepSeekThinking);
+    assert!(reasoning.preserves_state);
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)));
 }
 
 #[test]
@@ -3981,7 +4167,9 @@ fn pinned_metadata_preserves_endpoint_assertions_and_unknowns() {
             &model.reasoning_metadata
         )
         .is_none());
-        assert_eq!(model.context_window, Some(1_000_000));
+        assert_eq!(model.context_window, None);
+        assert_eq!(model.max_output_tokens, None);
+        assert_eq!(deepseek_discovered_limits(&model), (128_000, 64_000));
     }
     for reasoning in [
         serde_json::json!("yes"),
@@ -4029,13 +4217,31 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
         assert_eq!(model.display_name, None);
         assert!(model.reasoning_metadata.options.is_none());
     }
-    let source =
-        octet_ai::model_metadata::model_capability_metadata("deepseek", "deepseek-flash").unwrap();
-    assert!(snapshot_reasoning_metadata(
-        &crate::providers::DEEPSEEK,
+    let declaration = &crate::providers::DEEPSEEK;
+    let model = api_models_from_response_for(&body, Some(declaration))
+        .unwrap()
+        .remove(0);
+    assert_eq!(model.display_name.as_deref(), Some("DeepSeek V4.1 Flash"));
+    let reasoning = discovered_reasoning_capability(
+        declaration,
+        Protocol::OpenAiChat,
+        &model.id,
+        &model.reasoning_metadata,
+    )
+    .unwrap();
+    assert_eq!(
+        reasoning.openai_chat_mode,
+        OpenAiChatReasoningMode::DeepSeekThinking
+    );
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().values,
+        ["none", "low", "high", "max"]
+    );
+    assert!(discovered_reasoning_capability(
+        declaration,
         Protocol::OpenAiResponses,
-        "deepseek-flash",
-        &source
+        &model.id,
+        &model.reasoning_metadata,
     )
     .is_none());
     let declaration = BUILTIN_PROVIDER_DECLARATIONS
@@ -4048,9 +4254,13 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     )
     .unwrap()
     .remove(0);
-    assert_eq!(model.context_window, Some(65_536));
-    assert_eq!(model.max_output_tokens, Some(32_768));
+    // The scoped snapshot can name Cerebras' inventory row, but cannot supply
+    // its limits or reasoning. The default below belongs to the source contract.
+    assert_eq!(model.context_window, None);
+    assert_eq!(model.max_output_tokens, None);
     assert_eq!(model.display_name.as_deref(), Some("Qwen3.8 27B"));
+    assert_eq!(model.reasoning_metadata.supported, None);
+    assert!(model.reasoning_metadata.options.is_none());
     let reasoning = discovered_reasoning_capability(
         declaration,
         Protocol::OpenAiChat,
@@ -4070,46 +4280,71 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
         reasoning.options.as_ref().unwrap().default.as_deref(),
         Some("high")
     );
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"qwen-3.8-27b"}]}),
+    )
+    .unwrap();
+    let registered = catalog
+        .resolve(&ModelId("cerebras/qwen-3.8-27b".into()))
+        .unwrap();
+    assert_eq!(registered.spec.limits.context_window, 128_000);
+    assert_eq!(registered.spec.limits.max_output_tokens, 32_768);
+    assert_eq!(registered.spec.capabilities.reasoning.as_ref(), Some(&reasoning));
     // An effort array in an external catalog is not a universal wire contract.
     let groq = BUILTIN_PROVIDER_DECLARATIONS
         .iter()
         .find(|d| d.id == "groq")
         .unwrap();
-    assert!(
-        snapshot_reasoning_metadata(groq, Protocol::OpenAiChat, "unverified-route", &source)
-            .is_none()
-    );
+    let model = api_models_from_response_for(&body, Some(groq))
+        .unwrap()
+        .remove(0);
+    assert!(discovered_reasoning_capability(
+        groq,
+        Protocol::OpenAiChat,
+        &model.id,
+        &model.reasoning_metadata,
+    )
+    .is_none());
 }
 
 #[test]
-fn pinned_metadata_openrouter_enriches_missing_but_not_invalid_limits_or_prices() {
+fn pinned_metadata_openrouter_uses_endpoint_limits_and_fails_closed_for_invalid_prices() {
     let declaration = openrouter_declaration();
     let parse =
         |entry| openrouter_models_from_response(declaration, &serde_json::json!({"data":[entry]}));
-    let model = parse(serde_json::json!({"id":"deepseek/deepseek-v4-pro"}))
-        .unwrap()
-        .remove(0);
-    assert_eq!(model.limits.context_window, 1_048_576);
-    assert_eq!(
-        model
-            .capabilities
-            .reasoning
-            .as_ref()
-            .unwrap()
-            .openai_chat_mode,
-        OpenAiChatReasoningMode::OpenRouter
-    );
+    let model = parse(serde_json::json!({
+        "id":"deepseek/deepseek-v4-pro",
+        "top_provider":{"max_completion_tokens":65536}
+    }))
+    .unwrap()
+    .remove(0);
+    assert_eq!(model.limits.context_window, 131_072);
+    assert_eq!(model.limits.max_output_tokens, 65_536);
+    assert!(model.capabilities.reasoning.is_none());
     assert!(model.pricing.is_some());
     for value in [
         serde_json::Value::Null,
         serde_json::json!({"prompt":"unknown","completion":"0.5"}),
     ] {
-        let model = parse(serde_json::json!({"id":"deepseek/deepseek-v4-pro", "pricing":value}))
-            .unwrap()
-            .remove(0);
+        let model = parse(serde_json::json!({
+            "id":"deepseek/deepseek-v4-pro",
+            "top_provider":{"max_completion_tokens":65536},
+            "pricing":value
+        }))
+        .unwrap()
+        .remove(0);
         assert!(model.pricing.is_none());
     }
-    assert!(parse(serde_json::json!({"id":"deepseek/deepseek-v4-pro", "top_provider":{"max_completion_tokens":null}})).unwrap().is_empty());
+    assert!(parse(serde_json::json!({
+        "id":"deepseek/deepseek-v4-pro",
+        "top_provider":{"max_completion_tokens":null}
+    }))
+    .unwrap()
+    .is_empty());
 }
 
 #[tokio::test]
@@ -4237,10 +4472,50 @@ async fn pinned_metadata_deepseek_flash_exact_wire_controls_and_required_replay(
 
 #[test]
 fn pinned_metadata_partial_limit_leaves_are_independent() {
-    for limit in [
-        serde_json::json!({"context":1_000_000}),
-        serde_json::json!({"output":384_000}),
-        serde_json::json!({}),
+    for (limit, discovered, effective) in [
+        (
+            serde_json::json!({"context":1_000_000}),
+            (Some(1_000_000), None),
+            (1_000_000, 64_000),
+        ),
+        (
+            serde_json::json!({"output":384_000}),
+            (None, Some(384_000)),
+            (128_000, 128_000),
+        ),
+        (
+            serde_json::json!({"context":96_000,"output":8192}),
+            (Some(96_000), Some(8192)),
+            (96_000, 8192),
+        ),
+        (serde_json::json!({}), (None, None), (128_000, 64_000)),
+        (
+            serde_json::json!({"context":null}),
+            (None, None),
+            (128_000, 64_000),
+        ),
+        (
+            serde_json::json!({"output":null}),
+            (None, None),
+            (128_000, 64_000),
+        ),
+        (
+            serde_json::json!({"context":64_000,"output":null}),
+            (Some(64_000), None),
+            (64_000, 64_000),
+        ),
+        (
+            serde_json::json!({"context":null,"output":2048}),
+            (None, Some(2048)),
+            (128_000, 2048),
+        ),
+        (serde_json::Value::Null, (None, None), (128_000, 64_000)),
+        (
+            serde_json::json!("malformed"),
+            (None, None),
+            (128_000, 64_000),
+        ),
+        (serde_json::json!(false), (None, None), (128_000, 64_000)),
     ] {
         let model = api_models_from_response_for(
             &serde_json::json!({"data":[{"id":"deepseek-flash", "limit":limit}]}),
@@ -4248,30 +4523,12 @@ fn pinned_metadata_partial_limit_leaves_are_independent() {
         )
         .unwrap()
         .remove(0);
-        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 384_000));
+        // Only the asserted leaf is decoded; the snapshot supplies neither.
+        assert_eq!((model.context_window, model.max_output_tokens), discovered);
+        // Registration independently applies existing defaults and the context
+        // clamp, not the snapshot's 1M / 384K limits.
+        assert_eq!(deepseek_discovered_limits(&model), effective);
     }
-    for limit in [serde_json::Value::Null, serde_json::json!("malformed")] {
-        let model = api_models_from_response_for(
-            &serde_json::json!({"data":[{"id":"deepseek-flash", "limit":limit}]}),
-            Some(&crate::providers::DEEPSEEK),
-        )
-        .unwrap()
-        .remove(0);
-        assert_eq!(
-            (model.context_window, model.max_output_tokens),
-            (None, None)
-        );
-    }
-    let model = api_models_from_response_for(
-        &serde_json::json!({"data":[{"id":"deepseek-flash", "limit":{"context":null}}]}),
-        Some(&crate::providers::DEEPSEEK),
-    )
-    .unwrap()
-    .remove(0);
-    assert_eq!(
-        (model.context_window, model.max_output_tokens),
-        (None, Some(384_000))
-    );
 }
 
 #[test]
@@ -4297,15 +4554,31 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         .unwrap();
         let legacy = catalog.resolve(&ModelId(DEEPSEEK_MODEL_ID.into())).unwrap();
         assert_eq!(legacy.spec.api_name, api_name);
-        assert_eq!(legacy.spec.limits.context_window, 1_000_000);
-        assert_eq!(legacy.spec.limits.max_output_tokens, 384_000);
+        // Legacy V4 and the current Flash alias have different source defaults
+        // and controls; matching display names must not conflate their contracts.
+        let (context, output, values, default) = if api_name == "deepseek-flash" {
+            (128_000, 64_000, vec!["none", "low", "high", "max"], None)
+        } else {
+            (1_000_000, 384_000, vec!["none", "high", "xhigh"], Some("high"))
+        };
+        assert_eq!(legacy.spec.limits.context_window, context);
+        assert_eq!(legacy.spec.limits.max_output_tokens, output);
         let reasoning = legacy.spec.capabilities.reasoning.as_ref().unwrap();
         assert_eq!(
             reasoning.openai_chat_mode,
             OpenAiChatReasoningMode::DeepSeekThinking
         );
-        assert!(reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)));
-        assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)));
+        assert!(reasoning.preserves_state);
+        assert_eq!(reasoning.options.as_ref().unwrap().values, values);
+        assert_eq!(reasoning.options.as_ref().unwrap().default.as_deref(), default);
+        assert_eq!(
+            reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
+            api_name == "deepseek-flash"
+        );
+        assert_eq!(
+            reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)),
+            api_name != "deepseek-flash"
+        );
         if api_name == "deepseek-flash" {
             assert_eq!(
                 legacy.spec.display_name.as_deref(),
@@ -4525,6 +4798,83 @@ fn pinned_metadata_sparse_static_routes_keep_their_declared_wire_profiles() {
 }
 
 #[test]
+fn pinned_metadata_native_discovery_rejects_budgets_outside_output_limit() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "opencode")
+        .unwrap();
+    let api_name = "claude-sonnet-4-5";
+    let known = declaration
+        .static_reasoning_for(api_name, Protocol::AnthropicMessages)
+        .unwrap();
+    assert_eq!(known.effort_budgets.as_ref().unwrap().max, 32_768);
+    for messages in [false, true] {
+        let default_context = if messages { 200_000 } else { 128_000 };
+        let default_output = if messages { 64_000 } else { 32_768 };
+        for (context, output, effective_output, fits) in [
+            (None, None, default_output, messages),
+            (None, Some(32_768), 32_768, false),
+            (None, Some(32_769), 32_769, true),
+            (None, Some(2048), 2048, false),
+            (Some(8192), Some(64_000), 8192, false),
+            (Some(128_000), Some(64_000), 64_000, true),
+        ] {
+            let mut catalog = ModelCatalog::default();
+            for route in declaration.routes {
+                let id = EndpointId(route.endpoint_id.into());
+                if !catalog.has_endpoint(&id) {
+                    catalog
+                        .register_endpoint(Endpoint {
+                            id,
+                            base_url: url::Url::parse("https://fixture.invalid/").unwrap(),
+                            auth: Auth::None,
+                            default_headers: Default::default(),
+                            transport: route.transport,
+                            runtime: route.runtime,
+                            timeout: Duration::from_secs(5),
+                        })
+                        .unwrap();
+                }
+            }
+            let mut body = serde_json::json!({"data":[{"id":api_name,"reasoning":true}]});
+            if let Some(context) = context {
+                body["data"][0]["context_window"] = serde_json::json!(context);
+            }
+            if let Some(output) = output {
+                body["data"][0]["max_output_tokens"] = serde_json::json!(output);
+            }
+            if messages {
+                register_anthropic_compatible_models_from_response(
+                    &mut catalog,
+                    declaration,
+                    ModelFilter::All,
+                    &body,
+                )
+                .unwrap();
+            } else {
+                register_openai_compatible_models_from_response(
+                    &mut catalog,
+                    declaration,
+                    ModelFilter::All,
+                    &body,
+                )
+                .unwrap();
+            }
+            crate::providers::register_static_models(&mut catalog, declaration).unwrap();
+            let model = catalog
+                .resolve(&ModelId(format!("opencode/{api_name}")))
+                .unwrap();
+            assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
+            assert_eq!(model.spec.limits.context_window, context.unwrap_or(default_context));
+            assert_eq!(model.spec.limits.max_output_tokens, effective_output);
+            // Preserve the full declaration when it fits; otherwise retain the
+            // inventory row without raising limits or inventing a budget table.
+            assert_eq!(model.spec.capabilities.reasoning.as_ref(), fits.then_some(&known));
+        }
+    }
+}
+
+#[test]
 fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec() {
     let declaration = BUILTIN_PROVIDER_DECLARATIONS
         .iter()
@@ -4562,7 +4912,7 @@ fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec
                 &mut catalog,
                 declaration,
                 ModelFilter::All,
-                &serde_json::json!({"data":[{"id":api_name,
+                &serde_json::json!({"data":[{"id":api_name,"max_output_tokens":64_000,
                     "reasoning":{"supported":true,"values":values,"default":default}}]}),
             )
             .unwrap();
@@ -4571,6 +4921,8 @@ fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec
                 .resolve(&ModelId(format!("opencode/{api_name}")))
                 .unwrap();
             assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
+            assert_eq!(model.spec.limits.context_window, 128_000);
+            assert_eq!(model.spec.limits.max_output_tokens, 64_000);
             let known = declaration.static_reasoning_for(api_name, Protocol::AnthropicMessages);
             if let Some(mut expected) = known.filter(|_| expected) {
                 expected.options = Some(octet_ai::types::ReasoningOptions {

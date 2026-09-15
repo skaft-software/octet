@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "local-tools": {
+      "transport": "stdio",
+      "command": "node",
+      "args": ["server.js", "--safe"],
+      "env": {"NOT_IMPORTED": "value"},
+      "cwd": "/not-imported",
+      "autoApprove": ["read"]
+    },
+    "remote-tools": {
+      "transport_type": "streamable_http",
+      "url": "https://example.invalid/mcp"
+    }
+  }
+}

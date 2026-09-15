@@ -410,12 +410,28 @@ fn normalize_header_whitespace(value: &str) -> String {
 }
 
 fn canonical_uri(url: &url::Url) -> String {
-    let path = if url.path().is_empty() {
-        "/"
-    } else {
-        url.path()
+    let path = url.path();
+    if path.is_empty() || path == "/" {
+        return "/".to_owned();
+    }
+
+    // `Url::path_segments()` retains percent escapes from the prepared URL.
+    // Standard SigV4 URI-encodes that path again: wire `%3A` becomes canonical
+    // `%253A`. This is signing input, not a rewrite of the transmitted URL.
+    // See botocore 1.35.99 SigV4Auth::_normalize_url_path (safe='/~').
+    let Some(segments) = url.path_segments() else {
+        return aws_uri_encode(path, false);
     };
-    aws_uri_encode(path, false)
+    let mut canonical = String::new();
+    for segment in segments {
+        canonical.push('/');
+        canonical.push_str(&aws_uri_encode(segment, true));
+    }
+    if canonical.is_empty() {
+        "/".to_owned()
+    } else {
+        canonical
+    }
 }
 
 fn canonical_query(url: &url::Url) -> String {
@@ -1245,6 +1261,80 @@ mod tests {
         assert!(!redacted.contains("session-secret"));
         assert!(!redacted.contains("session-token"));
         assert!(!redacted.contains("Credential=session-access"));
+    }
+
+    #[tokio::test]
+    async fn sigv4_canonicalizes_encoded_path_and_query_and_exact_body() {
+        let signer = AwsSigV4Signer::new(
+            AwsCredentials::new(
+                "AKIDEXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                None,
+            )
+            .unwrap(),
+            "eu-west-1",
+            "bedrock",
+        )
+        .unwrap()
+        .with_clock(Arc::new(|| {
+            UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+        }));
+        let url = url::Url::parse(
+            "https://bedrock-runtime.eu-west-1.amazonaws.com/model/anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse-stream?z=two%20words&z=slash%2Fvalue&space=a+b",
+        )
+        .unwrap();
+        assert_eq!(
+            url.path(),
+            "/model/anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse-stream"
+        );
+        assert_eq!(
+            canonical_uri(&url),
+            "/model/anthropic.claude-3-7-sonnet-20250219-v1%253A0/converse-stream"
+        );
+        assert_eq!(
+            canonical_query(&url),
+            "space=a%20b&z=slash%2Fvalue&z=two%20words"
+        );
+
+        let body = bytes::Bytes::from_static(
+            br#"{"messages":[{"role":"user","content":[{"text":"exact bytes"}]}]}"#,
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        let signed = signer
+            .sign(&SigningRequest::new(
+                http::Method::POST,
+                url.clone(),
+                body.clone(),
+                headers.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            signed.headers["x-amz-content-sha256"],
+            sha256_hex(body.as_ref())
+        );
+        let authorization = signed.headers[AUTHORIZATION].to_str().unwrap();
+        assert!(authorization.contains("/eu-west-1/bedrock/aws4_request"));
+
+        let changed = signer
+            .sign(&SigningRequest::new(
+                http::Method::POST,
+                url,
+                bytes::Bytes::from_static(
+                    br#"{"messages":[{"role":"user","content":[{"text":"changed bytes"}]}]}"#,
+                ),
+                headers,
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            authorization,
+            changed.headers[AUTHORIZATION].to_str().unwrap()
+        );
     }
 
     #[test]

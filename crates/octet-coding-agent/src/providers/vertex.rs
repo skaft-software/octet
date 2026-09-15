@@ -493,4 +493,70 @@ mod tests {
         let second = resolver.resolve().await.unwrap();
         assert!(matches!(second.scheme, CredentialScheme::Bearer));
     }
+
+    #[tokio::test]
+    async fn expired_authorized_user_token_forces_refresh_without_exposing_value() {
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains("refresh_token=expiring-refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "expiring-access-token",
+                "expires_in": 0,
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let resolver = VertexAdcResolver {
+            source: AdcSource::AuthorizedUser {
+                client_id: "expiring-client".to_owned(),
+                client_secret: "expiring-secret".to_owned(),
+                refresh_token: "expiring-refresh".to_owned(),
+            },
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            cached: Mutex::new(None),
+            token_url: Some(url::Url::parse(&format!("{}/token", server.uri())).unwrap()),
+        };
+
+        let first = resolver.resolve().await.unwrap();
+        assert_eq!(first.value.to_string(), "<redacted>");
+        let second = resolver.resolve().await.unwrap();
+        assert_eq!(second.value.to_string(), "<redacted>");
+    }
+
+    #[test]
+    fn parses_only_supported_adc_types_and_keeps_project_metadata() {
+        let parsed = parse_adc(
+            br#"{
+                "type": "authorized_user",
+                "client_id": "fixture-client",
+                "client_secret": "fixture-secret",
+                "refresh_token": "fixture-refresh",
+                "project_id": "project-123"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.project_id.as_deref(), Some("project-123"));
+        assert!(matches!(
+            parsed.source,
+            AdcSource::AuthorizedUser {
+                client_id,
+                client_secret,
+                refresh_token
+            } if client_id == "fixture-client"
+                && client_secret == "fixture-secret"
+                && refresh_token == "fixture-refresh"
+        ));
+
+        assert!(parse_adc(br#"{"type":"external_account","project_id":"project-123"}"#).is_err());
+        assert!(parse_adc(br#"{"type":"authorized_user","client_id":"","client_secret":"secret","refresh_token":"refresh"}"#).is_err());
+    }
 }

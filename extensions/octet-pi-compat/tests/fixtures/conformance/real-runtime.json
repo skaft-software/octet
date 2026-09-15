@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "profile": "pi-0.84.4",
+  "source_revision": "b79e4cc834970cca69daebffab7df1da7d1e52c4",
+  "runtime": {
+    "coding_agent": {
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "0.84.4",
+      "license": "MIT"
+    },
+    "tui": {
+      "name": "@earendil-works/pi-tui",
+      "version": "0.84.4",
+      "license": "MIT"
+    },
+    "node_minimum": "22.19.0"
+  },
+  "source_root": "packages/coding-agent/examples/extensions",
+  "sources": [
+    {
+      "id": "hello",
+      "path": "hello.ts",
+      "order": 1,
+      "unchanged": true,
+      "registration": ["tool:hello"]
+    },
+    {
+      "id": "event-bus",
+      "path": "event-bus.ts",
+      "order": 2,
+      "unchanged": true,
+      "registration": ["command:emit", "event:my:notification"]
+    },
+    {
+      "id": "timed-confirm",
+      "path": "timed-confirm.ts",
+      "order": 3,
+      "unchanged": true,
+      "registration": ["command:timed", "command:timed-select", "command:timed-signal"]
+    }
+  ],
+  "journey": [
+    {
+      "id": "ordered-registration",
+      "assertion": "One ordered additionalExtensionPaths list produces the hello tool followed by the event-bus and timed-confirm commands."
+    },
+    {
+      "id": "shared-event-bus",
+      "assertion": "The unchanged event-bus example receives its own session-start emission and its command emission in the same runner event bus."
+    },
+    {
+      "id": "shared-global-this",
+      "assertion": "The aggregate remains one Node process; a direct globalThis marker is not exposed by these unchanged official examples and must remain unrun rather than be replaced by a toy source."
+    },
+    {
+      "id": "cancellation",
+      "assertion": "Cancelling the unchanged timed-confirm command cancels its outstanding host confirmation request and returns the bridge cancellation disposition."
+    },
+    {
+      "id": "restart",
+      "assertion": "A second process with the same exact source/runtime identity reproduces the first aggregate catalog and hello/event observations."
+    },
+    {
+      "id": "stale-source",
+      "assertion": "Changing a temporary copy after its identity is formed is rejected before Pi source import, without exposing the path."
+    },
+    {
+      "id": "trust-binding",
+      "assertion": "A mismatched selected manifest is rejected by the strict link identity before source import."
+    }
+  ],
+  "identity": {
+    "bridge_version": "0.7.0",
+    "trust_mode": "explicit_enable_and_trust_required",
+    "source_locks": "one supported lock fingerprint per source; an empty lock set is still bound",
+    "runtime": "package.json plus the complete dist fingerprint"
+  },
+  "expected": {
+    "tool_names": ["hello"],
+    "command_order_prefix": ["emit", "timed", "timed-select", "timed-signal"],
+    "session_notification": "Event from event-bus-example: Session started",
+    "emit_notification_prefix": "Event from /emit command: ",
+    "hello_text": "Hello, aggregate!",
+    "cancelled_error_code": -32800,
+    "stale_source_error_fragment": "changed after link publication",
+    "trust_error_fragment": "link identity does not match"
+  },
+  "gates": {
+    "source_integrity": "required",
+    "dependency_lock_integrity": "required",
+    "runtime_integrity": "required",
+    "explicit_enable_and_trust": "required",
+    "registration_order": "required",
+    "event_bus": "required",
+    "globalThis": "unrun_without_an_unchanged_marker",
+    "cancellation": "required",
+    "restart": "required",
+    "stale_source_rejection": "required"
+  },
+  "execution": {
+    "status": "unrun",
+    "reason": "This checked-in plan is inert. A verifier must supply the locally integrity-verified 0.84.4 package and clean b79e4cc834970cca69daebffab7df1da7d1e52c4 source checkout to the existing --full gate.",
+    "command": "python3 extensions/octet-pi-compat/conformance.py --full --network-isolated --coding-agent-tarball /local/pi-coding-agent-0.84.4.tgz --tui-tarball /local/pi-tui-0.84.4.tgz --pi-package /local/unpacked/pi-coding-agent --source-root /local/pi-source-at-b79e4cc"
+  }
+}

@@ -70,8 +70,13 @@ octet setup --preset lm-studio --manual-model ID [--yes]
 octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [--offline] [--yes]
 ```
 
-`--headless` is the documented provider-auth option; consult generated help for
-its exact login interaction. Copilot is not a CLI login/configuration provider.
+`--headless` prints the device verification URL/code without opening a browser.
+The unreleased Copilot candidate accepts `--login copilot [--headless]` and
+`--logout copilot`, also under the alias `github-copilot`. It uses only its private
+OAuth store, not environment or editor credentials. Online shared catalogs can
+then discover eligible `github-copilot/<id>` models; offline adds none. TUI slash
+auth commands are not yet integrated, and native-host protocol 1 gains no auth
+command or credential field. [Candidate limits and unrun qualification](providers.md#github-copilot-unreleased-candidate).
 
 Setup reviews without writing by default. `--yes` commits only the reviewed
 transaction; `--cancel` leaves the registry unchanged. An explicit `--preset

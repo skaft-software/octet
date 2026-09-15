@@ -11,18 +11,31 @@ Use `/model [id]` to select a model and `/status` to inspect its route and
 capabilities. Live discovery is used where a provider exposes it. `--offline`
 skips optional discovery, **not inference traffic**.
 
-A pinned, provider-scoped models.dev supplement fills missing metadata for models
-actually returned by supported built-in discovery. It does not inject availability,
-override API false/unknown/malformed assertions, or change configured/custom
-metadata or routes. Builds and runtime never fetch models.dev. See the
-[catalog source and pricing review](../crates/octet-ai/models/SOURCES.md).
+A pinned, provider-scoped models.dev supplement fills missing **display names and
+pricing only** for models actually returned by supported built-in discovery. It
+never supplies operational limits, image support, tool/structured-output flags,
+or reasoning controls. Endpoint assertions remain authoritative; existing
+provider/protocol declarations may supply their own documented sparse defaults,
+not snapshot-derived capabilities. False, unknown, null, and malformed explicit
+assertions are not replaced by snapshot optimism. Configured/custom metadata and
+routes keep precedence; Codex account inventory does not inherit the supplement.
+Builds and runtime never fetch models.dev. See the
+[catalog source and pricing review](../crates/octet-ai/models/SOURCES.md) for
+snapshot provenance and the distinction between retained rich records and the
+display/pricing-only discovery contract.
 
-For a sparse direct DeepSeek `deepseek-flash` entry, the supplement supplies
-**DeepSeek V4.1 Flash**, 1M context / 384K output, text/image input, tools,
-structured output, and exact Off/low/high/max reasoning with native DeepSeek
-controls and reasoning replay. Direct DeepSeek's current peak/off-peak tariff is
-not modeled: pricing remains unknown unless explicitly configured, so hard
-price-dependent ceilings fail closed.
+For sparse direct DeepSeek `deepseek-flash`, the supplement supplies the display
+name **DeepSeek V4.1 Flash**, not the snapshot's 1M context / 384K output or image
+and structured-output support. Without endpoint limits the existing fallback is
+128K context / 64K output. Its Off/low/high/max reasoning and native DeepSeek
+controls/replay come from the provider-scoped source contract, not models.dev;
+explicit endpoint reasoning metadata can narrow or disable that contract. The
+separate `deepseek-v4` family keeps its declared 1M/384K limits and
+Off/high/xhigh reasoning fallback. Direct DeepSeek's current peak/off-peak tariff
+is not modeled: pricing remains unknown unless explicitly configured, so hard
+price-dependent ceilings fail closed. See the
+[bounded metadata repair record](qualification/discovery-current-candidate.md)
+for source-review scope and unrun checks.
 
 > These are octet 0.7.6 source contracts, not live endpoint verification. Model
 > availability remains account- and endpoint-specific; deterministic checks do
@@ -97,10 +110,36 @@ does not update `~/.octet/extensions`. See the
 [subagents package](../extensions/octet-subagents/README.md), including its API
 0.2 implementation boundary. Catalog installation is [publication-gated](installation.md#optional-packages).
 
-GitHub Copilot is **not** a CLI login/configuration preset. A Rust embedding host
-can own its device flow, OAuth storage/exchange/refresh, and vetted inference
-origin through the [credential-safe SDK seam](sdk.md#host-owned-github-copilot).
-Neither standalone octet nor NDJSON `octet-host` accepts Copilot credentials.
+## GitHub Copilot (unreleased candidate)
+
+```sh
+octet --login copilot --headless
+octet --logout copilot
+```
+
+`github-copilot` is an alias. Login uses GitHub.com's device flow; `--headless`
+prints the verification URL/code without opening a browser. Only GitHub OAuth
+state is saved in the owner-private `~/.octet/credentials/copilot.json`; inference
+tokens stay in memory. No editor, Codex or environment credentials are imported.
+
+Online startup registers authenticated, eligible models as `github-copilot/<id>`
+in the ordinary picker and shared native-host catalog. Missing credentials,
+failed discovery and unsupported models contribute no Copilot entries.
+`--offline` skips even Copilot-store access and advertises no cached inventory.
+Only explicit Chat/Responses routes are supported; reasoning-flagged models,
+Anthropic-only routes, vision and structured output are not advertised. Custom
+Enterprise authorities and environment endpoint overrides are not supported.
+
+Subsequent credential resolution rejects local logout/replacement and rejected
+inference origins, but logout does not remotely revoke already-running requests.
+The TUI `/login` and `/logout` commands are not yet wired to Copilot; use the CLI
+flags and restart existing catalog owners after account changes. NDJSON does not
+gain login/logout commands or OAuth payload fields. Rust embedders retain the
+[credential-safe SDK seam](sdk.md#host-owned-github-copilot).
+
+This is **source integration, not build/live/native qualification**. See the
+[adapter candidate and unrun fixture matrix](qualification/copilot-host-current-candidate.md)
+for remaining implementation and acceptance gates; #249 is not closed.
 
 ## Local and custom endpoints
 
@@ -242,6 +281,13 @@ octet --reasoning budget=16000
 to the selected model. Exact off-only, binary, or named custom controls determine
 the picker and wire values, rather than a generic effort guess.
 
+Built-in native discovery may use a declaration-owned token-budget table only
+when the entire table fits strictly below the effective output ceiling. Otherwise
+the inventory model keeps its limits but advertises no reasoning control; octet
+does not enlarge the ceiling or invent replacement budgets from the snapshot.
+Compatible endpoint choices/defaults can narrow the declared contract without
+changing its native codec.
+
 `ultra` requires advertised Ultra/V2 metadata **and** the trusted, enabled,
 live `octet-subagents` service. Otherwise it is clamped to the highest ordinary
 safe effort. Child work uses extension `subagent_*` tools and `/subagents`;
@@ -339,3 +385,9 @@ queued for a later model-turn boundary; `parallel_tool_calls` is not native asyn
 These limits also apply to Codex Astra. Public API support does not prove OAuth
 endpoint support; additional capabilities require fresh account-scoped metadata
 or verified endpoint behavior.
+
+Third-party Astra inventory does not inherit direct OpenAI capabilities from its
+name or pinned record. For example, OpenRouter must advertise image input,
+tools/structured output, and reasoning on its own route. Its snapshot can enrich
+a missing label or price, not enable Responses Lite, delegation, or extra effort
+choices.

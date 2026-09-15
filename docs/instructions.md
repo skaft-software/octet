@@ -23,10 +23,11 @@ paths and bash's default cwd resolve from the workspace root, not necessarily
 the invocation directory.
 
 Use `--no-context-files` to omit context files. `/reload` recomposes current
-instructions and resources at a safe boundary. To replace **all** composed system
-instructions, set `system_prompt`, `OCTET_SYSTEM_PROMPT`, or
-`--system-prompt TEXT`. AGENTS/context/skills are ignored while this override is
-set. Bare `--system-prompt` means explicit empty text, not the normal default.
+instructions and resources at a safe boundary. To replace the base and
+AGENTS/context composition, set `system_prompt`, `OCTET_SYSTEM_PROMPT`, or
+`--system-prompt TEXT`. AGENTS/context composition is replaced by that value;
+bootstrap still appends the discovered skill metadata and file-location catalog.
+Bare `--system-prompt` means explicit empty text, not the normal default.
 See the [configuration precedence](configuration.md#precedence).
 
 ## Prompt templates
@@ -58,19 +59,40 @@ provenance. Detailed syntax remains in the
 ## Skills
 
 Skills are explicit, inspectable packages, not automatically active instructions.
-Discover them with `/skills`; load a reviewed skill with `/skills load NAME`.
-`/skills ...` supports listing/search, inspection, activation, unloading, and
-reload, including `/skills reload`. [Examples](../examples/skills/README.md).
+Discover them with `/skills`; in the TUI, `/skills search`, `/skills show`,
+`/skills load`, `/skills off`, and `/skills reload` are human commands.
+[Examples](../examples/skills/README.md).
 
-The host discovers metadata, activates only selected skills, injects active
-instructions once, and reads references lazily under bounds. Activation and
-resource snapshots are durable session events and survive compaction. The
-model-facing `search_skills`, `load_skill`, and `read_skill_resource` tools use
-that same boundary: loading checks trust and required tools; resource reads
-require a matching active hash and text under `references/` or `templates/`.
-Changed instructions are rejected rather than silently mixed into an activation.
+The model has no skill-specific search, load, or resource tool. When the composed
+prompt lists a skill, it supplies the `SKILL.md` location and directs the model to
+use the ordinary `read` tool; discovery supplies metadata and a location rather
+than injecting the skill body. Resolve references relative to the skill directory
+(parent of `SKILL.md`). For package resource semantics, supporting text is limited
+to `references/` or `templates/`; normal sandbox/path policy still applies, and
+`read` must be enabled.
+
+TUI and Serve do not have the same activation contract:
+
+- In the TUI, `/skills load NAME` resolves the skill and prefills `/skill:NAME`.
+  Submitting that draft expands the `SKILL.md` body into an ordinary user message
+  (plus optional arguments); it does not append a durable activation event.
+  `/skills off` can record deactivation only for an activation already present on
+  the branch.
+- Serve's slash-command worker appends a durable `SkillActivated` event on load
+  and `SkillDeactivated` on off. The activation event is Serve-only; TUI `off`
+  can only deactivate pre-existing state. Plain, print, and RPC do not gain this
+  activation path; their prompt preparation only expands explicit `/skill:NAME`
+  text as ordinary prompt content.
+
+An inlined TUI body is therefore subject to ordinary history and compaction: it may
+be summarized away, and resume does not reconstruct a separate active-skill state
+from it. Serve activation state can be reconstructed from its session events and
+compaction snapshots; this is not a promise of durable TUI activation.
+
+Skill package resource reads are bounded: discovery caps YAML frontmatter at 32
+KiB and `SKILL.md` at 256 KiB; a supporting text read is capped at 512 KiB and
+must stay under `references/` or `templates/`.
 [Skill contract](design/octet-coding-agent.md#skills).
-
 For the complete low-to-high skill roots and project-trust boundary, see
 [skill discovery](resources.md#skill-roots). [Resource discovery](resources.md)
 also defines managed-bundle admission, `--skill-dir` order, and diagnostics.

@@ -976,6 +976,10 @@ const REASONING_ANSWER_RESERVE: u64 = 1024;
 /// Bound actual tool executions emitted in one assistant turn. Every excess
 /// call still receives a compact error result so provider pairing remains valid.
 const MAX_TOOL_CALLS_PER_TURN: usize = 32;
+/// Bound read fan-out independently of the Tokio worker pool. Consecutive
+/// eligible calls are split into ordered waves of this width; every other
+/// effect is a barrier.
+const MAX_PARALLEL_READ_WAVE_WIDTH: usize = 4;
 /// Number of recent identical calls retained for the generic no-progress hint.
 const MAX_RECENT_TOOL_CALLS: usize = 16;
 /// Do not distract the model for the first two legitimate repeated probes.
@@ -1180,6 +1184,16 @@ fn effect_is_repeatable_observation(effect: ToolEffect) -> bool {
     matches!(effect, ToolEffect::Pure | ToolEffect::WorkspaceRead)
 }
 
+/// Live read scheduling is broader than crash replay. Host reads are allowed
+/// to overlap only after the exact host-owned classification and policy
+/// admission; they remain ineligible for automatic recovery after a crash.
+fn effect_is_parallel_observation(effect: ToolEffect) -> bool {
+    matches!(
+        effect,
+        ToolEffect::Pure | ToolEffect::WorkspaceRead | ToolEffect::HostRead
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn reserve_tool_effect(
     broker: &EffectBroker,
@@ -1247,8 +1261,81 @@ async fn reserve_tool_effect(
     })
 }
 
+struct DeferredParallelAfterToolCall {
+    name: String,
+    arguments: serde_json::Value,
+    progress_sink: ToolProgressSink,
+}
+
+struct ParallelReadWaveExecution {
+    execution: CompletedToolExecution,
+    after: Option<DeferredParallelAfterToolCall>,
+}
+
+struct AdmittedParallelReadCall {
+    tool: Arc<dyn Tool>,
+    name: String,
+    arguments: serde_json::Value,
+    execute_arguments: serde_json::Value,
+    progress_rx: mpsc::Receiver<ToolProgress>,
+    progress_sink: ToolProgressSink,
+    policy_decision: ToolPolicyDecision,
+    start: std::time::Instant,
+    started_unix_ms: u64,
+}
+
+enum ParallelReadPreparation {
+    Admitted(AdmittedParallelReadCall),
+    Completed(ParallelReadWaveExecution),
+}
+
+fn parallel_read_candidate(
+    call: &ToolCall,
+    call_index: usize,
+    answer_only: bool,
+    output_truncated: bool,
+    tool_map: &HashMap<String, Arc<dyn Tool>>,
+    context: &ToolContext<'_>,
+) -> bool {
+    call_index < MAX_TOOL_CALLS_PER_TURN
+        && !answer_only
+        && !output_truncated
+        && call.argument_error.is_none()
+        && call.arguments_value().is_ok_and(|arguments| {
+            tool_map.get(&call.name).is_some_and(|tool| {
+                tool.concurrency() == ToolConcurrency::Parallel
+                    && tool
+                        .effect(&arguments, context)
+                        .is_ok_and(effect_is_parallel_observation)
+            })
+        })
+}
+
+fn completed_parallel_read_execution(
+    result: Result<ToolOutput, ToolError>,
+    policy_decision: Option<ToolPolicyDecision>,
+    progress_rx: mpsc::Receiver<ToolProgress>,
+    progress_sink: ToolProgressSink,
+    start: std::time::Instant,
+    cancellation_won: bool,
+) -> ParallelReadWaveExecution {
+    ParallelReadWaveExecution {
+        execution: CompletedToolExecution {
+            result,
+            policy_decision,
+            duration: start.elapsed(),
+            started_unix_ms: None,
+            finished_unix_ms: Some(crate::session::now_unix_millis()),
+            progress_rx,
+            progress_sink,
+            cancellation_won,
+        },
+        after: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn execute_parallel_tool_call(
+async fn prepare_parallel_read_call(
     tool: Arc<dyn Tool>,
     hooks: &[Arc<dyn ToolCallHook>],
     broker: &EffectBroker,
@@ -1263,9 +1350,8 @@ async fn execute_parallel_tool_call(
     active_skills: &[crate::session::SkillActivatedSnapshot],
     registered_tools: &[String],
     cancellation: CancellationToken,
-) -> CompletedToolExecution {
+) -> ParallelReadPreparation {
     let start = std::time::Instant::now();
-    let mut started_unix_ms: Option<u64> = None;
     let (progress_tx, progress_rx) = mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
     let progress_sink = ToolProgressSink::live(progress_tx);
     let tool_ctx = ToolContext {
@@ -1292,125 +1378,313 @@ async fn execute_parallel_tool_call(
         false,
     )
     .await;
-    let (mut reservation, effect, mut decision, admission_error) = match admission {
-        Ok(ToolEffectAdmission {
-            intent,
-            reservation: effect_reservation,
-            effect,
-        }) => (Some((intent, effect_reservation)), Some(effect), None, None),
+    let ToolEffectAdmission {
+        intent,
+        reservation: effect_reservation,
+        effect,
+    } = match admission {
+        Ok(admission) => admission,
         Err(ToolEffectAdmissionError { error, decision }) => {
-            (None, None, Some(decision), Some(error))
+            let cancellation_won = cancellation.is_cancelled();
+            let result = if cancellation_won {
+                Err(cancelled_tool_error())
+            } else {
+                Err(error)
+            };
+            return ParallelReadPreparation::Completed(completed_parallel_read_execution(
+                result,
+                Some(decision),
+                progress_rx,
+                progress_sink,
+                start,
+                cancellation_won,
+            ));
         }
     };
+
     let mut hook_denial = None;
-    if reservation.is_some() {
-        for hook in hooks {
-            if let Err(error) = hook.before_tool_call(name, &arguments, &tool_ctx).await {
-                hook_denial = Some(error);
-                break;
-            }
+    let mut cancellation_won = false;
+    for hook in hooks {
+        let hook_result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            result = hook.before_tool_call(name, &arguments, &tool_ctx) => Some(result),
+        };
+        let Some(hook_result) = hook_result else {
+            cancellation_won = true;
+            break;
+        };
+        // A hook can synchronously cause cancellation while returning. The
+        // level-triggered check keeps cancellation ahead of a same-poll denial.
+        if cancellation.is_cancelled() {
+            cancellation_won = true;
+            break;
+        }
+        if hook_result.is_err() {
+            hook_denial = Some(());
+            break;
         }
     }
+    if cancellation_won || cancellation.is_cancelled() {
+        return ParallelReadPreparation::Completed(completed_parallel_read_execution(
+            Err(cancelled_tool_error()),
+            None,
+            progress_rx,
+            progress_sink,
+            start,
+            true,
+        ));
+    }
+    if hook_denial.is_some() {
+        let (error, decision) = secondary_hook_denial(sandbox, broker, Some(effect));
+        return ParallelReadPreparation::Completed(completed_parallel_read_execution(
+            Err(error),
+            Some(decision),
+            progress_rx,
+            progress_sink,
+            start,
+            false,
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return ParallelReadPreparation::Completed(completed_parallel_read_execution(
+            Err(cancelled_tool_error()),
+            None,
+            progress_rx,
+            progress_sink,
+            start,
+            true,
+        ));
+    }
 
-    let mut committed = false;
+    // Preserve the original hook arguments while completing the potentially
+    // large execution allocation before the reservation is consumed.
+    let execute_arguments = arguments.clone();
+    let receipt = match effect_reservation.commit(&intent) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let (error, decision) =
+                effect_reservation_commit_denial(sandbox, broker, effect, &error);
+            return ParallelReadPreparation::Completed(completed_parallel_read_execution(
+                Err(error),
+                Some(decision),
+                progress_rx,
+                progress_sink,
+                start,
+                false,
+            ));
+        }
+    };
+    let policy_decision = policy_decision(
+        sandbox,
+        broker,
+        Some(effect),
+        Some(receipt.authorization()),
+        None,
+    );
+    let started_unix_ms = crate::session::now_unix_millis();
+    ParallelReadPreparation::Admitted(AdmittedParallelReadCall {
+        tool,
+        name: name.to_owned(),
+        arguments,
+        execute_arguments,
+        progress_rx,
+        progress_sink,
+        policy_decision,
+        start,
+        started_unix_ms,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_admitted_parallel_read(
+    admitted: AdmittedParallelReadCall,
+    sandbox: &SandboxConfig,
+    tool_scope: &str,
+    resource_owner: &str,
+    active_skills: &[crate::session::SkillActivatedSnapshot],
+    registered_tools: &[String],
+    cancellation: CancellationToken,
+) -> ParallelReadWaveExecution {
+    let AdmittedParallelReadCall {
+        tool,
+        name,
+        arguments,
+        execute_arguments,
+        progress_rx,
+        progress_sink,
+        policy_decision,
+        start,
+        started_unix_ms,
+    } = admitted;
+    let tool_ctx = ToolContext {
+        workspace: &sandbox.workspace,
+        sandbox,
+        execution_scope: tool_scope,
+        resource_owner,
+        active_skills,
+        registered_tools,
+        progress: progress_sink.clone(),
+        cancellation: cancellation.clone(),
+    };
+    let execute = tool.execute(execute_arguments, &tool_ctx);
+    tokio::pin!(execute);
     let mut cancellation_won = false;
-    let result = if let Some(error) = admission_error {
-        if cancellation.is_cancelled() {
+    let execution_result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
             cancellation_won = true;
             Err(cancelled_tool_error())
-        } else {
-            Err(error)
         }
-    } else if hook_denial.is_some() {
-        if cancellation.is_cancelled() {
-            cancellation_won = true;
-            Err(cancelled_tool_error())
-        } else {
-            let (error, hook_decision) = secondary_hook_denial(sandbox, broker, effect);
-            decision = Some(hook_decision);
-            Err(error)
-        }
-    } else if cancellation.is_cancelled() {
+        result = &mut execute => result,
+    };
+    let result = if cancellation_won || cancellation.is_cancelled() {
         cancellation_won = true;
         Err(cancelled_tool_error())
     } else {
-        // Preserve the original arguments for after-call hooks, but complete
-        // this potentially large allocation before consuming admission.
-        let execute_arguments = arguments.clone();
-        if cancellation.is_cancelled() {
-            cancellation_won = true;
-            return CompletedToolExecution {
-                result: Err(cancelled_tool_error()),
-                policy_decision: decision,
-                progress_rx,
-                progress_sink,
-                cancellation_won,
-                duration: start.elapsed(),
-                started_unix_ms: None,
-                finished_unix_ms: Some(crate::session::now_unix_millis()),
-            };
-        }
-        let (intent, effect_reservation) = reservation
-            .take()
-            .expect("successful admission retains its exact reservation");
-        match effect_reservation.commit(&intent) {
-            Err(error) => {
-                let (error, commit_decision) = effect_reservation_commit_denial(
-                    sandbox,
-                    broker,
-                    effect.expect("successful admission retains an effect classification"),
-                    &error,
-                );
-                decision = Some(commit_decision);
-                Err(error)
-            }
-            Ok(receipt) => {
-                decision = Some(policy_decision(
-                    sandbox,
-                    broker,
-                    effect,
-                    Some(receipt.authorization()),
-                    None,
-                ));
-                committed = true;
-                started_unix_ms = Some(crate::session::now_unix_millis());
-                let execute = tool.execute(execute_arguments, &tool_ctx);
-                tokio::pin!(execute);
-                let execution_result = tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => Err(cancelled_tool_error()),
-                    result = &mut execute => result,
-                };
-                if cancellation.is_cancelled() {
-                    cancellation_won = true;
-                    Err(cancelled_tool_error())
-                } else {
-                    execution_result
-                }
-            }
-        }
+        execution_result
     };
+    ParallelReadWaveExecution {
+        execution: CompletedToolExecution {
+            result,
+            policy_decision: Some(policy_decision),
+            duration: start.elapsed(),
+            started_unix_ms: Some(started_unix_ms),
+            finished_unix_ms: Some(crate::session::now_unix_millis()),
+            progress_rx,
+            progress_sink: progress_sink.clone(),
+            cancellation_won,
+        },
+        after: Some(DeferredParallelAfterToolCall {
+            name,
+            arguments,
+            progress_sink,
+        }),
+    }
+}
 
-    if committed {
-        let (output, is_error) = match &result {
-            Ok(output) => (output.text.as_str(), output.is_error()),
-            Err(error) => (error.message.as_str(), true),
-        };
-        for hook in hooks {
-            hook.after_tool_call(name, &arguments, output, is_error, &tool_ctx)
+#[allow(clippy::too_many_arguments)]
+async fn execute_parallel_read_wave(
+    calls: &[ToolCall],
+    tool_map: &HashMap<String, Arc<dyn Tool>>,
+    hooks: &[Arc<dyn ToolCallHook>],
+    broker: &EffectBroker,
+    run_id: &str,
+    generation: u64,
+    sandbox: &SandboxConfig,
+    tool_scope: &str,
+    resource_owner: &str,
+    active_skills: &[crate::session::SkillActivatedSnapshot],
+    registered_tools: &[String],
+    cancellation: CancellationToken,
+) -> Vec<ParallelReadWaveExecution> {
+    let mut results: Vec<Option<ParallelReadWaveExecution>> =
+        (0..calls.len()).map(|_| None).collect();
+    let mut executions = futures_util::stream::FuturesUnordered::new();
+
+    for (index, call) in calls.iter().enumerate() {
+        let arguments = call
+            .arguments_value()
+            .expect("parallel read wave validates arguments before admission");
+        let prepared = prepare_parallel_read_call(
+            Arc::clone(
+                tool_map
+                    .get(&call.name)
+                    .expect("parallel read wave validates registered tools"),
+            ),
+            hooks,
+            broker,
+            run_id,
+            generation,
+            &call.id,
+            &call.name,
+            arguments,
+            sandbox,
+            tool_scope,
+            resource_owner,
+            active_skills,
+            registered_tools,
+            cancellation.clone(),
+        )
+        .await;
+        match prepared {
+            ParallelReadPreparation::Completed(execution) => results[index] = Some(execution),
+            ParallelReadPreparation::Admitted(admitted) => {
+                let execution_cancellation = cancellation.clone();
+                executions.push(async move {
+                    (
+                        index,
+                        execute_admitted_parallel_read(
+                            admitted,
+                            sandbox,
+                            tool_scope,
+                            resource_owner,
+                            active_skills,
+                            registered_tools,
+                            execution_cancellation,
+                        )
+                        .await,
+                    )
+                });
+                // Poll once after each commit so dispatch is not deferred until
+                // all reservations in this wave have been consumed. This is a
+                // deterministic executor handoff, not a timing-based delay.
+                let _ = futures_util::future::poll_fn(|cx| {
+                    match Pin::new(&mut executions).poll_next(cx) {
+                        std::task::Poll::Ready(Some((index, execution))) => {
+                            results[index] = Some(execution);
+                            std::task::Poll::Ready(())
+                        }
+                        _ => std::task::Poll::Ready(()),
+                    }
+                })
                 .await;
+            }
         }
     }
+    while let Some((index, execution)) = executions.next().await {
+        results[index] = Some(execution);
+    }
+    results
+        .into_iter()
+        .map(|execution| execution.expect("parallel read wave produces one result per call"))
+        .collect()
+}
 
-    CompletedToolExecution {
-        result,
-        policy_decision: decision,
-        progress_rx,
+#[allow(clippy::too_many_arguments)]
+async fn run_parallel_after_tool_hooks(
+    after: DeferredParallelAfterToolCall,
+    hooks: &[Arc<dyn ToolCallHook>],
+    result: &Result<ToolOutput, ToolError>,
+    sandbox: &SandboxConfig,
+    tool_scope: &str,
+    resource_owner: &str,
+    active_skills: &[crate::session::SkillActivatedSnapshot],
+    registered_tools: &[String],
+    cancellation: CancellationToken,
+) {
+    let DeferredParallelAfterToolCall {
+        name,
+        arguments,
         progress_sink,
-        cancellation_won,
-        duration: start.elapsed(),
-        started_unix_ms,
-        finished_unix_ms: Some(crate::session::now_unix_millis()),
+    } = after;
+    let (output, is_error) = match result {
+        Ok(output) => (output.text.as_str(), output.is_error()),
+        Err(error) => (error.message.as_str(), true),
+    };
+    let tool_ctx = ToolContext {
+        workspace: &sandbox.workspace,
+        sandbox,
+        execution_scope: tool_scope,
+        resource_owner,
+        active_skills,
+        registered_tools,
+        progress: progress_sink,
+        cancellation,
+    };
+    for hook in hooks {
+        hook.after_tool_call(&name, &arguments, output, is_error, &tool_ctx)
+            .await;
     }
 }
 
@@ -7284,13 +7558,13 @@ impl Agent {
                     break 'run FinishReason::Completed;
                 }
 
-                // A model can emit several independent reads in one turn.
-                // Start every explicitly parallel-safe call before awaiting
-                // any of them, but retain model order for persistence and
-                // ToolFinished events. The static tool promise is intersected
-                // with the host-owned classification for the exact arguments:
-                // network, host, process, mutation, and unknown effects always
-                // remain on the sequential path.
+                // A model can emit several independent observations in one
+                // turn. Scan only the next contiguous run of exact,
+                // host-classified read observations; every mutation, process,
+                // delegation, extension, network, unknown, schema-invalid, or
+                // sequential tool is a barrier. The live read predicate is
+                // intentionally broader than the crash-replay predicate:
+                // HostRead remains ambient authority and is never relabeled.
                 let parallel_active_skills = session
                     .head()
                     .and_then(|head| session.resolve_active_skills(&head).ok())
@@ -7306,93 +7580,7 @@ impl Agent {
                     progress: ToolProgressSink::null(),
                     cancellation: CancellationToken::default(),
                 };
-                let parallel_batch = !answer_only
-                    && !output_truncated
-                    && calls.len() > 1
-                    && calls.len() <= MAX_TOOL_CALLS_PER_TURN
-                    && calls.iter().all(|call| {
-                        call.argument_error.is_none()
-                            && call.arguments_value().is_ok_and(|arguments| {
-                            tool_map.get(&call.name).is_some_and(|tool| {
-                                tool.concurrency() == ToolConcurrency::Parallel
-                                    && tool
-                                        .effect(&arguments, &classification_context)
-                                        .is_ok_and(effect_is_repeatable_observation)
-                            })
-                        })
-                    });
-                let mut parallel_results = if parallel_batch {
-                    let active_skills = parallel_active_skills;
-                    for call in &calls {
-                        let parsed = call
-                            .arguments_value()
-                            .expect("parallel batch validates arguments before execution");
-                        stream_context.tool_started();
-                        let ev = AgentEvent::ToolStarted {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            args: parsed,
-                        };
-                        notify_observers(&observers, &ev);
-                        yield ev;
-                    }
-
-                    let operations = calls.iter().map(|call| {
-                        execute_parallel_tool_call(
-                            Arc::clone(
-                                tool_map
-                                    .get(&call.name)
-                                    .expect("parallel batch validates registered tools"),
-                            ),
-                            &tool_call_hooks,
-                            &effect_broker,
-                            &effect_run_id,
-                            tool_revision,
-                            &call.id,
-                            &call.name,
-                            call.arguments_value()
-                                .expect("parallel batch validates arguments before execution"),
-                            &sandbox,
-                            &tool_scope,
-                            &resource_owner,
-                            &active_skills,
-                            &registered_tools,
-                            abort.cancellation.clone(),
-                        )
-                    });
-                    let executions = futures_util::future::join_all(operations);
-                    tokio::pin!(executions);
-                    let mut abort_observed = abort.is_set();
-                    let completed = loop {
-                        tokio::select! {
-                            biased;
-                            results = &mut executions => break results,
-                            _ = abort.wait(), if !abort_observed => {
-                                abort_observed = true;
-                            }
-                            control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
-                                Some(Control::FollowUp(input)) => followups.push_back(input),
-                                Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
-                                    answer_only = true;
-                                    finish_pending = true;
-                                    context_capacity.invalidate();
-                                }
-                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
-                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
-                                Some(Control::Abort) => {
-                                    abort.set();
-                                    abort_observed = true;
-                                }
-                                None => control_open = false,
-                            },
-                        }
-                    };
-                    Some(completed.into_iter())
-                } else {
-                    None
-                };
+                let mut parallel_results: VecDeque<ParallelReadWaveExecution> = VecDeque::new();
 
                 // Calls in one assistant response form a single batch. Do not
                 // treat parallel or otherwise batched identical calls as a
@@ -7411,7 +7599,95 @@ impl Agent {
                     .collect();
 
                 // ── Commit tool results in emitted order ───────────────────
-                for (call_index, call) in calls.into_iter().enumerate() {
+                let mut call_index = 0usize;
+                while call_index < calls.len() {
+                    if parallel_results.is_empty()
+                        && parallel_read_candidate(
+                            &calls[call_index],
+                            call_index,
+                            answer_only,
+                            output_truncated,
+                            &tool_map,
+                            &classification_context,
+                        )
+                    {
+                        let mut wave_end = call_index;
+                        while wave_end < calls.len()
+                            && wave_end - call_index < MAX_PARALLEL_READ_WAVE_WIDTH
+                            && parallel_read_candidate(
+                                &calls[wave_end],
+                                wave_end,
+                                answer_only,
+                                output_truncated,
+                                &tool_map,
+                                &classification_context,
+                            )
+                        {
+                            wave_end += 1;
+                        }
+                        // A single eligible call gains no overlap and keeps the
+                        // ordinary sequential path's hook/control behavior.
+                        if wave_end - call_index > 1 {
+                            for call in &calls[call_index..wave_end] {
+                                let parsed = call
+                                    .arguments_value()
+                                    .expect("parallel read wave validates arguments");
+                                stream_context.tool_started();
+                                let ev = AgentEvent::ToolStarted {
+                                    id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    args: parsed,
+                                };
+                                notify_observers(&observers, &ev);
+                                yield ev;
+                            }
+
+                            let operation = execute_parallel_read_wave(
+                                &calls[call_index..wave_end],
+                                &tool_map,
+                                &tool_call_hooks,
+                                &effect_broker,
+                                &effect_run_id,
+                                tool_revision,
+                                &sandbox,
+                                &tool_scope,
+                                &resource_owner,
+                                &parallel_active_skills,
+                                &registered_tools,
+                                abort.cancellation.clone(),
+                            );
+                            tokio::pin!(operation);
+                            let mut abort_observed = abort.is_set();
+                            let completed = loop {
+                                tokio::select! {
+                                    biased;
+                                    results = &mut operation => break results,
+                                    _ = abort.wait(), if !abort_observed => {
+                                        abort_observed = true;
+                                    }
+                                    control = control_rx.recv(), if control_open => match control {
+                                        Some(Control::Steer(input)) => pending_steer.push(input),
+                                        Some(Control::FollowUp(input)) => followups.push_back(input),
+                                        Some(Control::FinishNow(input)) => {
+                                            pending_steer.push(input);
+                                            answer_only = true;
+                                            finish_pending = true;
+                                            context_capacity.invalidate();
+                                        }
+                                        Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                        Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                        Some(Control::Abort) => {
+                                            abort.set();
+                                            abort_observed = true;
+                                        }
+                                        None => control_open = false,
+                                    },
+                                }
+                            };
+                            parallel_results.extend(completed);
+                        }
+                    }
+                    let call = calls[call_index].clone();
                     let argument_error = call.argument_error;
                     let parsed = call.arguments_value();
                     let call_fingerprint = if argument_error.is_none() {
@@ -7432,7 +7708,13 @@ impl Agent {
                     });
                     let should_annotate_repetition =
                         repeated_recently >= REPEATED_TOOL_CALL_THRESHOLD;
-                    let preexecuted = parallel_results.as_mut().and_then(Iterator::next);
+                    let (preexecuted, deferred_after) =
+                        match parallel_results.pop_front() {
+                            Some(ParallelReadWaveExecution { execution, after }) => {
+                                (Some(execution), after)
+                            }
+                            None => (None, None),
+                        };
                     if preexecuted.is_none() {
                         stream_context.tool_started();
                         let ev = AgentEvent::ToolStarted {
@@ -7728,6 +8010,20 @@ impl Agent {
                             cancellation_won,
                         }
                     };
+                    if let Some(after) = deferred_after {
+                        run_parallel_after_tool_hooks(
+                            after,
+                            &tool_call_hooks,
+                            &result,
+                            &sandbox,
+                            &tool_scope,
+                            &resource_owner,
+                            &parallel_active_skills,
+                            &registered_tools,
+                            abort.cancellation.clone(),
+                        )
+                        .await;
+                    }
                     let result = if should_annotate_repetition {
                         annotate_repeated_tool_result(result, repeated_recently)
                     } else {
@@ -7855,6 +8151,7 @@ impl Agent {
                         output.attach_owner_presentation_images(images);
                     }
                     yield ev;
+                    call_index += 1;
 
                 }
                 for fingerprint in batch_fingerprints {

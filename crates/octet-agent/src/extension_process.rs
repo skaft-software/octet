@@ -14,6 +14,8 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::ExitStatus;
@@ -36,6 +38,18 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify, Semaphore};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+};
 
 use crate::artifact::{ArtifactId, ArtifactPublication, ArtifactSource, ArtifactStore};
 use crate::delegation::{
@@ -397,6 +411,88 @@ static REGISTERED_PROCESS_GROUPS: LazyLock<StdMutex<BTreeMap<i32, RegisteredProc
 static PROCESS_SNAPSHOT_REFRESH: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 static NEXT_PROCESS_GROUP_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(windows)]
+static WINDOWS_PROCESS_JOBS: LazyLock<
+    StdMutex<BTreeMap<u64, (RegisteredProcessKind, Weak<WindowsJob>)>>,
+> = LazyLock::new(|| StdMutex::new(BTreeMap::new()));
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+#[allow(non_snake_case)]
+unsafe extern "system" {
+    fn NtResumeProcess(process_handle: HANDLE) -> i32;
+}
+
+#[cfg(windows)]
+struct WindowsJob {
+    handle: OwnedHandle,
+    terminated: AtomicBool,
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn create() -> std::io::Result<Self> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: CreateJobObjectW returned a new owned handle for this process.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle.as_raw_handle().cast(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of_mut!(limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle,
+            terminated: AtomicBool::new(false),
+        })
+    }
+
+    fn terminate(&self) {
+        if !self.terminated.swap(true, Ordering::AcqRel) {
+            // The Job Object owns the exact process tree assigned by the
+            // suspended launch handshake; it cannot target an unrelated PID.
+            unsafe {
+                let _ = TerminateJobObject(self.handle.as_raw_handle().cast(), 1);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn register_windows_job(kind: RegisteredProcessKind, job: &Arc<WindowsJob>) -> u64 {
+    let registration_id = NEXT_PROCESS_GROUP_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
+    let mut registered = lock_std_mutex(&WINDOWS_PROCESS_JOBS);
+    registered.retain(|_, (_, job)| job.strong_count() != 0);
+    registered.insert(registration_id, (kind, Arc::downgrade(job)));
+    registration_id
+}
+
+#[cfg(windows)]
+fn unregister_windows_job(registration_id: u64) {
+    lock_std_mutex(&WINDOWS_PROCESS_JOBS).remove(&registration_id);
+}
+
+#[cfg(windows)]
+fn windows_jobs(kind: Option<RegisteredProcessKind>) -> Vec<Arc<WindowsJob>> {
+    let mut registered = lock_std_mutex(&WINDOWS_PROCESS_JOBS);
+    registered.retain(|_, (_, job)| job.strong_count() != 0);
+    registered
+        .values()
+        .filter(|(registered_kind, _)| kind.is_none_or(|wanted| wanted == *registered_kind))
+        .filter_map(|(_, job)| job.upgrade())
+        .collect()
+}
+
 #[cfg(unix)]
 const PROCESS_REAPER_POLL: Duration = Duration::from_millis(25);
 
@@ -412,12 +508,14 @@ static PROCESS_REAPER: LazyLock<Option<std::thread::Thread>> = LazyLock::new(|| 
         .map(|handle| handle.thread().clone())
 });
 
+#[cfg(unix)]
 fn valid_process_group_id(process_group_id: u64) -> Option<i32> {
     i32::try_from(process_group_id)
         .ok()
         .filter(|process_group_id| *process_group_id > 0)
 }
 
+#[cfg(not(windows))]
 fn register_process_group(process_group_id: u64, kind: RegisteredProcessKind) -> u64 {
     let registration_id = NEXT_PROCESS_GROUP_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
     #[cfg(unix)]
@@ -459,6 +557,7 @@ fn remove_registered_process_group(
     }
 }
 
+#[cfg(not(windows))]
 fn unregister_process_group(process_group_id: u64, registration_id: u64) -> bool {
     #[cfg(unix)]
     if let Some(process_group_id) = valid_process_group_id(process_group_id) {
@@ -477,16 +576,27 @@ fn unregister_process_group(process_group_id: u64, registration_id: u64) -> bool
 pub struct ProcessGroupGuard {
     process_group_id: AtomicU64,
     registration_id: u64,
+    #[cfg(windows)]
+    job: Option<Arc<WindowsJob>>,
+    #[cfg(windows)]
+    disarmed: AtomicBool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ProcessTerminationHandle {
+    #[cfg(not(windows))]
     process_group_id: u64,
+    #[cfg(not(windows))]
     registration_id: u64,
+    #[cfg(windows)]
+    job: Arc<WindowsJob>,
 }
 
 impl ProcessTerminationHandle {
     fn terminate(self) {
+        #[cfg(windows)]
+        self.job.terminate();
+        #[cfg(not(windows))]
         terminate_registered_process_group(
             self.process_group_id,
             self.registration_id,
@@ -497,14 +607,17 @@ impl ProcessTerminationHandle {
 
 impl ProcessGroupGuard {
     /// Registers a shell or built-in `bash` child process group.
+    #[cfg(not(windows))]
     pub fn bash(pid: Option<u32>) -> Self {
         Self::new(pid.map(u64::from).unwrap_or(0), RegisteredProcessKind::Bash)
     }
 
+    #[cfg(not(windows))]
     fn extension(process_group_id: u64) -> Self {
         Self::new(process_group_id, RegisteredProcessKind::Extension)
     }
 
+    #[cfg(not(windows))]
     fn new(process_group_id: u64, kind: RegisteredProcessKind) -> Self {
         let registration_id = register_process_group(process_group_id, kind);
         Self {
@@ -513,23 +626,84 @@ impl ProcessGroupGuard {
         }
     }
 
+    #[cfg(windows)]
+    fn from_windows(
+        process_id: u32,
+        kind: RegisteredProcessKind,
+        job: Arc<WindowsJob>,
+        registration_id: u64,
+    ) -> Self {
+        let _ = kind;
+        Self {
+            process_group_id: AtomicU64::new(u64::from(process_id)),
+            registration_id,
+            job: Some(job),
+            disarmed: AtomicBool::new(false),
+        }
+    }
+
     fn termination_handle(&self) -> ProcessTerminationHandle {
-        ProcessTerminationHandle {
-            process_group_id: self.process_group_id.load(Ordering::Acquire),
-            registration_id: self.registration_id,
+        #[cfg(windows)]
+        {
+            ProcessTerminationHandle {
+                job: self
+                    .job
+                    .as_ref()
+                    .expect("Windows process guard always owns a Job Object")
+                    .clone(),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            ProcessTerminationHandle {
+                process_group_id: self.process_group_id.load(Ordering::Acquire),
+                registration_id: self.registration_id,
+            }
         }
     }
 
     /// Immediately force-terminates the owned process group.
     pub fn terminate_now(&self) {
-        let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
-        terminate_registered_process_group(process_group_id, self.registration_id, libc_sigkill());
+        #[cfg(windows)]
+        {
+            if !self.disarmed.load(Ordering::Acquire) {
+                if let Some(job) = &self.job {
+                    job.terminate();
+                }
+            }
+            self.process_group_id.store(0, Ordering::Release);
+        }
+        #[cfg(not(windows))]
+        {
+            let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
+            terminate_registered_process_group(
+                process_group_id,
+                self.registration_id,
+                libc_sigkill(),
+            );
+        }
     }
 
     /// Releases the group after its child and output pipes have fully settled.
     pub fn disarm(&self) {
-        let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
-        unregister_process_group(process_group_id, self.registration_id);
+        #[cfg(windows)]
+        {
+            if !self.disarmed.swap(true, Ordering::AcqRel) {
+                // A successful Bash root may have started background work. The
+                // bounded Windows route does not leave that work outside the
+                // host-owned Job Object; close it only after all pipes settled.
+                if let Some(job) = &self.job {
+                    job.terminate();
+                }
+                unregister_windows_job(self.registration_id);
+            }
+            self.process_group_id.store(0, Ordering::Release);
+        }
+        #[cfg(not(windows))]
+        {
+            let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
+            unregister_process_group(process_group_id, self.registration_id);
+        }
     }
 
     #[cfg(unix)]
@@ -635,6 +809,93 @@ impl ProcessGroupGuard {
             let _ = (lifetime, cancellation);
             self.disarm();
         }
+    }
+}
+
+#[cfg(windows)]
+/// Prepares and registers a Windows process in an exact, private Job Object.
+///
+/// The child is created suspended so assignment succeeds before any extension
+/// or shell code can run. Dropping the resulting guard terminates the owned
+/// job tree.
+pub struct WindowsProcessLaunch {
+    job: Arc<WindowsJob>,
+    kind: RegisteredProcessKind,
+    registration_id: u64,
+}
+
+#[cfg(windows)]
+impl WindowsProcessLaunch {
+    /// Prepare a Bash-compatible child for Job Object supervision.
+    pub fn bash(command: &mut Command) -> std::io::Result<Self> {
+        Self::prepare(command, RegisteredProcessKind::Bash)
+    }
+
+    /// Prepare an executable extension child for Job Object supervision.
+    pub fn extension(command: &mut Command) -> std::io::Result<Self> {
+        Self::prepare(command, RegisteredProcessKind::Extension)
+    }
+
+    fn prepare(command: &mut Command, kind: RegisteredProcessKind) -> std::io::Result<Self> {
+        let job = Arc::new(WindowsJob::create()?);
+        let registration_id = register_windows_job(kind, &job);
+        // No application code runs until the process is assigned to the Job
+        // Object. A failed assignment therefore fails closed rather than
+        // falling back to direct-child cleanup.
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_SUSPENDED
+                | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
+        Ok(Self {
+            job,
+            kind,
+            registration_id,
+        })
+    }
+
+    /// Assign the suspended child to the Job Object and resume it.
+    pub fn register(self, child: &Child) -> std::io::Result<ProcessGroupGuard> {
+        let process_id = child.id().ok_or_else(|| {
+            unregister_windows_job(self.registration_id);
+            std::io::Error::other("spawned Windows process did not expose a process ID")
+        })?;
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_SUSPEND_RESUME,
+                0,
+                process_id,
+            )
+        };
+        if process.is_null() {
+            unregister_windows_job(self.registration_id);
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: OpenProcess returned a handle owned by this scope.
+        let process = unsafe { OwnedHandle::from_raw_handle(process) };
+        let assigned = unsafe {
+            AssignProcessToJobObject(
+                self.job.handle.as_raw_handle().cast(),
+                process.as_raw_handle().cast(),
+            )
+        };
+        if assigned == 0 {
+            unregister_windows_job(self.registration_id);
+            return Err(std::io::Error::last_os_error());
+        }
+        let status = unsafe { NtResumeProcess(process.as_raw_handle().cast()) };
+        if status < 0 {
+            self.job.terminate();
+            unregister_windows_job(self.registration_id);
+            return Err(std::io::Error::other(format!(
+                "failed to resume Windows process: NTSTATUS {status:#x}"
+            )));
+        }
+        Ok(ProcessGroupGuard::from_windows(
+            process_id,
+            self.kind,
+            self.job,
+            self.registration_id,
+        ))
     }
 }
 
@@ -1312,6 +1573,7 @@ fn registered_process_is_alive(process_group_id: i32, registration_id: u64) -> b
     identities.any(process_identity_is_alive)
 }
 
+#[cfg(not(windows))]
 fn libc_sigkill() -> i32 {
     #[cfg(unix)]
     {
@@ -1323,6 +1585,7 @@ fn libc_sigkill() -> i32 {
     }
 }
 
+#[cfg(not(windows))]
 fn terminate_registered_process_group(process_group_id: u64, registration_id: u64, signal: i32) {
     #[cfg(unix)]
     {
@@ -1454,7 +1717,14 @@ pub async fn terminate_bash_process_groups(timeout: Duration) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let _ = timeout;
+        for job in windows_jobs(Some(RegisteredProcessKind::Bash)) {
+            job.terminate();
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = timeout;
 }
 
@@ -1466,6 +1736,10 @@ pub fn force_kill_registered_process_groups() {
     {
         let process_keys = registered_process_keys(None);
         signal_registered_processes(&process_keys, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    for job in windows_jobs(None) {
+        job.terminate();
     }
 }
 
@@ -4191,7 +4465,7 @@ pub enum ExtensionRuntimeError {
     /// A request was cooperatively cancelled before a terminal response.
     #[error("extension request `{method}` cancelled: {reason}")]
     Cancelled {
-        /// JSON-RPC method.
+        /// Original JSON-RPC request method, not the cancellation notification.
         method: String,
         /// Inspectable terminal reason.
         reason: String,
@@ -6283,7 +6557,7 @@ impl ExtensionProcess {
     /// any remainder without replaying them.
     pub async fn drain(&self, deadline: Duration) -> bool {
         let connection = read_std_lock(&self.inner.connection).clone();
-        connection.drain(deadline).await
+        connection.drain(deadline, "reload drain deadline").await
     }
 
     /// Restarts the process and atomically swaps it in after a successful
@@ -6680,7 +6954,9 @@ impl ExtensionProcess {
             "shutdown",
         )
         .await;
-        let _ = connection.drain(self.inner.config.shutdown_timeout).await;
+        let _ = connection
+            .drain(self.inner.config.shutdown_timeout, "shutdown")
+            .await;
         let graceful = connection.shutdown().await;
         self.inner
             .approval_store
@@ -8531,7 +8807,10 @@ impl ProcessConnection {
                 Err(_) => Err(PendingError::Closed("response channel closed".into())),
             };
             registration.disarm();
-            reply.map_err(pending_error)
+            // Pending cancellation carries a reason, while this future retains
+            // the admitted JSON-RPC method. Keep that provenance on shutdown or
+            // reload just as on the direct cancellation and timeout paths.
+            reply.map_err(|error| pending_error(error, method))
         };
         tokio::pin!(operation);
         let timed = tokio::time::timeout(timeout, &mut operation);
@@ -8852,7 +9131,7 @@ impl ProcessConnection {
                         .map_err(|_| {
                             ExtensionRuntimeError::Closed("extension writer closed".into())
                         })?
-                        .map_err(pending_error)?;
+                        .map_err(|error| pending_error(error, "request"))?;
                     return Ok(ChildResponseAdmission::Queued);
                 }
                 Err(CHILD_RESPONDING) => {
@@ -8910,10 +9189,10 @@ impl ProcessConnection {
         })
     }
 
-    async fn drain(self: &Arc<Self>, deadline: Duration) -> bool {
+    async fn drain(self: &Arc<Self>, deadline: Duration, cancellation_reason: &str) -> bool {
         let settled = self.quiesce(deadline).await;
         if !settled {
-            self.cancel_all_pending("reload drain deadline");
+            self.cancel_all_pending(cancellation_reason);
         } else {
             self.settle_artifacts();
         }
@@ -9317,7 +9596,9 @@ fn provider_protocol_name(protocol: Protocol) -> Option<&'static str> {
         // The API 0.3 extension-provider schema intentionally declares only
         // these three generic wire protocols. Do not coerce native host codecs
         // into a misleading generic route.
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi => None,
+        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi | Protocol::MistralConversations => {
+            None
+        }
     }
 }
 
@@ -9636,6 +9917,13 @@ async fn spawn_connection(
         .env("OCTET_EXTENSION_SCRATCH", &scratch_directory);
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    let process_launch = WindowsProcessLaunch::extension(&mut command).map_err(|error| {
+        ExtensionRuntimeError::Spawn {
+            extension: descriptor.manifest.name.clone(),
+            message: format!("failed to prepare Windows process supervision: {error}"),
+        }
+    })?;
 
     // Linux can transiently reject exec with ETXTBSY ("Text file busy") when a
     // freshly written entrypoint is launched while another host thread still
@@ -9668,8 +9956,22 @@ async fn spawn_connection(
             }
         }
     };
+    #[cfg(unix)]
     let process_group_id = extension_process_group_id(&child);
+    #[cfg(unix)]
     let process_group = ProcessGroupGuard::extension(process_group_id);
+    #[cfg(windows)]
+    let process_group = match process_launch.register(&child) {
+        Ok(process_group) => process_group,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(ExtensionRuntimeError::Spawn {
+                extension: descriptor.manifest.name.clone(),
+                message: format!("failed to register Windows process supervision: {error}"),
+            });
+        }
+    };
     let termination = process_group.termination_handle();
     let stdin = child
         .stdin
@@ -9753,7 +10055,7 @@ async fn spawn_connection(
         Arc::clone(&health),
         events.clone(),
         Arc::clone(&child),
-        termination,
+        termination.clone(),
         Arc::clone(&frame_limit),
     ));
     let (presentation_updates, presentation_update_rx) = watch::channel(None);
@@ -11849,7 +12151,7 @@ async fn queue_api_v03_child_response(
                         result
                             .map_err(|_| "API 0.3 session lifecycle response write timed out".to_owned())?
                             .map_err(|_| "extension writer closed".to_owned())?
-                            .map_err(|error| pending_error(error).to_string())?;
+                            .map_err(|error| pending_error(error, "request").to_string())?;
                     }
                 };
                 return Ok(ChildResponseAdmission::Queued);
@@ -14270,12 +14572,12 @@ fn fail_all_pending(pending: &PendingRequests, pending_changed: &Notify, error: 
     pending_changed.notify_waiters();
 }
 
-fn pending_error(error: PendingError) -> ExtensionRuntimeError {
+fn pending_error(error: PendingError, method: &str) -> ExtensionRuntimeError {
     match error {
         PendingError::Closed(message) => ExtensionRuntimeError::Closed(message),
         PendingError::Protocol(message) => ExtensionRuntimeError::Protocol(message),
         PendingError::Cancelled(reason) => ExtensionRuntimeError::Cancelled {
-            method: "request".into(),
+            method: method.to_owned(),
             reason,
         },
         PendingError::Remote {
@@ -14654,6 +14956,54 @@ confirmations = true
             session_id: session_id.into(),
             extension_instance_id: "instance-test".into(),
             process_generation: 1,
+        }
+    }
+
+    #[test]
+    fn pending_cancellation_preserves_original_method_and_reason() {
+        for expected_method in [
+            methods::TOOL_CALL,
+            methods::COMMAND_EXECUTE,
+            methods::HOOK_RUN,
+        ] {
+            for expected_reason in ["shutdown", "reload drain deadline", "user"] {
+                let error = pending_error(
+                    PendingError::Cancelled(expected_reason.into()),
+                    expected_method,
+                );
+                match error {
+                    ExtensionRuntimeError::Cancelled { method, reason } => {
+                        assert_eq!(method, expected_method);
+                        assert_eq!(reason, expected_reason);
+                    }
+                    other => panic!("expected local cancellation, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_remote_cancellation_remains_a_remote_error() {
+        let data = serde_json::json!({"terminal": "cancelled", "reason": "remote"});
+        let error = pending_error(
+            PendingError::Remote {
+                code: -32800,
+                message: "request cancelled".into(),
+                data: Some(data.clone()),
+            },
+            methods::TOOL_CALL,
+        );
+        match error {
+            ExtensionRuntimeError::Remote {
+                code,
+                message,
+                data: actual_data,
+            } => {
+                assert_eq!(code, -32800);
+                assert_eq!(message, "request cancelled");
+                assert_eq!(actual_data, Some(data));
+            }
+            other => panic!("remote terminal error was reclassified: {other:?}"),
         }
     }
 
@@ -16067,6 +16417,7 @@ flags = [
         );
         assert_eq!(provider_protocol_name(Protocol::BedrockConverse), None);
         assert_eq!(provider_protocol_name(Protocol::GoogleGenerativeAi), None);
+        assert_eq!(provider_protocol_name(Protocol::MistralConversations), None);
     }
 
     #[test]
@@ -18350,8 +18701,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             .acquire_request_admission()
             .expect("admit before drain");
         let drain_connection = Arc::clone(&connection);
-        let mut drain =
-            tokio::spawn(async move { drain_connection.drain(Duration::from_secs(1)).await });
+        let mut drain = tokio::spawn(async move {
+            drain_connection
+                .drain(Duration::from_secs(1), "reload drain deadline")
+                .await
+        });
 
         assert!(
             tokio::time::timeout(Duration::from_millis(25), &mut drain)
@@ -18365,6 +18719,105 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             .expect("drain did not observe admission release")
             .expect("drain task failed"));
         assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_shutdown_preserves_each_pending_method_and_wire_envelope() {
+        let temp = TempDir::new().expect("tempdir");
+        let script_path = temp.path().join("cancel-methods.sh");
+        write_executable_script(
+            &script_path,
+            r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.1","tools":[],"commands":[]}}'
+IFS= read -r first
+IFS= read -r second
+printf '%s\n%s\n' "$first" "$second" > "$OCTET_WORKSPACE/requests.jsonl"
+IFS= read -r shutdown
+case "$shutdown" in
+  *'"method":"shutdown"'*) printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{}}' ;;
+  *) exit 23 ;;
+esac
+"#,
+        );
+        let descriptor = trusted_descriptor(
+            temp.path(),
+            minimal_manifest("cancel-methods", "cancel-methods.sh"),
+        );
+        let process = ExtensionProcess::start(descriptor, ExtensionRuntimeConfig::new(temp.path()))
+            .await
+            .expect("start process");
+        let connection = read_std_lock(&process.inner.connection).clone();
+        let methods = [methods::TOOL_CALL, methods::COMMAND_EXECUTE];
+        let calls = methods.map(|method| {
+            let connection = Arc::clone(&connection);
+            tokio::spawn(async move {
+                connection
+                    .request(
+                        method,
+                        serde_json::json!({"marker": method}),
+                        Duration::from_secs(5),
+                    )
+                    .await
+            })
+        });
+        // Wait for both writes, not a scheduling delay or just queued frames:
+        // cancellation may legitimately skip a frame not yet sent to the child.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let written = {
+                    let pending = lock_std_mutex(&connection.pending);
+                    pending.len() == 2
+                        && pending.values().all(|request| {
+                            request.frame_state.load(Ordering::Acquire) == FRAME_WRITTEN
+                        })
+                };
+                if written {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both requests must be written before shutdown");
+
+        assert!(process.shutdown().await);
+        for (expected_method, call) in methods.into_iter().zip(calls) {
+            match call.await.expect("request task") {
+                Err(ExtensionRuntimeError::Cancelled { method, reason }) => {
+                    assert_eq!(method, expected_method);
+                    assert_eq!(reason, "shutdown");
+                }
+                other => panic!("expected pending cancellation, got {other:?}"),
+            }
+        }
+        assert!(lock_std_mutex(&connection.pending).is_empty());
+
+        let captured = std::fs::read_to_string(temp.path().join("requests.jsonl"))
+            .expect("captured legacy requests");
+        let frames = captured
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("request envelope"))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["id"], 2);
+        assert_eq!(frames[1]["id"], 3);
+        for method in methods {
+            let frame = frames
+                .iter()
+                .find(|frame| frame["method"] == method)
+                .expect("original method on the wire");
+            assert_eq!(
+                *frame,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": frame["id"],
+                    "method": method,
+                    "params": {"marker": method},
+                })
+            );
+        }
     }
 
     #[cfg(unix)]

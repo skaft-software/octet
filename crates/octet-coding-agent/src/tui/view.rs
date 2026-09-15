@@ -363,6 +363,32 @@ impl ToolPanel {
 }
 
 #[derive(Clone, Debug)]
+struct PromptHistoryEntry {
+    /// Exact composer projection, including chip masks rather than transcript text.
+    display_text: String,
+    /// Payloads authorized by the masks in `display_text`.
+    attachments: Vec<composer::Attachment>,
+}
+
+#[derive(Clone, Debug)]
+struct PromptHistoryDraft {
+    /// Draft text retained while the user browses sent prompts.
+    display_text: String,
+    /// Restore the cursor along with the draft text.
+    cursor: usize,
+    /// Pending payloads belonging to the saved draft, not to history entries.
+    attachments: Vec<composer::Attachment>,
+}
+
+#[derive(Clone, Debug)]
+struct PromptHistoryNavigation {
+    /// Current entry in the oldest-to-newest process-local history.
+    index: usize,
+    /// Draft captured before the first history transition.
+    draft: PromptHistoryDraft,
+}
+
+#[derive(Clone, Debug)]
 struct QueuedSteering {
     /// Readable transcript projection (large pasted text expanded).
     display: String,
@@ -898,6 +924,10 @@ pub(crate) struct ShellState {
     block_revisions: Vec<u64>,
     /// Steering messages accepted while a run is active but not yet injected.
     steering_queue: Vec<QueuedSteering>,
+    /// Successful prompts retained only by this interactive shell for recall.
+    prompt_history: Vec<PromptHistoryEntry>,
+    /// Active sent-prompt traversal and the draft captured before it began.
+    prompt_history_navigation: Option<PromptHistoryNavigation>,
     /// Chip-backed attachments awaiting submit.
     ledger: composer::AttachmentLedger,
     /// Input modalities of the active model; gates attach attempts.
@@ -1109,6 +1139,102 @@ fn invalidate_editor_autocomplete(state: &mut ShellState) {
 
 fn normal_editor_focused(state: &ShellState) -> bool {
     state.panel.is_none() && state.overlay.is_none() && state.tool_input_prompt.is_none()
+}
+
+const MAX_PROMPT_HISTORY_ENTRIES: usize = 100;
+
+fn capture_prompt_history_draft(state: &mut ShellState) -> PromptHistoryDraft {
+    PromptHistoryDraft {
+        display_text: state.editor.text().to_owned(),
+        cursor: state.editor.cursor(),
+        attachments: state.ledger.take_all(),
+    }
+}
+
+fn restore_prompt_history_entry(state: &mut ShellState, index: usize) {
+    let (display_text, attachments) = {
+        let entry = &state.prompt_history[index];
+        (entry.display_text.clone(), entry.attachments.clone())
+    };
+    state.ledger.clear();
+    state.editor.set_text(display_text);
+    let cursor = state.editor.text().len();
+    state.editor.set_cursor(cursor);
+    state.ledger.restore(attachments);
+    state.composer_preferred_column = None;
+    state.slash_selection = 0;
+    state.slash_scroll = 0;
+    state.slash_popup_dismissed = false;
+    invalidate_editor_autocomplete(state);
+}
+
+fn restore_prompt_history_draft(state: &mut ShellState, draft: PromptHistoryDraft) {
+    state.ledger.clear();
+    state.editor.set_text(draft.display_text);
+    state.editor.set_cursor(draft.cursor);
+    state.ledger.restore(draft.attachments);
+    state.composer_preferred_column = None;
+    state.slash_selection = 0;
+    state.slash_scroll = 0;
+    state.slash_popup_dismissed = false;
+    invalidate_editor_autocomplete(state);
+}
+
+/// Consume boundary arrows for process-local sent-prompt traversal.
+fn navigate_prompt_history(state: &mut ShellState, action: &EditAction) -> bool {
+    let moving_up = matches!(action, EditAction::Up);
+    let moving_down = matches!(action, EditAction::Down);
+    if !moving_up && !moving_down {
+        return false;
+    }
+
+    if state.prompt_history_navigation.is_some() {
+        let index = state
+            .prompt_history_navigation
+            .as_ref()
+            .expect("prompt history navigation is present")
+            .index;
+        if moving_up {
+            if index == 0 {
+                return true;
+            }
+            let next = index - 1;
+            state
+                .prompt_history_navigation
+                .as_mut()
+                .expect("prompt history navigation is present")
+                .index = next;
+            restore_prompt_history_entry(state, next);
+            return true;
+        }
+
+        if index.saturating_add(1) < state.prompt_history.len() {
+            let next = index + 1;
+            state
+                .prompt_history_navigation
+                .as_mut()
+                .expect("prompt history navigation is present")
+                .index = next;
+            restore_prompt_history_entry(state, next);
+        } else {
+            let navigation = state
+                .prompt_history_navigation
+                .take()
+                .expect("prompt history navigation is present");
+            restore_prompt_history_draft(state, navigation.draft);
+        }
+        return true;
+    }
+
+    if moving_up && state.editor.cursor() == 0 && !state.prompt_history.is_empty() {
+        let draft = capture_prompt_history_draft(state);
+        let index = state.prompt_history.len() - 1;
+        state.prompt_history_navigation = Some(PromptHistoryNavigation { index, draft });
+        restore_prompt_history_entry(state, index);
+        return true;
+    }
+
+    false
 }
 
 impl ShellState {
@@ -3190,8 +3316,29 @@ impl InteractiveShell {
     /// Add a locally submitted prompt immediately; Agent persistence follows
     /// only after `Agent::prompt` succeeds.
     pub fn on_prompt_submitted(&mut self, prompt: &str) {
+        let composed = ComposedInput::from_text(prompt.to_owned());
+        self.on_composed_prompt_submitted(&composed);
+    }
+
+    /// Add a submitted composer projection to the transcript and local recall.
+    /// The display mask and its payloads stay separate from the transcript text.
+    pub fn on_composed_prompt_submitted(&mut self, composed: &ComposedInput) {
+        {
+            let mut state = self.state.borrow_mut();
+            if !composed.display_text.is_empty() || !composed.attachments.is_empty() {
+                state.prompt_history.push(PromptHistoryEntry {
+                    display_text: composed.display_text.clone(),
+                    attachments: composed.attachments.clone(),
+                });
+                if state.prompt_history.len() > MAX_PROMPT_HISTORY_ENTRIES {
+                    let excess = state.prompt_history.len() - MAX_PROMPT_HISTORY_ENTRIES;
+                    state.prompt_history.drain(..excess);
+                }
+            }
+            state.prompt_history_navigation = None;
+        }
         let prompt_color = self.state.borrow().prompt_color.clone();
-        self.push_local_submission(prompt, prompt_color);
+        self.push_local_submission(&composed.transcript_text, prompt_color);
     }
 
     /// Add a local shell escape without implying that any model received it.
@@ -3278,11 +3425,10 @@ impl InteractiveShell {
     }
 
     pub fn apply_edit(&mut self, action: EditAction) {
-        if matches!(action, EditAction::Up | EditAction::Down) {
+        if matches!(&action, EditAction::Up | EditAction::Down) {
             let mut state = self.state.borrow_mut();
-            // Only a visible host path menu claims arrows. An extension result,
-            // modal input, mid-draft cursor, or empty/tiny popup keeps its
-            // existing keyboard ownership and normal visual editor movement.
+            // Only a visible host path menu claims arrows. An extension result
+            // and modal input keep their existing keyboard ownership.
             if normal_editor_focused(&state) && state.extension_autocomplete.is_none() {
                 let count = input_path_suggestions(&state).len();
                 if count > 0
@@ -3291,11 +3437,14 @@ impl InteractiveShell {
                         .is_empty()
                 {
                     state.path_selection = state.path_selection.min(count - 1);
-                    state.path_selection = if matches!(action, EditAction::Up) {
+                    state.path_selection = if matches!(&action, EditAction::Up) {
                         state.path_selection.saturating_sub(1)
                     } else {
                         state.path_selection.saturating_add(1).min(count - 1)
                     };
+                    return;
+                }
+                if !state.run.is_active() && navigate_prompt_history(&mut state, &action) {
                     return;
                 }
             }
@@ -3309,6 +3458,11 @@ impl InteractiveShell {
                 | EditAction::Newline
         );
         let mut state = self.state.borrow_mut();
+        if !matches!(&action, EditAction::Up | EditAction::Down) {
+            // Any ordinary edit or explicit cursor move starts a new draft;
+            // recalled entries themselves remain immutable in the history.
+            state.prompt_history_navigation = None;
+        }
         let geometry = composer_editor_geometry(&state, state.size.0);
         let visual_navigation = matches!(
             &action,
@@ -3333,33 +3487,23 @@ impl InteractiveShell {
             state.composer_preferred_column = None;
             match action {
                 EditAction::Paste(text) => {
-                    // Attachment policy remains shell-owned, but the reusable
-                    // editor is the sole authority for normalized text insertion
-                    // and cursor movement.
+                    // A bracketed paste explicitly grants upload consent.
+                    // Admit the complete path list before the editor sees it,
+                    // so a quoted/escaped batch gets distinct masks and one
+                    // failing item cannot leave partial chips.
                     let pasted = TextEditor::normalize_paste(&text);
-                    let inserted = match composer::classify_paste(&pasted) {
-                        composer::PasteKind::Verbatim | composer::PasteKind::NonMediaFile(_) => {
+                    let modalities = state.input_modalities;
+                    let inserted = match state.ledger.attach_explicit_paths(&pasted, modalities) {
+                        Ok(Some(replaced)) => replaced,
+                        Ok(None) => match composer::classify_paste(&pasted) {
+                            composer::PasteKind::LargeText => {
+                                state.ledger.attach_pasted_text(pasted)
+                            }
+                            _ => pasted,
+                        },
+                        Err(error) => {
+                            state.push_block(TranscriptBlock::Notice(error.to_string()));
                             pasted
-                        }
-                        composer::PasteKind::LargeText => state.ledger.attach_pasted_text(pasted),
-                        composer::PasteKind::MediaFile(path) => {
-                            let modalities = state.input_modalities;
-                            match state.ledger.attach_media(&path, modalities) {
-                                Ok(chip) => chip,
-                                Err(error) => {
-                                    state.push_block(TranscriptBlock::Notice(error.to_string()));
-                                    pasted
-                                }
-                            }
-                        }
-                        composer::PasteKind::DocumentFile(path) => {
-                            match state.ledger.attach_file_reference(&path) {
-                                Ok(chip) => chip,
-                                Err(error) => {
-                                    state.push_block(TranscriptBlock::Notice(error.to_string()));
-                                    pasted
-                                }
-                            }
                         }
                     };
                     state
@@ -3422,12 +3566,13 @@ impl InteractiveShell {
     }
 
     /// Navigate or accept the live slash-command popup without turning it into
-    /// a heavyweight modal panel.
-    pub fn slash_menu(&mut self, action: SlashMenuAction) {
+    /// a heavyweight modal panel. A selected command returns `true` for the
+    /// ordinary dispatcher; navigation and dismissal return `false`.
+    pub fn slash_menu(&mut self, action: SlashMenuAction) -> bool {
         let mut state = self.state.borrow_mut();
         let suggestions = input_slash_suggestions(&state);
         if suggestions.is_empty() {
-            return;
+            return false;
         }
         let last = suggestions.len().saturating_sub(1);
         state.slash_selection = state.slash_selection.min(last);
@@ -3456,18 +3601,18 @@ impl InteractiveShell {
             }
             SlashMenuAction::Select => {
                 let command = &suggestions[state.slash_selection];
+                let selected = format!("/{}", command.name);
                 state.editor.set_text(format!(
-                    "/{}{}",
-                    command.name,
+                    "{selected}{}",
                     if command.accepts_argument { " " } else { "" }
                 ));
                 state.slash_popup_dismissed = true;
                 invalidate_editor_autocomplete(&mut state);
-                return;
+                return true;
             }
             SlashMenuAction::Close => {
                 state.slash_popup_dismissed = true;
-                return;
+                return false;
             }
         }
         state.slash_popup_dismissed = false;
@@ -3479,6 +3624,7 @@ impl InteractiveShell {
         state.slash_scroll = state
             .slash_scroll
             .min(suggestions.len().saturating_sub(page));
+        false
     }
 
     /// Drop the mention file index so the next `@` completion re-walks the
@@ -3991,6 +4137,7 @@ impl InteractiveShell {
     /// Drain the editor and resolve chips into ordered parts.
     pub fn drain_composed(&mut self) -> ComposedInput {
         let mut state = self.state.borrow_mut();
+        state.prompt_history_navigation = None;
         let text = state.editor.take_text();
         invalidate_editor_autocomplete(&mut state);
 
@@ -4009,6 +4156,7 @@ impl InteractiveShell {
     /// must be observationally equivalent to a validation error.
     pub fn restore_composed(&mut self, composed: ComposedInput) {
         let mut state = self.state.borrow_mut();
+        state.prompt_history_navigation = None;
         state.editor.set_text(composed.display_text);
         state.ledger.restore(composed.attachments);
         invalidate_editor_autocomplete(&mut state);
@@ -4017,6 +4165,7 @@ impl InteractiveShell {
     /// Discard the current draft and every attachment it owns.
     pub fn clear_editor(&mut self) {
         let mut state = self.state.borrow_mut();
+        state.prompt_history_navigation = None;
         state.editor.clear();
         state.ledger.clear();
         state.slash_selection = 0;
@@ -4027,10 +4176,16 @@ impl InteractiveShell {
 
     pub fn drain_editor(&mut self) -> String {
         let mut state = self.state.borrow_mut();
+        let navigating_history = state.prompt_history_navigation.take().is_some();
         state.slash_selection = 0;
         state.slash_scroll = 0;
         state.slash_popup_dismissed = false;
         let text = state.editor.take_text();
+        if navigating_history {
+            // A command consumes editor text rather than composing a prompt;
+            // never leave the recalled entry's attachment authority pending.
+            state.ledger.clear();
+        }
         invalidate_editor_autocomplete(&mut state);
         text
     }

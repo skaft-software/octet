@@ -33,6 +33,7 @@ def conformance_module():
     spec = importlib.util.spec_from_file_location("pi_conformance_test_module", CONFORMANCE)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -58,6 +59,20 @@ class ConformanceHarnessTests(unittest.TestCase):
         self.assertEqual(78, report["official_examples"])
         self.assertEqual(33, report["tui_audit_rows"])
         self.assertEqual(6, report["plan_journeys"])
+
+    def test_real_runtime_aggregate_fixture_is_ordered_and_explicitly_unrun(self) -> None:
+        module = conformance_module()
+        fixture = fixture_document("real-runtime-aggregate.json")
+
+        self.assertEqual(fixture, module.check_real_runtime_aggregate_fixture())
+        self.assertEqual(
+            [source["id"] for source in fixture["sources"]],
+            ["hello", "plan-mode"],
+        )
+        self.assertEqual(
+            fixture["evidence"]["status"],
+            "unrun_until_explicit_real_package_and_source_root_are_supplied",
+        )
 
     def test_full_gate_refuses_before_loading_without_network_isolation(self) -> None:
         completed = subprocess.run(
@@ -92,6 +107,10 @@ class ConformanceHarnessTests(unittest.TestCase):
                         path.write_text("export default () => {};\n", encoding="utf-8")
                     else:
                         path.mkdir()
+                for source in fixture_document("real-runtime.json")["sources"]:
+                    path = examples_root / source["path"]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("export default () => {};\n", encoding="utf-8")
                 if layout == "missing-entry":
                     missing = examples_root / examples[-1]
                     if missing.is_dir():
@@ -100,20 +119,34 @@ class ConformanceHarnessTests(unittest.TestCase):
                         missing.unlink()
                 package = Path(temporary) / "package"
                 tui = package / "node_modules/@earendil-works/pi-tui"
+                node = Path(temporary).resolve() / "fixture-node"
+                # The entrypoint checks executability; execution itself stays mocked.
+                node.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+                node.chmod(0o700)
                 arguments = SimpleNamespace(
                     network_isolated=True,
+                    network_backend="unshare",
                     coding_agent_tarball=Path(temporary) / "coding-agent.tgz",
                     tui_tarball=Path(temporary) / "tui.tgz",
                     pi_package=package,
                     source_root=checkout,
                 )
                 with (
+                    patch.object(
+                        module,
+                        "select_network_backend",
+                        return_value=module.NetworkBackend(
+                            "unshare", "/fixture/unshare", "linux_unshare_net"
+                        ),
+                    ),
                     patch.object(module, "verify_tarball") as verify_tarball,
                     patch.object(module, "verify_package_root", side_effect=[package, tui]),
                     patch.object(module, "node_resolved_package", return_value=tui),
                     patch.object(module, "git", side_effect=[module.REVISION, ""]),
-                    patch.object(module.shutil, "which", return_value="/fixture/node"),
+                    patch.object(module.shutil, "which", return_value=str(node)),
                     patch.object(module, "fingerprint", return_value="f" * 64) as fingerprint,
+                    patch.object(module, "runtime_integrity", return_value="r" * 64),
+                    patch.object(module, "run_real_aggregate", return_value={"status": "stub"}),
                     patch.object(module, "load_source") as load_source,
                 ):
                     if layout != "monorepo":
@@ -122,17 +155,71 @@ class ConformanceHarnessTests(unittest.TestCase):
                         load_source.assert_not_called()
                         fingerprint.assert_not_called()
                     else:
-                        module.run_full(arguments, {})
+                        report = {}
+                        module.run_full(arguments, report)
                         self.assertEqual(78, load_source.call_count)
                         self.assertEqual(
                             [examples_root / example for example in examples],
                             [call.args[3] for call in load_source.call_args_list],
                         )
                         for call in load_source.call_args_list:
-                            self.assertEqual(("/fixture/node", package, checkout), call.args[:3])
+                            self.assertEqual((str(node), package, checkout), call.args[:3])
                             self.assertEqual("f" * 64, call.args[4])
-                        self.assertEqual(78, fingerprint.call_count)
+                            self.assertEqual("linux_unshare_net", call.args[6].evidence_name)
+                        environment = load_source.call_args_list[0].args[5]
+                        self.assertEqual(
+                            {
+                                "HOME",
+                                "TMPDIR",
+                                "PATH",
+                                "LANG",
+                                "LC_ALL",
+                                "NO_PROXY",
+                                "no_proxy",
+                                "HTTP_PROXY",
+                                "HTTPS_PROXY",
+                                "http_proxy",
+                                "https_proxy",
+                            },
+                            set(environment),
+                        )
+                        self.assertTrue(environment["HOME"].startswith("/var/tmp/"))
+                        self.assertEqual(str(Path(environment["HOME"]) / "tmp"), environment["TMPDIR"])
+                        self.assertEqual("linux_unshare_net", report["network_isolation"])
+                        self.assertEqual(81, fingerprint.call_count)
                     self.assertEqual(2, verify_tarball.call_count)
+
+    def test_dynamic_runtime_loaders_register_postponed_dataclass_annotations(self) -> None:
+        # Exercise the import boundary without launching Node, Pi, or a sandbox.
+        module = conformance_module()
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(sys.modules):
+            root = Path(temporary)
+            (root / "real_runtime.py").write_text(
+                "from __future__ import annotations\n"
+                "from dataclasses import dataclass\n"
+                "@dataclass\n"
+                "class Marker:\n"
+                "    value: str\n"
+                "closed = False\n"
+                "class JsonRpcPeer:\n"
+                "    def __init__(self, *args): self.messages = []\n"
+                "    def send_request(self, *args): return 1\n"
+                "    def response(self, *args): return {}\n"
+                "    def close(self):\n"
+                "        global closed\n"
+                "        closed = True\n"
+                "def run_real_aggregate(**kwargs):\n"
+                "    return Marker(kwargs['marker']).value\n",
+                encoding="utf-8",
+            )
+            backend = SimpleNamespace(command=lambda command, **_kwargs: command)
+            with patch.object(module, "ROOT", root):
+                self.assertEqual("loaded", module.run_real_aggregate(marker="loaded"))
+                module.load_source(
+                    "fixture-node", root, root, root / "example.ts", "f" * 64,
+                    {"HOME": str(root)}, backend,
+                )
+            self.assertTrue(sys.modules["octet_pi_bounded_protocol"].closed)
 
     def test_full_gate_compares_the_entire_selected_package_payload(self) -> None:
         module = conformance_module()

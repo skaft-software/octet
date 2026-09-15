@@ -2731,6 +2731,12 @@
       "id": "generated-sdk-schema",
       "fixture": "generated-api-0.3",
       "status": "covered"
+    },
+    {
+      "id": "real-runtime-aggregate",
+      "fixture": "real-runtime:ordered-aggregate",
+      "status": "unrun",
+      "qualification": "Requires exact Pi 0.84.4 artifacts, clean pinned source, prepared dependency locks, and Linux unshare --net; static fixture evidence is not runtime evidence."
     }
   ]
 }

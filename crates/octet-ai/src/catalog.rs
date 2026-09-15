@@ -364,6 +364,8 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
                 ReasoningControl::Effort | ReasoningControl::TokenBudget
             ),
             Protocol::BedrockConverse => reasoning.control == ReasoningControl::TokenBudget,
+            // This codec does not yet map native reasoning controls or content.
+            Protocol::MistralConversations => false,
         };
         let chat_mode_matches = reasoning.openai_chat_mode == OpenAiChatReasoningMode::Standard
             || (spec.protocol == Protocol::OpenAiChat

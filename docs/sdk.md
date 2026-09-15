@@ -89,10 +89,13 @@ run calling its provider.
 
 ### Host-owned GitHub Copilot
 
-GitHub Copilot is embedding-only Rust integration, absent from `octet --login`,
-environment/configuration setup, and NDJSON `octet-host`: those surfaces cannot
-safely own the host's GitHub OAuth state. Standalone catalogs never advertise
-Copilot models.
+The unreleased coding-host adapter accepts `octet --login copilot [--headless]`
+and `--logout copilot` (`github-copilot` is an alias). Its private OAuth store can
+supply eligible Copilot models to the shared online catalog, including NDJSON
+`models` and catalog-backed `run`. Offline catalog construction adds none. NDJSON
+protocol 1 has **no** new login/logout command or OAuth payload field, and this
+does not grant extension API 0.3 native-provider authority. See the
+[source-only candidate and unrun qualification](qualification/copilot-host-current-candidate.md).
 
 An embedding app implements `octet_sdk::provider::CopilotHost`, owns device-flow/
 OAuth state and durable credential storage, and constructs `CopilotProvider`
@@ -114,9 +117,16 @@ sensitive on requests and redacted from diagnostics, never in provider definitio
 catalog metadata, or persistence. Hosts must also exclude credentials from model
 IDs and display labels.
 
-The seam does not implement GitHub's live OAuth endpoints, Enterprise endpoint
-policy, or an interactive CLI flow. These are host-owned; use Rust embedding
-only when the host can implement and test that policy.
+The generic seam does not implement GitHub's wire endpoints. The separate coding
+adapter implements GitHub.com's bounded device/exchange/discovery path and a
+fixed inference-origin allowlist; it imports no third-party credentials and
+supports no custom Enterprise authority or environment endpoint override.
+`availability` is checked even before reusing a fresh credential: embedding hosts
+must reject a deleted/replaced login. Explicit exchange/refresh share the
+resolver's invalidation lock and discard the old credential on failure or
+cancellation. Hosts still own active-run/device cancellation and catalog
+replacement; local logout is not remote revocation. Full provider parity,
+TUI slash auth, native/live acceptance and Rust verification remain open.
 
 ## Rust-owned recovery limits
 

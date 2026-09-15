@@ -1,7 +1,7 @@
 import type { SessionSummary } from "./protocol";
 import { displaySessionTitle } from "./session-title";
 
-const NOTIFICATION_VERSION = 1;
+const NOTIFICATION_VERSION = 2;
 const MAX_REMEMBERED_TRANSITIONS = 256;
 
 export interface NotificationHandle {
@@ -14,7 +14,8 @@ export interface NotificationAdapter {
   requestPermission(): Promise<NotificationPermission>;
   show(
     title: string,
-    options: NotificationOptions,
+    // The Notifications API supports renotify, but current DOM typings omit it.
+    options: NotificationOptions & { renotify?: boolean },
   ): NotificationHandle;
 }
 
@@ -40,13 +41,20 @@ function storageKey(hostId: string): string {
   return `octet.notifications.v${NOTIFICATION_VERSION}.${encodeURIComponent(hostId)}`;
 }
 
+function pullRequestState(summary: SessionSummary): string {
+  return summary.pullRequest?.state ?? "none";
+}
+
 function transitionKey(summary: SessionSummary): string {
+  // Keep device-local deduplication to opaque/session-state metadata. In
+  // particular, never persist a PR URL, review content, or credentials here.
   return [
     summary.id,
     summary.status,
     summary.updatedAt,
     summary.attentionCount,
     summary.unread ? "unread" : "read",
+    pullRequestState(summary),
   ].join("\u001f");
 }
 
@@ -55,13 +63,42 @@ function attentionState(summary: SessionSummary): string {
     summary.status,
     summary.attentionCount,
     summary.unread ? "unread" : "read",
+    pullRequestState(summary),
   ].join("\u001f");
+}
+
+function pullRequestNotificationCopy(summary: SessionSummary): {
+  title: string;
+  body: string;
+} | null {
+  const taskTitle = displaySessionTitle(summary.title);
+  switch (summary.pullRequest?.state) {
+    case "in_progress":
+      return {
+        title: "octet pull request opened",
+        body: `${taskTitle} has a pull request in progress.`,
+      };
+    case "ready":
+      return {
+        title: "octet pull request ready for review",
+        body: `${taskTitle} has a pull request ready for review.`,
+      };
+    case "merged":
+      return {
+        title: "octet pull request merged",
+        body: `${taskTitle}'s pull request was merged.`,
+      };
+    default:
+      return null;
+  }
 }
 
 function notificationCopy(summary: SessionSummary): {
   title: string;
   body: string;
 } | null {
+  const pullRequestCopy = pullRequestNotificationCopy(summary);
+  if (pullRequestCopy) return pullRequestCopy;
   if (!summary.unread && summary.attentionCount === 0) return null;
   const taskTitle = displaySessionTitle(summary.title);
   switch (summary.status) {
@@ -147,6 +184,7 @@ export class AttentionNotificationManager {
     const notification = this.adapter.show(copy.title, {
       body: copy.body,
       tag: `octet-session-${summary.id}`,
+      renotify: true,
       silent: false,
     });
     notification.setOnClick(() => {

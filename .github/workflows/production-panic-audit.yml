@@ -1,0 +1,106 @@
+name: Production panic audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact candidate commit selected as this workflow's ref
+        required: true
+        type: string
+      confirmation:
+        description: Type RUN_PRODUCTION_PANIC_AUDIT to pass the dispatch gate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_NET_OFFLINE: "false"
+
+concurrency:
+  group: production-panic-audit-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: inputs.confirmation == 'RUN_PRODUCTION_PANIC_AUDIT'
+    name: Collect and check production Clippy JSON
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production-panic-audit
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the run to the selected immutable candidate
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_SHA" != "$SOURCE_SHA" ]]; then
+            echo "dispatch the workflow with its ref set to the exact source_sha" >&2
+            exit 1
+          fi
+          test "$(git rev-parse 'HEAD^{commit}')" = "$SOURCE_SHA"
+          git diff-index --quiet HEAD --
+
+      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
+        with:
+          toolchain: 1.86.0
+          components: clippy
+
+      - name: Collect Rust 1.86 Cargo JSONL diagnostics
+        id: clippy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-features --lib --bins --no-deps --locked --message-format=json -- -W clippy::expect_used -W clippy::unwrap_used \
+            2>"$RUNNER_TEMP/clippy.stderr" \
+            | tee "$RUNNER_TEMP/clippy.jsonl"
+
+      - name: Check production diagnostics against the reviewed baseline
+        if: always()
+        shell: bash
+        env:
+          CLIPPY_OUTCOME: ${{ steps.clippy.outcome }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check-production-panics.py \
+            --diagnostics "$RUNNER_TEMP/clippy.jsonl" \
+            --baseline scripts/production-panic-baseline.json
+          test "$CLIPPY_OUTCOME" = success
+
+      - name: Record immutable audit metadata
+        if: always()
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          {
+            echo "## Production panic audit"
+            echo
+            echo "- Candidate: \`$SOURCE_SHA\`"
+            echo "- Toolchain: \`1.86.0\`"
+            echo "- Diagnostics: \`cargo clippy --workspace --all-features --lib --bins --no-deps --locked --message-format=json\`"
+            echo "- Baseline: \`scripts/production-panic-baseline.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: production-panic-audit-${{ inputs.source_sha }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/clippy.jsonl
+            ${{ runner.temp }}/clippy.stderr
+            scripts/production-panic-baseline.json

@@ -27,6 +27,9 @@ pub struct StreamingStats {
     pub preview_copied_bytes: u64,
     /// Newly accepted bytes classified for provisional structural-line visibility.
     pub preview_scanned_bytes: u64,
+    /// Bytes classified while deciding whether a literal preview can be promoted
+    /// to canonical prose.
+    pub preview_classified_bytes: u64,
     /// Bytes covered by lexical blank-boundary searches and marker-prefix checks.
     /// Separate from fence scanning, parser input, and preview copying.
     pub lexical_scanned_bytes: u64,
@@ -226,6 +229,16 @@ pub struct StreamingMarkdown {
     // Raw tail bytes represented by the preview; any withheld suffix remains
     // immediately available to raw and semantic-copy consumers.
     preview_source_len: usize,
+    // Whether the represented source already contains a newline. This keeps
+    // append-local preview classification from rescanning an immutable prefix.
+    preview_source_has_newline: bool,
+    // Ordinary prose is previewed with Markdown's soft-break geometry from its
+    // first visible line. The source itself remains in `tail`/`raw`; these
+    // fields only track the normalized display projection between parser
+    // commits.
+    preview_prose: bool,
+    prose_pending_soft_break: bool,
+    prose_at_boundary: bool,
     stats: StreamingStats,
 }
 
@@ -363,6 +376,11 @@ impl StreamingMarkdown {
         self.committed = markdown::parse(&self.decoded);
         self.tail.clear();
         self.preview = Document::default();
+        self.preview_source_len = 0;
+        self.preview_source_has_newline = false;
+        self.preview_prose = false;
+        self.prose_pending_soft_break = false;
+        self.prose_at_boundary = false;
         self.finished = true;
         self.committed_revision = self.committed_revision.saturating_add(1);
         self.tail_revision = self.tail_revision.saturating_add(1);
@@ -389,12 +407,15 @@ impl StreamingMarkdown {
                     code: String::new(),
                 })]);
                 self.preview_source_len = open.code_start;
+                self.preview_source_has_newline = self.tail[..open.code_start].contains('\n');
                 self.tail_semantic_parsed = true;
             }
             let end = self.presentation_end();
             if let [Block::CodeBlock(code)] = self.preview.blocks.as_mut_slice() {
-                code.code.push_str(&self.tail[self.preview_source_len..end]);
-                self.stats.preview_copied_bytes += (end - self.preview_source_len) as u64;
+                let start = self.preview_source_len;
+                code.code.push_str(&self.tail[start..end]);
+                self.stats.preview_copied_bytes += (end - start) as u64;
+                self.preview_source_has_newline |= self.tail[start..end].contains('\n');
                 self.preview_source_len = end;
             }
             return;
@@ -434,9 +455,9 @@ impl StreamingMarkdown {
             && !completed_fence
             && !had_open_fence
         {
-            // Once the inline budget is exhausted, keep the interpretation of
-            // the prefix until a real block boundary. Geometric parser ticks
-            // must not fold an already visible literal continuation into spaces.
+            // An ordinary prose preview already uses Markdown's soft-break
+            // geometry. Keep appending its literal source projection until a
+            // proven structure or parser promotion requires replacement.
             self.append_preview();
             return;
         }
@@ -507,8 +528,9 @@ impl StreamingMarkdown {
             self.record_parse(end);
             preview = markdown::parse(&self.tail[..end]);
         }
-        // A geometric parser pass discovers block boundaries, not permission
-        // to collapse literal source lines into soft-wrapped prose for a frame.
+        // Ordinary prose previews already use the same soft-break geometry as
+        // canonical Markdown. Other parser-only structure is published only
+        // when its semantic interpretation is safe to show.
         let rich = preview.blocks.iter().any(|block| match block {
             Block::Paragraph(content) => content.iter().any(|inline| {
                 !matches!(
@@ -520,9 +542,19 @@ impl StreamingMarkdown {
             _ => true,
         });
         if rich {
+            self.preview_prose = false;
+            self.prose_pending_soft_break = false;
+            self.prose_at_boundary = false;
+            let preview_source_has_newline = if self.preview_source_len <= end {
+                self.preview_source_has_newline
+                    || self.tail[self.preview_source_len..end].contains('\n')
+            } else {
+                self.tail[..end].contains('\n')
+            };
             self.preview_epoch += 1;
             self.preview = preview;
             self.preview_source_len = end;
+            self.preview_source_has_newline = preview_source_has_newline;
             self.tail_semantic_parsed = true;
         } else {
             self.append_preview();
@@ -547,6 +579,10 @@ impl StreamingMarkdown {
         self.next_parse_at = 1024;
         self.tail_semantic_parsed = false;
         self.preview_source_len = 0;
+        self.preview_source_has_newline = false;
+        self.preview_prose = false;
+        self.prose_pending_soft_break = false;
+        self.prose_at_boundary = false;
         self.committed_revision = self.committed_revision.saturating_add(1);
     }
 
@@ -572,7 +608,104 @@ impl StreamingMarkdown {
         if end <= self.preview_source_len {
             return;
         }
-        let suffix = &self.tail[self.preview_source_len..end];
+        let start = self.preview_source_len;
+        let suffix_len = end - start;
+        let suffix_has_newline = self.tail[start..end].contains('\n');
+        if self.preview_prose {
+            if prose_suffix_requires_literal_preview(
+                &self.tail[..start],
+                &self.tail[start..end],
+                &mut self.stats.preview_classified_bytes,
+            ) {
+                let source = self.tail[..end].to_owned();
+                self.preview = Document::new(vec![Block::Plain(source)]);
+                self.preview_prose = false;
+                self.prose_pending_soft_break = false;
+                self.prose_at_boundary = false;
+                self.preview_epoch += 1;
+                self.stats.preview_copied_bytes += suffix_len as u64;
+            } else {
+                self.stats.preview_copied_bytes += suffix_len as u64;
+                append_prose_suffix(
+                    &self.tail[start..end],
+                    &mut self.preview,
+                    &mut self.prose_pending_soft_break,
+                    &mut self.prose_at_boundary,
+                    &mut self.preview_epoch,
+                );
+            }
+        } else {
+            // A literal preview cannot be promoted to canonical prose until a
+            // newline proves the current source line. Defer classification while
+            // the accepted suffix has no newline; otherwise every append would
+            // rescan the complete growing candidate.
+            if !suffix_has_newline {
+                self.append_literal_preview(start, end);
+                self.preview_source_len = end;
+                return;
+            }
+
+            // A parsed structural prefix (for example, a heading) may still
+            // share the mutable tail with an ordinary paragraph. Classify the
+            // suffix after that proven block boundary, rather than allowing the
+            // prefix's syntax to force the paragraph back to physical source
+            // rows.
+            let structural_prefix = self.preview_source_len > 0
+                && self.tail[..start].ends_with("\n\n")
+                && matches!(
+                    self.preview.blocks.last(),
+                    Some(block) if !matches!(block, Block::Paragraph(_) | Block::Plain(_))
+                );
+            let candidate_start = if structural_prefix { start } else { 0 };
+            let candidate = &self.tail[candidate_start..end];
+            if ordinary_preview_start(candidate, &mut self.stats.preview_classified_bytes)
+                && !prose_requires_literal_preview(
+                    candidate,
+                    &mut self.stats.preview_classified_bytes,
+                )
+            {
+                let source_has_newline = self.preview_source_has_newline || suffix_has_newline;
+                let replay_plain = !self.preview.is_empty()
+                    && source_has_newline
+                    && matches!(self.preview.blocks.as_slice(), [Block::Plain(_)]);
+                if (self.preview.is_empty() && source_has_newline)
+                    || replay_plain
+                    || (structural_prefix && source_has_newline)
+                {
+                    let source_start = if replay_plain { 0 } else { start };
+                    if replay_plain {
+                        // A source line can be classified as ordinary only after
+                        // it receives its first newline. Rebuild that short
+                        // literal prefix as canonical prose once, before it can
+                        // be committed as a different geometry.
+                        self.preview = Document::default();
+                        self.preview_source_len = 0;
+                    }
+                    self.preview_prose = true;
+                    self.prose_pending_soft_break = false;
+                    self.prose_at_boundary = false;
+                    self.preview_epoch += 1;
+                    self.stats.preview_copied_bytes += (end - source_start) as u64;
+                    append_prose_suffix(
+                        &self.tail[source_start..end],
+                        &mut self.preview,
+                        &mut self.prose_pending_soft_break,
+                        &mut self.prose_at_boundary,
+                        &mut self.preview_epoch,
+                    );
+                } else {
+                    self.append_literal_preview(start, end);
+                }
+            } else {
+                self.append_literal_preview(start, end);
+            }
+        }
+        self.preview_source_has_newline |= suffix_has_newline;
+        self.preview_source_len = end;
+    }
+
+    fn append_literal_preview(&mut self, start: usize, end: usize) {
+        let suffix = &self.tail[start..end];
         self.stats.preview_copied_bytes += suffix.len() as u64;
         match self.preview.blocks.last_mut() {
             Some(Block::Plain(text)) => text.push_str(suffix),
@@ -592,7 +725,109 @@ impl StreamingMarkdown {
                 self.preview.blocks.push(Block::Plain(suffix.to_owned()));
             }
         }
-        self.preview_source_len = end;
+    }
+}
+
+fn ordinary_preview_start(source: &str, classified: &mut u64) -> bool {
+    *classified = classified.saturating_add(source.len() as u64);
+    let line = source.split('\n').next().unwrap_or_default();
+    !line.is_empty() && !line.trim().is_empty() && !literal_preview_line(line)
+}
+
+fn prose_requires_literal_preview(source: &str, classified: &mut u64) -> bool {
+    *classified = classified.saturating_add(source.len() as u64);
+    source.contains(['\t', '\r'])
+        || source
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+        || source
+            .split('\n')
+            .any(|line| literal_preview_line(line) || line_has_hard_break(line))
+}
+
+fn prose_suffix_requires_literal_preview(
+    previous: &str,
+    suffix: &str,
+    classified: &mut u64,
+) -> bool {
+    *classified = classified.saturating_add(suffix.len() as u64);
+    suffix.contains(['\t', '\r'])
+        || suffix
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+        || suffix
+            .split('\n')
+            .any(|line| literal_preview_line(line) || line_has_hard_break(line))
+        || (previous.ends_with(' ') && suffix.starts_with(" \n"))
+        || (previous.ends_with("  ") && suffix.starts_with('\n'))
+        || (previous.ends_with('\\') && suffix.starts_with('\n'))
+}
+
+fn literal_preview_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let indent = line.len().saturating_sub(trimmed.len());
+    let mut scanned = 0;
+    indent >= 4
+        || line.starts_with('\t')
+        || trimmed.starts_with(['#', '>', '<', '|'])
+        || is_list_marker(trimmed, &mut scanned)
+        || opening_fence(trimmed).is_some()
+        || matches!(trimmed, "---" | "***" | "___")
+}
+
+fn line_has_hard_break(line: &str) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let without_spaces = line.trim_end_matches(' ');
+    line.len().saturating_sub(without_spaces.len()) >= 2 || without_spaces.ends_with('\\')
+}
+
+fn append_prose_suffix(
+    suffix: &str,
+    preview: &mut Document,
+    pending_soft_break: &mut bool,
+    at_boundary: &mut bool,
+    preview_epoch: &mut u64,
+) {
+    for piece in suffix.split_inclusive('\n') {
+        let has_newline = piece.ends_with('\n');
+        let line = piece.strip_suffix('\n').unwrap_or(piece);
+        if has_newline && line.chars().all(char::is_whitespace) {
+            *pending_soft_break = false;
+            *at_boundary = true;
+            continue;
+        }
+        if *at_boundary {
+            preview.blocks.push(Block::Paragraph(Vec::new()));
+            *preview_epoch = (*preview_epoch).saturating_add(1);
+            *at_boundary = false;
+        }
+        if *pending_soft_break {
+            append_prose_text(preview, " ");
+            *pending_soft_break = false;
+        }
+        if !line.is_empty() {
+            append_prose_text(preview, line);
+        }
+        if has_newline {
+            *pending_soft_break = true;
+        }
+    }
+}
+
+fn append_prose_text(preview: &mut Document, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(Block::Paragraph(content)) = preview.blocks.last_mut() {
+        if let Some(Inline::Raw(raw)) = content.last_mut() {
+            raw.push_str(text);
+        } else {
+            content.push(Inline::Raw(text.to_owned()));
+        }
+    } else {
+        preview
+            .blocks
+            .push(Block::Paragraph(vec![Inline::Raw(text.to_owned())]));
     }
 }
 
@@ -605,8 +840,9 @@ pub struct StreamingLineUpdate {
 }
 
 /// Incremental line-layout cache. At a stable width, newly committed blocks
-/// and changed tail rows are rendered. Literal/open-code tails retain proven
-/// visual rows; semantic promotion, reflow, and finalization may replace them.
+/// and changed tail rows are rendered. Ordinary prose uses its canonical
+/// soft-break geometry from the first preview; literal/open-code tails retain
+/// proven visual rows; semantic promotion, reflow, and finalization may replace them.
 #[derive(Clone, Debug, Default)]
 pub struct StreamingRenderCache {
     width: Option<u16>,
@@ -1206,12 +1442,22 @@ mod tests {
             let stats = stream.stats();
             assert!(stats.fence_scanned_bytes <= 2 * total as u64, "{stats:?}");
             assert!(stats.preview_copied_bytes <= 3 * total as u64, "{stats:?}");
-            assert_eq!(stream.raw_bytes(), chunk.repeat(30_000).as_bytes());
-            let [Block::Plain(text)] = stream.preview().blocks.as_slice() else {
-                panic!("expected literal preview");
-            };
-            assert_eq!(text, stream.unstable_source());
-            assert_eq!(stream.finish(), &markdown::parse(&chunk.repeat(30_000)));
+            assert!(stats.preview_classified_bytes <= 3 * total as u64, "{stats:?}");
+            let expected = chunk.repeat(30_000);
+            assert_eq!(stream.raw_bytes(), expected.as_bytes());
+            if chunk == "word line\n" {
+                let [Block::Paragraph(content)] = stream.preview().blocks.as_slice() else {
+                    panic!("expected canonical prose preview");
+                };
+                assert!(matches!(content.as_slice(), [Inline::Raw(_)]));
+                assert_eq!(stream.copy_text(), markdown::parse(&expected).plain_text());
+            } else {
+                let [Block::Plain(text)] = stream.preview().blocks.as_slice() else {
+                    panic!("expected literal preview");
+                };
+                assert_eq!(text, stream.unstable_source());
+            }
+            assert_eq!(stream.finish(), &markdown::parse(&expected));
         }
     }
 
@@ -1265,6 +1511,65 @@ mod tests {
             renderer.render(stream.committed(), 40).plain_lines()
         );
         stats
+    }
+
+    #[test]
+    fn open_paragraph_rows_are_provisional_until_a_following_block_commits_them() {
+        let renderer = RichRenderer::plain();
+        let mut stream = StreamingMarkdown::new();
+        let mut cache = StreamingRenderCache::default();
+        let mut frame = Vec::new();
+
+        stream.push_str("first paragraph has enough words to wrap across rows\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        assert_eq!(update.stable_prefix, 0);
+        frame.extend(update.replacement);
+        assert!(frame.len() >= 2);
+        assert!(stream.committed().blocks.is_empty());
+        assert_eq!(cache.committed_rows(), 0);
+
+        let previous = frame.clone();
+        stream.push_str("continuation adds more words\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        assert!(update.stable_prefix < previous.len());
+        assert_eq!(cache.committed_rows(), 0);
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert_ne!(frame, previous);
+        assert_eq!(
+            frame,
+            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+        );
+
+        // A trailing blank line proves the paragraph boundary, but the
+        // paragraph is not committed until a following block is present.
+        stream.push_str("\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert!(stream.committed().blocks.is_empty());
+        assert_eq!(cache.committed_rows(), 0);
+        assert_eq!(
+            frame,
+            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+        );
+
+        let previous = frame.clone();
+        stream.push_str("next paragraph starts here\n");
+        let update = cache.render_line_update(&stream, &renderer, 40, false);
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert!(stream.committed().blocks.len() >= 1);
+        assert!(cache.committed_rows() > 0);
+        assert!(cache.committed_rows() <= previous.len());
+        assert_eq!(
+            &frame[..cache.committed_rows()],
+            &previous[..cache.committed_rows()]
+        );
+        assert_eq!(
+            frame,
+            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+        );
     }
 
     #[test]
@@ -1639,18 +1944,33 @@ mod tests {
         assert!(narrow.lines().all(|line| line.len() <= 10));
     }
     #[test]
-    fn parser_thresholds_do_not_publish_one_frame_prose_reflows() {
+    fn parser_thresholds_preserve_canonical_prose_geometry() {
         let mut stream = StreamingMarkdown::new();
+        let renderer = RichRenderer::plain();
         let mut cache = StreamingRenderCache::default();
-        for line in 1..=400 {
-            stream.push_str("word line\n");
-            let rows = cache.render_lines(&stream, &RichRenderer::plain(), 40, false);
-            assert_eq!(rows.len(), line, "source line {line}");
+        let mut source = String::new();
+        let mut frame = Vec::new();
+        for _ in 1..=400 {
+            let previous = frame.clone();
+            let chunk = "word line\n";
+            source.push_str(chunk);
+            stream.push_str(chunk);
+            let update = cache.render_line_update(&stream, &renderer, 40, false);
+            assert!(update.stable_prefix <= previous.len());
+            frame.truncate(update.stable_prefix);
+            frame.extend(update.replacement);
+            assert_eq!(
+                &previous[..update.stable_prefix],
+                &frame[..update.stable_prefix]
+            );
+            assert_eq!(
+                frame,
+                renderer.render(&markdown::parse(&source), 40).plain_lines(),
+                "source length {}",
+                source.len()
+            );
         }
-        assert_eq!(
-            stream.finish(),
-            &markdown::parse(&"word line\n".repeat(400))
-        );
+        assert_eq!(stream.finish(), &markdown::parse(&source));
     }
 
     #[test]

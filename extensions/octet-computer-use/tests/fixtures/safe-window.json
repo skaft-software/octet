@@ -1,0 +1,31 @@
+{
+  "hwnd": 4097,
+  "process_id": 8120,
+  "process_start_time": 132456789,
+  "app": {
+    "aumid": "Contoso.AutomationFixture_123!App",
+    "publisher": "CN=Contoso Fixture Publisher",
+    "product": "Contoso Automation Fixture",
+    "binary_path": "C:\\Program Files\\Contoso\\AutomationFixture\\fixture.exe",
+    "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "signature_valid": true
+  },
+  "desktop": {
+    "name": "Default",
+    "station": "WinSta0",
+    "session_id": 1,
+    "secure": false
+  },
+  "class_name": "ContosoAutomationFixtureWindow",
+  "title": "Automation Fixture",
+  "thread_id": 9120,
+  "parent_hwnd": 0,
+  "owner_hwnd": 0,
+  "integrity_level": 8192,
+  "rect": [100, 100, 300, 260],
+  "client_rect": [0, 0, 100, 80],
+  "visible": true,
+  "enabled": true,
+  "minimized": false,
+  "security_ui": false
+}

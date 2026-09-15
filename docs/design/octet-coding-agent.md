@@ -139,10 +139,12 @@ labels it as such.
 
 System instructions are composed through `compose_instructions(&Config)`.
 
-- If `Config::system_prompt` is `Some(value)`, composition is replaced entirely
-  by that exact value (including `""`), bypassing AGENTS and skill instructions.
-- If `system_prompt` is `None`, the default flow composes the base prompt,
-  trusted workspace/global `AGENTS.md` context, and active skill instructions.
+- If `Config::system_prompt` is `Some(value)`, composition returns that exact
+  value (including `""`) and bypasses AGENTS/context composition. Bootstrap may
+  still append the discovered skill metadata and file-location catalog.
+- If `system_prompt` is `None`, the default flow composes the base prompt and
+  trusted workspace/global `AGENTS.md` context; bootstrap then appends the
+  discovered skill catalog. It does not inject full skill bodies.
 - Layer precedence for `system_prompt`, lowest to highest, is global config,
   trusted project config, `OCTET_SYSTEM_PROMPT`, then CLI `--system-prompt`.
   An explicit empty CLI value overrides every lower layer.
@@ -152,9 +154,10 @@ System instructions are composed through `compose_instructions(&Config)`.
 
 The environment block truthfully distinguishes the workspace root from the
 invocation directory. Relative tool paths and the default `bash` working
-directory resolve from the workspace root. Enabled core-tool names are listed,
-while the contract acknowledges extension and skill tools supplied alongside
-them. When the workspace has the octet source-checkout markers, the base prompt
+directory resolve from the workspace root. Enabled core-tool names are listed;
+extension tools may be supplied alongside them. Skill discovery is represented by
+file locations in the composed prompt, not a built-in model-facing tool surface.
+When the workspace has the octet source-checkout markers, the base prompt
 also includes absolute paths to the README, `docs/`, `examples/`, `crates/`, and
 the coding-agent crate and tells the model to consult them for octet questions or
 changes. Packaged installs resolve the matching README, docs, examples, and
@@ -163,8 +166,9 @@ text assets from the binary into that same data layout. Behavioral changes
 require regression tests rather than model-specific prompt tuning.
 
 Global and trusted workspace `AGENTS.md` files retain root-to-leaf precedence
-and are wrapped in path-labelled `<project_instructions>` blocks. Active skill
-instructions use labelled blocks with stable IDs and hashes.
+and are wrapped in path-labelled `<project_instructions>` blocks. Skill discovery
+adds only its bounded metadata and file-location catalog to the composed prompt;
+full skill bodies are not injected by this composition.
 
 ## Compaction and handoff summaries
 
@@ -197,12 +201,11 @@ summaries retain them. Legacy entries deserialize with empty details.
 
 ## Agent construction and tools
 
-Every build or idle-boundary rebuild creates one `ExtensionHost` and registers,
-in order:
-
-- Core tools: `read`, `edit`, `write`, `bash`, then opt-in `search`. The default
-  surface omits `search` because `bash` already provides `rg`/`find`/`ls`.
-- Skill tools: `search_skills`, `load_skill`, `read_skill_resource`.
+Every build or idle-boundary rebuild creates one `ExtensionHost`. `CoreTools`
+registers the core tools in order: `read`, `edit`, `write`, `bash`, then opt-in
+`search`; the default surface omits `search` because `bash` already provides
+`rg`/`find`/`ls`. Enabled extensions may add their own tools after discovery and
+policy admission. Skill discovery does not add a model-facing tool.
 
 Context budgeting reserves the serialized schemas from that exact host rather
 than reproducing a hard-coded subset. When delegation is installed, bootstrap
@@ -259,19 +262,40 @@ host-owned footer; after `octet-agent` mirrors the settled child usage into root
 
 Skills are discovered from user, workspace, and explicit CLI directories with
 explicit paths taking highest precedence. Workspace skills require workspace
-trust. Model-visible activation is explicit:
+trust. Discovery supplies immutable descriptors: the composed prompt lists each
+visible filesystem skill location and directs the model to use the ordinary
+`read` tool. No model-facing skill-specific tools are registered, and discovery
+does not inject full skill bodies into the system prompt.
 
-1. `search_skills` returns metadata.
-2. `load_skill` verifies trust and required registered/enabled tools, snapshots
-   the instructions and content hash, persists `SkillActivated`, and returns
-   only compact activation metadata.
-3. `read_skill_resource` requires a matching active activation, reloads
-   `SKILL.md`, rejects a changed instructions hash, permits only text under
-   `references/` or `templates/`, and persists the resource snapshot.
+The frontends have different command and persistence paths:
 
-Active instructions are appended once in labelled system-prompt blocks rather
-than duplicated in both the prompt and `load_skill` result. Activation/resource
-state survives compaction through snapshots in the compaction entry.
+- TUI `/skills load NAME` resolves the skill and prefills `/skill:NAME`. On
+  submission, `expand_skill_command` checks declared required tools and inlines
+  the `SKILL.md` body plus arguments into an ordinary user message; it does not
+  append `SkillActivated`. TUI `/skills off` can append `SkillDeactivated` only
+  for an activation already present on the branch.
+- Serve's slash-command worker appends `SkillActivated` (descriptor, content
+  hash, and instructions) on load and `SkillDeactivated` on off. The activation
+  event is Serve-only; TUI `off` can only deactivate pre-existing state. Plain,
+  print, and RPC do not gain this activation path.
+- Interactive submission and the plain, print, and RPC prompt paths expand
+  explicit `/skill:NAME` text as ordinary prompt content. They do not provide a
+  second activation API. Prompt-template `{{skill:name}}` expansion likewise
+  requires an already active session skill.
+
+The model uses ordinary `read` for `SKILL.md` and referenced files, subject to the
+normal allowlist and sandbox. For package resource semantics, supporting text is
+limited to `references/` or `templates/`. Discovery caps YAML frontmatter at 32
+KiB and `SKILL.md` at 256 KiB; a supporting text read is capped at 512 KiB. The
+session schema contains `SkillResourceRead`/resource snapshots, but no current
+registered model tool writes that event; it is not a model-facing resource API.
+
+Compaction keeps the configured recent-message token window (default 20,000) and
+summarizes older ordinary messages. A TUI inline body is therefore ordinary
+history and may be summarized away; it does not become durable active state.
+Serve activation events are separate session state and their active snapshots
+are carried by compaction, so that Serve-only persistence must not be promised
+for TUI activation.
 
 ## Prompt templates
 
@@ -322,7 +346,7 @@ remain disabled; the appearance selector is not a theme loader. See
 - `/tree`, `/checkout <entry-id>` — inspect durable entries and switch branches.
 - `/name [name]`, `/export [path]` — name and safely export the current session.
 - `/prompt [name] [arguments]` — inspect or expand prompt templates.
-- `/skills search|load|reload|off ...` — inspect and explicitly activate skills.
+- `/skills search|load|reload|off ...` — inspect, invoke, reload, or deactivate skills; TUI load-prefill does not establish durable activation.
 - `/extensions [status|reload]` — interactively enable/disable managed executable bundles, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped.
 - `/subagents` — when supplied by the enabled `octet-subagents` package, navigate workers with arrow keys and open owner-authorized read-only transcripts with Enter.
 - `/help [command]` — show local command help and octet self-documentation.
@@ -428,10 +452,24 @@ credentials and headers remain behind
 provider definitions, catalog model metadata, logs, or persistence. The resolver
 serializes exchange/refresh and refreshes before its short-lived session expires.
 
-The standalone CLI and NDJSON host intentionally provide no Copilot login or
-configuration path. GitHub OAuth endpoint behavior, Enterprise policy, and live
-integration testing remain embedding-host responsibilities; the product covers
-only deterministic fake-host/transport behavior.
+The product now supplies a separate `auth::copilot` adapter for GitHub.com's
+bounded device/OAuth exchange, owner-private selected credential storage and
+vetted inference origins. CLI `--login copilot [--headless]` and `--logout copilot`
+(also `github-copilot`) dispatch before workspace/session startup. Synchronous
+catalog construction registers through a scoped discovery thread/current-thread
+runtime; the existing interactive blocking-lifecycle worker remains outside the
+renderer. Offline and missing credentials return before runtime/client creation,
+and failed discovery cannot partially mutate the catalog. Setup rebuilds and
+Codex-only logout preserve independent Copilot registration.
+
+The same catalog flows into existing NDJSON `models` and catalog-backed `run`;
+there is no new native-host auth command, OAuth payload field, or extension API
+0.3 authority. TUI slash auth is not yet integrated. Fresh credential resolution
+rechecks the host's selected login; explicit replacement is serialized with
+invalidation, and rejected/changed origins fence every resolver sharing a host.
+No local operation promises remote revocation of an already-resolved request or
+pending device code. All new Rust fixtures, full provider parity and native/live
+acceptance remain unqualified; see the [candidate record](../qualification/copilot-host-current-candidate.md).
 
 ## Authentication
 

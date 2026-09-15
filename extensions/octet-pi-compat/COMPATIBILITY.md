@@ -27,6 +27,29 @@ octet retains credentials and authorization leases. Endpoint, header, API-key,
 transport, callback, and OAuth payload authority are rejected or withheld.
 The fixture coverage is not a real-runtime provider-parity claim.
 
+## Optional API 0.2 UI fixture coverage
+
+The public-surface rows and canonical machine ledger below describe baseline
+fixtures without optional UI features. They are not assertions that an optional
+host-admitted surface has been exercised against real Pi. Their statuses and
+pinned inventory remain unchanged.
+
+The bridge additionally accepts explicit legacy `semantic_ui`, `editor_handoff`,
+`autocomplete` and resize observation features, as described in the
+[UI handoff contract](README.md#optional-api-02-ui-handoff). Bounded text widgets,
+header/footer projections, editor acknowledgements and suffix completions now
+have separate actual-bridge fixtures in `tests/test_bridge_ui.py`; these do not
+replace the baseline rejection fixtures or the unchanged-source full gate.
+Raw input handlers, replacement editors and arbitrary terminal components remain
+unsupported. Both API `0.3` provider mode and the private projection helper reject
+legacy UI admission. The helper describes only legacy `0.2` features, not a
+canonical `0.3` schema or capability grant.
+
+See the [candidate qualification](../../docs/qualification/pi-ui-current-candidate.md)
+for exact fixture coverage and outstanding generated-link/Rust-host/native gates.
+The deferred widget/editor statements in the baseline tables and plan-mode
+journeys below retain that no-optional-UI scope, not a full parity claim.
+
 ## Executable inventory
 
 `python3 extensions/octet-pi-compat/conformance.py --check --json` validates the 118 public-surface rows, all 78 official extension entries (69 files and 9 directories), all 33 Pi TUI audit rows, the six plan-mode journeys, fixture links, and the raw-byte profile integrity sidecar.

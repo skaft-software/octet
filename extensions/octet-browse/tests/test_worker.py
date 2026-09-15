@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from octet_browse.adapters import AdapterRegistry
 from octet_browse.paths import BrowsePaths
+from octet_browse.profile import ProfileManager
 from octet_browse.safety import BrowseError, ResourceOwner
 from octet_browse.worker import BrowserEngine, MAX_TABS, OperationContext, PlaywrightWorker
 
@@ -86,6 +88,115 @@ class FakeContext:
         self.pages = pages
 
 
+class LifecycleContext:
+    def __init__(self, pages: list[FakePage]):
+        self.pages = pages
+        self.handlers = {}
+        self.closed = False
+        self.close_calls = 0
+        self.new_page_calls = 0
+
+    def on(self, event: str, handler: object) -> None:
+        self.handlers.setdefault(event, []).append(handler)
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def set_default_timeout(self, _timeout: int) -> None:
+        pass
+
+    def set_default_navigation_timeout(self, _timeout: int) -> None:
+        pass
+
+    def route(self, _pattern: str, _handler: object) -> None:
+        pass
+
+    def new_page(self) -> FakePage:
+        if self.closed:
+            raise RuntimeError("context closed")
+        self.new_page_calls += 1
+        page = FakePage()
+        self.pages.append(page)
+        for handler in self.handlers.get("page", []):
+            handler(page)
+        return page
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.closed:
+            return
+        self.closed = True
+        for handler in self.handlers.get("close", []):
+            handler()
+
+    def emit_external_close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for handler in self.handlers.get("close", []):
+            handler()
+
+
+class LaunchSetup:
+    def validate_runtime(self) -> None:
+        pass
+
+
+class LaunchChromium:
+    def __init__(
+        self,
+        executable: Path,
+        contexts: list[LifecycleContext],
+        launched: threading.Event | None = None,
+    ) -> None:
+        self.executable_path = str(executable)
+        self.contexts = contexts
+        self.launched = launched
+        self.launch_calls = 0
+
+    def launch_persistent_context(self, **_arguments: object) -> LifecycleContext:
+        self.launch_calls += 1
+        if self.launched is not None:
+            self.launched.set()
+        if not self.contexts:
+            raise RuntimeError("no fixture context remains")
+        return self.contexts.pop(0)
+
+
+class LaunchPlaywright:
+    def __init__(
+        self,
+        executable: Path,
+        contexts: list[LifecycleContext],
+        launched: threading.Event | None = None,
+    ) -> None:
+        self.chromium = LaunchChromium(executable, contexts, launched)
+        self.stop_calls = 0
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class LaunchApi:
+    def __init__(self, playwright: LaunchPlaywright):
+        self.playwright = playwright
+
+    def sync_playwright(self) -> "LaunchApi":
+        return self
+
+    def start(self) -> LaunchPlaywright:
+        return self.playwright
+
+
+class CancelAfterLaunch:
+    def __init__(self, launched: threading.Event):
+        self.launched = launched
+
+    def raise_if_cancelled(self) -> None:
+        if self.launched.is_set():
+            raise BrowseError("request_cancelled", "request cancelled")
+
+
 class BrowserActionSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_home = tempfile.TemporaryDirectory()
@@ -101,7 +212,10 @@ class BrowserActionSafetyTests(unittest.TestCase):
         self.engine.profiles = None
         self.engine._tab_id_factory = lambda: "tab_fixture"
         self.engine._playwright = object()
+        self.engine._context = None
         self.engine._profile_lease = None
+        self.engine._context_closed = False
+        self.engine._closing_context = False
         self.owner = ResourceOwner("session", "instance", 1)
         self.engine._owner = self.owner.key
         self.engine._tabs = {}
@@ -111,6 +225,8 @@ class BrowserActionSafetyTests(unittest.TestCase):
         self.engine._download_events = 0
         self.engine._blocked_navigation = False
         self.engine._degraded = False
+        self.engine._adapters = AdapterRegistry()
+        self.engine._attached = None
 
     def _attach(self, page: FakePage) -> str:
         self.engine._context = FakeContext([page])
@@ -286,20 +402,41 @@ class BrowserActionSafetyTests(unittest.TestCase):
         self.engine._route_request(subresource, Request("data:image/png,x", parent=Frame(None)))
         self.assertTrue(subresource.continued)
 
+    def test_blank_page_with_method_opener_is_retained(self) -> None:
+        page = FakePage(url="about:blank")
+        page.opener = lambda: None
+        tab_id = self._attach(page)
+        self.engine._sync_pages()
+        self.assertIn(tab_id, self.engine._tabs)
+        self.assertEqual(self.engine._selected_tab_id, tab_id)
+
     def test_context_failure_closes_state_and_reports_degraded(self) -> None:
         class BrokenContext:
+            close_calls = 0
+
             @property
             def pages(self):
                 raise RuntimeError("browser crashed")
 
             def close(self):
-                pass
+                self.close_calls += 1
 
-        self.engine._context = BrokenContext()
+        self._attach(FakePage())
+        context = BrokenContext()
+        self.engine._context = context
         status = self.engine.status(self.operation(), self.owner)
         self.assertFalse(status["open"])
+        self.assertFalse(status["isolated_open"])
+        self.assertFalse(status["external_open"])
         self.assertTrue(status["degraded"])
         self.assertEqual(status["tabs"], [])
+        self.assertIsNone(status["selected_tab_id"])
+        self.assertEqual(context.close_calls, 1)
+        repeated = self.engine.status(self.operation(), self.owner)
+        self.assertFalse(repeated["open"])
+        self.assertTrue(repeated["degraded"])
+        self.assertIsNone(self.engine._context)
+        self.assertEqual(context.close_calls, 1)
 
     def test_owner_mismatch_cannot_enumerate_or_operate_tabs(self) -> None:
         page = FakePage()
@@ -315,6 +452,86 @@ class BrowserActionSafetyTests(unittest.TestCase):
         with self.assertRaises(BrowseError) as raised:
             self.engine.tabs(self.operation(), other)
         self.assertEqual(raised.exception.code, "owner_mismatch")
+
+
+class BrowserLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _engine(
+        home: str,
+        contexts: list[LifecycleContext],
+        launched: threading.Event | None = None,
+    ) -> tuple[BrowserEngine, LaunchPlaywright, ResourceOwner, Path]:
+        paths = BrowsePaths.for_home(Path(home))
+        executable = paths.runtime / "browsers" / "chromium-fixture" / "chrome"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"fixture chromium")
+        executable.chmod(0o700)
+        playwright = LaunchPlaywright(executable, contexts, launched)
+        engine = BrowserEngine(paths, LaunchSetup(), ProfileManager(paths))
+        engine._load_pinned_playwright = lambda: LaunchApi(playwright)  # type: ignore[method-assign]
+        return engine, playwright, ResourceOwner("session", "instance", 1), executable
+
+    @staticmethod
+    def _operation(cancellation: object | None = None) -> OperationContext:
+        return OperationContext(time.monotonic() + 2, cancellation=cancellation)
+
+    def test_repeated_launch_reuses_visible_context_without_new_tab_or_relaunch(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            context = LifecycleContext([FakePage()])
+            engine, playwright, owner, _ = self._engine(home, [context])
+            try:
+                first = engine.launch(self._operation(), owner)
+                second = engine.launch(self._operation(), owner)
+                self.assertTrue(first["open"])
+                self.assertTrue(second["open"])
+                self.assertEqual(playwright.chromium.launch_calls, 1)
+                self.assertEqual(context.new_page_calls, 0)
+                self.assertIs(engine._context, context)
+                self.assertEqual(first["selected_tab_id"], second["selected_tab_id"])
+            finally:
+                engine.shutdown()
+
+    def test_external_context_close_is_degraded_and_does_not_relaunch_until_explicit_open(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            context = LifecycleContext([FakePage()])
+            replacement = LifecycleContext([FakePage()])
+            engine, playwright, owner, _ = self._engine(home, [context, replacement])
+            try:
+                engine.launch(self._operation(), owner)
+                context.emit_external_close()
+                with self.assertRaises(BrowseError) as action:
+                    engine.tabs(self._operation(), owner)
+                self.assertEqual(action.exception.code, "browser_degraded")
+                status = engine.status(self._operation(), owner)
+                self.assertFalse(status["open"])
+                self.assertTrue(status["degraded"])
+                self.assertEqual(status["tabs"], [])
+                self.assertEqual(playwright.chromium.launch_calls, 1)
+                self.assertEqual(context.close_calls, 1)
+                recovered = engine.launch(self._operation(), owner)
+                self.assertTrue(recovered["open"])
+                self.assertEqual(playwright.chromium.launch_calls, 2)
+            finally:
+                engine.shutdown()
+
+    def test_cancelled_launch_closes_context_and_releases_profile_before_admission(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            launched = threading.Event()
+            context = LifecycleContext([FakePage()])
+            engine, playwright, owner, _ = self._engine(home, [context], launched)
+            try:
+                with patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": "fixture"}):
+                    with self.assertRaises(BrowseError) as raised:
+                        engine.launch(self._operation(CancelAfterLaunch(launched)), owner)
+                self.assertEqual(raised.exception.code, "request_cancelled")
+                self.assertIsNone(engine._context)
+                self.assertIsNone(engine._profile_lease)
+                self.assertEqual(context.close_calls, 1)
+                self.assertEqual(playwright.stop_calls, 1)
+                lease = engine.profiles.acquire(create=False)
+                lease.release()
+            finally:
+                engine.shutdown()
 
 
 if __name__ == "__main__":

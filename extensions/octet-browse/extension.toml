@@ -20,6 +20,10 @@ environment = []
 [contributes]
 tools = [
   "browser_status",
+  "browser_backend_select",
+  "browser_backend_revoke",
+  "browser_backend_stop",
+  "browser_backend_status",
   "browser_launch",
   "browser_tabs",
   "browser_open_url",
