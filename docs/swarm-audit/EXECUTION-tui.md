@@ -146,3 +146,114 @@ START 2026-09-15T17:13:25Z tui8 alive
 ### tui8 — observed commands (TASK 2 / TASK 3)
 
 - `cargo test --locked -p octet-coding-agent --lib reasoning_render` -> **exit 0, `18 passed; 0 failed`** (`/tmp/tui8-t2d.log`). Includes the pre-existing `activity_shimmer_contrast_survives_light_and_dark_composite_surfaces` matrix (still >= 4.5:1 for every cell of every label/strength/frame at both depths, now over the tinted palette) plus the two new regressions. Iteration 2 notes, kept for the record: the first acceptance run failed on `compacting context` chroma (own over-tight 0.02 tolerance, replaced by an exact palette-equality assertion for untinted rows), the second on a light/ANSI256 tint that a sparse cube collapsed onto a grey entry (fixed by taking the most chroma each hue can afford instead of one nominal value), and the third on the centre-vs-neighbour luminance ordering (fixed by pinning each tint entry to its own cell's resting luminance, so the tint adds hue and chroma only, and by deriving the ANSI256 ordering tolerance from `nearest_ansi256`'s documented 1.2:1 filter).
+START 2026-09-15T17:53:02Z tui9 alive
+
+START 2026-09-15T17:55:32Z tui11 alive
+
+## tui11 session — 2026-09-15T17:55Z onwards
+
+### TASK 1 (P0) — the activity shimmer is model-adaptive, unified, and smooth
+
+**Root cause, with the exact derivation (the "which one is it" question):** the rainbow gate is CORRECT and is
+not the defect. `rainbow_strength` comes from `view.rs:2174 InteractiveShell::status_rainbow_strength()` ->
+`view.rs:1223 status_rainbow_strength_at(run_reasoning, run.elapsed_at(now))`, where `run_reasoning` is set at
+run start from `state.reasoning` (`view.rs:2835`). It returns non-zero only for `Some("max" | "ultra")` inside
+the `STATUS_RAINBOW_DURATION` two-second window, and 0 for `high` and every other level (already pinned by
+`view/tests.rs:7150 max_and_ultra_working_rainbow_fades_for_two_seconds_only`). At `high` the rainbow branch at
+`reasoning_render.rs:374` is unreachable.
+The actual defect was the **`ActivityTint` ramp** landed earlier in this lane: `ACTIVITY_WORKING_HUES =
+[0, 14, 30, 45]` and `ACTIVITY_THINKING_HUES = [190, 212, 236, 262]` were applied at EVERY reasoning level with
+no `rainbow_strength` gate at all, so `Working` was tinted orange-yellow and `Thinking` cool cyan-violet
+whatever the model. `classify_model_identity("gpt-6-astra", ...)` -> `ModelLab::OpenAi`
+(`theme.rs:2064` marker `gpt-`), whose `source_color()` is `#1f1f1f` (`theme.rs:142`): an exact grey, i.e. the
+reported model has a NEUTRAL identity that the fixed hue sets overwrote.
+
+**Fix (all in `crates/octet-coding-agent/src/tui/view/reasoning_render.rs`):**
+- Deleted `ACTIVITY_WORKING_HUES` / `ACTIVITY_THINKING_HUES` / `ActivityTint` / `activity_hue_family` /
+  `activity_spread_reaches` / `activity_tint_spread` / `activity_hue_color` / `activity_tint_color`. There is no
+  per-label hue set left anywhere.
+- New `ActivityRamp` (Working | Thinking) with ONE shared ramp per model: hue rotations
+  `ACTIVITY_RAMP_HUE_STEPS = [0.0, 0.34, 0.68, 1.0]` of `ACTIVITY_RAMP_HUE_SPAN = 24.0` degrees around the
+  model's own hue, saturation multipliers `[1.0, 1.25, 1.5, 1.75]` of the model's own HSV saturation, and the
+  same index walk. Hue and saturation are both *derived from the model colour*, so the ramp can only ever move
+  inside the model's colour family.
+- `ActivityIdentity` (`reasoning_render.rs`) is the identity source: `Some(color)` = the model's own
+  `theme.model_rgb(lab)` (the same colour the resting label uses); `None` for `ModelLab::Unknown`/no lab, i.e.
+  "there is no model identity" - the ramp must not invent one from the theme's fallback chrome accent.
+- `activity_accent_color`: converts the identity to HSV, forces an exact profile grey
+  (`activity_grey_at` -> `activity_color_at_least((0,0,0), target)`) when the identity is missing or its HSV
+  saturation is at or below `ACTIVITY_NEUTRAL_SATURATION = 0.06`, otherwise rotates the model hue and scales the
+  model saturation. `activity_reachable_saturation`/`activity_reachable_value` keep the accent inside the
+  profile's proven luminance band, so the tint adds hue/chroma at the cell's own luminance and never overtakes
+  the falloff.
+- **Non-chromatic state cue**: `ACTIVITY_THINKING_SWEEP_DEPTH = 0.80`. Both labels share the identical colour
+  family, falloff, cycle and identity; only the sweep *depth* (luminance range) differs - 0.07 of relative
+  luminance on the dark profile, 0.016 on the light one. It works for an achromatic identity, where no hue can
+  differ, and it cannot break the "centre is the most distinct cell" property because each label's own falloff
+  stays strictly monotone.
+- **Smooth full traverse with a rest gap** (`ACTIVITY_SWEEP_HALF = 4`, `ACTIVITY_SWEEP_START =
+  -(ACTIVITY_SWEEP_HALF + ACTIVITY_LABEL_OFFSET + 1) = -7`, `activity_cycle(label) = width + 12`): the centre
+  enters before the margin dot, crosses every label cell, exits past the trailing edge, and the first and last
+  position of the cycle leave every rendered cell - the dot included - at the resting colour
+  (`ACTIVITY_SWEEP_REST_FRAMES = 2`). `ACTIVITY_SWEEP_FALLOFF = [100, 84, 64, 40, 18]` is the five-cell smooth
+  ramp. Previously `cycle = width + 4` put the trailing cell at 48-64% brightness on the last frame and
+  immediately at 48-64% on the leading cell of the next, i.e. the reported teleport.
+- Unchanged invariants: foreground-only (no background cell is painted), one colour per grapheme, `None`
+  palette -> static `bold(model_fg)` label, the looping cycle, `ACTIVITY_DARK_SWEEP_LUMINANCE = 0.50` /
+  `ACTIVITY_LIGHT_SWEEP_LUMINANCE = 0.09`, and the max/ultra rainbow gated on `rainbow_strength` only.
+
+Observed: `cargo test --locked -p octet-coding-agent --lib reasoning_render` -> exit 0, `21 passed; 0 failed`
+(`/tmp/tui11-reasoning.log`). New/updated tests:
+`neutral_model_identities_shimmer_without_any_hue` (asserts the `gpt-6-astra` classification, that the lab
+colour is exactly neutral, that every cell of BOTH labels stays within 0.02 chroma on 3 backgrounds x 2
+encoders while still moving >= 0.20 of the profile separation in luminance, and that the missing-identity ramp
+entries are exact greys), `working_and_thinking_share_one_hue_family_and_differ_by_brightness` (5 labs x 2
+backgrounds: each centre within `ACTIVITY_RAMP_HUE_SPAN` + 12 degrees of the model hue, the two labels within
+one family of each other, and >= 0.15 of the separation apart in luminance),
+`max_and_ultra_rainbow_stays_gated_to_that_emphasis_level_only` (0 for off/minimal/low/medium/high, 100 for max;
+rendered `Working` equals the rainbow colour exactly at strength 100 and carries NO chroma for a neutral lab at
+strength 0), `the_sweep_traverses_every_label_cell_in_order_before_it_loops` (every cell is the most lit cell
+exactly at `centre_frame(i)`, one cell per frame, strictly increasing), and
+`the_sweep_rests_between_cycles_and_never_teleports` (>= 2 all-rest frames per cycle including the margin dot,
+no per-cell frame-to-frame luminance change above 0.30 of the separation - the reported teleport was 0.64 - and
+the period equals the cycle length).
+
+- 2026-09-15T18:2xZ. Observed pre-existing failure in this lane's own path:
+  `cargo test --locked -p octet-coding-agent --lib tui::view` -> `412 passed; 1 failed`, the failure being
+  `tui::view::tests::subagent_panel_groups_states_and_collapses_finished_workers_by_default`
+  (`view/tests.rs:990`): the rendered panel shows `Running · 8` but no collapsed `2 Done`/`2 Failed`/`2 Stopped`
+  summary line and no `ctrl+t shows all` (panel row budget consumes the body). `view/tests.rs`,
+  `view.rs` and `view/panel_render.rs` are all UNMODIFIED in the tree, and `render_panel` takes no dependency on
+  `reasoning_render`, so this is red at HEAD and not caused by the shimmer change. It is the §2 subagents-panel
+  acceptance test and is handled with that row.
+
+### TASK 2 — subagent activity settles into the turn that produced it
+
+- Root cause (differs from the file pointers in the brief, which described the older chrome-only path):
+  `set_subagent_activity` already writes a persistent `TranscriptBlock::Tool` panel, and
+  `shell_chrome::render_subagent_activity` already returns empty while `subagent_activity_block` is set. The
+  replay came from the *anchor*: `begin_run` (`view.rs`) clears `subagent_activity` AND
+  `subagent_activity_block` on every new prompt ("A delegation team is scoped to one owning run"), so the
+  session-scoped roster snapshot the endpoint keeps republishing opened a **fresh** block at
+  `active_reasoning.unwrap_or(transcript.len())` - i.e. directly under the new prompt, pushing the new turn's
+  freshly opened `Working` row (`begin_run` -> `open_working_status`) down with it. That is both reported
+  symptoms in one mechanism: the completed subagents appearing on the new prompt instead of at the end of the
+  interrupted turn, and no working indicator "for a bit".
+- Fix in `crates/octet-coding-agent/src/tui/view.rs`: new `ShellState::settled_subagent_workers`
+  (`BTreeSet<String>` of `DelegationTelemetryChild::child_id` / extension activity ids, via the new
+  `subagent_worker_ids`). `set_subagent_activity` now (a) records identities on the in-place update path and on
+  insert, and (b) when there is no current-run anchor and the snapshot has no live worker and no identity that
+  has not already been settled, ignores the snapshot entirely - it renders no transcript block and clears the
+  transient `subagent_activity` so the chrome strip cannot draw it either. The settled block stays exactly where
+  the delegation occurred. A snapshot that carries a live worker, or a worker the transcript has not shown, still
+  opens a block, so the live view is preserved. Session replacement clears the set with the live state.
+- Tests added in `view/tests.rs`: `a_settled_subagent_roster_never_replays_under_a_later_prompt` (turn 1 live ->
+  completed -> RunFinished keeps the block; turn 2 with the same completed roster asserts exactly one `Subagents`
+  occurrence, that it is ABOVE the new prompt, that `subagent_activity`/`subagent_activity_block` stay empty, and
+  that the new turn's `Working` row is still the transcript tail) and
+  `live_workers_for_the_current_turn_still_open_a_block` (a genuinely new worker in turn 2 still renders, exactly
+  one additional block).
+- 2026-09-15T18:5xZ. VERIFICATION BLOCKED by a concurrent unowned writer: `cargo test --locked -p
+  octet-coding-agent --lib subagent` -> `error: could not compile sexy-tui-rs (lib) due to 4 previous errors`
+  (`rich_text/markdown.rs:105,306,370`: `Builder::build` arity, `Frame::Code` missing `info`). `crates/sexy-tui-rs`
+  is not this worker's path. The two new tests are written but their green run is unconfirmed.

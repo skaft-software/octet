@@ -825,6 +825,24 @@ impl SubagentActivityView {
     }
 }
 
+/// Displayed worker identities of one snapshot, used to decide whether a
+/// snapshot carries anything the transcript has not already settled. Telemetry
+/// child ids are the durable identity; the extension activity id is the
+/// equivalent for the non-delegation presentation.
+fn subagent_worker_ids(view: &SubagentActivityView) -> Vec<String> {
+    if !view.telemetry.is_empty() {
+        return view
+            .telemetry
+            .iter()
+            .map(|child| child.child_id.clone())
+            .collect();
+    }
+    view.activities
+        .iter()
+        .map(|activity| activity.id.clone())
+        .collect()
+}
+
 fn subagent_activity_is_active(view: &SubagentActivityView) -> bool {
     if !view.telemetry.is_empty() {
         return view
@@ -1084,6 +1102,14 @@ pub(crate) struct ShellState {
     /// block. It is reset at the next root run so settled history remains
     /// immutable while a new delegation event gets its own row.
     pub(crate) subagent_activity_block: Option<usize>,
+    /// Worker identities already settled into the transcript. The delegation
+    /// team is scoped to the session, so its final snapshot keeps being
+    /// republished after the turn that produced it has ended; a snapshot that
+    /// brings no live worker and no worker identity that has not already been
+    /// rendered must not open a second block. Without this, every new prompt
+    /// replayed the previous turn's completed workers underneath the new prompt
+    /// and displaced the new turn's `Working` row.
+    pub(crate) settled_subagent_workers: std::collections::BTreeSet<String>,
     slash_selection: usize,
     slash_scroll: usize,
     slash_popup_dismissed: bool,
@@ -1621,13 +1647,15 @@ impl ShellState {
     /// new block is immediately followed by the model's replacement thinking
     /// row, matching the tool-call presentation.
     fn set_subagent_activity(&mut self, view: SubagentActivityView) {
-        self.subagent_activity = Some(view.clone());
+        let workers = subagent_worker_ids(&view);
+        let active = subagent_activity_is_active(&view);
         if let Some(index) = self.subagent_activity_block {
             if let Some(TranscriptBlock::Tool(panel)) = self.transcript.get_mut(index) {
                 if let Some(previous) = panel.subagent_activity.as_ref() {
                     let same_presentation = previous.same_presentation(&view);
                     let was_active = !panel.finished;
                     panel.update_subagent_activity(&view);
+                    self.settled_subagent_workers.extend(workers);
                     if same_presentation {
                         return;
                     }
@@ -1644,6 +1672,18 @@ impl ShellState {
             self.subagent_activity_block = None;
         }
 
+        if self.subagent_activity_block.is_none()
+            && !active
+            && workers
+                .iter()
+                .all(|worker| self.settled_subagent_workers.contains(worker))
+        {
+            // Settled already: this snapshot is the session-scoped roster
+            // arriving after its own turn ended. Render nothing - no transcript
+            // block below the new prompt, no chrome strip above the editor.
+            self.subagent_activity = None;
+            return;
+        }
         if let Some(index) = self.active_reasoning {
             let empty = matches!(
                 self.transcript.get(index),
@@ -1659,6 +1699,7 @@ impl ShellState {
         let active = !panel.finished;
         self.insert_block(index, TranscriptBlock::Tool(Box::new(panel)));
         self.subagent_activity_block = Some(index);
+        self.settled_subagent_workers.extend(workers);
         if active {
             self.register_active_event(index);
             // Keep the model-status row below the delegated event while the
@@ -2822,6 +2863,9 @@ impl InteractiveShell {
         // overlay while its first authoritative refresh is still pending.
         state.subagent_activity = None;
         state.subagent_activity_block = None;
+        // A different session has a different delegation team: nothing from the
+        // previous session is "already settled" for this one.
+        state.settled_subagent_workers.clear();
         state.run_model = Some(state.model.clone());
         state.run_model_lab = state.model_lab;
         state.run_prompt_color = state.prompt_color.clone();
@@ -5931,6 +5975,9 @@ impl InteractiveShell {
         // hydrated history never contains an executable worker event.
         state.subagent_activity = None;
         state.subagent_activity_block = None;
+        // A different session has a different delegation team: nothing from the
+        // previous session is "already settled" for this one.
+        state.settled_subagent_workers.clear();
         state.session_work_elapsed = Duration::ZERO;
         state.run_model = None;
         state.run_model_lab = None;

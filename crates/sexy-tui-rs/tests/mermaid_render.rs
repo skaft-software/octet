@@ -58,6 +58,20 @@ const SUPPORTED: &[(&str, &str)] = &[
     ("flowchart LR\n  a.b_c-1 --> d2", "┌─────────┐    ┌────┐\n│ a.b_c-1 ├───▶│ d2 │\n└─────────┘    └────┘"),
     // unlabelled_nodes
     ("flowchart LR\n  A --> B", "┌───┐    ┌───┐\n│ A ├───▶│ B │\n└───┘    └───┘"),
+    // semicolon_separated_statements
+    ("flowchart LR; A[One] --> B[Two]; B --> C[Three]", "┌─────┐    ┌─────┐    ┌───────┐\n│ One ├───▶│ Two ├───▶│ Three │\n└─────┘    └─────┘    └───────┘"),
+    // trailing_comment
+    ("flowchart LR\n  A[One] --> B[Two] %% trailing comment", "┌─────┐    ┌─────┐\n│ One ├───▶│ Two │\n└─────┘    └─────┘"),
+    // comment_after_header
+    ("flowchart LR %% the pipeline\n  A[One] --> B[Two]", "┌─────┐    ┌─────┐\n│ One ├───▶│ Two │\n└─────┘    └─────┘"),
+    // quoted_label_with_delimiters
+    ("flowchart LR\n  A[\"a[b]c\"] --> B[Two]", "┌───────┐    ┌─────┐\n│ a[b]c ├───▶│ Two │\n└───────┘    └─────┘"),
+    // quoted_link_label
+    ("flowchart LR\n  A -->|\"two words\"| B", "┌───┐two words  ┌───┐\n│ A ├──────────▶│ B │\n└───┘           └───┘"),
+    // percent_inside_quoted_label
+    ("flowchart LR\n  A[\"100%% done\"] --> B[Two]", "┌────────────┐    ┌─────┐\n│ 100%% done ├───▶│ Two │\n└────────────┘    └─────┘"),
+    // semicolon_inside_quoted_label
+    ("flowchart LR\n  A[\"a;b\"] --> B[Two]", "┌─────┐    ┌─────┐\n│ a;b ├───▶│ Two │\n└─────┘    └─────┘"),
     // wide_labels
     ("flowchart LR\n  A[界_x] --> B[y界]", "┌──────┐    ┌─────┐\n│ 界_x ├───▶│ y界 │\n└──────┘    └─────┘"),
 ];
@@ -84,7 +98,15 @@ const FAIL_CLOSED: &[(&str, &str)] = &[
     // node_list
     ("flowchart LR\n  A --> B & C", "dropped, line 2: node lists with `&` are not supported"),
     // subgraph
-    ("flowchart LR\n  subgraph S\n  A --> B\n  end", "dropped, line 2: expected a link, found \"S\""),
+    ("flowchart LR\n  subgraph S\n  A --> B\n  end", "dropped, line 2: `subgraph` statements are not supported"),
+    // end_statement
+    ("flowchart LR\n  A --> B\n  end", "dropped, line 3: `end` statements are not supported"),
+    // direction_statement
+    ("flowchart LR\n  direction LR\n  A --> B", "dropped, line 2: `direction` statements are not supported"),
+    // unterminated_quoted_label
+    ("flowchart LR\n  A[\"oops] --> B", "dropped, line 2: unterminated quoted label opened with `[`"),
+    // quoted_label_missing_delimiter
+    ("flowchart LR\n  A[\"oops\" --> B", "dropped, line 2: quoted label opened with `[` is not closed by `]`"),
     // cycle
     ("flowchart LR\n  A --> B --> C --> A", "dropped, cycle through node \"A\""),
     // skips_a_layer
@@ -203,4 +225,34 @@ fn error_variants_are_typed() {
         render_mermaid("flowchart LR\n  A --> C\n  A --> B\n  B --> C"),
         Err(MermaidError::UnsupportedTopology { .. })
     ));
+}
+
+/// Deterministic token soup: no input may panic, exceed the documented limits,
+/// or take unbounded time. 1500 short inputs built from Mermaid fragments
+/// (valid and invalid) exercise the parser and both layouts.
+#[test]
+fn random_token_soup_never_panics_and_stays_within_limits() {
+    const TOKENS: &[&str] = &[
+        "graph", "flowchart", "TD", "TB", "LR", "BT", "RL", "-->", "---", "-.->", "==>", "->", "|", "|x|", "[",
+        "]", "(", ")", "{", "}", "\"", "%%", ";", "&", "subgraph", "end", "direction", ":::c", "classDef", "A", "B",
+        "node_1", "界", "\n", " ", "pie", "\t",
+    ];
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) as usize
+    };
+    for _ in 0..1500 {
+        let token_count = 1 + next() % 16;
+        let mut source = String::new();
+        for _ in 0..token_count {
+            source.push_str(TOKENS[next() % TOKENS.len()]);
+        }
+        if let Ok(art) = render_mermaid(&source) {
+            assert!(art.width <= 400, "width {} for {source:?}", art.width);
+            assert!(art.lines.len() <= 200, "rows {} for {source:?}", art.lines.len());
+        }
+    }
 }

@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use octet_serve_backend::{
-    CommandId, DeviceId, ErrorCode, HostId, PromptInput, ProtocolValidation, ResourceStore,
-    ResourceStoreError, SanitizedError, ServiceError, SessionCommand, SessionCommandEnvelope,
-    SessionId, MAX_PROMPT_BYTES,
+    CommandId, DeviceId, DurableEntryId, ErrorCode, HostId, PromptInput, ProtocolValidation,
+    ResourceStore, ResourceStoreError, SanitizedError, ServiceError, SessionCommand,
+    SessionCommandEnvelope, SessionId, MAX_PROMPT_BYTES,
 };
 use tempfile::tempdir;
 
@@ -95,6 +95,12 @@ fn resources_are_opaque_session_scoped_and_reopenable() {
     );
 
     let handle = reference.handle.clone();
+    let entry = DurableEntryId::new("security-entry-1").unwrap();
+    // The commit sidecar is the sole restart visibility boundary: a staged
+    // binding stays transient until the adapter commits the tool record.
+    store
+        .persist_record(&owner, &entry, "tool-call-full", br#"{"kind":"tool-result"}"#)
+        .unwrap();
     drop(store);
     let reopened = ResourceStore::open(directory.path()).unwrap();
     assert_eq!(reopened.content(&owner, &handle).unwrap(), content);
@@ -149,4 +155,25 @@ fn internal_service_failures_are_sanitized_and_public_errors_reject_extra_fields
         .message
         .chars()
         .any(|character| character.is_control()));
+    assert_eq!(controls.message, "bad\u{fffd}message\u{fffd}");
+    assert!(controls.validate().is_ok());
+
+    // Escape and bidi disguises cannot survive the public boundary either.
+    let disguised =
+        SanitizedError::public(ErrorCode::InvalidBoundary, "safe\u{1b}[31m\u{202e}evil");
+    assert!(!disguised
+        .message
+        .chars()
+        .any(|character| character.is_control()));
+    assert!(!disguised.message.contains('\u{202e}'));
+
+    // A client-supplied public error carrying a control character is rejected
+    // at the validation boundary instead of being re-emitted.
+    let mut forged = serde_json::to_value(&controls).unwrap();
+    forged.as_object_mut().unwrap().insert(
+        "message".into(),
+        serde_json::Value::String("first line\nsecond line".into()),
+    );
+    let forged: SanitizedError = serde_json::from_value(forged).unwrap();
+    assert!(forged.validate().is_err());
 }

@@ -39,7 +39,7 @@ models, authenticate, or verify availability at a hosted provider.
 
 ## Release decision remains separate
 
-The [roadmap](../../ROADMAP.md) selects core workflow qualification; the backlog
+The repository `ROADMAP.md` selects core workflow qualification; the backlog
 is not a release commitment. No installer was run, signed artifact retrieved,
 remote issue closed, or commit created. Physical-terminal color/scrollback/focus,
 unassisted fresh-user success, live media comprehension, and published-target

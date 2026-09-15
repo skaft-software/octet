@@ -170,14 +170,23 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   known to be unrenderable it stops descending (without that, the
   `\frac` → argument → `\frac` chain kept re-entering on the same unconsumed
   token and grew with the input).
-- Tests: `crates/sexy-tui-rs/tests/latex_render.rs`, 16 tests. Run:
+- Tests: `crates/sexy-tui-rs/tests/latex_render.rs`, 17 tests. Run:
   `cargo test -p sexy-tui-rs --test latex_render` =>
-  `test result: ok. 16 passed; 0 failed` (upstream `latex.test.ts` corpus,
+  `test result: ok. 17 passed; 0 failed` (upstream `latex.test.ts` corpus,
   captured display/inline layout corpora, operator-limit, matrix-delimiter,
-  fail-closed and nesting tests).
+  fail-closed and nesting tests, plus `TABLE_GOLDENS`: 407 captured goldens for
+  the 403 upstream table entries (224 symbols, 88 relation commands, 32 named
+  operators, 18 accents, 30 plain wrappers, 7 blackboard letters, 4
+  negative-spacing commands — the 3 malformed `\negmedspace`-style inputs are
+  fail-closed cases) plus 7 spacing edge cases, asserted by
+  `every_symbol_table_entry_renders_its_reference_glyph`).
 - Differential oracle: the real upstream `latex.ts` run under Node 26 with its
-  real `visibleWidth` against this port over 2913 cases (upstream suite +
-  curated real LaTeX + 2626 randomized token-soup cases) => **0 divergences**.
+  real `visibleWidth` against this port. Two sweeps:
+  (1) 2913 cases (upstream suite + curated real LaTeX + 2626 randomized
+  token-soup cases) => **0 divergences**; (2) editor11's complete-by-construction
+  sweep of 1061 cases that mechanically enumerates every upstream table entry
+  and every environment in inline and display mode => `total=1061
+  divergences=0`, plus a 403-case per-entry corpus => `total=403 divergences=0`.
   The only observed differences (11 of 3000 randomized cases) are inputs
   containing non-BMP characters, where the reference splits UTF-16 surrogate
   halves and the port indexes `char`s.
@@ -193,32 +202,59 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   layout to the external `grok-mermaid` package. That dependency cannot be added
   here (no network/npm dependency in a renderer), so this row ships a
   self-contained engine instead of a port.
-- Covered: `graph`/`flowchart` with `TD`/`TB`/`LR` (with optional `;`), node ids
-  with or without labels, the label shapes `[]`, `()`, `{}`, `(())`, `([])`,
-  `[[]]`, `{{}}` (all drawn as a box), chained and repeated links, `-->`/`->`
-  (arrow head), `---` (no head), `-.->`/`==>` (arrow head; stroke styling not
-  modelled), `|label|` edge labels, `:::class` decorations, `classDef`/`class`/
-  `style`/`linkStyle`/`click` directives, `%%` comments, quoted and CJK labels,
-  and disconnected components.
+- Covered: `graph`/`flowchart` with `TD`/`TB`/`LR` (with optional `;`, and `;`
+  may terminate the header and separate same-line statements:
+  `flowchart LR; A --> B; B --> C`), node ids with or without labels, the label
+  shapes `[]`, `()`, `{}`, `(())`, `([])`, `[[]]`, `{{}}` (all drawn as a box),
+  quoted labels including labels containing the closing delimiter (`A["a[b]c"]`)
+  and quoted `|link labels|`, `%%` comments anywhere outside a quoted label,
+  chained and repeated links, `-->`/`->` (arrow head), `---` (no head),
+  `-.->`/`==>` (arrow head; stroke styling not modelled), `|label|` edge
+  labels, `:::class` decorations, `classDef`/`class`/`style`/`linkStyle`/`click`
+  directives, quoted and CJK labels, and disconnected components.
 - Fails closed with a typed `MermaidError` (no panic, no partial diagram, no
   unbounded work): other diagram types (`pie`, `sequenceDiagram`, …), `BT`/`RL`
   (rejected rather than misrendered — mirroring the grid would reverse labels),
-  subgraphs, `&` node lists, `A -- text --> B` inline labels, other arrow
-  tokens, unbalanced brackets, cycles, edges that skip a layer, and anything
-  over `MAX_MERMAID_*` (16 KiB source, 64 nodes, 256 edges, 48-cell labels,
-  400×200 art).
+  `subgraph`/`end`/`direction` statements, `&` node lists, `A -- text --> B`
+  inline labels, other arrow tokens, unbalanced brackets/quotes, cycles, edges
+  that skip a layer, and anything over `MAX_MERMAID_*` (16 KiB source, 64 nodes,
+  256 edges, 48-cell labels, 400×200 art).
 - Not modelled: shape outlines (diamonds/stadiums render as boxes), link stroke
-  styling, subgraphs, `BT`/`RL`, upstream's style-span/warning channels, and
-  the "unrendered diagram" fallback text — the embedding component owns them
-  and should map `Err` onto that fallback. **No consumer is wired yet**
+  styling, subgraphs, `BT`/`RL`, HTML-entity decoding in labels (emitted
+  literally), upstream's style-span/warning channels, and the "unrendered
+  diagram" fallback text — the embedding component owns them and should map
+  `Err` onto that fallback. **No consumer is wired yet**
   (`crates/octet-coding-agent` has no `rich_text::mermaid` call site).
-- Tests: `crates/sexy-tui-rs/tests/mermaid_render.rs`, 10 tests. Run:
+- Tests: `crates/sexy-tui-rs/tests/mermaid_render.rs`, 11 tests. Run:
   `cargo test -p sexy-tui-rs --test mermaid_render` =>
-  `test result: ok. 10 passed; 0 failed` (22 supported goldens, 16 fail-closed
-  messages, width invariant, wide-label alignment, size limits).
+  `test result: ok. 11 passed; 0 failed` (29 supported goldens including the
+  semicolon/comment/quoted-label cases, 20 fail-closed messages, a deterministic
+  1500-input token-soup fuzz test that must not panic or exceed the size caps,
+  width invariant, wide-label alignment, size limits).
 - Fixed while landing this row: `:::` class annotations parsed only two colons
   (so `A[Foo]:::highlight` failed), `BT`/`RL` were silently drawn as `TD`/`LR`,
   `---` drew an arrow head, a trailing `;` on the header line was rejected, and
   a CJK label pushed the box's right border one column right (the covered cell
   of a double-width glyph was emitted as a space).
+- Fixed/extended by editor11: `%%` comments are now stripped anywhere on a line
+  (outside quotes) instead of only at line start, `;` separates statements on a
+  line and may share the header line, quoted labels may contain the closing
+  delimiter, quoted `|link labels|` lose their quotes, and
+  `subgraph`/`end`/`direction` report a named typed error instead of being
+  parsed as node ids. Observed:
+
+      flowchart LR; A[One] --> B[Two]; B --> C[Three] =>
+      ┌─────┐    ┌─────┐    ┌───────┐
+      │ One ├───▶│ Two ├───▶│ Three │
+      └─────┘    └─────┘    └───────┘
+      flowchart LR\n  A["a[b]c"] --> B[Two] =>
+      ┌───────┐    ┌─────┐
+      │ a[b]c ├───▶│ Two │
+      └───────┘    └─────┘
+      flowchart LR\n  A -->|"two words"| B =>
+      ┌───┐two words  ┌───┐
+      │ A ├──────────▶│ B │
+      └───┘           └───┘
+      flowchart LR\n  subgraph S\n  A --> B\n  end =>
+      Err "dropped, line 2: `subgraph` statements are not supported"
 

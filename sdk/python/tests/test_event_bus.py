@@ -1,0 +1,452 @@
+"""Behavioural tests for the bounded, host-mediated extension event bus.
+
+The bus is fail-closed and bounded by construction: unknown or foreign topics,
+payloads that do not match the declared topic spec, credential/PII/path-shaped
+data, and queue pressure are all refused instead of silently degraded. These
+tests exercise the SDK enforcement kernel plus the extension-side participant
+with an injected host-request callable (the host does not implement ``bus/*``
+yet, so the end-to-end path stays UNRUN and is documented).
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from octet_extension.event_bus import (  # noqa: E402
+    CAPABILITY_MISMATCH,
+    DEFAULT_LIMITS,
+    INVALID_PARAMS,
+    RESOURCE_EXHAUSTED,
+    BusEnvelope,
+    BusError,
+    BusLimits,
+    BoundedQueue,
+    EventBusKernel,
+    FieldSpec,
+    HostEventBus,
+    TopicRegistry,
+    TopicSpec,
+    validate_payload,
+    validate_topic,
+)
+from octet_extension.protocol import RpcError  # noqa: E402
+
+
+def status_topic(owner: str = "alpha") -> TopicSpec:
+    return TopicSpec(
+        owner=owner,
+        name="status",
+        fields=(
+            FieldSpec.string("summary", max_bytes=128),
+            FieldSpec.integer("count", minimum=0, maximum=1000),
+            FieldSpec.boolean("degraded", required=False),
+            FieldSpec.enum("phase", ("starting", "ready", "failed")),
+        ),
+        description="bounded extension status",
+    )
+
+
+class TopicValidationTests(unittest.TestCase):
+    def test_topic_syntax_is_strict_and_namespaced(self) -> None:
+        self.assertEqual(("alpha", "status"), validate_topic("bus.alpha.status"))
+        for topic in ("", "alpha.status", "bus.alpha", "bus.Alpha.status", "bus.alpha.status.extra", "bus../etc"):
+            with self.assertRaises(BusError, msg=topic) as caught:
+                validate_topic(topic)
+            self.assertEqual(INVALID_PARAMS, caught.exception.code)
+
+    def test_unknown_topic_fails_closed(self) -> None:
+        kernel = EventBusKernel()
+        kernel.declare(status_topic())
+        with self.assertRaises(BusError) as caught:
+            kernel.registry.get("bus.alpha.missing")
+        self.assertEqual("unknown_topic", caught.exception.reason)
+        with self.assertRaises(BusError):
+            kernel.subscribe("beta", "bus.alpha.missing")
+
+    def test_registry_rejects_duplicate_and_forbidden_declarations(self) -> None:
+        registry = TopicRegistry()
+        registry.declare(status_topic())
+        with self.assertRaises(BusError) as caught:
+            registry.declare(status_topic())
+        self.assertEqual("topic_already_declared", caught.exception.reason)
+        with self.assertRaises(BusError) as forbidden:
+            registry.declare(
+                TopicSpec(owner="alpha", name="audit", fields=(FieldSpec.string("apiKey"),))
+            )
+        self.assertEqual("forbidden_field", forbidden.exception.reason)
+
+    def test_limits_are_validated(self) -> None:
+        with self.assertRaises(BusError):
+            BusLimits(max_queue_messages=0)
+        with self.assertRaises(BusError):
+            BusLimits(max_queue_messages=8192)
+        with self.assertRaises(BusError):
+            BusLimits(max_message_bytes=-1)
+
+
+class PayloadValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.spec = status_topic()
+
+    def test_valid_payload_is_returned_unchanged(self) -> None:
+        payload = {"summary": "all green", "count": 3, "phase": "ready"}
+        self.assertEqual(payload, validate_payload(self.spec, payload))
+
+    def test_shape_violations_fail_closed(self) -> None:
+        cases = (
+            ({"count": 1, "phase": "ready"}, "missing_field"),
+            ({"summary": "x", "count": 1, "phase": "ready", "extra": "nope"}, "unknown_field"),
+            ({"summary": "x", "count": "1", "phase": "ready"}, "invalid_field_type"),
+            ({"summary": "x", "count": 1, "phase": "unknown"}, "invalid_field_value"),
+            ({"summary": "x", "count": -1, "phase": "ready"}, "field_below_minimum"),
+            ({"summary": "x", "count": 5000, "phase": "ready"}, "field_above_maximum"),
+            ("not-an-object", "payload_not_an_object"),
+        )
+        for payload, reason in cases:
+            with self.assertRaises(BusError, msg=reason) as caught:
+                validate_payload(self.spec, payload)
+            self.assertEqual(reason, caught.exception.reason)
+            self.assertEqual(INVALID_PARAMS, caught.exception.code)
+
+    def test_authority_shaped_fields_are_refused(self) -> None:
+        for field_name in ("authorization", "api_key", "privatePath", "capability", "sessionToken", "trust"):
+            spec = TopicSpec(owner="alpha", name="audit", fields=(FieldSpec.string(field_name),))
+            with self.assertRaises(BusError) as caught:
+                validate_payload(spec, {field_name: "value"})
+            self.assertEqual("forbidden_field", caught.exception.reason)
+
+    def test_pii_and_private_values_are_refused(self) -> None:
+        cases = (
+            ("user@example.com", "pii_detected"),
+            ("sk-live-abcdefghijklmnop", "pii_detected"),
+            ("Bearer abcdefghijklmnop", "pii_detected"),
+            ("/Users/someone/private/report.txt", "private_path"),
+            ("~/.ssh/id_ed25519", "private_path"),
+            ("+1 (555) 010-9999", "pii_detected"),
+            ("first line\nsecond line", "control_character"),
+        )
+        for value, reason in cases:
+            with self.assertRaises(BusError, msg=value) as caught:
+                validate_payload(self.spec, {"summary": value, "count": 1, "phase": "ready"})
+            self.assertEqual(reason, caught.exception.reason)
+
+    def test_oversized_string_and_field_count_are_bounded(self) -> None:
+        with self.assertRaises(BusError) as caught:
+            validate_payload(self.spec, {"summary": "x" * 129, "count": 1, "phase": "ready"})
+        self.assertEqual(RESOURCE_EXHAUSTED, caught.exception.code)
+        spec = TopicSpec(
+            owner="alpha",
+            name="wide",
+            fields=tuple(FieldSpec.string("field{0}".format(index)) for index in range(3)),
+        )
+        limits = BusLimits(max_payload_fields=2)
+        with self.assertRaises(BusError) as caught:
+            validate_payload(spec, {"field0": "a", "field1": "b", "field2": "c"}, limits)
+        self.assertEqual("too_many_fields", caught.exception.reason)
+
+
+class BoundedQueueTests(unittest.TestCase):
+    def envelope(self, sequence: int) -> BusEnvelope:
+        return BusEnvelope(
+            topic="bus.alpha.status",
+            publisher="alpha",
+            sequence=sequence,
+            published_at_ms=sequence,
+            payload={"sequence": sequence},
+            byte_len=16,
+        )
+
+    def test_queue_bounds_messages_and_bytes(self) -> None:
+        queue = BoundedQueue(BusLimits(max_queue_messages=2, max_queue_bytes=1024))
+        queue.push(self.envelope(1))
+        queue.push(self.envelope(2))
+        with self.assertRaises(BusError) as caught:
+            queue.push(self.envelope(3))
+        self.assertEqual(RESOURCE_EXHAUSTED, caught.exception.code)
+        self.assertEqual(2, len(queue))
+        drained = queue.drain()
+        self.assertEqual([1, 2], [item.sequence for item in drained])
+        self.assertEqual(0, queue.byte_len)
+
+    def test_queue_byte_budget_and_drain_bound(self) -> None:
+        queue = BoundedQueue(BusLimits(max_queue_messages=64, max_queue_bytes=20))
+        queue.push(self.envelope(1))
+        with self.assertRaises(BusError) as caught:
+            queue.push(self.envelope(2))
+        self.assertEqual("queue_bytes_exceeded", caught.exception.reason)
+        self.assertEqual(1, len(queue.drain(max_messages=1)))
+        with self.assertRaises(BusError):
+            queue.drain(max_messages=0)
+
+
+class KernelTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.kernel = EventBusKernel()
+        self.status = self.kernel.declare(status_topic("alpha"))
+
+    def publish(self, publisher: str = "alpha", *, sequence: int = 1, payload=None) -> BusEnvelope:
+        return self.kernel.publish(
+            publisher,
+            self.status.topic,
+            payload if payload is not None else {"summary": "ok", "count": 1, "phase": "ready"},
+            published_at_ms=1_000 * sequence,
+        )
+
+    def test_publish_requires_topic_ownership(self) -> None:
+        with self.assertRaises(BusError) as caught:
+            self.publish("beta")
+        self.assertEqual(CAPABILITY_MISMATCH, caught.exception.code)
+        self.assertEqual("foreign_topic", caught.exception.reason)
+
+    def test_delivery_is_per_extension_and_subscription_scoped(self) -> None:
+        self.kernel.subscribe("alpha", self.status.topic)
+        self.kernel.subscribe("beta", self.status.topic)
+        envelope = self.publish()
+        self.assertEqual(("alpha", "beta"), self.kernel.subscribers(self.status.topic))
+        self.assertEqual([envelope], self.kernel.deliver("beta", self.status.topic))
+        self.assertEqual([envelope], self.kernel.deliver("alpha", self.status.topic))
+        self.assertEqual([], self.kernel.deliver("beta", self.status.topic))
+        with self.assertRaises(BusError) as caught:
+            self.kernel.deliver("gamma", self.status.topic)
+        self.assertEqual("not_subscribed", caught.exception.reason)
+
+    def test_unsubscribed_extension_receives_nothing(self) -> None:
+        self.kernel.subscribe("alpha", self.status.topic)
+        self.publish()
+        self.kernel.publish(
+            "alpha",
+            self.status.topic,
+            {"summary": "second", "count": 2, "phase": "ready"},
+            published_at_ms=2_000,
+        )
+        self.assertEqual(2, len(self.kernel.deliver("alpha", self.status.topic)))
+        self.kernel.unsubscribe("alpha", self.status.topic)
+        with self.assertRaises(BusError):
+            self.kernel.deliver("alpha", self.status.topic)
+
+    def test_sequence_is_monotonic_per_publisher_and_topic(self) -> None:
+        self.kernel.subscribe("beta", self.status.topic)
+        first = self.publish(sequence=1)
+        second = self.publish(sequence=2)
+        self.assertEqual((1, 2), (first.sequence, second.sequence))
+        drained = self.kernel.deliver("beta", self.status.topic)
+        self.assertEqual([1, 2], [item.sequence for item in drained])
+
+    def test_full_queue_raises_instead_of_dropping(self) -> None:
+        kernel = EventBusKernel(BusLimits(max_queue_messages=1))
+        status = kernel.declare(status_topic("alpha"))
+        kernel.subscribe("beta", status.topic)
+        kernel.publish("alpha", status.topic, {"summary": "a", "count": 1, "phase": "ready"}, published_at_ms=1)
+        with self.assertRaises(BusError) as caught:
+            kernel.publish("alpha", status.topic, {"summary": "b", "count": 2, "phase": "ready"}, published_at_ms=2)
+        self.assertEqual(RESOURCE_EXHAUSTED, caught.exception.code)
+        self.assertEqual(1, len(kernel.deliver("beta", status.topic)))
+
+    def test_message_size_and_subscription_limits(self) -> None:
+        kernel = EventBusKernel(BusLimits(max_message_bytes=32))
+        status = kernel.declare(status_topic("alpha"))
+        kernel.subscribe("beta", status.topic)
+        with self.assertRaises(BusError) as caught:
+            kernel.publish(
+                "alpha",
+                status.topic,
+                {"summary": "x" * 64, "count": 1, "phase": "ready"},
+                published_at_ms=1,
+            )
+        self.assertEqual(RESOURCE_EXHAUSTED, caught.exception.code)
+
+        limited = EventBusKernel(BusLimits(max_subscriptions=1))
+        limited.declare(status_topic("alpha"))
+        limited.declare(TopicSpec(owner="alpha", name="other", fields=(FieldSpec.string("note"),)))
+        limited.subscribe("beta", "bus.alpha.status")
+        with self.assertRaises(BusError) as caught:
+            limited.subscribe("beta", "bus.alpha.other")
+        self.assertEqual("subscription_limit", caught.exception.reason)
+
+    def test_expired_messages_are_dropped_at_delivery(self) -> None:
+        self.kernel.subscribe("beta", self.status.topic)
+        self.publish(sequence=1)
+        self.assertEqual([], self.kernel.deliver("beta", self.status.topic, now_ms=1_000_000))
+        self.kernel.publish(
+            "alpha",
+            self.status.topic,
+            {"summary": "fresh", "count": 2, "phase": "ready"},
+            published_at_ms=1_000_000,
+        )
+        self.assertEqual(1, len(self.kernel.deliver("beta", self.status.topic, now_ms=1_000_100)))
+
+    def test_envelope_is_inert_and_frozen(self) -> None:
+        self.kernel.subscribe("beta", self.status.topic)
+        envelope = self.publish()
+        with self.assertRaises(Exception):
+            envelope.publisher = "beta"  # type: ignore[misc]
+        payload = envelope.payload
+        with self.assertRaises(TypeError):
+            payload["count"] = 5  # type: ignore[index]
+        self.assertEqual(
+            {
+                "topic": "bus.alpha.status",
+                "publisher": "alpha",
+                "sequence": 1,
+                "publishedAtMs": 1000,
+                "payload": {"summary": "ok", "count": 1, "phase": "ready"},
+            },
+            envelope.public(),
+        )
+
+
+class HostEventBusClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.registry = TopicRegistry()
+        self.registry.declare(status_topic("alpha"))
+        self.registry.declare(status_topic("beta"))
+        self.calls = []
+
+    def make_bus(self, extension_id: str, responder=None) -> HostEventBus:
+        def request(method, params):
+            self.calls.append((method, params))
+            if responder is not None:
+                return responder(method, params)
+            return {"sequence": 7}
+
+        return HostEventBus(
+            request,
+            self.registry,
+            extension_id=extension_id,
+            now_ms=lambda: 5_000,
+        )
+
+    def test_subscribe_and_publish_use_the_host_methods(self) -> None:
+        bus = self.make_bus("alpha")
+        bus.subscribe("bus.beta.status")
+        envelope = bus.publish(
+            "bus.alpha.status",
+            {"summary": "ok", "count": 2, "phase": "ready"},
+        )
+        self.assertEqual(7, envelope.sequence)
+        self.assertEqual(
+            [
+                ("bus/subscribe", {"topic": "bus.beta.status"}),
+                (
+                    "bus/publish",
+                    {
+                        "topic": "bus.alpha.status",
+                        "payload": {"summary": "ok", "count": 2, "phase": "ready"},
+                        "publishedAtMs": 5000,
+                    },
+                ),
+            ],
+            self.calls,
+        )
+
+    def test_local_violations_never_reach_the_host(self) -> None:
+        bus = self.make_bus("alpha")
+        with self.assertRaises(BusError):
+            bus.publish("bus.beta.status", {"summary": "ok", "count": 1, "phase": "ready"})
+        with self.assertRaises(BusError):
+            bus.publish("bus.alpha.status", {"summary": "user@example.com", "count": 1, "phase": "ready"})
+        with self.assertRaises(BusError):
+            bus.publish("bus.alpha.status", {"summary": "ok", "count": 1, "phase": "nope"})
+        with self.assertRaises(BusError):
+            bus.subscribe("bus.alpha.missing")
+        self.assertEqual([], self.calls)
+
+    def test_host_failure_is_propagated_not_swallowed(self) -> None:
+        def failing(method, params):
+            raise RpcError(-32601, "unknown or unnegotiated method")
+
+        bus = self.make_bus("alpha", failing)
+        with self.assertRaises(RpcError) as caught:
+            bus.publish("bus.alpha.status", {"summary": "ok", "count": 1, "phase": "ready"})
+        self.assertEqual(-32601, caught.exception.code)
+        self.assertFalse(bus._subscribed)  # type: ignore[attr-defined]
+
+    def test_inbound_delivery_is_validated_and_sequence_bounded(self) -> None:
+        bus = self.make_bus("beta")
+        bus.subscribe("bus.alpha.status")
+        envelope = bus.accept_event(
+            {
+                "topic": "bus.alpha.status",
+                "publisher": "alpha",
+                "sequence": 3,
+                "publishedAtMs": 4_900,
+                "payload": {"summary": "ok", "count": 1, "phase": "ready"},
+            }
+        )
+        assert envelope is not None
+        self.assertEqual(("alpha", 3), (envelope.publisher, envelope.sequence))
+
+    def test_inbound_violations_are_refused(self) -> None:
+        bus = self.make_bus("beta")
+        bus.subscribe("bus.alpha.status")
+        base = {
+            "topic": "bus.alpha.status",
+            "publisher": "alpha",
+            "sequence": 1,
+            "publishedAtMs": 4_900,
+            "payload": {"summary": "ok", "count": 1, "phase": "ready"},
+        }
+        cases = (
+            ({**base, "topic": "bus.beta.status"}, CAPABILITY_MISMATCH),
+            ({**base, "publisher": "beta"}, INVALID_PARAMS),
+            ({**base, "publisher": "beta"}, INVALID_PARAMS),
+            ({**base, "sequence": "1"}, INVALID_PARAMS),
+            ({**base, "payload": {"summary": "user@example.com", "count": 1, "phase": "ready"}}, INVALID_PARAMS),
+            ({**base, "payload": {"summary": "ok", "count": 1}}, INVALID_PARAMS),
+            ("not-an-object", INVALID_PARAMS),
+        )
+        for params, code in cases:
+            with self.assertRaises(BusError, msg=repr(params)) as caught:
+                bus.accept_event(params)
+            self.assertEqual(code, caught.exception.code)
+
+    def test_inbound_stale_sequence_is_refused(self) -> None:
+        bus = self.make_bus("beta")
+        bus.subscribe("bus.alpha.status")
+        bus.accept_event(
+            {
+                "topic": "bus.alpha.status",
+                "publisher": "alpha",
+                "sequence": 2,
+                "publishedAtMs": 4_900,
+                "payload": {"summary": "ok", "count": 1, "phase": "ready"},
+            }
+        )
+        with self.assertRaises(BusError) as caught:
+            bus.accept_event(
+                {
+                    "topic": "bus.alpha.status",
+                    "publisher": "alpha",
+                    "sequence": 1,
+                    "publishedAtMs": 4_900,
+                    "payload": {"summary": "ok", "count": 1, "phase": "ready"},
+                }
+            )
+        self.assertEqual("stale_sequence", caught.exception.reason)
+
+    def test_declare_is_namespaced_to_the_extension(self) -> None:
+        bus = self.make_bus("alpha")
+        spec = bus.declare(name="progress", fields=(FieldSpec.integer("percent", minimum=0, maximum=100),))
+        self.assertEqual("bus.alpha.progress", spec.topic)
+        with self.assertRaises(BusError):
+            self.make_bus("gamma").publish("bus.alpha.status", {"summary": "ok", "count": 1, "phase": "ready"})
+
+
+class ContractStatusTests(unittest.TestCase):
+    def test_defaults_are_bounded(self) -> None:
+        self.assertLessEqual(DEFAULT_LIMITS.max_message_bytes, 64 * 1024)
+        self.assertLessEqual(DEFAULT_LIMITS.max_queue_messages, 256)
+        self.assertLessEqual(DEFAULT_LIMITS.max_subscriptions, 32)
+        self.assertLessEqual(DEFAULT_LIMITS.max_drain_messages, 256)
+
+    def test_errors_map_to_protocol_codes(self) -> None:
+        error = BusError(RESOURCE_EXHAUSTED, "queue_full")
+        self.assertEqual({"code": -32012, "reason": "queue_full"}, error.error_object())
+
+
+if __name__ == "__main__":
+    unittest.main()

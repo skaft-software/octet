@@ -278,6 +278,7 @@ impl serde::Serialize for Base64Bytes {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum WireImageUrl {
     Url(String),
     Inline {

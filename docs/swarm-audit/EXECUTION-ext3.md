@@ -410,7 +410,7 @@ note). Files touched by me: `apps/apple-shared/Sources/OctetServe/{WireEnums,Run
   edited (other owner), it is linked from `docs/README.md`.
 - 6.2 artifacts exist: `AGENTS.md`, `docs/maintainers/README.md`, prompts `cl|is|pr|wr.md`, skills
   `release|add-provider|interactive-testing`. The maintainer set was not reachable from
-  `docs/README.md`; I added `- [Maintainer prompts, skills and playbooks](maintainers/README.md)`
+  `docs/README.md`; I added `- [Maintainer prompts, skills and playbooks](../maintainers/README.md)`
   under `## Development`.
 
 ### REPAIR (deliberate exception to my path list): `apps/apple-shared` now compiles
@@ -517,3 +517,191 @@ touched it in 8h (all five files mtime 09:16, `.build` 12:34), it is Swift-only 
 
 ## START 2026-09-15T17:42:57Z ext9 alive
 
+
+START 2026-09-15T17:53:02Z ext10 alive
+START 2026-09-15T17:55:32Z ext11 alive
+
+### ext11 — Row #261 published v0.8 Pi runtime resource/latency evidence (real artifact, threshold-derived)
+- `scripts/bench-pi-runtime.py` no longer hardcodes `hold`. `release_decision.status` is derived
+  from six documented thresholds (`THRESHOLD_DEFAULTS`) as `fail` (any breach), `incomplete`
+  (metric `unavailable`, or < 5 repetitions), else `pass`; `release_approval.approved` is a separate
+  evidence-gate verdict so a hermetic fixture can never approve a release. `--threshold NAME=VALUE`
+  overrides one limit and fails closed (exit 2) on unknown/non-numeric/negative input.
+- New `--publish` mode: refuses to overwrite, requires the output inside `docs/benchmarks/` and a full
+  lowercase 40/64-hex candidate, omits the CPU brand string, and writes `results.json`,
+  a generated `README.md` (method, thresholds, gates, profile table) and `SHA256SUMS`.
+- Defect found and fixed: macOS 27 `ps` rejects the `thcount` keyword, so every Darwin resource sample
+  silently became `unavailable` (memory-safety of the row's "resource samples" was nominal). The
+  harness now probes `MAC_PS_FORMATS` once and falls back to `pid=,ppid=,rss=,pcpu=`, keeping RSS and
+  process counts measured and recording the unsupported thread column as `null`.
+- Committed capture: `docs/benchmarks/pi-runtime-v0.8-fixture/` (candidate
+  `00e3ca3e561fc807491931712b93e534c952cf59`, 5 repetitions, 25 ms interval, 16 samples/process,
+  116 KB). Observed `status: pass`, `release_approval.approved: false` with unmet gates
+  `runtime_manager_adapter` (observed `hermetic_fixture`) and `inference_attribution`.
+  All six thresholds pass, e.g. startup overhead median 4.245 ms ≤ 250 ms, startup p95 51.612 ms ≤
+  1000 ms, warm-call p95 0.221 ms ≤ 250 ms, peak-RSS delta 5776 KiB ≤ 262144 KiB.
+- Offline, no network, no provider/model call, temporary HOME, no credentials inherited (asserted by
+  the artifact's `metadata.safety` and by running with `--offline`-free stdlib-only code).
+- `python3 -m unittest discover -s scripts/tests -p 'test_bench_pi_runtime.py' -v` =>
+  `Ran 8 tests ... OK` (new cases: threshold parsing fails closed; pass/fail/incomplete derivation;
+  unavailable RSS is not estimated; publish refuses outside `docs/benchmarks/` and refuses a
+  non-revision candidate).
+- Docs: `docs/benchmarks/pi-runtime-evidence.md` (decision/thresholds/publication/macOS limits),
+  `docs/benchmarks/README.md`; inventory rows added to `docs/package-assets.txt`.
+- Gap recorded, not claimed: `scripts/test-packaged-docs.py` asserts inventory files are git-tracked,
+  so it fails while these new files are uncommitted (`AssertionError: {...}` for the three new paths);
+  the link/inventory validation can only pass after the parent commits them. A real API 0.3
+  runtime-manager adapter, Linux capture, model/server identity and GPU evidence remain UNRUN.
+- CHANGELOG-ready: "Score the Pi runtime fixture harness against documented bounded thresholds and
+  publish a self-describing, sanitized v0.8 evidence artifact (`--publish`); fix Darwin resource
+  sampling where macOS 27 `ps` rejects the `thcount` keyword."
+
+### ext11 — Row #341 Serve cross-boundary security invariants (executed)
+- `cargo test --offline --locked --manifest-path extensions/octet-serve/Cargo.toml --profile ci-test
+  --test security_full` => `running 3 tests ... test result: ok. 3 passed; 0 failed` for
+  `resources_are_opaque_session_scoped_and_reopenable`,
+  `public_command_dtos_fail_closed_at_unknown_and_size_boundaries`,
+  `internal_service_failures_are_sanitized_and_public_errors_reject_extra_fields`.
+  Whole workspace in the same pass: 15 targets + doc-tests, `284 passed / 0 failed`.
+- Two defects were found by actually running it: (1) `tests/lifecycle_full.rs:232` did not compile
+  (`EventPayload::UsageUpdated` wants `UsageSnapshot`, `error[E0308]`); (2) the resource fixture
+  expected a staged, uncommitted binding to survive `ResourceStore::open`, but the commit sidecar is
+  the documented sole restart visibility boundary — the fixture now commits via `persist_record`.
+- Hardening from the failing invariant: `SanitizedError::public` sanitized with `multiline: true`, so
+  a public error could carry `\n`/`\r`/`\t` and a client-supplied error could pass validation with an
+  embedded newline. Both the constructor and `validate` are now strictly single-line (all callers
+  pass fixed one-line sentences, so no message text changed). New assertions cover U+FFFD replacement
+  (`"bad\nmessage\t"` -> `bad<U+FFFD>message<U+FFFD>`), escape/bidi stripping, and rejection of a
+  client-supplied newline.
+- `scripts/check-octet-serve-boundaries.sh` in this shared worktree prints ~258 KB of unrelated paths
+  (it audits base `63f73d65...HEAD` plus every worker's dirty file). Isolated run: local clone at
+  `00e3ca3e` + only the three changed Serve files, base `HEAD` ->
+  `octet serve changes stay within the optional extension/application boundary`, rc=0.
+- Record: `docs/qualification/serve-security-full.md`; predecessor
+  `docs/qualification/serve-lifecycle-current-candidate.md` now points to the observed runs.
+- CHANGELOG-ready: "Qualify the Serve security invariants with an executed bounded fixture run and
+  make public error text strictly single-line (control characters cannot cross the public boundary)."
+
+### ext11 — Row #396 Serve lifecycle/isolation/reconnect acceptance (executed)
+- `--test lifecycle_full` => `3 passed; 0 failed`:
+  `dropping_one_attachment_leaves_owner_running_and_command_effect_once`,
+  `owner_loss_fences_actor_without_ack_cache_or_second_dispatch`,
+  `stale_generation_is_rejected_before_dispatch_and_replay_is_cursor_bound` (stale generation
+  rejected with `current_generation: Some(1)` and a driver closure that `panic!`s; journal
+  `event_capacity: 2` returns `Gap{earliest 2, latest 3}` for a zero cursor and exactly the two
+  retained events for cursor `(1,1)`).
+- Supporting cells in the same run: `ten_sessions_isolate_attach_loss_duplicate_cancel_and_bounded_replay`,
+  `duplicate_command_reuses_exact_ack_and_never_dispatches_twice`,
+  `concurrent_open_of_one_session_constructs_one_driver`,
+  `concurrent_reopen_after_owner_closes_installs_one_refreshed_actor`,
+  `two_sessions_are_owned_and_projected_in_isolation`,
+  `quarantined_owner_wait_is_bounded_without_releasing_the_fence`,
+  `trust_revocation_fences_commands_and_retires_matching_actors`, `tests/lifecycle_current.rs`.
+- Flake recorded, not hidden: `pty::tests::shell_exit_settles_signal_ignoring_descendants` failed once
+  with `terminal stream ended: channel lagged by 34` under full-suite load and passed alone
+  (`1 passed; 0 failed`) and on the recorded re-run.
+- EXERCISED HERE: in-process actor/core lifecycle through the public API. NEEDS A LIVE HOST: real
+  transport disconnect/reconnect, host loss/takeover, crash recovery of a real state directory,
+  measured OS budgets, approval/steer/follow-up journeys, installed-binary restart.
+- Record: `docs/qualification/serve-lifecycle-reconnect-full.md`.
+- CHANGELOG-ready: "Publish the Serve lifecycle/reconnect acceptance record: generation fencing,
+  owner loss, duplicate idempotence, attachment drop, and cursor-bounded journal replay all pass,
+  and fix the `lifecycle_full` fixture that never compiled."
+
+### ext11 — Row #42 inter-extension event bus (bounded primitive + host contract; host mediation left)
+- Implemented `sdk/python/octet_extension/event_bus.py`: typed topics (`bus.<owner>.<name>`),
+  owner-only publish, per-`(extension, topic)` bounded queues, monotonic per-publisher sequence,
+  age-based expiry at delivery, immutable payload views, and a fail-closed matrix
+  (`invalid_params`/`capability_mismatch`/`resource_exhausted`) for unknown or foreign topics,
+  unknown/missing/wrong-typed fields, forbidden authority-shaped field names, PII/secret/private-path
+  values, control characters, stale/duplicate inbound sequence, and queue pressure (raise, never
+  drop). `EventBusKernel`/`TopicRegistry`/`BoundedQueue` are the deterministic enforcement reference;
+  `HostEventBus` is the extension-side participant over the SDK host-request API.
+- Observed: `PYTHONPATH=sdk/python python3 -m unittest sdk/python/tests/test_event_bus.py` =>
+  `Ran 28 tests ... OK`; whole SDK `python3 -m unittest discover -s sdk/python/tests` =>
+  `Ran 101 tests ... OK`. Two kernel defects were found and fixed by the tests (per-field byte budget
+  was ignored; payloads were mutable after publication).
+- NOT IMPLEMENTED, recorded with exact anchors: the host has no `event_bus` capability and no `bus/*`
+  method, so `HostEventBus` publish/subscribe fail closed with the host's `unknown_method`. Required
+  next steps (in `docs/extensions/event-bus.md`): schema capability + methods at
+  `protocol/extension-api-v0.3.schema.json:280`, Rust specs at
+  `crates/octet-agent/src/extension_api_v03.rs:80`/`:106`, a host bus service, and a Rust plus
+  two-extension end-to-end fixture. No extension can use the bus end-to-end today; nothing is claimed
+  as working.
+- Docs/ledger: `docs/extensions/event-bus.md` (bounds, fail-closed matrix, remaining host work),
+  `sdk/python/README.md`, `docs/README.md`, `docs/package-assets.txt`, and the `Partial` row in
+  `docs/parity/extensions.md` (my path).
+- CHANGELOG-ready: "Add the bounded, extension-scoped event-bus primitive and host contract: typed
+  topics, owner-only publish, bounded queues, and fail-closed rejection of unknown topics,
+  authority-shaped fields, and PII-shaped payloads; the host capability remains outstanding."
+
+### ext11 — Row #4 Pi session/transcript import (format not establishable; exact artifact recorded)
+- Searched the tree for a Pi session/transcript representation: `migrate.rs` imports
+  settings/models/skills/MCP only and records `eventBus` as a static-analysis surface (`:2406`);
+  `MigrationImportResult` has no session field; `extensions/octet-import-pi` owns no parsing;
+  `octet-pi-compat` treats `ctx.sessionManager` as a throwing proxy (`bridge.mjs:903`),
+  `README.md:148` lists session entries as an explicit parity blocker, `COMPATIBILITY.md:175` marks
+  session snapshots "host-owned and rejected explicitly"; no session-file reader/writer, fixture,
+  schema or golden capture exists anywhere.
+- No parser was shipped, by design: a guessed reader would silently mis-import history. The bounded
+  untrusted-input design (size/shape/version bounds, no execution, no trust widening, redaction,
+  idempotence, dry-run, failure taxonomy) and the exact missing artifact (pinned upstream format spec
+  or a reviewed redacted capture corpus for the pinned Pi 0.84.4) are recorded in
+  `docs/pi-session-import.md`, linked from `docs/README.md` and inventoried in
+  `docs/package-assets.txt`.
+- Verdict: BLOCKED ON MISSING ARTIFACT (not on engineering). Nothing executed; no live Pi home was
+  read; the existing settings/model/skill/MCP import path was not touched.
+- CHANGELOG-ready: "Record the bounded Pi session/transcript import design and the exact missing
+  upstream format artifact instead of shipping an unvalidated transcript parser."
+
+### ext11 — Parity 6.1 and 6.2 verification (docs coverage + maintainer artifacts)
+- 6.1 verification: all twelve topic documents exist and resolve — settings (`configuration.md`),
+  session format (`session-format.md`), keybindings (`commands.md#keys`), compaction (`context.md`),
+  templates (`instructions.md`), providers (`providers.md`, not edited), packages (`packages.md`),
+  shell aliases (`shell-aliases.md`), terminal (`terminal.md`), tmux (`tmux.md`), Termux (`termux.md`),
+  Windows (`windows.md`) — and are linked from `docs/README.md`. A relative-link audit over the twelve
+  pages plus `docs/README.md`, `docs/maintainers/**`, and `docs/parity/{README,repo-tooling}.md`
+  resolved **239 links, 0 unresolved**.
+- 6.2 verification: four maintainer prompts (`cl|is|pr|wr.md`) and three skills (release,
+  add-provider, interactive-testing, 60/63/77 lines with `name`/`description` front matter) exist;
+  every prompt uses only `${@:-default}`, which `crates/octet-coding-agent/src/prompts.rs:589`
+  (`braced_argument`) supports along with `${@:start:len}` and `$N`.
+- DEFECT FIXED: the 6.2 table cited the repository-root `AGENTS.md`, which `.gitignore:42` keeps
+  local-only, so a fresh clone had a broken shipped link and no tracked conventions artifact. Added
+  the tracked mirror `docs/maintainers/conventions.md` (root file untouched and still local) and
+  repointed `docs/maintainers/README.md` and `docs/parity/repo-tooling.md`.
+- DEFECT FIXED: the shipped-docs gate was red. `python3 scripts/test-packaged-docs.py` requires every
+  tracked file under `docs/`, `examples/`, and `sdk/` to be listed in `docs/package-assets.txt`, and
+  81 tracked files were missing (parity, qualification, swarm-audit, maintainers, the 6.1 topic
+  pages, examples, SDK tests) with 15 markdown links pointing at uninventoried targets. Added the 81
+  inventory rows plus the six linked extension docs, mirrored the six non-docs extras into
+  `scripts/install.sh` `OCTET_DOCUMENTATION_EXTRAS`, and converted three links to files outside the
+  package (`ROADMAP.md`, two `crates/.../bootstrap*.rs`) into code spans in
+  `docs/qualification/{core-journeys-df5a7e80,discovery-current-candidate}.md`.
+  Observed after the fix (with the 10 new files treated as tracked, i.e. the post-commit state):
+  `packaged docs: 443 public files, 43 extra references; links, producer bytes and negative boundaries passed`.
+  Unpatched, the only remaining assertion failure is "inventory entries are untracked" for the 10 new
+  files; it clears when the parent commits them.
+- DECISION POINT for the parent: the exhaustive-inventory rule means the docs package now ships the
+  `docs/swarm-audit/**` and `docs/qualification/**` working records. If internal records must not
+  ship, the alternative is a packaging-policy change (exclude those trees from the checker's
+  tracked-subset rule and drop their inventory rows) — that is outside these rows.
+- Ledger: `docs/parity/README.md` rows `6.1`/`6.2` moved from `Partial` to `Landed` with the receipt
+  pointer; the detail page records the observed run.
+- CHANGELOG-ready: "Verify parity 6.1/6.2 docs and maintainer artifacts, add the tracked agent
+  conventions mirror, and repair the shipped-docs inventory so the packaged-docs gate passes."
+
+### ext11 — Computer-use authority rows #383/#385/#389/#390 recorded with exact primitives (never claimed)
+- `docs/parity/extensions.md` computer-use section now records all four authority rows in a
+  "recorded, never claimed" table: #383 host-brokered `policy/evaluate` authorization service
+  (host-owned approval, target selection, owner settlement; no computer-use/browser reference exists
+  in `crates/octet-coding-agent/src/host/*`); #385 real macOS host with Accessibility/AX trust plus
+  `main.py` backend dispatch (tests inject `MockNative`); #389 real Windows UIA/Composition host
+  (tests drive `FixtureSystem`); #390 release-catalog entry, packaged artifact, and physical
+  human-takeover plus hard process-loss release evidence (none exists in
+  `extensions/release-catalog.txt`).
+- Re-run for regression evidence only: `python3 -m unittest discover -s extensions/octet-computer-use/tests`
+  => `Ran 93 tests ... OK`. No live native run, packaging step, or takeover observation is claimed.
+- CHANGELOG-ready: "Record the computer-use authority rows (#383/#385/#389/#390) with their exact
+  policy/hardware/release-gated primitives in the parity ledger, without claiming any live native or
+  packaged qualification."

@@ -90,8 +90,8 @@ outcomes. Grouped options below remain individually required, not alternatives.
 | 2b.6 | Focus reporting and focus-out interaction reset | editor | Landed |
 | 2c.1 | Cached transcript search panel, match/current styling, prev/next click, Escape | TUI | Unverified |
 | 2c.2 | Hidden/auto/always themed transient scrollbar | TUI | Unverified |
-| 2c.3 | LaTeX rendering | TUI | In progress; port renders, completion pending |
-| 2c.4 | Mermaid box-drawing diagrams | TUI | In progress; honest subset only |
+| 2c.3 | LaTeX rendering | TUI | Landed; oracle-swept (1061 cases, 0 divergences), 407 goldens |
+| 2c.4 | Mermaid box-drawing diagrams | TUI | Landed; bounded self-captured subset, unsupported syntax fails closed |
 | 2c.5 | Component mouse events/MouseRegion/capture/focus/hover/click selection/link hit-test/right paste | TUI | Unverified |
 | 2c.6 | Native text clipboard read with existing write fallback | TUI | Pending; text only, images excluded |
 | 2d.1 | /settings defaults/theme/transport/images/editor padding | TUI | Unverified |
@@ -111,9 +111,9 @@ outcomes. Grouped options below remain individually required, not alternatives.
 | 3.4 | Span assertion harness | telemetry | Landed |
 | 3.5 | Provider/stream/tool/turn/compaction/summary/delegation span boundaries | telemetry | Landed; boundaries wired, behavioral test pending |
 | 3.6 | Tool and summary usage in totals, cache-hit rate, distinct cacheWrite1h; preserve uncertainty | telemetry | Landed |
-| 4.1 | ls directories/dotfiles/limit | tools | Landed |
-| 4.2 | find glob/gitignore/limit | tools | Landed |
-| 4.3 | Default grep: ignoreCase/context/limit/hidden | tools | Landed |
+| 4.1 | ls directories/dotfiles/limit | tools | Withdrawn by maintainer decision; behaviour served by ripgrep-backed `search` |
+| 4.2 | find glob/gitignore/limit | tools | Withdrawn by maintainer decision; behaviour served by ripgrep-backed `search` |
+| 4.3 | Default grep: ignoreCase/context/limit/hidden | tools | Withdrawn by maintainer decision; behaviour served by ripgrep-backed `search` |
 | 4.4 | Bash spilled output path | tools | Landed |
 | 4.5 | Bash session identity/provider/model/reasoning env + commandPrefix | tools | Landed |
 | 4.6 | Opt-in PowerShell, Windows CI evidence | tools | Partial; opt-in gating landed, Windows CI evidence hardware-gated |
@@ -136,8 +136,8 @@ outcomes. Grouped options below remain individually required, not alternatives.
 | 5.9 | Incremental session/entry search + change notification | CLI | Verified |
 | 5.10 | Catalog publish min-client/required-provider/count/checksum/immutable-path gates | CLI | Verified |
 | 5.11 | Isolated model-backed eval harness/artifacts/pass/latency/cost deltas | CLI | In progress |
-| 6.1 | Docs for settings/session format/keybindings/compaction/templates/providers/packages/shell aliases/terminal/tmux/termux/Windows | repo tooling | Partial |
-| 6.2 | Maintainer prompts and release/add-provider/interactive-testing skills; AGENTS conventions | repo tooling | Partial |
+| 6.1 | Docs for settings/session format/keybindings/compaction/templates/providers/packages/shell aliases/terminal/tmux/termux/Windows | repo tooling | Landed (12 topic pages; 239 relative links, 0 unresolved; receipt in [repo-tooling.md](repo-tooling.md#verification-status)) |
+| 6.2 | Maintainer prompts and release/add-provider/interactive-testing skills; AGENTS conventions | repo tooling | Landed (4 prompts, 3 skills, tracked conventions mirror `docs/maintainers/conventions.md`; root `AGENTS.md` stays local-only) |
 | 6.3 | HEAD/worktree catalog diff including effective reasoning levels | repo tooling | Landed |
 | 6.4 | CHANGELOG release extraction and link repair | repo tooling | Landed |
 | 6.5 | Deterministic git-archive source artifact pinned by version/ref | repo tooling | Landed |

@@ -38,9 +38,8 @@ use octet_agent::tools::{
         SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure,
         SummarizationFailureKind, SummarizationOutcome, SummarizationRetryPolicy,
     },
-    BashCheckpointPublisher, BashTool, CheckpointedBashTool, EditTool, FindTool, GrepTool, LsTool,
-    PowerShellTool, ReadTool, SearchTool, ShellSessionEnvironment, WriteTool,
-    BASH_CHECKPOINT_MAX_BYTES,
+    BashCheckpointPublisher, BashTool, CheckpointedBashTool, EditTool, PowerShellTool, ReadTool,
+    SearchTool, ShellSessionEnvironment, WriteTool, BASH_CHECKPOINT_MAX_BYTES,
 };
 use serde_json::json;
 
@@ -98,367 +97,6 @@ impl Fixture {
 async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
-}
-
-fn binary_available(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-}
-
-/// Runs `body` with `PATH` restricted to `path` and restores it afterwards.
-/// The caller must hold [`serial`].
-async fn run_with_path<T>(path: &std::path::Path, body: impl std::future::Future<Output = T>) -> T {
-    let previous = std::env::var_os("PATH");
-    // SAFETY: the caller holds the process-wide `serial` lock.
-    unsafe { std::env::set_var("PATH", path) };
-    let result = body.await;
-    match previous {
-        Some(value) => unsafe { std::env::set_var("PATH", value) },
-        None => unsafe { std::env::remove_var("PATH") },
-    }
-    result
-}
-
-// ── 4.1 `ls`: directories, dotfiles, limit ────────────────────────────────
-
-#[cfg(unix)]
-#[tokio::test]
-async fn ls_lists_directories_and_dotfiles_without_recursing() {
-    let f = fixture();
-    f.write("B.txt", "b");
-    f.write("a.txt", "a");
-    f.write(".dotfile", "d");
-    f.write("sub/inner.txt", "i");
-
-    let output = LsTool
-        .execute(json!({"path": "."}), &f.ctx())
-        .await
-        .unwrap();
-
-    // Case-insensitive ordering: `.dotfile`, `a.txt`, `B.txt`, `sub/`.
-    let lines: Vec<&str> = output.text.lines().collect();
-    assert_eq!(
-        lines,
-        vec![".dotfile", "a.txt", "B.txt", "sub/"],
-        "{}",
-        output.text
-    );
-    // Directories carry a trailing slash and the listing is not recursive.
-    assert!(!output.text.contains("inner.txt"), "{}", output.text);
-
-    // A subdirectory lists its own children when requested explicitly.
-    let nested = LsTool
-        .execute(json!({"path": "sub"}), &f.ctx())
-        .await
-        .unwrap();
-    assert_eq!(nested.text, "inner.txt");
-
-    // Effect classification stays a workspace read; `ls` needs no process
-    // authority even though it enumerates through descriptor-relative syscalls.
-    assert_eq!(
-        LsTool.effect(&json!({"path": "."}), &f.ctx()).unwrap(),
-        ToolEffect::WorkspaceRead
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn ls_enforces_limit_and_rejects_zero() {
-    let f = fixture();
-    for name in ["a", "b", "c"] {
-        f.write(name, "x");
-    }
-
-    let limited = LsTool
-        .execute(json!({"path": ".", "limit": 2}), &f.ctx())
-        .await
-        .unwrap();
-    assert_eq!(
-        limited.text,
-        "a\nb\n[entries or byte limit reached; limit=2; truncated=true]"
-    );
-
-    let error = LsTool
-        .execute(json!({"path": ".", "limit": 0}), &f.ctx())
-        .await
-        .unwrap_err();
-    assert!(error.message.contains("limit must be positive"), "{error}");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn ls_reports_an_empty_directory_explicitly() {
-    let f = fixture();
-    std::fs::create_dir_all(f.workspace.join("empty")).unwrap();
-    let output = LsTool
-        .execute(json!({"path": "empty"}), &f.ctx())
-        .await
-        .unwrap();
-    assert_eq!(output.text, "(empty directory)");
-}
-
-// ── 4.2 `find`: glob, gitignore, limit ───────────────────────────────────
-
-#[tokio::test]
-async fn find_glob_includes_hidden_paths_and_respects_gitignore_with_limit() {
-    let _serial = serial().await;
-    if !binary_available("fd") {
-        eprintln!("skipping: fd not on PATH");
-        return;
-    }
-    let f = fixture();
-    // A `.git` directory makes the workspace a repository, so `.gitignore` is
-    // authoritative for the run.
-    std::fs::create_dir_all(f.workspace.join(".git")).unwrap();
-    f.write(".gitignore", "ignored.rs\n");
-    f.write("src/main.rs", "fn main() {}");
-    f.write("src/notes.txt", "notes");
-    f.write("ignored.rs", "fn ignored() {}");
-    f.write(".hidden/keep.rs", "fn keep() {}");
-
-    let output = FindTool
-        .execute(json!({"pattern": "*.rs"}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(output.text.contains("src/main.rs"), "{}", output.text);
-    // `--hidden`: dot-directories are searched...
-    assert!(output.text.contains(".hidden/keep.rs"), "{}", output.text);
-    // ...while `.gitignore` rules still exclude ignored paths.
-    assert!(!output.text.contains("ignored.rs"), "{}", output.text);
-    assert!(!output.text.contains("notes.txt"), "{}", output.text);
-    // Untruncated output is a bare, newline-separated path list.
-    let mut listed: Vec<&str> = output.text.lines().collect();
-    listed.sort_unstable();
-    assert_eq!(
-        listed,
-        vec![".hidden/keep.rs", "src/main.rs"],
-        "{}",
-        output.text
-    );
-    assert_eq!(output.text.matches('\n').count(), 1, "{:?}", output.text);
-
-    let limited = FindTool
-        .execute(json!({"pattern": "*.rs", "limit": 1}), &f.ctx())
-        .await
-        .unwrap();
-    assert_eq!(
-        limited.text.lines().last().unwrap(),
-        "[results or byte limit reached; limit=1; truncated=true]"
-    );
-
-    let none = FindTool
-        .execute(json!({"pattern": "*.nomatch"}), &f.ctx())
-        .await
-        .unwrap();
-    assert_eq!(none.text, "No files found matching pattern");
-}
-
-#[tokio::test]
-async fn find_reports_a_missing_fd_as_an_error_without_downloading() {
-    let _serial = serial().await;
-    let f = fixture();
-    let empty = f.workspace.join("empty-path");
-    std::fs::create_dir_all(&empty).unwrap();
-    let error = run_with_path(&empty, async {
-        FindTool
-            .execute(json!({"pattern": "*.rs", "path": "."}), &f.ctx())
-            .await
-    })
-    .await
-    .unwrap_err();
-    // No download: the failure is a clear tool error naming the missing
-    // primitive, not a silent network fetch or a bash fallback.
-    assert!(
-        error.message.contains("find requires installed fd"),
-        "{error}"
-    );
-}
-
-// ── 4.3 default `grep`: ignoreCase, context, limit, hidden ───────────────
-
-#[tokio::test]
-async fn grep_defaults_include_hidden_files_and_honor_ignore_case_and_context() {
-    let _serial = serial().await;
-    if !binary_available("rg") {
-        eprintln!("skipping: rg not on PATH");
-        return;
-    }
-    let f = fixture();
-    f.write(".hidden/secrets.txt", "line one\nNEEDLE\nline three\n");
-    f.write("plain.txt", "nothing here\n");
-
-    // Hidden files are searched by default.
-    let hidden = GrepTool
-        .execute(json!({"pattern": "NEEDLE"}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(
-        hidden.text.contains(".hidden/secrets.txt:2"),
-        "{}",
-        hidden.text
-    );
-    assert!(hidden.text.starts_with("1 match\n"), "{}", hidden.text);
-    assert!(hidden.text.ends_with("truncated=false"), "{}", hidden.text);
-
-    // ignoreCase is off by default and turns the same call into a match.
-    let case_sensitive = GrepTool
-        .execute(json!({"pattern": "needle"}), &f.ctx())
-        .await
-        .unwrap();
-    assert_eq!(case_sensitive.text, "no matches");
-    let ignore_case = GrepTool
-        .execute(json!({"pattern": "needle", "ignoreCase": true}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(
-        ignore_case.text.contains(".hidden/secrets.txt:2"),
-        "{}",
-        ignore_case.text
-    );
-
-    // Context lines use a `-` separator and do not consume the match limit.
-    let context = GrepTool
-        .execute(json!({"pattern": "NEEDLE", "context": 1}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(
-        context.text.contains(".hidden/secrets.txt-1  line one"),
-        "{}",
-        context.text
-    );
-    assert!(
-        context.text.contains(".hidden/secrets.txt-3  line three"),
-        "{}",
-        context.text
-    );
-    assert!(context.text.starts_with("1 match\n"), "{}", context.text);
-
-    // `hidden: false` excludes dot-directories again.
-    let visible_only = GrepTool
-        .execute(json!({"pattern": "NEEDLE", "hidden": false}), &f.ctx())
-        .await
-        .unwrap();
-    assert_eq!(visible_only.text, "no matches");
-}
-
-#[tokio::test]
-async fn grep_limit_defaults_to_one_hundred_and_rejects_bad_arguments() {
-    let _serial = serial().await;
-    if !binary_available("rg") {
-        eprintln!("skipping: rg not on PATH");
-        return;
-    }
-    let f = fixture();
-    let body: String = (1..=5).map(|n| format!("needle {n}\n")).collect();
-    f.write("many.txt", &body);
-
-    let limited = GrepTool
-        .execute(json!({"pattern": "needle", "limit": 3}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(limited.text.starts_with("3+ matches\n"), "{}", limited.text);
-    assert!(limited.text.ends_with("truncated=true"), "{}", limited.text);
-    assert_eq!(
-        limited.text.matches("many.txt").count(),
-        3,
-        "{}",
-        limited.text
-    );
-
-    // Default limit is 100: five matches are all returned, untruncated.
-    let defaulted = GrepTool
-        .execute(json!({"pattern": "needle"}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(
-        defaulted.text.starts_with("5 matches\n"),
-        "{}",
-        defaulted.text
-    );
-    assert_eq!(defaulted.text.matches("many.txt").count(), 5);
-
-    for (arguments, expected) in [
-        (
-            json!({"pattern": "x", "unknown": true}),
-            "unknown grep property",
-        ),
-        (json!({"pattern": "x", "limit": 0}), "positive integer"),
-        (
-            json!({"pattern": "x", "max_results": 1}),
-            "unknown grep property",
-        ),
-        (
-            json!({"pattern": "x", "ignoreCase": "yes"}),
-            "must be boolean",
-        ),
-        (
-            json!({"pattern": "x", "literal": "yes"}),
-            "literal must be boolean",
-        ),
-        (
-            json!({"pattern": "x", "mode": "regex"}),
-            "unknown grep property",
-        ),
-    ] {
-        let error = GrepTool
-            .execute(arguments.clone(), &f.ctx())
-            .await
-            .unwrap_err();
-        assert!(error.message.contains(expected), "{arguments}: {error}");
-    }
-
-    // `literal` bypasses regex interpretation; regex-free patterns behave the
-    // same either way because literal is the default mode.
-    f.write("regex.txt", "a.c\n");
-    let literal = GrepTool
-        .execute(json!({"pattern": "a.c", "literal": true}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(
-        literal.text.contains("regex.txt:1  a.c"),
-        "{}",
-        literal.text
-    );
-    let defaulted_mode = GrepTool
-        .execute(json!({"pattern": "a.c"}), &f.ctx())
-        .await
-        .unwrap();
-    assert!(
-        defaulted_mode.text.contains("regex.txt:1  a.c"),
-        "{}",
-        defaulted_mode.text
-    );
-    assert!(
-        defaulted_mode.text.contains("many.txt") == false,
-        "a literal `a.c` must not match `needle 1`: {}",
-        defaulted_mode.text
-    );
-
-    // The definition advertises the Pi-shaped schema.
-    let definition = GrepTool.definition();
-    assert_eq!(definition.name, "grep");
-    let properties = definition.parameters["properties"].as_object().unwrap();
-    for key in [
-        "pattern",
-        "path",
-        "glob",
-        "ignoreCase",
-        "literal",
-        "context",
-        "limit",
-        "hidden",
-    ] {
-        assert!(properties.contains_key(key), "missing grep property {key}");
-    }
-    assert_eq!(definition.parameters["required"], json!(["pattern"]));
-    // The search-only vocabulary is not advertised through `grep`.
-    for key in ["query", "mode", "max_results"] {
-        assert!(!properties.contains_key(key), "grep must not expose {key}");
-    }
 }
 
 // ── 4.4 bash spilled output path ─────────────────────────────────────────
@@ -999,16 +637,7 @@ fn batch_termination_requires_unanimous_finalized_results() {
 fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     use octet_agent::tool::collect_tool_prompt_contributions;
 
-    let tools: Vec<&dyn Tool> = vec![
-        &BashTool,
-        &ReadTool,
-        &EditTool,
-        &WriteTool,
-        &SearchTool,
-        &LsTool,
-        &FindTool,
-        &GrepTool,
-    ];
+    let tools: Vec<&dyn Tool> = vec![&BashTool, &ReadTool, &EditTool, &WriteTool, &SearchTool];
     let contributions = collect_tool_prompt_contributions(tools);
     let by_name = |name: &str| {
         contributions
@@ -1023,23 +652,14 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
             .iter()
             .map(|contribution| contribution.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["bash", "read", "edit", "write", "ls", "find", "grep"]
+        vec!["bash", "read", "edit", "write"]
     );
     assert_eq!(
         by_name("bash").snippet,
-        "Execute bash commands (ls, grep, find, etc.)"
+        "Execute bash commands (prefer rg/ripgrep for file and content search)"
     );
     assert_eq!(by_name("read").snippet, "Read file contents");
     assert_eq!(by_name("write").snippet, "Create or overwrite files");
-    assert_eq!(by_name("ls").snippet, "List directory contents");
-    assert_eq!(
-        by_name("find").snippet,
-        "Find files by glob pattern (respects .gitignore)"
-    );
-    assert_eq!(
-        by_name("grep").snippet,
-        "Search file contents for patterns (respects .gitignore)"
-    );
     assert!(by_name("edit")
         .snippet
         .starts_with("Make precise file edits"));
@@ -1058,8 +678,6 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     );
     // Tools without guidelines contribute an empty list, not a placeholder.
     assert!(by_name("bash").guidelines.is_empty());
-    assert!(by_name("ls").guidelines.is_empty());
-    assert!(by_name("grep").guidelines.is_empty());
 
     // The PI_* guideline is gated on the variant that really injects the
     // metadata: the plain `bash` tool clears it, the session shell does not.
@@ -2045,4 +1663,44 @@ async fn summarization_retries_are_distinct_from_compaction_failures_without_dup
         .diagnostic(),
         "summarization retries exhausted after 2 attempts: socket closed"
     );
+}
+
+// ── registered built-in surface (maintainer decision) ────────────────────
+
+/// The model-visible built-in surface is exactly `read`/`write`/`edit`/`bash`
+/// plus the ripgrep-backed `search` (and the Windows-only opt-in `powershell`).
+///
+/// This is the regression guard that stops a Pi-parity pass from re-adding a
+/// dedicated `ls`/`find`/`grep` tool: filename discovery and content search are
+/// served by `rg`, through `search` or `bash`, matching the v0.7.6 release
+/// surface. `search` stays registered for embedders and explicit allowlists even
+/// though the coding product leaves it out of its default allowlist.
+#[test]
+fn core_tools_register_exactly_the_narrow_maintainer_surface() {
+    use octet_agent::extension::ExtensionHost;
+
+    let mut host = ExtensionHost::new();
+    host.load(&octet_agent::CoreTools);
+    let mut names: Vec<String> = host
+        .tool_definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    names.sort();
+
+    #[cfg(windows)]
+    let expected = vec!["bash", "edit", "powershell", "read", "search", "write"];
+    #[cfg(not(windows))]
+    let expected = vec!["bash", "edit", "read", "search", "write"];
+
+    assert_eq!(
+        names, expected,
+        "the registered built-in tool surface changed"
+    );
+    for withdrawn in ["ls", "find", "grep"] {
+        assert!(
+            !names.iter().any(|name| name == withdrawn),
+            "`{withdrawn}` must not be offered to the model"
+        );
+    }
 }

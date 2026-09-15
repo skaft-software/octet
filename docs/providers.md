@@ -122,6 +122,30 @@ Model availability depends on account and region. Quote IDs containing shell
 metacharacters, for example
 `octet --model 'bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0'`.
 
+AWS **instance/container metadata** credentials are *opt-in*, because octet
+cannot tell an EC2 instance with a role from an unrelated laptop that would only
+time out: probing them on every start costs about a second when no metadata
+service is reachable. The metadata sources are consulted only when the local
+environment indicates them, and the first matching indication wins:
+
+1. `AWS_EC2_METADATA_DISABLED=false` — the standard AWS switch, explicitly off.
+2. `OCTET_AWS_METADATA_CREDENTIALS=1` — octet's explicit opt-in, for an instance
+   whose configuration carries no other marker. (`0`, `false`, `no` or `off`
+   keep it disabled.)
+3. `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `AWS_CONTAINER_CREDENTIALS_FULL_URI`
+   — set by ECS/EKS-style platforms.
+4. `AWS_METADATA_SERVICE_ENDPOINT` / `AWS_METADATA_SERVICE_ENDPOINT_MODE` — the
+   host pinned the IMDS endpoint.
+5. The effective `AWS_PROFILE` declares
+   `credential_source = Ec2InstanceMetadata`/`EcsContainer` (or
+   `ec2_metadata_service_endpoint`).
+
+Anything else — including a profile that merely exists, `AWS_PROFILE` alone, or
+`AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` presence — keeps the metadata
+sources disabled, and an unrecognized `AWS_EC2_METADATA_DISABLED` value stays
+disabled rather than probing on a typo. Static environment keys and profile keys
+are unaffected: they are local reads and are always consulted first.
+
 Azure deployments use Responses. A resource can be `my-resource`, or its endpoint
 `https://my-resource.openai.azure.com/`; the deployment must name your deployment.
 Optional `AZURE_OPENAI_API_VERSION` defaults to the bundled preview version.
@@ -449,6 +473,22 @@ uses). Any other profile fails closed with a typed unsupported error instead of
 silently dropping a caller's billing-changing control. Octet does not yet apply
 the provider's tier cost multipliers to reported usage cost; see the
 [providers parity ledger](parity/providers.md#codex-service_tier).
+
+The OpenAI Responses **computer-use tool**
+(`{"type":"computer_use_preview","display_width":…,"display_height":…,
+"environment":…}`) is likewise a declared capability: a caller must select it
+(`ResponsesOptions::with_computer_use`) **and** the route's declared
+`runtime.responses_profile` must accept it (the public Responses profile today;
+any other profile fails closed with a typed unsupported error). Octet carries
+the protocol only — it declares the tool, maps a provider `computer_call` to a
+canonical tool call named `computer_use_preview` with a bounded action payload
+(`click`, `double_click`, `drag`, `keypress`, `move`, `screenshot`, `scroll`,
+`type`, `wait`; anything else fails closed, including a missing action), and
+maps the caller's result back to a `computer_call_output` item carrying the one
+documented `computer_screenshot` object. **Nothing in octet executes a computer
+action**: there is no desktop or browser backend behind this codec, and whether
+any action may run is a separate host-policy decision. See the
+[codec ledger](parity/codecs.md).
 
 `previous_response_id` is a best-effort process-local live-WebSocket optimization
 only when fixed parameters and the prior input/output prefix match. It is not

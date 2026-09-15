@@ -6,6 +6,13 @@
 **Baseline:** `e2eef46b051360600a06e72dc1694b4924c09c7c`  
 **Candidate revision:** pending; source-only and uncommitted
 
+> **Observed run added:** [`serve-lifecycle-reconnect-full.md`](serve-lifecycle-reconnect-full.md)
+> and [`serve-security-full.md`](serve-security-full.md) now record executed
+> runs at `00e3ca3e` (both fixtures pass; `tests/lifecycle_full.rs` had a
+> compile error that is fixed). The **UNRUN** cells below are retained as the
+> pre-run snapshot of this source-only candidate; the live-host, browser, and
+> measured-OS-budget gaps are unchanged.
+
 ## Scope and status
 
 This is a bounded source candidate, not a release, beta, installed-candidate, or

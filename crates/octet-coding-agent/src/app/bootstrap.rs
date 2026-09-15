@@ -74,12 +74,18 @@ pub struct Bootstrap {
 /// The single user-facing Codex context note for every catalog model that needs
 /// one, recorded during catalog construction.
 ///
-/// Recording is not printing: the note is emitted by
-/// [`Bootstrap::codex_context_note`] for the effective session model only, at
-/// most once per session.
+/// Recording is not printing, and startup no longer prints either: a frontend
+/// pulls the note with [`Bootstrap::take_codex_context_note`] when the user can
+/// act on it (the first assistant turn, or an on-demand status/context surface),
+/// and the latch here makes it a once-per-session note even if a later pull
+/// repeats the lookup. See [`crate::codex_context::codex_context_session_note`]
+/// for the wording contract.
 #[derive(Clone, Debug, Default)]
 pub struct CodexContextNotes {
     notes: std::collections::HashMap<ModelId, String>,
+    /// Set by the first delivery, so the note can never be shown twice in one
+    /// session (and never for a second, different model).
+    delivered: std::cell::Cell<bool>,
 }
 
 impl CodexContextNotes {
@@ -89,22 +95,54 @@ impl CodexContextNotes {
 
     /// The note for one model, if its window needs one. A non-Codex model has no
     /// note, so a non-Codex session prints nothing.
+    ///
+    /// This is the non-consuming peek: it neither delivers nor latches.
     pub fn note_for(&self, model: &ModelId) -> Option<&str> {
         self.notes.get(model).map(String::as_str)
+    }
+
+    /// Take the note for `model`, at most once per session.
+    ///
+    /// Returns `None` when this model needs no note (a non-Codex route) or when
+    /// a note was already delivered for this session, so a lazy surface can be
+    /// re-entered freely without ever repeating the note.
+    pub fn take_for(&self, model: &ModelId) -> Option<String> {
+        let note = self.notes.get(model)?;
+        if self.delivered.replace(true) {
+            return None;
+        }
+        Some(note.clone())
     }
 }
 
 impl Bootstrap {
     /// The single Codex context note for the effective session model, if any.
     ///
-    /// A frontend calls this once, when the session's model is resolved. It
-    /// returns nothing for a non-Codex model, so a session on another provider
-    /// prints no Codex note at all, and it never returns a note twice for one
-    /// session because the note is looked up rather than emitted during catalog
-    /// enumeration. See [`crate::codex_context::codex_context_session_note`] for
-    /// the wording contract.
+    /// This is a read-only peek for tests and diagnostics; frontends deliver the
+    /// note with [`Bootstrap::take_codex_context_note`]. It returns nothing for a
+    /// non-Codex model, so a session on another provider prints no Codex note at
+    /// all. See [`crate::codex_context::codex_context_session_note`] for the
+    /// wording contract.
     pub fn codex_context_note(&self, model: &ModelId) -> Option<&str> {
         self.codex_context_notes.note_for(model)
+    }
+
+    /// Take the one Codex context note for this session, lazily, at most once.
+    ///
+    /// Startup deliberately shows nothing: the note is not part of the initial
+    /// frame or the pre-ready transcript. A frontend calls this when the user can
+    /// act on it — attached to the first assistant turn after readiness, or from
+    /// an on-demand status/context surface — and gets the same bounded,
+    /// effective-model-only wording once; every later call returns `None`.
+    ///
+    /// The note is unchanged in substance: it still names the model, the
+    /// advertised/entitled/effective windows, the deliberate 272K policy and its
+    /// double-pricing cliff, and the remedy, and it still carries no internal
+    /// Rust API name or operation id. A Codex route above 272K is still marked as
+    /// uncertain usage at both session boundaries, independently of whether this
+    /// note has ever been shown.
+    pub fn take_codex_context_note(&self, model: &ModelId) -> Option<String> {
+        self.codex_context_notes.take_for(model)
     }
 
     /// Starts only provider-capable API 0.3 extensions when their declarations
@@ -5258,6 +5296,41 @@ fn base_model_catalog(offline: bool) -> anyhow::Result<ModelCatalog> {
     base_model_catalog_with_custom_store(offline, None)
 }
 
+/// Environment switch for the off-screen startup phase trace.
+const STARTUP_TRACE_ENV: &str = "OCTET_STARTUP_TRACE";
+/// Monotonic origin for the phase trace, shared by every phase in this process.
+static STARTUP_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Whether the startup phase trace is enabled for one env value.
+///
+/// Off unless the switch is explicitly set to something other than empty/`0`, so
+/// the default startup prints nothing.
+fn startup_trace_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// One stable, single-line phase record. No timestamps are asserted anywhere:
+/// the harness compares *which* phases ran and how often.
+fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
+    format!("octet-startup: {phase} elapsed={}us", elapsed.as_micros())
+}
+
+/// Report one startup phase boundary out of band.
+///
+/// Startup renders nothing, but the latency acceptance criteria still need the
+/// phases to be distinguishable, so `OCTET_STARTUP_TRACE=1` writes one line per
+/// boundary to stderr (`octet-startup: <phase> elapsed=<micros>us`) and the
+/// default (unset) prints nothing and changes no behavior. Stable phase names:
+/// `catalog.base`, `catalog.codex`, `catalog.copilot`, `bootstrap.ready`,
+/// `session.resolve`, `app.build`.
+pub(crate) fn startup_phase(phase: &str) {
+    if !startup_trace_enabled(std::env::var_os(STARTUP_TRACE_ENV).as_deref()) {
+        return;
+    }
+    let started = STARTUP_STARTED.get_or_init(std::time::Instant::now);
+    crate::output::stderr_line(startup_phase_line(phase, started.elapsed()));
+}
+
 /// Build the runtime model catalog, exposing subscription models only through
 /// their authenticated product-owned registration boundary.
 pub fn model_catalog() -> anyhow::Result<ModelCatalog> {
@@ -5278,9 +5351,12 @@ pub fn model_catalog_with_offline_and_codex_notes(
     offline: bool,
 ) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
     let mut catalog = base_model_catalog(offline)?;
+    startup_phase("catalog.base");
     let mut notes = CodexContextNotes::default();
     register_codex_catalog(&mut catalog, offline, &mut notes);
+    startup_phase("catalog.codex");
     register_copilot_catalog(&mut catalog, offline);
+    startup_phase("catalog.copilot");
     Ok((catalog, notes))
 }
 
@@ -5345,6 +5421,7 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         crate::output::stderr!("warning: could not write session workspace marker: {error}");
     }
     let client = AiClient::try_new()?;
+    startup_phase("bootstrap.ready");
     Ok(Bootstrap {
         config,
         catalog,
@@ -5468,6 +5545,7 @@ fn launch_configuration_parts(
     config: &Config,
     session: &SessionSelection,
 ) -> anyhow::Result<(Option<Session>, LaunchConfiguration)> {
+    startup_phase("session.resolve");
     let prepared = match session {
         SessionSelection::OpenExisting(path) => {
             let descriptor_path = descriptor_session_path(path)?;
@@ -5715,13 +5793,11 @@ pub async fn resolve_launch_interactive(
         None if boot.is_modeless() => ReasoningConfig::Off,
         None => default_reasoning_for_model(&catalog.resolve(&model)?),
     };
-    // At most one Codex context note per session, for the effective model only.
-    // The interactive shell owns the transcript, so the note goes there instead
-    // of to stderr.
-    if let Some(note) = boot.codex_context_note(&model) {
-        shell.notice(note.to_owned());
-        shell.render();
-    }
+    // The Codex context note is NOT emitted here: startup shows nothing, so the
+    // note is delivered lazily by whoever owns the transcript
+    // (`Bootstrap::take_codex_context_note`: the first assistant turn after
+    // readiness, or an on-demand context surface). Recording it stayed in
+    // catalog construction, so the wording is still effective-model-only.
     Ok(LaunchSelection {
         model,
         session,
@@ -5806,7 +5882,9 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
         Some(reasoning) => reasoning,
         None => default_reasoning_for_model(&catalog.resolve(&model)?),
     };
-    // At most one Codex context note per session, for the effective model only.
+    // Headless print/RPC launches have no lazy surface to deliver the note on,
+    // and stderr is neither the TUI frame nor the transcript, so the one bounded
+    // line still goes there. The interactive launch above stays silent.
     if let Some(note) = boot.codex_context_note(&model) {
         crate::output::stderr!("{note}");
     }
@@ -6086,6 +6164,7 @@ pub(crate) fn build_app_with_runtime_manager(
         codex_context_notes: _,
     } = boot;
     let mut system = system;
+    startup_phase("app.build");
     let mut prestarted_extensions = prestarted_extensions.into_inner();
     if let Some((_, extensions)) = prestarted_extensions.as_mut() {
         extensions.synchronize_provider_catalog(&mut catalog, &client);
@@ -6886,6 +6965,63 @@ mod codex_context_note_regression_tests {
             &resolution,
         );
         assert_eq!(notes.note_for(&ModelId("gpt-5.6-luna".to_owned())), Some(note.as_str()));
+    }
+
+    /// The note is delivered lazily and at most once per session, and a route
+    /// that needs no note never consumes the delivery.
+    #[test]
+    fn the_codex_context_note_is_delivered_lazily_and_at_most_once() {
+        let (catalog, notes) = registered_notes("plus");
+        let effective = catalog_id(&catalog, "gpt-5.6-sol");
+        let expected = notes
+            .note_for(&effective)
+            .expect("a reduced Codex route has one note")
+            .to_owned();
+
+        // A model with no note never consumes the once-per-session delivery, so
+        // a non-Codex first turn cannot swallow the Codex route's note.
+        let other = catalog
+            .models()
+            .map(|model| model.id.clone())
+            .find(|id| notes.note_for(id).is_none())
+            .expect("the catalog carries non-Codex models");
+        assert_eq!(notes.take_for(&other), None);
+        assert_eq!(notes.note_for(&effective), Some(expected.as_str()));
+
+        // The first pull delivers exactly the recorded wording, still without any
+        // internal API name or operation id, and still naming the deliberate cap.
+        let delivered = notes
+            .take_for(&effective)
+            .expect("the first pull delivers the note");
+        assert_eq!(delivered, expected);
+        assert!(delivered.starts_with("note: Codex model"), "{delivered}");
+        assert!(!delivered.contains("Session::"), "{delivered}");
+        assert!(
+            !delivered.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
+            "{delivered}"
+        );
+        assert!(delivered.contains("deliberate"), "{delivered}");
+        assert!(delivered.contains("double-priced"), "{delivered}");
+
+        // Startup showed nothing, and every later pull stays silent: the note can
+        // never be repeated in one session, and the peek is still available to
+        // diagnostics.
+        assert_eq!(notes.take_for(&effective), None);
+        assert_eq!(notes.take_for(&effective), None);
+        assert_eq!(notes.note_for(&effective), Some(expected.as_str()));
+    }
+
+    /// The startup phase trace is off by default, and its gate plus line format
+    /// are stable for the latency acceptance harness.
+    #[test]
+    fn the_startup_phase_trace_is_off_by_default_and_named_consistently() {
+        assert!(!startup_trace_enabled(None));
+        assert!(!startup_trace_enabled(Some(std::ffi::OsStr::new(""))));
+        assert!(!startup_trace_enabled(Some(std::ffi::OsStr::new("0"))));
+        assert!(startup_trace_enabled(Some(std::ffi::OsStr::new("1"))));
+        let line = startup_phase_line("catalog.codex", std::time::Duration::from_micros(1_250));
+        assert_eq!(line, "octet-startup: catalog.codex elapsed=1250us");
+        assert!(!line.contains('\n'));
     }
 }
 

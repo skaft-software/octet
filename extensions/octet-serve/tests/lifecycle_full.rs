@@ -10,7 +10,7 @@ use octet_serve_backend::{
     ContextUsage, DeviceId, DriverCommandOutcome, EventPayload, HostId, JournalConfig,
     ModelSelection, PromptInput, ReplayResponse, ServiceError, SessionActor, SessionActorCore,
     SessionCommand, SessionCommandEnvelope, SessionCursor, SessionDriver, SessionId,
-    SessionLiveState, SessionSeed, SessionSnapshot, SessionSummary, TimestampedEvent,
+    SessionLiveState, SessionSeed, SessionSnapshot, SessionSummary, TimestampedEvent, UsageSnapshot,
 };
 
 fn seed(index: usize) -> SessionSeed {
@@ -229,7 +229,7 @@ async fn stale_generation_is_rejected_before_dispatch_and_replay_is_cursor_bound
         core.publish(TimestampedEvent::new(
             timestamp,
             EventPayload::UsageUpdated {
-                usage: ContextUsage::default(),
+                usage: UsageSnapshot::default(),
             },
         ))
         .unwrap();

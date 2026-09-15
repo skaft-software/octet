@@ -78,13 +78,15 @@ means code plus a behavioural test that was actually run.
 - Add typed provider declarations covering sampling params, headers,
   `vllmPriority`, `supportsMaxOutputTokens`, thinking-token budget fields,
   `$var` chat-template interpolation and bearer-token credential aliases.
-- Tool parity: `ls`/`find`/`grep` limits, dotfiles, gitignore and context
-  handling; bash output spill, bounded interval checkpoints and the session
-  environment contract; original-file non-overlapping multi-edit with legacy
-  normalization; adopted preview coalescing; unanimous finalized-result batch
-  termination; durable invocation memos; deferred suspend/resume handles; tool
-  prompt snippets and guidelines; summarization retry distinct from compaction
-  failure.
+- Tool behaviours: bash output spill, bounded interval checkpoints and the
+  session environment contract; original-file non-overlapping multi-edit with
+  legacy normalization; adopted preview coalescing; unanimous finalized-result
+  batch termination; durable invocation memos; deferred suspend/resume handles;
+  summarization retry distinct from compaction failure. The agent tool surface
+  stays `read`/`write`/`edit`/`bash` with ripgrep-backed `search`, matching
+  0.7.6: the Pi-parity `ls`, `find` and `grep` tools were withdrawn by
+  maintainer decision, and their behaviours are served by `search` (rg) plus
+  `bash`.
 
 ### CLI and sessions
 

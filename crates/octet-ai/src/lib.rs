@@ -83,8 +83,9 @@ pub use host_transport::{HostStreamModel, HostStreamTransport};
 pub use mime::Mime;
 pub use pricing::{Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR};
 pub use responses::{
-    ResponsesCompactRequest, ResponsesCompactResponse, ResponsesInput, ResponsesItem,
-    ResponsesItemError, ResponsesOptions, ResponsesOutput, ResponsesReplayItem,
+    ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest, ResponsesCompactResponse,
+    ResponsesInput, ResponsesItem, ResponsesItemError, ResponsesOptions, ResponsesOutput,
+    ResponsesReplayItem,
 };
 pub use stream::{
     CanonicalStreamAssembler, ProviderLifecycle, ProviderLifecycleState, ResponseStream,

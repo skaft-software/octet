@@ -40,11 +40,13 @@
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
+- [Pi session/transcript import status and missing artifact](pi-session-import.md)
 - [Serve](experimental/octet-serve/README.md)
 
 ## Development
 
 - [Extension authoring](extensions.md)
+- [Extension event bus (bounded, host-mediated)](extensions/event-bus.md)
 - [Extension API 0.3 reference](extensions/API-0.3-REFERENCE.md)
 - [Additive Pi parity ledger](parity/README.md) and its
   [extension-surface detail page](parity/extensions.md)

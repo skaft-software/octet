@@ -218,6 +218,20 @@ impl ResponsesRuntimeProfile {
     pub const fn accepts_service_tier(self) -> bool {
         matches!(self, Self::Codex)
     }
+
+    /// Whether this profile declares the Responses computer-use tool
+    /// (`computer_use_preview`).
+    ///
+    /// Declaring the tool asks the provider's model to propose computer
+    /// actions as `computer_call` items. The codec only carries that protocol
+    /// exchange — it never performs an action — so this is an endpoint
+    /// declaration, never a provider-name branch or an authority grant.
+    /// Whether anything may execute an action is decided by host policy.
+    /// Routes that do not declare the tool fail closed instead of silently
+    /// dropping the caller's request.
+    pub const fn accepts_computer_use(self) -> bool {
+        matches!(self, Self::Default)
+    }
 }
 
 /// OpenAI Responses service tier requested for a single request.

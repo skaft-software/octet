@@ -59,10 +59,16 @@ pub struct SanitizedError {
 
 impl SanitizedError {
     /// Builds an explicitly public error and strips unsafe controls.
+    ///
+    /// The outbound public error surface is strictly single-line: every control
+    /// character (including `\n`, `\r`, and `\t`) is replaced with U+FFFD.
+    /// Callers pass fixed, bounded sentences; nothing here needs embedded
+    /// newlines, and refusing them keeps a public message from forging a second
+    /// log line or terminal row.
     pub fn public(code: ErrorCode, message: impl AsRef<str>) -> Self {
         Self {
             code,
-            message: sanitize_public_text(message.as_ref(), MAX_DIAGNOSTIC_BYTES, true),
+            message: sanitize_public_text(message.as_ref(), MAX_DIAGNOSTIC_BYTES, false),
             retryable: false,
             current_generation: None,
         }
@@ -91,6 +97,6 @@ impl SanitizedError {
 
 impl ProtocolValidation for SanitizedError {
     fn validate(&self) -> Result<(), ValidationError> {
-        validate_public_text("error.message", &self.message, MAX_DIAGNOSTIC_BYTES, true)
+        validate_public_text("error.message", &self.message, MAX_DIAGNOSTIC_BYTES, false)
     }
 }

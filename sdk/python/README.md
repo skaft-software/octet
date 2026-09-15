@@ -34,6 +34,22 @@ aliases for earlier first-party names.
 For application embedding rather than extension authoring, see
 [native-host protocol `1`](../../docs/sdk.md), a separate interface.
 
+## Bounded event bus
+
+`octet_extension.event_bus` carries the bounded, extension-scoped bus contract:
+typed topics (`bus.<owner>.<name>`), bounded queues, owner-only publish,
+fail-closed validation of unknown topics, forbidden authority-shaped fields, and
+PII/secret/private-path values. The module holds the enforcement kernel
+(`EventBusKernel`, `TopicRegistry`, `BoundedQueue`, `validate_payload`) and the
+extension-side participant (`HostEventBus`).
+
+**The host does not expose the `event_bus` capability yet**, so real
+`bus/publish` and `bus/subscribe` calls fail closed with the host's
+`unknown_method`. The bound rules, the fail-closed matrix, and the exact
+schema/crate work that is still required are recorded in
+[docs/extensions/event-bus.md](../../docs/extensions/event-bus.md); the
+behavioral suite is `tests/test_event_bus.py`.
+
 ## Legacy runtime reference
 
 Existing API `0.1`/`0.2` implementations can use the

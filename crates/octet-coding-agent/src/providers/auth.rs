@@ -492,15 +492,274 @@ fn parse_aws_ini_section(
 }
 
 fn aws_metadata_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
-    if optional_bounded_env("AWS_EC2_METADATA_DISABLED")?
-        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-    {
+    aws_metadata_credentials_with(
+        aws_metadata_activation()?,
+        |variable| optional_bounded_env(variable),
+        metadata_credentials_from_url,
+        ec2_metadata_credentials,
+    )
+}
+
+/// Probe the AWS metadata credential sources for `activation`.
+///
+/// A `Disabled` activation returns before any client is built, so an
+/// unrelated-provider launch pays neither a metadata request nor its bounded
+/// timeout. This is the whole point of the activation rule: instance/container
+/// metadata credentials may exist, but "might exist" is not a reason to probe
+/// an unrelated cloud environment on every start.
+fn aws_metadata_credentials_with<R, F, C>(
+    activation: AwsMetadataActivation,
+    mut read_env: R,
+    fetch_container: F,
+    fetch_ec2: C,
+) -> anyhow::Result<Option<octet_ai::AwsCredentials>>
+where
+    R: FnMut(&str) -> anyhow::Result<Option<String>>,
+    F: Fn(&url::Url, bool) -> anyhow::Result<octet_ai::AwsCredentials>,
+    C: Fn(&url::Url) -> anyhow::Result<Option<octet_ai::AwsCredentials>>,
+{
+    if matches!(activation, AwsMetadataActivation::Disabled(_)) {
         return Ok(None);
     }
-    if let Some(url) = ecs_metadata_url()? {
-        return metadata_credentials_from_url(&url, true).map(Some);
+    if let Some(url) = ecs_metadata_url_with(&mut read_env)? {
+        return fetch_container(&url, true).map(Some);
     }
-    ec2_metadata_credentials()
+    let base = aws_metadata_service_endpoint_with(&mut read_env)?;
+    fetch_ec2(&base)
+}
+
+/// Product opt-in variable that allows the AWS metadata credential sources.
+///
+/// EC2 instance metadata and ECS container credentials are the two AWS sources
+/// with no local configuration marker, so octet cannot tell "this machine is an
+/// instance with a role" from "this laptop will simply time out". The rule below
+/// therefore requires a positive local indication before a probe; this variable
+/// is the explicit opt-in for an EC2 user whose provider configuration has no
+/// other marker.
+pub(crate) const AWS_METADATA_OPT_IN_VARIABLE: &str = "OCTET_AWS_METADATA_CREDENTIALS";
+
+/// Default EC2 instance metadata service endpoint (IMDS).
+const AWS_EC2_METADATA_ENDPOINT: &str = "http://169.254.169.254/";
+
+/// The local evidence that made the metadata sources eligible, in evaluation
+/// order. Kept as data so the rule is testable and so a diagnostic can name the
+/// reason without reading the environment again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AwsMetadataIndication {
+    /// `AWS_EC2_METADATA_DISABLED` is explicitly `false`: the standard AWS opt-in.
+    ExplicitlyNotDisabled,
+    /// `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`/`_FULL_URI` is set. ECS, EKS and
+    /// similar platforms set this only inside a container that has credentials.
+    ContainerCredentialsUri,
+    /// `AWS_METADATA_SERVICE_ENDPOINT`/`_MODE` is set: the host pinned the IMDS
+    /// endpoint, which only an EC2-shaped environment does.
+    MetadataServiceEndpoint,
+    /// `OCTET_AWS_METADATA_CREDENTIALS` truthy: the operator's explicit opt-in.
+    ProductOptIn,
+    /// The effective AWS profile declares instance/container metadata as its
+    /// credential source (`credential_source = Ec2InstanceMetadata|EcsContainer`).
+    ProfileCredentialSource,
+}
+
+/// Why the metadata probe stays closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AwsMetadataSuppression {
+    /// `AWS_EC2_METADATA_DISABLED` (or the opt-in) is explicitly off.
+    ExplicitlyDisabled,
+    /// The variable holds an unrecognized value; unknown state stays closed.
+    UnrecognizedDisableSetting,
+    /// Nothing local indicates a metadata source. This is the ordinary
+    /// unrelated-provider launch (for example a Codex user on a laptop).
+    Unindicated,
+}
+
+/// Whether the AWS metadata credential sources may be probed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AwsMetadataActivation {
+    /// A local indication was found; the bounded probe may run.
+    Enabled(AwsMetadataIndication),
+    /// No probe is attempted, for the recorded reason.
+    Disabled(AwsMetadataSuppression),
+}
+
+/// The already-read inputs of the activation rule.
+///
+/// Keeping these as plain data (rather than reading the environment inside the
+/// decision) is what makes the rule a pure, directly testable function.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AwsMetadataActivationInputs {
+    /// Raw `AWS_EC2_METADATA_DISABLED` value.
+    pub(crate) ec2_metadata_disabled: Option<String>,
+    /// Raw `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` value.
+    pub(crate) container_credentials_relative_uri: Option<String>,
+    /// Raw `AWS_CONTAINER_CREDENTIALS_FULL_URI` value.
+    pub(crate) container_credentials_full_uri: Option<String>,
+    /// Raw `AWS_METADATA_SERVICE_ENDPOINT` value.
+    pub(crate) metadata_service_endpoint: Option<String>,
+    /// Raw `AWS_METADATA_SERVICE_ENDPOINT_MODE` value.
+    pub(crate) metadata_service_endpoint_mode: Option<String>,
+    /// Raw `OCTET_AWS_METADATA_CREDENTIALS` value.
+    pub(crate) product_opt_in: Option<String>,
+    /// `credential_source` from the effective AWS profile, already lowercased.
+    pub(crate) profile_credential_source: Option<String>,
+    /// `ec2_metadata_service_endpoint` from the effective AWS profile.
+    pub(crate) profile_metadata_service_endpoint: Option<String>,
+}
+
+/// The activation rule: a pure function of the local AWS environment.
+///
+/// Order matters and is chosen so that an explicit off always wins, and so that
+/// every *enabling* input is a positive local statement that this machine has
+/// metadata credentials. `AWS_PROFILE`, `AWS_CONFIG_FILE` and
+/// `AWS_SHARED_CREDENTIALS_FILE` presence alone is deliberately **not** an
+/// indication: a laptop user with any AWS profile would otherwise pay the probe,
+/// which is exactly the ~1s startup penalty this rule removes. A profile only
+/// enables the probe when it *declares* metadata as its credential source.
+pub(crate) fn aws_metadata_activation_from(
+    inputs: &AwsMetadataActivationInputs,
+) -> AwsMetadataActivation {
+    if let Some(value) = &inputs.ec2_metadata_disabled {
+        if value.eq_ignore_ascii_case("true") {
+            return AwsMetadataActivation::Disabled(AwsMetadataSuppression::ExplicitlyDisabled);
+        }
+        if value.eq_ignore_ascii_case("false") {
+            return AwsMetadataActivation::Enabled(AwsMetadataIndication::ExplicitlyNotDisabled);
+        }
+        // Unknown state stays closed rather than probing on a typo.
+        return AwsMetadataActivation::Disabled(AwsMetadataSuppression::UnrecognizedDisableSetting);
+    }
+    if let Some(value) = &inputs.product_opt_in {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => {
+                return AwsMetadataActivation::Enabled(AwsMetadataIndication::ProductOptIn);
+            }
+            "0" | "false" | "no" | "off" => {
+                return AwsMetadataActivation::Disabled(
+                    AwsMetadataSuppression::ExplicitlyDisabled,
+                );
+            }
+            _ => {
+                return AwsMetadataActivation::Disabled(
+                    AwsMetadataSuppression::UnrecognizedDisableSetting,
+                );
+            }
+        }
+    }
+    if inputs.container_credentials_relative_uri.is_some()
+        || inputs.container_credentials_full_uri.is_some()
+    {
+        return AwsMetadataActivation::Enabled(AwsMetadataIndication::ContainerCredentialsUri);
+    }
+    if inputs.metadata_service_endpoint.is_some() || inputs.metadata_service_endpoint_mode.is_some()
+    {
+        return AwsMetadataActivation::Enabled(AwsMetadataIndication::MetadataServiceEndpoint);
+    }
+    if inputs.profile_metadata_service_endpoint.is_some() {
+        return AwsMetadataActivation::Enabled(AwsMetadataIndication::MetadataServiceEndpoint);
+    }
+    if inputs
+        .profile_credential_source
+        .as_deref()
+        .is_some_and(|source| {
+            matches!(
+                source.trim().to_ascii_lowercase().as_str(),
+                "ec2instancemetadata" | "ecscontainer"
+            )
+        })
+    {
+        return AwsMetadataActivation::Enabled(AwsMetadataIndication::ProfileCredentialSource);
+    }
+    AwsMetadataActivation::Disabled(AwsMetadataSuppression::Unindicated)
+}
+
+/// Read the activation inputs from the AWS environment and the effective profile.
+fn aws_metadata_activation_inputs() -> anyhow::Result<AwsMetadataActivationInputs> {
+    aws_metadata_activation_inputs_with(
+        |variable| optional_bounded_env(variable),
+        |config_file| aws_profile_values(config_file),
+    )
+}
+
+fn aws_metadata_activation_inputs_with<R, P>(
+    mut read_env: R,
+    mut read_profile: P,
+) -> anyhow::Result<AwsMetadataActivationInputs>
+where
+    R: FnMut(&str) -> anyhow::Result<Option<String>>,
+    P: FnMut(bool) -> anyhow::Result<Option<std::collections::BTreeMap<String, String>>>,
+{
+    let profile_values = read_profile(false)?;
+    let profile_config = read_profile(true)?;
+    let profile_value = |values: &Option<std::collections::BTreeMap<String, String>>, key: &str| {
+        values
+            .as_ref()
+            .and_then(|values| values.get(key))
+            .cloned()
+    };
+    Ok(AwsMetadataActivationInputs {
+        ec2_metadata_disabled: read_env("AWS_EC2_METADATA_DISABLED")?,
+        container_credentials_relative_uri: read_env("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")?,
+        container_credentials_full_uri: read_env("AWS_CONTAINER_CREDENTIALS_FULL_URI")?,
+        metadata_service_endpoint: read_env("AWS_METADATA_SERVICE_ENDPOINT")?,
+        metadata_service_endpoint_mode: read_env("AWS_METADATA_SERVICE_ENDPOINT_MODE")?,
+        product_opt_in: read_env(AWS_METADATA_OPT_IN_VARIABLE)?,
+        profile_credential_source: profile_value(&profile_values, "credential_source"),
+        profile_metadata_service_endpoint: profile_value(&profile_config, "ec2_metadata_service_endpoint"),
+    })
+}
+
+fn aws_metadata_activation() -> anyhow::Result<AwsMetadataActivation> {
+    Ok(aws_metadata_activation_from(&aws_metadata_activation_inputs()?))
+}
+
+/// Resolve the IMDS base URL, honoring the standard endpoint override.
+///
+/// The override exists so a machine (or a test) that pins IMDS can still be
+/// used; it is validated fail-closed because it selects a host the signer will
+/// contact.
+fn aws_metadata_service_endpoint_with<R>(mut read_env: R) -> anyhow::Result<url::Url>
+where
+    R: FnMut(&str) -> anyhow::Result<Option<String>>,
+{
+    let Some(value) = read_env("AWS_METADATA_SERVICE_ENDPOINT")? else {
+        return url::Url::parse(AWS_EC2_METADATA_ENDPOINT).map_err(Into::into);
+    };
+    checked_aws_metadata_endpoint(&value)
+}
+
+fn checked_aws_metadata_endpoint(value: &str) -> anyhow::Result<url::Url> {
+    if value.is_empty() || value.len() > 2048 {
+        anyhow::bail!("invalid AWS metadata service endpoint");
+    }
+    let mut url = url::Url::parse(value)
+        .map_err(|_| anyhow::anyhow!("invalid AWS metadata service endpoint"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!("invalid AWS metadata service endpoint");
+    }
+    // Plain HTTP is only acceptable where IMDS actually lives: the loopback or
+    // the link-local metadata addresses. Anything else must be HTTPS.
+    if url.scheme() == "http" && !aws_metadata_host_is_link_local_or_loopback(&url) {
+        anyhow::bail!("invalid AWS metadata service endpoint");
+    }
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    Ok(url)
+}
+
+fn aws_metadata_host_is_link_local_or_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback() || address.octets()[..2] == [169, 254],
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 fn metadata_http_client() -> anyhow::Result<reqwest::blocking::Client> {
@@ -511,10 +770,6 @@ fn metadata_http_client() -> anyhow::Result<reqwest::blocking::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(Into::into)
-}
-
-fn ecs_metadata_url() -> anyhow::Result<Option<url::Url>> {
-    ecs_metadata_url_with(|variable| optional_bounded_env(variable))
 }
 
 fn ecs_metadata_url_with(
@@ -568,10 +823,13 @@ fn metadata_credentials_from_url(
     credentials_from_metadata_body(read_bounded_response(response)?)
 }
 
-fn ec2_metadata_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
+fn ec2_metadata_credentials(base: &url::Url) -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
     let client = metadata_http_client()?;
+    let token_url = base
+        .join("latest/api/token")
+        .map_err(|_| anyhow::anyhow!("invalid AWS metadata service endpoint"))?;
     let token_response = match client
-        .put("http://169.254.169.254/latest/api/token")
+        .put(token_url)
         .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
         .send()
     {
@@ -582,8 +840,11 @@ fn ec2_metadata_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>
     if token.is_empty() || token.len() > 512 || token.chars().any(char::is_control) {
         return Ok(None);
     }
+    let roles_url = base
+        .join("latest/meta-data/iam/security-credentials/")
+        .map_err(|_| anyhow::anyhow!("invalid AWS metadata service endpoint"))?;
     let role_response = match client
-        .get("http://169.254.169.254/latest/meta-data/iam/security-credentials/")
+        .get(roles_url)
         .header("X-aws-ec2-metadata-token", &token)
         .send()
     {
@@ -601,7 +862,9 @@ fn ec2_metadata_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>
     {
         return Ok(None);
     }
-    let url = format!("http://169.254.169.254/latest/meta-data/iam/security-credentials/{role}");
+    let url = base
+        .join(&format!("latest/meta-data/iam/security-credentials/{role}"))
+        .map_err(|_| anyhow::anyhow!("invalid AWS metadata service endpoint"))?;
     let response = match client
         .get(url)
         .header("X-aws-ec2-metadata-token", token)
@@ -992,6 +1255,374 @@ ignored key = ignored
             headers[http::HeaderName::from_static("x-api-key")],
             "key-value"
         );
+    }
+
+    // --- AWS metadata activation (startup latency) -------------------------
+    //
+    // These are the deterministic acceptance tests for the activation rule. They
+    // assert *request counts*, never elapsed milliseconds: the defect was "an
+    // unrelated-provider launch issues a metadata request at all", and a timing
+    // threshold would pass or fail with machine load.
+
+    /// The ordinary case: a laptop with no AWS environment and no AWS profile.
+    fn laptop_inputs() -> AwsMetadataActivationInputs {
+        aws_metadata_activation_inputs_with(|_| Ok(None), |_| Ok(None)).unwrap()
+    }
+
+    /// A loopback metadata fixture. Returns the base URL and a request counter.
+    ///
+    /// The server answers exactly `routes.len()` requests and then exits, so a
+    /// test that asserts the counter also asserts how many requests were made.
+    fn metadata_fixture(
+        routes: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> (url::Url, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = requests.clone();
+        let expected = routes.len();
+        std::thread::spawn(move || {
+            for _ in 0..expected {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => request.push(byte[0]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&request);
+                let path = line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_owned();
+                let (status, body) = routes
+                    .iter()
+                    .find(|(route, _, _)| *route == path)
+                    .map(|(_, status, body)| (*status, *body))
+                    .unwrap_or(("404 Not Found", ""));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        (
+            url::Url::parse(&format!("http://{address}/")).unwrap(),
+            requests,
+        )
+    }
+
+    #[test]
+    fn unrelated_provider_launch_makes_zero_aws_metadata_requests() {
+        // Headline acceptance criterion. The activation rule is evaluated from
+        // empty environment/profile reads, exactly like a Codex user's laptop,
+        // and the stubbed metadata sources count every request they receive.
+        let activation = aws_metadata_activation_from(&laptop_inputs());
+        assert_eq!(
+            activation,
+            AwsMetadataActivation::Disabled(AwsMetadataSuppression::Unindicated)
+        );
+
+        let container_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ec2_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let container_counter = container_requests.clone();
+        let ec2_counter = ec2_requests.clone();
+        let credentials = aws_metadata_credentials_with(
+            activation,
+            |_| Ok(None),
+            move |_, _| {
+                container_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(fixture_credentials("container"))
+            },
+            move |_| {
+                ec2_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(fixture_credentials("ec2")))
+            },
+        )
+        .unwrap();
+
+        assert!(credentials.is_none());
+        assert_eq!(
+            container_requests.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no container metadata request may be issued for an unrelated provider"
+        );
+        assert_eq!(
+            ec2_requests.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no EC2 metadata request may be issued for an unrelated provider"
+        );
+    }
+
+    #[test]
+    fn activation_rule_is_a_pure_function_of_the_local_inputs() {
+        let rule = aws_metadata_activation_from;
+        let enabled = AwsMetadataActivation::Enabled;
+        let disabled = AwsMetadataActivation::Disabled;
+        use AwsMetadataIndication as Indication;
+        use AwsMetadataSuppression as Suppression;
+
+        assert_eq!(
+            rule(&laptop_inputs()),
+            disabled(Suppression::Unindicated),
+            "no local indication must stay closed"
+        );
+
+        let mut inputs = laptop_inputs();
+        inputs.ec2_metadata_disabled = Some("true".to_owned());
+        assert_eq!(
+            rule(&inputs),
+            disabled(Suppression::ExplicitlyDisabled),
+            "the standard AWS disable switch is respected"
+        );
+
+        let mut inputs = laptop_inputs();
+        inputs.ec2_metadata_disabled = Some("TRUE".to_owned());
+        assert_eq!(rule(&inputs), disabled(Suppression::ExplicitlyDisabled));
+
+        let mut inputs = laptop_inputs();
+        inputs.ec2_metadata_disabled = Some("maybe".to_owned());
+        assert_eq!(
+            rule(&inputs),
+            disabled(Suppression::UnrecognizedDisableSetting),
+            "unknown state stays closed instead of probing"
+        );
+
+        let mut inputs = laptop_inputs();
+        inputs.ec2_metadata_disabled = Some("false".to_owned());
+        assert_eq!(rule(&inputs), enabled(Indication::ExplicitlyNotDisabled));
+
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            let mut inputs = laptop_inputs();
+            inputs.product_opt_in = Some(value.to_owned());
+            assert_eq!(
+                rule(&inputs),
+                enabled(Indication::ProductOptIn),
+                "opt-in value {value} must enable the probe"
+            );
+        }
+
+        for value in ["0", "false", "no", "off"] {
+            let mut inputs = laptop_inputs();
+            inputs.product_opt_in = Some(value.to_owned());
+            assert_eq!(
+                rule(&inputs),
+                disabled(Suppression::ExplicitlyDisabled),
+                "opt-in value {value} must keep the probe closed"
+            );
+        }
+
+        for (relative, full) in [
+            (Some("/v2/credentials".to_owned()), None),
+            (None, Some("http://localhost:1234/credentials".to_owned())),
+        ] {
+            let mut inputs = laptop_inputs();
+            inputs.container_credentials_relative_uri = relative;
+            inputs.container_credentials_full_uri = full;
+            assert_eq!(rule(&inputs), enabled(Indication::ContainerCredentialsUri));
+        }
+
+        let mut inputs = laptop_inputs();
+        inputs.metadata_service_endpoint = Some("http://169.254.169.254/".to_owned());
+        assert_eq!(rule(&inputs), enabled(Indication::MetadataServiceEndpoint));
+
+        let mut inputs = laptop_inputs();
+        inputs.metadata_service_endpoint_mode = Some("IPv6".to_owned());
+        assert_eq!(rule(&inputs), enabled(Indication::MetadataServiceEndpoint));
+
+        let mut inputs = laptop_inputs();
+        inputs.profile_credential_source = Some("Ec2InstanceMetadata".to_owned());
+        assert_eq!(rule(&inputs), enabled(Indication::ProfileCredentialSource));
+
+        let mut inputs = laptop_inputs();
+        inputs.profile_credential_source = Some("Environment".to_owned());
+        assert_eq!(
+            rule(&inputs),
+            disabled(Suppression::Unindicated),
+            "a profile that does not declare metadata is not an indication"
+        );
+
+        // An explicit off wins over every enabling input.
+        let mut inputs = laptop_inputs();
+        inputs.ec2_metadata_disabled = Some("true".to_owned());
+        inputs.container_credentials_relative_uri = Some("/v2/credentials".to_owned());
+        inputs.product_opt_in = Some("true".to_owned());
+        assert_eq!(rule(&inputs), disabled(Suppression::ExplicitlyDisabled));
+    }
+
+    #[test]
+    fn activation_reads_the_documented_opt_in_variable_and_profile_source() {
+        let inputs = aws_metadata_activation_inputs_with(
+            |name| {
+                Ok(match name {
+                    AWS_METADATA_OPT_IN_VARIABLE => Some("1".to_owned()),
+                    _ => None,
+                })
+            },
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(
+            aws_metadata_activation_from(&inputs),
+            AwsMetadataActivation::Enabled(AwsMetadataIndication::ProductOptIn)
+        );
+
+        let profile = std::collections::BTreeMap::from([(
+            "credential_source".to_owned(),
+            "EcsContainer".to_owned(),
+        )]);
+        let inputs = aws_metadata_activation_inputs_with(
+            |_| Ok(None),
+            move |config_file| {
+                Ok(if config_file { None } else { Some(profile.clone()) })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            aws_metadata_activation_from(&inputs),
+            AwsMetadataActivation::Enabled(AwsMetadataIndication::ProfileCredentialSource)
+        );
+    }
+
+    #[test]
+    fn indicated_metadata_probe_reaches_the_ec2_source() {
+        // The intentional path: an EC2 user who opts in still resolves, and the
+        // probe runs against the default IMDS endpoint.
+        let mut inputs = laptop_inputs();
+        inputs.product_opt_in = Some("true".to_owned());
+        let activation = aws_metadata_activation_from(&inputs);
+        let ec2_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_base = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let ec2_counter = ec2_requests.clone();
+        let base_slot = seen_base.clone();
+        let credentials = aws_metadata_credentials_with(
+            activation,
+            |_| Ok(None),
+            |_, _| panic!("the container source must not run without a container URI"),
+            move |base| {
+                ec2_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *base_slot.lock().unwrap() = Some(base.to_string());
+                Ok(Some(fixture_credentials("ec2")))
+            },
+        )
+        .unwrap();
+
+        assert!(credentials.is_some(), "the opt-in must still resolve");
+        assert_eq!(ec2_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            seen_base.lock().unwrap().as_deref(),
+            Some(AWS_EC2_METADATA_ENDPOINT)
+        );
+    }
+
+    #[test]
+    fn indicated_metadata_probe_prefers_the_container_uri() {
+        let mut inputs = laptop_inputs();
+        inputs.container_credentials_relative_uri = Some("/v2/credentials".to_owned());
+        let activation = aws_metadata_activation_from(&inputs);
+        let container_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_url = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let container_counter = container_requests.clone();
+        let url_slot = seen_url.clone();
+        let credentials = aws_metadata_credentials_with(
+            activation,
+            |name| {
+                Ok((name == "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+                    .then(|| "/v2/credentials".to_owned()))
+            },
+            move |url, ecs| {
+                assert!(ecs, "container credentials are fetched with the ECS flag");
+                container_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *url_slot.lock().unwrap() = Some(url.to_string());
+                Ok(fixture_credentials("container"))
+            },
+            |_| panic!("the EC2 source must not run when a container URI is configured"),
+        )
+        .unwrap();
+
+        assert!(credentials.is_some());
+        assert_eq!(
+            container_requests.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            seen_url.lock().unwrap().as_deref(),
+            Some("http://169.254.170.2/v2/credentials")
+        );
+    }
+
+    #[test]
+    fn ec2_metadata_flow_is_bounded_to_the_documented_requests() {
+        // Functional evidence that the intentional path still works end to end:
+        // token, role list, role credentials. The counter pins the request count.
+        let (base, requests) = metadata_fixture(vec![
+            ("/latest/api/token", "200 OK", "metadata-token"),
+            (
+                "/latest/meta-data/iam/security-credentials/",
+                "200 OK",
+                "fixture-role\n",
+            ),
+            (
+                "/latest/meta-data/iam/security-credentials/fixture-role",
+                "200 OK",
+                r#"{"AccessKeyId":"fixture-access","SecretAccessKey":"fixture-secret","Token":"fixture-token"}"#,
+            ),
+        ]);
+        let credentials = ec2_metadata_credentials(&base).unwrap();
+        assert!(credentials.is_some(), "a reachable IMDS must still resolve");
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn an_unavailable_metadata_endpoint_costs_one_bounded_request() {
+        // The probe is entered only when indicated, and when the endpoint is
+        // blocked it fails fast and closed: exactly one request, no retry, and a
+        // `None` that lets the unrelated provider be skipped.
+        let (base, requests) = metadata_fixture(vec![("/latest/api/token", "404 Not Found", "")]);
+        let credentials = ec2_metadata_credentials(&base).unwrap();
+        assert!(credentials.is_none(), "an unavailable IMDS resolves to no credentials");
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn aws_metadata_service_endpoint_override_is_validated_fail_closed() {
+        let default = aws_metadata_service_endpoint_with(|_| Ok(None)).unwrap();
+        assert_eq!(default.as_str(), AWS_EC2_METADATA_ENDPOINT);
+
+        for accepted in [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080/imds",
+            "http://[::1]:8080",
+            "https://metadata.internal.example",
+        ] {
+            let endpoint = aws_metadata_service_endpoint_with(|_| Ok(Some(accepted.to_owned())))
+                .unwrap_or_else(|error| panic!("{accepted} must be accepted: {error}"));
+            assert!(endpoint.as_str().ends_with('/'), "{endpoint}");
+        }
+
+        for rejected in [
+            "",
+            "http://metadata.example.com",
+            "http://user@169.254.169.254/",
+            "http://169.254.169.254/?query=1",
+            "http://169.254.169.254/#fragment",
+            "ftp://169.254.169.254/",
+        ] {
+            assert!(
+                aws_metadata_service_endpoint_with(|_| Ok(Some(rejected.to_owned()))).is_err(),
+                "metadata endpoint override must be rejected: {rejected}"
+            );
+        }
     }
 
     #[test]

@@ -13,9 +13,9 @@ use octet_ai::{
     AiClient, AiError, AssistantMessage, AssistantPart, AudioPayload, CacheRetention,
     CompatibilityMode, Cost, DecodeError, ImageSource, Media, Message, Model, OutputFormat,
     OutputModalities, Protocol, ReasoningConfig, ReasoningMode, Request, ResponsesCompactRequest,
-    ResponsesInput, ResponsesOptions, ResponsesReplayItem, StopReason, StreamEvent, ToolCall,
-    ToolCallArgumentError, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage,
-    UserPart, PICODOLLARS_PER_MICRODOLLAR,
+    ResponsesInput, ResponsesOptions, ResponsesReplayItem, ServiceTier, StopReason, StreamEvent,
+    ToolCall, ToolCallArgumentError, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage,
+    UserMessage, UserPart, PICODOLLARS_PER_MICRODOLLAR,
 };
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
@@ -60,9 +60,9 @@ use crate::telemetry::{
     spans::{SpanGuard, TelemetryContext},
 };
 use crate::tool::{
-    content_hash, CancellationToken, ReplaySafety, Tool, ToolConcurrency, ToolContext, ToolError,
-    ToolOutput, ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
-    ToolProgressSink, PROGRESS_CHANNEL_CAPACITY,
+    batch_requests_termination, content_hash, CancellationToken, ReplaySafety, Tool,
+    ToolConcurrency, ToolContext, ToolError, ToolOutput, ToolOutputContentPart, ToolOutputDetails,
+    ToolOutputMediaKind, ToolProgress, ToolProgressSink, PROGRESS_CHANNEL_CAPACITY,
 };
 
 /// Errors surfaced by [`Agent`] APIs.
@@ -680,6 +680,10 @@ pub struct Agent {
     completion_policy: CompletionPolicy,
     output_modalities: OutputModalities,
     max_output_tokens: u64,
+    /// Requested provider service tier for this agent's Responses requests.
+    /// `None` sends no tier. Set through [`Agent::set_service_tier`], which
+    /// refuses a route whose declared profile does not accept the field.
+    service_tier: Option<ServiceTier>,
     /// Stable semantic source key persisted with user-submitted prompts.
     prompt_model_source: Option<String>,
     prompt_color: Option<String>,
@@ -3687,16 +3691,60 @@ fn durable_responses_options(
     session: &Session,
     model: &Model,
     system: &str,
-) -> Option<ResponsesOptions> {
-    exact_responses_replay(session, model, system)
-        .map(|exact| ResponsesOptions::full_replay(exact.input))
+    requested_service_tier: Option<ServiceTier>,
+) -> Result<Option<ResponsesOptions>, AgentError> {
+    let service_tier = resolve_service_tier(model, requested_service_tier)?;
+    let replay = exact_responses_replay(session, model, system);
+    match (replay, service_tier) {
+        // No route-affine local window and no requested tier: keep the
+        // historical `None`, which makes the codec fall back to canonical
+        // replay with no Responses options at all.
+        (None, None) => Ok(None),
+        (replay, service_tier) => {
+            // A requested tier rides on Responses options even when the session
+            // has no window yet: the codec then replays canonically exactly as
+            // it would without options, so the tier is never silently dropped.
+            let options = replay.map_or_else(ResponsesOptions::default, |exact| {
+                ResponsesOptions::full_replay(exact.input)
+            });
+            Ok(Some(match service_tier {
+                Some(tier) => options.with_service_tier(tier),
+                None => options,
+            }))
+        }
+    }
+}
+
+/// Validates a requested service tier against the route that will carry it.
+///
+/// The tier changes provider routing and billing, so it is sent only to an
+/// endpoint whose declared runtime profile accepts the Responses `service_tier`
+/// field ([`octet_ai::ResponsesRuntimeProfile::accepts_service_tier`], the Codex
+/// subscription runtime today). Every other route — and every non-Responses
+/// protocol, where the field could not be emitted at all — fails closed with the
+/// codec's typed unsupported error instead of silently dropping the control.
+fn resolve_service_tier(
+    model: &Model,
+    requested: Option<ServiceTier>,
+) -> Result<Option<ServiceTier>, AgentError> {
+    let Some(tier) = requested else {
+        return Ok(None);
+    };
+    if model.spec.protocol != Protocol::OpenAiResponses
+        || !model.endpoint.runtime.responses_profile.accepts_service_tier()
+    {
+        return Err(AiError::Unsupported(octet_ai::UnsupportedError::ServiceTier).into());
+    }
+    Ok(Some(tier))
 }
 
 fn native_responses_options(
     session: &Session,
     model: &Model,
     system: &str,
+    requested_service_tier: Option<ServiceTier>,
 ) -> Result<ResponsesOptions, AgentError> {
+    let service_tier = resolve_service_tier(model, requested_service_tier)?;
     let replay = session
         .responses_replay_items(&model.endpoint.id, &model.spec.id)?
         .ok_or_else(|| {
@@ -3705,13 +3753,15 @@ fn native_responses_options(
                     .to_owned(),
             )
         })?;
-    Ok(ResponsesOptions::full_replay(
-        octet_ai::responses::encode_responses_replay(
-            model,
-            (!system.is_empty()).then_some(system),
-            &replay,
-        ),
-    ))
+    let options = ResponsesOptions::full_replay(octet_ai::responses::encode_responses_replay(
+        model,
+        (!system.is_empty()).then_some(system),
+        &replay,
+    ));
+    Ok(match service_tier {
+        Some(tier) => options.with_service_tier(tier),
+        None => options,
+    })
 }
 
 fn estimate_responses_request_tokens(
@@ -5314,6 +5364,7 @@ impl Agent {
             completion_policy: CompletionPolicy::Natural,
             output_modalities: OutputModalities::Text,
             max_output_tokens,
+            service_tier: None,
             prompt_model_source: None,
             prompt_color: None,
             prompt_display_text: None,
@@ -5369,9 +5420,10 @@ impl Agent {
                 &self.session,
                 &self.model,
                 &self.system,
+                self.service_tier,
             )?),
             AgentCompactionMode::Local | AgentCompactionMode::Disabled => {
-                durable_responses_options(&self.session, &self.model, &self.system)
+                durable_responses_options(&self.session, &self.model, &self.system, self.service_tier)?
             }
         };
         let request = Request {
@@ -6067,6 +6119,28 @@ impl Agent {
         })
     }
 
+    /// Selects the provider service tier for this agent's Responses requests.
+    ///
+    /// `None` clears the selection and sends no tier, which is the default and
+    /// the only thing an undeclared route can carry. `Some(tier)` is accepted
+    /// only on a route whose declared endpoint profile accepts the Responses
+    /// `service_tier` field ([`octet_ai::ResponsesRuntimeProfile::accepts_service_tier`],
+    /// the Codex subscription runtime today); every other route returns the
+    /// codec's typed unsupported error instead of silently dropping a control
+    /// that changes provider routing and billing. The same gate is re-applied
+    /// when a request is built, so a later route change can never leak the field
+    /// onto an endpoint that does not declare it.
+    pub fn set_service_tier(&mut self, tier: Option<ServiceTier>) -> Result<(), AgentError> {
+        resolve_service_tier(&self.model, tier)?;
+        self.service_tier = tier;
+        Ok(())
+    }
+
+    /// Returns the selected provider service tier, if any.
+    pub fn service_tier(&self) -> Option<ServiceTier> {
+        self.service_tier
+    }
+
     /// Replaces the durable active session at an idle boundary.
     ///
     /// Active V2 delegation owns session-scoped child resources, so callers
@@ -6371,6 +6445,9 @@ impl Agent {
         let max_session_tokens = self.max_session_tokens;
         let max_session_cost_microdollars = self.max_session_cost_microdollars;
         let auto_compaction_mode = self.auto_compaction_mode;
+        // The caller-selected provider service tier rides on every Responses
+        // request this run builds; the builder re-checks the route capability.
+        let service_tier = self.service_tier;
         let compaction_threshold_fraction = self.compaction_threshold_fraction;
         let compaction_keep_recent_tokens = self.compaction_keep_recent_tokens;
         let provider_retries_enabled = self.provider_retries_enabled;
@@ -6837,12 +6914,25 @@ impl Agent {
                 let active_system = capacity.active_system;
                 let responses =
                     if auto_compaction_mode == AgentCompactionMode::NativeResponses {
-                        match native_responses_options(session, &model, &active_system) {
+                        match native_responses_options(
+                            session,
+                            &model,
+                            &active_system,
+                            service_tier,
+                        ) {
                             Ok(options) => Some(options),
                             Err(error) => break 'run FinishReason::Failed(error),
                         }
                     } else {
-                        durable_responses_options(session, &model, &active_system)
+                        match durable_responses_options(
+                            session,
+                            &model,
+                            &active_system,
+                            service_tier,
+                        ) {
+                            Ok(options) => options,
+                            Err(error) => break 'run FinishReason::Failed(error),
+                        }
                     };
 
                 let request = Request {
@@ -7786,6 +7876,9 @@ impl Agent {
                     cancellation: CancellationToken::default(),
                 };
                 let mut parallel_results: VecDeque<ParallelReadWaveExecution> = VecDeque::new();
+                // Row 4.10: every finalized result of this assistant batch, in
+                // emitted order, decides the batch's termination request.
+                let mut termination_requests: Vec<bool> = Vec::with_capacity(calls.len());
 
                 // Calls in one assistant response form a single batch. Do not
                 // treat parallel or otherwise batched identical calls as a
@@ -8294,6 +8387,12 @@ impl Agent {
                     if !newly_added.is_empty() {
                         announced_tools.extend(newly_added.iter().cloned());
                     }
+                    // Recorded before the durable commit below, so the batch's
+                    // termination decision can never be taken from a result
+                    // that was not actually placed. A failed call has no
+                    // result and never requests termination.
+                    termination_requests
+                        .push(result.as_ref().map(ToolOutput::terminates_run).unwrap_or(false));
                     let (message, accepted_media, text, is_error, details) = lower_tool_result(
                         call.id.clone(),
                         &result,
@@ -8397,6 +8496,15 @@ impl Agent {
                 // enter another model turn after controlled cancellation.
                 if abort.is_set() {
                     break 'run FinishReason::Aborted;
+                }
+
+                // Row 4.10: Pi's unanimity rule, applied to exactly one
+                // assistant batch. Every emitted call already has a durable
+                // result above, so a unanimous request ends the run instead of
+                // entering another model turn; any sibling that did not ask to
+                // stop keeps the batch going, and its result is never discarded.
+                if batch_requests_termination(termination_requests.iter().copied()) {
+                    break 'run FinishReason::Completed;
                 }
 
                 if needs_continuation {
@@ -9781,6 +9889,73 @@ mod tests {
     }
 
     #[test]
+    fn a_requested_service_tier_is_gated_by_the_route_and_never_silently_dropped() {
+        use octet_ai::{ModelCatalog, ModelId, ResponsesRuntimeProfile, ServiceTier};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("service-tier.jsonl")).unwrap();
+        let mut model = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+
+        // A route that does not declare the field refuses the selection with the
+        // codec's typed unsupported error instead of dropping it silently.
+        let rejection = resolve_service_tier(&model, Some(ServiceTier::Priority)).unwrap_err();
+        assert_eq!(
+            rejection.to_string(),
+            "ai error: Unsupported error: Responses service tier is unsupported on this route"
+        );
+        // The same route may always clear the selection.
+        assert_eq!(resolve_service_tier(&model, None).unwrap(), None);
+
+        // The declared Codex runtime accepts it.
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            ResponsesRuntimeProfile::Codex;
+        assert_eq!(
+            resolve_service_tier(&model, Some(ServiceTier::Priority)).unwrap(),
+            Some(ServiceTier::Priority)
+        );
+
+        // A non-Responses protocol could not emit the field at all, so a declared
+        // profile bit must not be enough.
+        let mut chat = model.clone();
+        Arc::make_mut(&mut chat.spec).protocol = Protocol::OpenAiChat;
+        assert!(resolve_service_tier(&chat, Some(ServiceTier::Priority)).is_err());
+
+        // The historical no-tier path is untouched: a session whose assistant
+        // turn has no route-affine sidecar still builds no Responses options.
+        session
+            .append(user_message(UserInput::from("legacy prompt")))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("legacy answer".into())],
+                model: model.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+            })))
+            .unwrap();
+        assert!(
+            durable_responses_options(&session, &model, "system", None)
+                .unwrap()
+                .is_none(),
+            "no tier and no replay window keeps the canonical no-options request"
+        );
+
+        // A requested tier still rides on the request when there is no replay
+        // window: the codec then replays canonically exactly as it would with no
+        // options, so `/fast` cannot be silently inert.
+        let options = durable_responses_options(&session, &model, "system", Some(ServiceTier::Flex))
+            .unwrap()
+            .expect("a requested tier always produces options");
+        assert_eq!(options.service_tier, Some(ServiceTier::Flex));
+        assert!(options.input.is_none());
+        assert_eq!(options.previous_response_id, None);
+        assert!(!options.store);
+        assert_eq!(options.context_management, None);
+    }
+
+    #[test]
     fn exact_responses_replay_estimate_counts_opaque_provider_payloads() {
         use octet_ai::{ModelCatalog, ModelId, ResponsesItem, ResponsesOutput};
 
@@ -9825,7 +10000,9 @@ mod tests {
         );
         assert_eq!(estimate.provider_tokens, None);
 
-        let options = durable_responses_options(&session, &model, "system").unwrap();
+        let options = durable_responses_options(&session, &model, "system", None)
+            .unwrap()
+            .unwrap();
         assert!(options.input.is_some());
         assert_eq!(options.previous_response_id, None);
         assert!(!options.store);

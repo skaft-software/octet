@@ -6,6 +6,13 @@
 //! trait and register through the same [`ExtensionHost::tool`] method as any
 //! third-party tool.
 //!
+//! The model-visible surface is deliberately narrow: `read`/`write`/`edit`/
+//! `bash` plus the ripgrep-backed `search` tool (available to embedders and
+//! explicit allowlists; the coding product leaves it out of its default
+//! allowlist). File discovery and content search are served by `rg` through
+//! `search` or `bash` — there is deliberately no separate `ls`/`find`/`grep`
+//! tool (maintainer decision, matching the v0.7.6 release surface).
+//!
 //! Three modules here are not tools but the harness-side primitives Pi defines
 //! next to them, landed in the tool layer because `session.rs`/`agent.rs` are
 //! outside this change's scope: [`durability`] (durable invocation-scoped
@@ -16,9 +23,6 @@
 
 mod bash;
 mod edit;
-mod ls;
-mod find;
-mod grep;
 mod powershell;
 mod shell_environment;
 mod read;
@@ -34,9 +38,6 @@ pub use bash::{
     BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES, MIN_BASH_CHECKPOINT_INTERVAL,
 };
 pub use edit::EditTool;
-pub use ls::LsTool;
-pub use find::FindTool;
-pub use grep::GrepTool;
 pub use powershell::PowerShellTool;
 pub use shell_environment::{ShellSessionEnvironment, SessionShellTool};
 pub use read::ReadTool;
@@ -165,9 +166,6 @@ impl Extension for CoreTools {
         // The coding product disables this redundant schema by default, while
         // keeping it available to embedders and explicit tool allowlists.
         host.tool(SearchTool);
-        host.tool(LsTool);
-        host.tool(FindTool);
-        host.tool(GrepTool);
         // Optional at the product allowlist boundary; never a bash fallback.
         #[cfg(windows)]
         host.tool(PowerShellTool);
