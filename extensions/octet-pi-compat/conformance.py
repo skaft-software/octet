@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -29,6 +30,18 @@ PROFILE_PATH = ROOT / "profiles/0.84.4.json"
 LEDGER_PATH = ROOT / "profiles/0.84.4.ledger.json"
 INTEGRITY_PATH = ROOT / "profiles/0.84.4.integrity.json"
 FIXTURE_DIR = ROOT / "tests/fixtures/conformance"
+REAL_RUNTIME_FIXTURE_PATH = FIXTURE_DIR / "real-runtime.json"
+REAL_RUNTIME_AGGREGATE_FIXTURE_PATH = FIXTURE_DIR / "real-runtime-aggregate.json"
+REAL_RUNTIME_MANIFEST_PATH = ROOT / "tests/fixtures/real-runtime-extension.toml"
+ALTERNATE_RUNTIME_MANIFEST_PATH = ROOT / "tests/fixtures/extension.toml"
+BRIDGE_VERSION = "0.7.0"
+SUPPORTED_LOCK_FILES = (
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+)
 TUI_PROFILE_PATH = REPO / "crates/sexy-tui-rs/upstream/pi-tui-0.84.4.json"
 BRIDGE = ROOT / "bridge.mjs"
 PROFILE = "pi-0.84.4"
@@ -75,6 +88,162 @@ def fixture_index(path: Path):
     return result
 
 
+def check_real_runtime_fixture():
+    fixture = document(REAL_RUNTIME_FIXTURE_PATH)
+    if fixture.get("schema_version") != 1 or fixture.get("profile") != PROFILE:
+        fail("real-runtime fixture has the wrong profile identity")
+    if fixture.get("source_revision") != REVISION:
+        fail("real-runtime fixture is not pinned to the exact Pi 0.84.4 source revision")
+    if fixture.get("source_root") != "packages/coding-agent/examples/extensions":
+        fail("real-runtime fixture source root is not the pinned coding-agent examples root")
+
+    runtime = fixture.get("runtime")
+    if not isinstance(runtime, dict) or runtime.get("node_minimum") != "22.19.0":
+        fail("real-runtime fixture has the wrong Node minimum")
+    for key, package_name in (
+        ("coding_agent", "@earendil-works/pi-coding-agent"),
+        ("tui", "@earendil-works/pi-tui"),
+    ):
+        package = runtime.get(key)
+        if not isinstance(package, dict) or package.get("name") != package_name:
+            fail(f"real-runtime fixture omits {package_name}")
+        if package.get("version") != VERSION or package.get("license") != "MIT":
+            fail(f"real-runtime fixture does not pin {package_name}@{VERSION} and its license")
+
+    expected_sources = [
+        ("hello", "hello.ts"),
+        ("event-bus", "event-bus.ts"),
+        ("timed-confirm", "timed-confirm.ts"),
+    ]
+    sources = fixture.get("sources")
+    if not isinstance(sources, list) or len(sources) != len(expected_sources):
+        fail("real-runtime fixture must select the bounded unchanged source set")
+    for order, (row, expected) in enumerate(zip(sources, expected_sources, strict=True), 1):
+        if (
+            not isinstance(row, dict)
+            or row.get("id") != expected[0]
+            or row.get("path") != expected[1]
+            or row.get("order") != order
+            or row.get("unchanged") is not True
+        ):
+            fail("real-runtime fixture source order or unchanged-source pin is invalid")
+        if not isinstance(row.get("registration"), list) or not row["registration"]:
+            fail(f"real-runtime fixture has no registration evidence for {expected[0]}")
+        source_path = PurePosixPath(row["path"])
+        if source_path.is_absolute() or ".." in source_path.parts or not source_path.parts:
+            fail("real-runtime fixture source path escapes the pinned source root")
+
+    journey_ids = {row.get("id") for row in fixture.get("journey", []) if isinstance(row, dict)}
+    expected_journeys = {
+        "ordered-registration",
+        "shared-event-bus",
+        "shared-global-this",
+        "cancellation",
+        "restart",
+        "stale-source",
+        "trust-binding",
+    }
+    if journey_ids != expected_journeys:
+        fail("real-runtime fixture journey inventory is incomplete")
+    gates = fixture.get("gates")
+    expected_gates = {
+        "source_integrity",
+        "dependency_lock_integrity",
+        "runtime_integrity",
+        "explicit_enable_and_trust",
+        "registration_order",
+        "event_bus",
+        "globalThis",
+        "cancellation",
+        "restart",
+        "stale_source_rejection",
+    }
+    if not isinstance(gates, dict) or set(gates) != expected_gates:
+        fail("real-runtime fixture gate inventory is incomplete")
+    if gates.get("globalThis") != "unrun_without_an_unchanged_marker":
+        fail("real-runtime fixture must not substitute a toy globalThis source")
+    execution = fixture.get("execution")
+    if not isinstance(execution, dict) or execution.get("status") != "unrun":
+        fail("real-runtime fixture must remain explicitly unrun")
+    nonempty(execution.get("reason"), "real-runtime unrun reason")
+    nonempty(execution.get("command"), "real-runtime verifier command")
+    expected = fixture.get("expected")
+    if not isinstance(expected, dict):
+        fail("real-runtime fixture has no protocol assertions")
+    for key in (
+        "tool_names",
+        "command_order_prefix",
+        "session_notification",
+        "emit_notification_prefix",
+        "hello_text",
+        "cancelled_error_code",
+        "stale_source_error_fragment",
+        "trust_error_fragment",
+    ):
+        if key not in expected:
+            fail(f"real-runtime fixture omits assertion {key}")
+    return fixture
+
+
+def check_real_runtime_aggregate_fixture():
+    fixture = document(REAL_RUNTIME_AGGREGATE_FIXTURE_PATH)
+    if fixture.get("schema_version") != 1 or fixture.get("profile") != PROFILE:
+        fail("real-runtime aggregate fixture has the wrong profile identity")
+    if fixture.get("id") != "real-runtime:ordered-aggregate":
+        fail("real-runtime aggregate fixture has the wrong identity")
+    if fixture.get("kind") != "unchanged_source_aggregate":
+        fail("real-runtime aggregate fixture must describe unchanged sources")
+
+    expected_sources = [
+        ("hello", "examples/extensions/hello.ts"),
+        ("plan-mode", "examples/extensions/plan-mode"),
+    ]
+    sources = fixture.get("sources")
+    if not isinstance(sources, list) or len(sources) != len(expected_sources):
+        fail("real-runtime aggregate fixture must select its declared source set")
+    for row, expected in zip(sources, expected_sources, strict=True):
+        if not isinstance(row, dict) or (row.get("id"), row.get("entrypoint")) != expected:
+            fail("real-runtime aggregate fixture source order or entrypoint is invalid")
+        nonempty(row.get("assertion"), f"real-runtime aggregate assertion for {expected[0]}")
+        entrypoint = PurePosixPath(row["entrypoint"])
+        if entrypoint.is_absolute() or ".." in entrypoint.parts or not entrypoint.parts:
+            fail("real-runtime aggregate entrypoint escapes the pinned source root")
+
+    expected_journey = [
+        "verify_profile_and_package_integrity",
+        "verify_source_and_dependency_lock_fingerprints",
+        "load_sources_once_in_declared_order",
+        "exercise_registered_tools_and_commands",
+        "cancel_an_in_flight_request",
+        "settle_and_restart_with_the_same_identity",
+        "reject_changed_source_before_execution",
+    ]
+    if fixture.get("journey") != expected_journey:
+        fail("real-runtime aggregate fixture journey order is invalid")
+
+    evidence = fixture.get("evidence")
+    expected_evidence = [
+        "profile",
+        "package_integrity",
+        "source_order",
+        "source_fingerprints",
+        "source_lock_fingerprints",
+        "runtime_integrity",
+        "link_identity",
+        "trust_mode",
+        "cancellation",
+        "restart",
+        "stale_source_rejection",
+    ]
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("required") != expected_evidence
+        or evidence.get("status") != "unrun_until_explicit_real_package_and_source_root_are_supplied"
+    ):
+        fail("real-runtime aggregate fixture evidence status or inventory is invalid")
+    return fixture
+
+
 def verify_profile_digest(profile):
     sidecar = document(INTEGRITY_PATH)
     actual = hashlib.sha256(PROFILE_PATH.read_bytes()).hexdigest()
@@ -94,6 +263,8 @@ def check_static():
     examples_fixture = fixture_index(FIXTURE_DIR / "official-examples.json")
     tui_fixture = fixture_index(FIXTURE_DIR / "tui-audit.json")
     plan = document(FIXTURE_DIR / "plan-mode-journey.json")
+    check_real_runtime_aggregate_fixture()
+    real_runtime = check_real_runtime_fixture()
 
     if profile.get("schema_version") != 1 or profile.get("profile") != PROFILE:
         fail("wrong Pi profile schema or name")
@@ -115,6 +286,8 @@ def check_static():
         "tests/fixtures/conformance/official-examples.json",
         "tests/fixtures/conformance/plan-mode-journey.json",
         "tests/fixtures/conformance/tui-audit.json",
+        "tests/fixtures/conformance/real-runtime.json",
+        "tests/fixtures/conformance/real-runtime-aggregate.json",
     }
     if not isinstance(conformance, dict) or conformance.get("ledger") != "0.84.4.ledger.json" or set(conformance.get("fixtures", [])) != expected_files:
         fail("profile conformance cross-links are incomplete")
@@ -229,7 +402,7 @@ def check_static():
         "profile-integrity", "official-example-inventory", "bridge-cancellation", "bridge-bounds",
         "host-supervisor-restart", "host-extension-trust", "bridge-source-fingerprint",
         "host-sanitized-environment", "legacy-api-regression", "generated-api-0.3", "tui-audit",
-        "plan-mode:full-journey",
+        "plan-mode:full-journey", "real-runtime:ordered-aggregate",
     }
     known = set(public) | set(examples_fixture) | set(tui_fixture) | plan_ids | static_gates
     for gate in ledger.get("gates", []):
@@ -498,6 +671,101 @@ def fingerprint(source: Path):
     return digest.hexdigest()
 
 
+def source_lock_fingerprint(source: Path):
+    source = source.resolve()
+    root = source if source.is_dir() else source.parent
+    entries = []
+    for name in SUPPORTED_LOCK_FILES:
+        path = root / name
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            fail(f"cannot inspect dependency lock {path}: {error}")
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            fail(f"dependency lock {path} is not a regular non-symlink file")
+        if metadata.st_size > 16 * 1024 * 1024:
+            fail(f"dependency lock {path} exceeds the supported size limit")
+        entries.append((name, path))
+    digest = hashlib.sha256()
+    digest.update(b"octet-pi-source-lock-fingerprint\0")
+    digest.update((1).to_bytes(4, "big"))
+    digest.update(len(entries).to_bytes(4, "big"))
+    total = 0
+    for name, path in entries:
+        _frame_digest(digest, name)
+        data = read_regular_file(path, f"dependency lock {name}", 64 * 1024 * 1024 - total)
+        _frame_digest(digest, data)
+        total += len(data)
+    return digest.hexdigest()
+
+
+def _frame_digest(digest, value):
+    data = value if isinstance(value, bytes) else str(value).encode()
+    digest.update(len(data).to_bytes(8, "big"))
+    digest.update(data)
+
+
+def runtime_integrity(package: Path):
+    root = package.resolve()
+    digest = hashlib.sha256()
+    digest.update(b"octet-pi-runtime-integrity\0")
+    digest.update((1).to_bytes(4, "big"))
+    _frame_digest(digest, read_regular_file(root / "package.json", "Pi package manifest", 256 * 1024))
+    _frame_digest(digest, fingerprint(root / "dist"))
+    return digest.hexdigest()
+
+
+def aggregate_digest(fixture, source_fingerprints, source_lock_fingerprints):
+    payload = {
+        "fixture": fixture,
+        "source_fingerprints": list(source_fingerprints),
+        "source_lock_fingerprints": list(source_lock_fingerprints),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def link_identity(
+    *,
+    extensions,
+    source_fingerprints,
+    source_lock_fingerprints,
+    package,
+    pi_runtime_integrity,
+    aggregate_digest_value,
+    manifest_path,
+    command_name,
+    octet_version,
+    agent_dir,
+):
+    digest = hashlib.sha256()
+    digest.update(b"octet-pi-aggregate-link-identity\0")
+    digest.update((1).to_bytes(4, "big"))
+    for value in (
+        BRIDGE_VERSION,
+        VERSION,
+        octet_version,
+        command_name,
+        str(manifest_path.resolve(strict=True)),
+        str(package.resolve()),
+        pi_runtime_integrity,
+        aggregate_digest_value,
+        "explicit_enable_and_trust_required",
+        os.path.abspath(agent_dir),
+    ):
+        _frame_digest(digest, value)
+    digest.update(len(extensions).to_bytes(4, "big"))
+    for extension, source_hash, lock_hash in zip(
+        extensions, source_fingerprints, source_lock_fingerprints, strict=True
+    ):
+        _frame_digest(digest, os.path.abspath(extension))
+        _frame_digest(digest, source_hash)
+        _frame_digest(digest, lock_hash)
+    return digest.hexdigest()
+
+
 def load_source(node: str, package: Path, checkout: Path, extension: Path, digest: str, env):
     unshare = shutil.which("unshare")
     if not sys.platform.startswith("linux") or not unshare:
@@ -556,6 +824,20 @@ def load_source(node: str, package: Path, checkout: Path, extension: Path, diges
             process.wait()
 
 
+def run_real_aggregate(**kwargs):
+    spec = importlib.util.spec_from_file_location(
+        "octet_pi_real_runtime_runner", ROOT / "real_runtime.py"
+    )
+    if spec is None or spec.loader is None:
+        fail("real-runtime runner is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        return module.run_real_aggregate(**kwargs)
+    except module.RealRuntimeFailure as error:
+        fail(str(error))
+
+
 def run_full(arguments, report):
     if not arguments.network_isolated:
         fail("--full refuses extension loading without --network-isolated")
@@ -585,18 +867,97 @@ def run_full(arguments, report):
         fail("--full requires node on PATH")
     failures = []
     with tempfile.TemporaryDirectory(prefix="octet-pi-conformance-") as directory:
-        home = Path(directory); (home / "tmp").mkdir()
-        env = {"HOME": str(home), "TMPDIR": str(home / "tmp"), "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_PROXY": "*", "no_proxy": "*", "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"}
+        home = Path(directory)
+        (home / "tmp").mkdir()
+        agent_dir = home / "pi-agent"
+        agent_dir.mkdir()
+        env = {
+            "HOME": str(home),
+            "TMPDIR": str(home / "tmp"),
+            "PATH": os.environ.get("PATH", ""),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "NO_PROXY": "*",
+            "no_proxy": "*",
+            "HTTP_PROXY": "http://127.0.0.1:9",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+            "http_proxy": "http://127.0.0.1:9",
+            "https_proxy": "http://127.0.0.1:9",
+        }
         for example in examples:
             source = examples_root / example
             try:
                 load_source(node, package, checkout, source, fingerprint(source), env)
             except GateFailure as error:
                 failures.append(str(error))
-    if failures:
-        suffix = "" if len(failures) <= 8 else f"\n... and {len(failures) - 8} more"
-        fail(f"{len(failures)} of 78 exact-source examples failed:\n" + "\n".join(failures[:8]) + suffix)
-    report.update({"real_runtime": "integrity_verified_local_full_run", "real_examples_loaded": 78, "network_isolation": "linux_unshare_net"})
+        if failures:
+            suffix = "" if len(failures) <= 8 else f"\n... and {len(failures) - 8} more"
+            fail(f"{len(failures)} of 78 exact-source examples failed:\n" + "\n".join(failures[:8]) + suffix)
+
+        real_fixture = check_real_runtime_fixture()
+        real_sources = [examples_root / row["path"] for row in real_fixture["sources"]]
+        if any(not source.is_file() for source in real_sources):
+            fail("source checkout lacks a selected unchanged real-runtime aggregate source")
+        if not REAL_RUNTIME_MANIFEST_PATH.is_file() or not ALTERNATE_RUNTIME_MANIFEST_PATH.is_file():
+            fail("real-runtime identity manifests are missing")
+        unshare = shutil.which("unshare")
+        if not unshare:
+            fail("--full requires Linux unshare --net")
+        source_hashes = [fingerprint(source) for source in real_sources]
+        lock_hashes = [source_lock_fingerprint(source) for source in real_sources]
+        runtime_hash = runtime_integrity(package)
+        aggregate_identity_digest = aggregate_digest(real_fixture, source_hashes, lock_hashes)
+        command_name = "pi-real-aggregate"
+        octet_version = "0.7.0"
+
+        def make_link_identity(**values):
+            return link_identity(
+                extensions=values["extensions"],
+                source_fingerprints=values["source_fingerprints"],
+                source_lock_fingerprints=values["source_lock_fingerprints"],
+                package=package,
+                pi_runtime_integrity=runtime_hash,
+                aggregate_digest_value=aggregate_identity_digest,
+                manifest_path=values["manifest_path"],
+                command_name=command_name,
+                octet_version=octet_version,
+                agent_dir=agent_dir,
+            )
+
+        aggregate_identity = make_link_identity(
+            extensions=real_sources,
+            source_fingerprints=source_hashes,
+            source_lock_fingerprints=lock_hashes,
+            manifest_path=REAL_RUNTIME_MANIFEST_PATH,
+        )
+        aggregate_report = run_real_aggregate(
+            launcher=[unshare, "--net", "--", node],
+            bridge=BRIDGE,
+            checkout=checkout,
+            package=package,
+            extensions=real_sources,
+            source_fingerprints=source_hashes,
+            source_lock_fingerprints=lock_hashes,
+            runtime_integrity=runtime_hash,
+            aggregate_digest=aggregate_identity_digest,
+            manifest_path=REAL_RUNTIME_MANIFEST_PATH,
+            alternate_manifest_path=ALTERNATE_RUNTIME_MANIFEST_PATH,
+            link_identity=aggregate_identity,
+            make_link_identity=make_link_identity,
+            agent_dir=agent_dir,
+            octet_version=octet_version,
+            command_name=command_name,
+            env=env,
+            expected=real_fixture["expected"],
+        )
+    report.update(
+        {
+            "real_runtime": "integrity_verified_local_full_run",
+            "real_examples_loaded": 78,
+            "network_isolation": "linux_unshare_net",
+            "real_aggregate": aggregate_report,
+        }
+    )
 
 
 def main(argv):

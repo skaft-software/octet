@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -2355,7 +2356,9 @@ function hashFramed(hash, value) {
 }
 
 function sourceLabel(index) {
-  return `#${index + 1}`;
+  const source = args.extensions[index];
+  const name = source ? basename(source) : "unknown";
+  return `#${index + 1} (${name})`;
 }
 
 function sourceVerificationError(index, reason) {
