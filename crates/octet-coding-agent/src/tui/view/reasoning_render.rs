@@ -942,13 +942,11 @@ mod tests {
                     ColorDepth::TrueColor => MIN_LUMINANCE_DELTA,
                     _ => MIN_LUMINANCE_DELTA_ANSI256,
                 };
-                // The chroma claim is asserted on the exact encoder. ANSI256
-                // additionally passes every cell through `nearest_ansi256`,
-                // whose grid is sparse at the light profile's luminance band
-                // (the only chromatic entries near relative luminance 0.09 are
-                // saturated primaries), so a modest chroma can legitimately
-                // collapse onto a grey entry there. Luminance, ordering, and
-                // resting contrast are asserted at both depths.
+                // Every claim below holds at both depths. True colour is the
+                // exact encoder; ANSI256 additionally passes each cell through
+                // `nearest_ansi256`, so the strict cell *ordering* is asserted
+                // exactly there and with that encoder's own documented
+                // luminance bound at ANSI256 depth.
                 let exact_colour = depth == ColorDepth::TrueColor;
                 for lab in [
                     None,
@@ -988,7 +986,7 @@ mod tests {
                              of relative luminance from resting {resting:?}"
                         );
                         let chroma_delta = (chroma(center) - chroma(resting)).abs();
-                        if tinted && exact_colour {
+                        if tinted {
                             assert!(
                                 chroma_delta >= MIN_CHROMA_DELTA,
                                 "{background:?}/{depth:?}/{lab:?} {label}: centre {center:?} moves only \

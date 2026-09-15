@@ -174,3 +174,108 @@ boundary returns the SAME agent id, one worker; a different key spawns its own),
 `reattachment_fails_closed_when_the_child_session_is_gone`.
 NOTE: `cargo test -p octet-agent` is currently blocked by another worker's in-flight
 crates/octet-ai/src/responses_ws.rs edit (E0596); retrying.
+
+STEP 2026-09-15T19:20Z agent8: launchable child-session handle (openall4's missing primitive) LANDED host-side.
+
+New host API (crates/octet-agent/src/delegation.rs, crates/octet-agent/src/agent.rs):
+- `pub fn octet_agent::resolve_launchable_child_session(session_directory: &Path, reference: &str)
+   -> Result<LaunchableChildSession, DelegationError>` — resolves `agent-session:<sha256>` from the
+  session-owned durable roster (`<session-dir>/delegation/fleet.json`) with NO live agent, so a
+  separate process can launch a worker pane. Fails closed with a bounded reason for: unknown handle,
+  malformed handle (not exactly 64 lowercase hex), a worker parked at the approval boundary, a
+  vanished transcript, an unreadable/foreign roster.
+- `Agent::session_delegation() -> Option<SessionDelegationHandle>` and
+  `SessionDelegationHandle::launchable_child_session(reference)` — the in-process resolver, which
+  additionally knows process-local liveness (`AgentRecord.live_task`, cleared by a Drop guard on every
+  `run_worker` exit path) and refuses a worker a live task still owns.
+- `LaunchableChildSession { reference, session_path, agent_id, agent_path, status }` — the token is
+  opaque/path-free/argv-safe (`agent-session:` + 64 lowercase hex, no `/`, no space, no secret);
+  `session_path` is host-only and must never be published to an extension, a notice, or a command line.
+- Every `list_agents` / extension `agent/list` row now carries `handle`, `launchable`, `launch_blocked`
+  and `live_task`, so the extension can render a pane vs an explicit blocked reason without new RPC.
+- Parked (`awaiting_approval`) workers are NOT launchable; the host refusal is the well-founded basis
+  for the extension's existing `worker_awaiting_approval` refusal.
+
+REMAINING PRIMITIVE (not mine, does not exist yet — named blocker, not a silent gap):
+CLI-side wiring in `crates/octet-coding-agent/src/session_store.rs::path_by_id` (accept
+`agent-session:<sha256>` and call `resolve_launchable_child_session`, then hand the resolved host-only
+child path to the launcher). Until that lands, `/subagents open-all` worker panes stay BLOCKED with
+that exact wiring named. Documented in docs/subagents.md (that paragraph previously claimed no
+host-side resolver exists; corrected).
+
+Observed output (run by me):
+```
+$ cargo test -p octet-agent --test delegation              -> 11 passed; 0 failed
+$ cargo test -p octet-agent --lib                          -> 539 passed; 0 failed; 1 ignored
+$ cargo test -p octet-agent --test agent_run -- --skip websocket --skip qualified_codex_ws --skip native_compaction_calls_bound_reopening
+                                                           -> 136 passed; 0 failed; 3 filtered out
+$ cargo test -p octet-agent --test telemetry_conformance    -> 9 passed; 0 failed
+$ cargo test -p octet-agent --test extension_api_v03_conformance -> 5 passed
+$ cargo test -p octet-agent --test extension_api_0_1_conformance -> 4 passed
+$ cargo check --workspace --all-targets --locked           -> Finished (green)
+```
+Pre-existing red, NOT caused by my change and NOT mine to touch:
+- `crates/octet-agent/tests/agent_run.rs::websocket_connection_limit_is_retried_by_agent` fails with
+  `StreamProtocol(ResponseNotResumable { detail: "websocket_connection_limit_reached" })` — ai8's
+  in-flight `crates/octet-ai/src/responses_ws.rs` work (host said do not chase).
+- `crates/octet-agent/tests/api_v03_runnable.rs` fails with
+  `-32011 extension capability mismatch: theme_selection` (extension/theme capability negotiation,
+  not delegation).
+
+TASK 2 status (honest): NOT started — no code written for parity 1e.2 durability, §4 consumers
+4.7/4.8/4.10/4.13, #264, #265, #267. The P0 (TASK 1) plus the corrected telemetry doc and the
+launchable handle consumed the whole budget; nothing half-applied was left in the tree.
+
+CHANGELOG-ready bullets:
+- feat(octet-agent): session-scoped delegation lifetime. A spawned worker's record is owned by the
+  session, not the run: the end of the owning run (completed, aborted, or dropped) journals an explicit
+  `run_detached` boundary, keeps the worker discoverable, and persists id, name, task, child-session
+  reference, status, and consumed budget to a durable roster (`fleet.json`) that survives a process
+  restart. A later turn reattaches the fleet (`wait_agent`, `send_message`, `followup_task`,
+  `interrupt_agent` all work on it) and never spawns a duplicate for the same extension idempotency
+  key. Retirement stays explicit and diagnosable.
+- fix(octet-agent): a reattached worker no longer keeps a stale `detached` marker (the run-scoped
+  marker is cleared for a live in-process worker) and reattachment rebuilds the command channel when a
+  settled/parked record no longer owns a receiver, instead of attaching work to a closed queue.
+- fix(octet-agent): execution caps hold across the turn boundary. Idle workers release their execution
+  slot, reattachment acquires one slot per record and leaves the excess visibly `detached`, and a new
+  owning run never hands back capacity that a surviving worker still holds.
+- fix(octet-agent): a root owning run reactivates after an explicit stop and sweeps only *retired*
+  (shut-down, non-resumable) records, so an explicit stop can neither brick the session nor burn a
+  worker name forever.
+- feat(octet-agent): unattended mutation fails closed. A detached worker that needs an approval
+  authority it no longer has parks in a durable `awaiting_approval` state with a bounded reason
+  (never proceeds, never blocks forever); it is not launchable, and a later turn supplies the decision.
+- feat(octet-agent): session-owned launchable child-session handle. `resolve_launchable_child_session`
+  / `Agent::session_delegation()` resolve the opaque, path-free, argv-safe `agent-session:<sha256>`
+  reference to a host-only launchable transcript; `agent/list` rows carry `handle`, `launchable`,
+  `launch_blocked`. A live in-process worker, a parked worker, and a vanished transcript refuse with a
+  bounded reason. Remaining primitive: CLI `path_by_id` wiring for `octet --resume <reference>`.
+- docs(parity/telemetry): row 3.5 corrected from "NOT landed" to landed, with the live generator
+  locations and the five boundary tests; the stale `#[allow(dead_code)]` on
+  `TelemetryContext::begin_typed`, `CompletionAttributes::record`, and `SpanGuard::context` removed.
+
+CONTRACT FOR THE EXTENSION (openall4) — exact host surface to call:
+1. `agent/list` row fields: `status.state` ∈ {pending, running, completed, interrupted, timed_out,
+   failed, detached, awaiting_approval, shutdown}; plus `detached` (bool), `live_task` (bool),
+   `handle` (string|null, `agent-session:<sha256>`), `launchable` (bool), `launch_blocked` (string|null,
+   bounded reason), `diagnostic` (string|null, e.g. "detached worker could not be reattached: ...").
+2. `agent/wait` returns when no record is pending/running; a detached record with no live task is not
+   running, so wait settles instead of stalling. `agent/spawn` with a previously used idempotency key
+   returns the SAME `agent_id`/`agent_path` for the session-owned worker (no duplicate), and fails with
+   `-32002` only when the key is reused with different input. A reused public `task_name` that is held
+   by an existing worker is refused with a bounded message naming the holder and `followup_task`.
+3. `agent/follow_up` on a settled reattached worker returns `delivery: "new_run"`; on a running worker
+   `"follow_up"`. `agent/message` returns `steering`/`queued`. `agent/interrupt` sets `interrupted`
+   (explicit stop; `shutdown` only for owner/team teardown).
+4. Parked workers: render `awaiting approval` with the bounded reason; refuse `subagent_continue`
+   (`worker_awaiting_approval`), keep `subagent_stop`. After the owning session reattaches, the record
+   is `pending` again (idle, no work retried): the parent must re-issue the work through
+   `agent/follow_up`, which is what supplies the missing authority.
+5. Launchable panes: use `handle` + `launchable`; when `launchable` is false read `launch_blocked`
+   verbatim (it distinguishes a live in-process worker from an approval park from a vanished
+   transcript). Do not fabricate a resume; the launcher still needs the CLI `path_by_id` wiring.
+
+agent6: session-scoped delegation lifetime landed
+
+START 2026-09-15T17:42:57Z agent9 alive

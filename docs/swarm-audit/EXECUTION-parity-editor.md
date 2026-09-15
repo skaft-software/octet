@@ -432,3 +432,34 @@ the rest are disposable. My own probes (`_latex_ed8_probe.rs`,
   link labels, other diagram types, cycles, layer-skipping edges and oversized
   input, and aligns box borders correctly for CJK labels (10 tests in
   `tests/mermaid_render.rs`).
+
+### editor8 final verification runs (observed, not claimed)
+
+`cargo test -p sexy-tui-rs` (whole crate, detached run, log
+`/tmp/ed8/crate_test.log`) => `EXIT=0`:
+
+    unittests src/lib.rs            -> test result: ok. 190 passed; 0 failed
+    tests/_latex_debug.rs           -> ok. 1 passed
+    tests/_latex_diff.rs            -> ok. 1 passed
+    tests/_latex_probe.rs           -> ok. 1 passed
+    tests/_latex_stress.rs          -> ok. 5 passed   (was SIGABRT before this row)
+    tests/_mermaid_debug.rs         -> ok. 1 passed
+    tests/images_current.rs         -> ok. 6 passed
+    tests/latex_render.rs           -> ok. 16 passed
+    tests/mermaid_render.rs         -> ok. 10 passed
+    tests/pi_tui_render.rs          -> ok. 27 passed
+    tests/rich_rendering.rs         -> ok. 4 passed
+    Doc-tests sexy_tui_rs           -> ok. 1 passed
+
+`cargo check --workspace --all-targets --locked` (log
+`/tmp/ed8/workspace_check.log`) => `Finished dev profile ... in 2.58s`, `EXIT=0`.
+
+Base revision for this work: `9c43111d` (wave 7). My files were swept into the
+parent's `7be2dc96` "wave 8" checkpoint commit; I ran no git write commands
+myself.
+
+Still open for someone else: no UI consumer calls
+`rich_text::mermaid::render_mermaid` or `rich_text::latex::render_latex` yet
+(the markdown/rich renderer path in `crates/octet-coding-agent` owns the
+`$$…$$`/```` ```mermaid ```` fences), and row 2b.5 needs the view wiring
+described above.

@@ -448,39 +448,45 @@ impl CodexContextSurface {
 
     /// Bounded, truthful facts for the effort/thinking menu.
     ///
-    /// Cost is never rendered as an exact figure above the standard tier.
+    /// Plain user language only, matching the session's Codex context notes:
+    /// every window is labelled, no internal API path or operation identifier is
+    /// ever rendered, and cost is never shown as an exact figure above the 272K
+    /// standard tier. The diagnostic operation id stays in
+    /// [`Self::uncertain_usage_operation`], which the session recorder reads
+    /// directly; the deliberate 272K cap is a decision, never a defect.
     pub fn summary_lines(&self) -> Vec<String> {
+        let label = crate::codex_context::context_window_label;
+        let cap = label(crate::codex_context::CODEX_CONTEXT_WINDOW_CAP);
+        let entitled = self.entitled_max_window.max(self.effective_window);
         let mut lines = vec![format!(
-            "{} context window: {} tokens ({})",
-            self.model_id,
-            self.effective_window,
-            if self.effective_window > crate::codex_context::CODEX_CONTEXT_WINDOW_CAP {
-                "above the 272K standard tier: cost and usage are UNCERTAIN"
+            "Codex context window — advertised {}, entitled {}, effective {}{}",
+            label(self.advertised_window),
+            label(entitled),
+            label(self.effective_window),
+            if self.has_uncertain_usage() {
+                ": cost and usage are UNCERTAIN"
             } else {
-                "standard 272K tier"
+                ""
             },
         )];
-        if let Some(operation) = self.uncertain_usage_operation() {
+        if self.has_uncertain_usage() {
             lines.push(format!(
-                "cost and usage are UNCERTAIN for this route; record them as uncertain with Session::record_usage_uncertainty({operation:?}) instead of an exact figure"
+                "At {} — above the {cap} standard tier — every request is double-priced (about 2x input and 1.5x output for the whole request, not just the excess) and long-running sessions are likelier to drop the Codex websocket, so this session's cost and usage are reported as UNCERTAIN instead of an exact figure.",
+                label(self.effective_window),
             ));
         }
         match self.clamp() {
             Some(clamp) => lines.push(clamp.message()),
-            None if self.advertised_window > self.effective_window => lines.push(format!(
-                "{} advertises {} tokens; this route budgets {}",
-                self.model_id, self.advertised_window, self.effective_window
-            )),
             None => lines.push(format!(
-                "{} is budgeted at {} tokens, the deliberate {} token Codex working window",
-                self.model_id,
-                self.effective_window,
-                crate::codex_context::working_context_window(&self.model_id)
+                "octet budgets {} for this Codex route; the provider advertises {}.",
+                label(self.effective_window),
+                label(self.advertised_window),
             )),
         }
         match self.raise_target() {
             Some(target) => lines.push(format!(
-                "raise to {target} tokens: {}",
+                "Raise to {}: {}",
+                label(target),
                 self.raise_instruction(target)
             )),
             None => lines.push(self.raise_blocked_reason()),
@@ -489,17 +495,21 @@ impl CodexContextSurface {
     }
 
     /// Why no raise is offered for this route.
+    ///
+    /// Every window is labelled, so the reader never has to guess which number
+    /// is the deliberate cap and which is the plan's own entitlement ceiling.
     pub fn raise_blocked_reason(&self) -> String {
-        let working = crate::codex_context::working_context_window(&self.model_id);
-        if self.entitled_max_window <= working {
+        let label = crate::codex_context::context_window_label;
+        let working = label(crate::codex_context::working_context_window(&self.model_id));
+        if self.entitled_max_window <= crate::codex_context::working_context_window(&self.model_id)
+        {
             format!(
-                "no raise is available for {}: the deliberate {} window is already this model's {} token entitlement ceiling",
-                self.model_id, working, self.entitled_max_window
+                "no raise is available for {}: the deliberate {working} window is already this model's entitlement ceiling",
+                self.model_id
             )
         } else {
             format!(
-                "raising above the deliberate {} token window requires a Codex Pro or ProLite plan",
-                working
+                "raising above the deliberate {working} window requires a Codex Pro or ProLite plan"
             )
         }
     }
@@ -1584,8 +1594,59 @@ mod tests {
         assert!(message.contains("double-priced"), "{message}");
         assert!(message.contains("websocket"), "{message}");
         let summary = surface.summary_lines().join("\n");
-        assert!(summary.contains("272000"), "{summary}");
-        assert!(summary.contains("872000"), "{summary}");
+        // Labelled windows, matching the session note's house style.
+        assert!(summary.contains("advertised 872K"), "{summary}");
+        assert!(summary.contains("effective 272K"), "{summary}");
+    }
+
+    /// The effort menu is user-facing prose. It must never render an internal
+    /// API path, function call, or operation identifier, and every window it
+    /// quotes must be labelled.
+    #[test]
+    fn the_effort_menu_summary_never_renders_internal_identifiers() {
+        for (model_id, window) in [
+            ("gpt-6-astra", 272_000u64),
+            ("gpt-5.6-luna", 372_000),
+            ("gpt-6-astra", 872_000),
+            ("gpt-5.6-luna", 1_000_000),
+        ] {
+            for entitled in [false, true] {
+                let surface = CodexContextSurface::capture(&codex_route(model_id, window), entitled)
+                    .expect("Codex route");
+                let summary = surface.summary_lines().join("\n");
+                for leak in [
+                    "Session::",
+                    "record_usage_uncertainty",
+                    "codex-context-above-272k",
+                    "uncertain_usage_operation",
+                    "::",
+                    "()",
+                    "crates/",
+                    "fn ",
+                    "CodexContext",
+                ] {
+                    assert!(
+                        !summary.contains(leak),
+                        "{model_id}/{window}/entitled={entitled}: internal identifier {leak:?} \
+                         leaked: {summary}"
+                    );
+                }
+                // Every quoted window is labelled, never a bare number.
+                assert!(
+                    !summary.contains("272000") && !summary.contains("372000"),
+                    "unlabelled window: {summary}"
+                );
+                assert!(!summary.contains('$'), "exact cost figure: {summary}");
+                // The deliberate cap is described as a decision, never a defect.
+                for wrong in ["bug", "regression", "broken", "incorrect"] {
+                    assert!(!summary.contains(wrong), "{wrong:?} in {summary}");
+                }
+                assert!(
+                    !summary.contains("no ceiling") && !summary.contains("?"),
+                    "placeholder-style blob: {summary}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1600,13 +1661,17 @@ mod tests {
         );
         let summary = surface.summary_lines().join("\n");
         assert!(summary.contains("UNCERTAIN"), "{summary}");
-        assert!(summary.contains("record_usage_uncertainty"), "{summary}");
+        assert!(summary.contains("double-priced"), "{summary}");
+        assert!(summary.contains("websocket"), "{summary}");
         assert!(
             !summary.contains('$'),
             "no exact-looking cost figure may be rendered above the standard tier: {summary}"
         );
+        // The operation id is an internal diagnostic; it is recorded by the
+        // session, never rendered. `the_effort_menu_summary_never_renders_...`
+        // asserts that for every Codex family and entitlement.
         assert!(
-            summary.contains(&crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION.to_string()),
+            !summary.contains("codex-context-above-272k"),
             "{summary}"
         );
     }

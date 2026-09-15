@@ -6397,6 +6397,37 @@ impl Agent {
             };
             let session = &mut *session_guard;
             let mut context_capacity = initial_capacity;
+            // Parity 1e.2 durability half: republish the partial assistant
+            // turn a killed stream left behind. The frame journal is consumed
+            // exactly once and only its user-visible text/reasoning progress is
+            // re-emitted; a partial tool call is never a result. A journal
+            // removed at terminal settlement yields nothing here, so a
+            // completed turn is never replayed as progress.
+            match session.take_partial_assistant() {
+                Ok(Some(partial)) => {
+                    for part in partial.content {
+                        let (channel, text) = match part {
+                            AssistantPart::Text(text) => (OutputChannel::Text, text),
+                            AssistantPart::Reasoning(reasoning) => (
+                                OutputChannel::Reasoning,
+                                reasoning.text.unwrap_or_default(),
+                            ),
+                            AssistantPart::ToolCall(_)
+                            | AssistantPart::Media(_)
+                            | AssistantPart::ProviderMetadata(_) => continue,
+                        };
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let ev = AgentEvent::OutputDelta { channel, text };
+                        notify_observers(&observers, &ev);
+                        yield ev;
+                    }
+                }
+                Ok(None) => {}
+                // A recovery aid must never fail the run it observes.
+                Err(_) => {}
+            }
             // Row 3.5: one run span owns the generated stream's lifetime. Its
             // children (turns) are derived only from this explicit context, and
             // the guard is settled explicitly at the durable run boundary.
@@ -7001,6 +7032,16 @@ impl Agent {
                         s
                     },
                 };
+                // Parity 1e.2 durability half: encode the in-flight assistant
+                // message into compact frames and journal them beside the
+                // session between deltas, so a killed process can republish the
+                // partial prefix. Frames never include a terminal event, and a
+                // journal fault never affects the provider stream.
+                let mut assistant_frame_encoder = octet_ai::AssistantMessageFrameEncoder::new(
+                    model.spec.id.clone(),
+                    model.spec.protocol,
+                );
+                let mut assistant_frame_journal = session.begin_assistant_frame_journal().ok();
 
                 // ── Consume the stream, staying responsive to control ──────
                 // Text/tool deltas dominate this hot path; keep StreamEvent
@@ -7157,6 +7198,14 @@ impl Agent {
                         }
                         Next::Event(Some(Ok(event))) => {
                             stream_context.observe_stream(&event);
+                            // Journal the frame this event produces, if any.
+                            // Terminal events produce no frame and are handled
+                            // by settlement below.
+                            if let Ok(Some(frame)) = assistant_frame_encoder.encode(&event) {
+                                if let Some(journal) = assistant_frame_journal.as_mut() {
+                                    let _ = journal.append(&frame);
+                                }
+                            }
                             match event {
                             StreamEvent::ProviderLifecycle(lifecycle) => {
                                 let ev = AgentEvent::ProviderLifecycle { lifecycle };
@@ -7195,7 +7244,15 @@ impl Agent {
                                 notify_observers(&observers, &ev);
                                 yield ev;
                             }
-                            StreamEvent::Finished(response) => break Ok(response),
+                            StreamEvent::Finished(response) => {
+                                // Terminal settlement: the frame sequence is
+                                // partial progress only and must never be
+                                // republished once the attempt is complete.
+                                if let Some(journal) = assistant_frame_journal.as_mut() {
+                                    journal.settle();
+                                }
+                                break Ok(response)
+                            }
                             _ => {}
                             }
                         },

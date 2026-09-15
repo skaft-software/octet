@@ -6,8 +6,10 @@ Where this document disagrees with a detail document or an
 `docs/swarm-audit/EXECUTION-*.md` receipt, prefer this document.
 
 - Branch: `vibe/pi-parity-roadmap-df5a7e80`
-- HEAD at verification time: `9c43111dad46b9c557bf14be7428c9471a84d4b1`
-  ("vibe: wave 7 checkpoint (laTeX port, codex context policy, subagents launcher, eval harness)")
+- HEAD at start: `9c43111dad46b9c557bf14be7428c9471a84d4b1` ("vibe: wave 7 checkpoint …").
+  HEAD at the end of this pass: `7be2dc96` — **a checkpoint was committed by the
+  parent while I was verifying**, so every result below is stamped with the local
+  time it was taken (EDT) and the tree was dirty for most of the pass.
 - Base for diffs: `df5a7e80`
 - Method: every "command run" cell below is a command this verifier ran on this
   host at the stated HEAD. No result is copied from a worker receipt.
@@ -15,10 +17,13 @@ Where this document disagrees with a detail document or an
 
 ## Open items the PR body must state
 
-1. `cargo test -p octet-ai` **fails**: `tests/client_stream.rs` has 6 failures in
-   `responses_websocket_*`, and `tests/agent_run.rs` has
-   `websocket_connection_limit_is_retried_by_agent` failing. All seven tests are
-   untouched by this diff but exercise code it rewrote (C8).
+1. `cargo test -p octet-coding-agent --lib` **fails** (7 tests at 13:42), including
+   two (`tui/pickers.rs:1841`, `modes/interactive.rs:1166`) in files no worker
+   modified, so they are real HEAD failures (C9). A second surface,
+   `cargo test -p octet-ai --test client_stream` (6 failures) and
+   `cargo test -p octet-agent --test agent_run`
+   (`websocket_connection_limit_is_retried_by_agent`) were red when I measured
+   them; `client_stream` was fixed at 13:42 (C8).
 2. `docs/parity/telemetry.md:76` claims row 3.5 is "NOT landed" with "no
    behavioral boundary test exists" — false at HEAD; the spans and three
    boundary tests exist (C1).
@@ -37,19 +42,28 @@ Where this document disagrees with a detail document or an
 
 ## Overall status
 
-**The source tree compiles and the overwhelming majority of the behavioural
-surface passes. The documentation overclaims in a few places and underclaims in
-others; those are listed below and are the honest PR caveats.**
+**The tree compiles and most suites pass, but it is NOT green.
+`cargo test -p octet-coding-agent --lib` still fails 7 tests at the end of this
+pass — two of them in files no worker modified — and three other surfaces were
+red while I measured them (`client_stream`, `agent_run`, and the `octet-ai` lib,
+all since repaired). On top of that, four documentation claims are wrong against
+HEAD (two over-claim, two under-claim). Everything else below is a verified pass
+or a precisely-scoped "unverified".
 
-- The committed source is green: `cargo check --workspace --all-targets --locked`
-  finishes clean (0 errors) at HEAD.
-- The previously reported subagents fail-closed failure is **FIXED** (see §4).
-- Two documentation statements are **materially false against HEAD**
-  (telemetry row 3.5 "not landed"; the Codex `service_tier` "unblocks `/fast`"
-  headline). One large generated test oracle is committed by accident. The
-  CHANGELOG is empty despite ~96 "CHANGELOG-ready" bullets.
-- One Python-suite failure is **purely environmental** (a stale `__pycache__`
-  directory), reproducibly excluded by a copy of the tree (see §3).
+- `cargo check --workspace --all-targets --locked` is clean (0 errors) — but it
+  briefly stopped compiling during this pass on an unfinished worker edit, so
+  "green" is only true between edits.
+- The previously reported subagents fail-closed failure is **FIXED** (C6).
+- The previously reported `octet-ai` lib failures and infinite hang are
+  **FIXED mid-pass** (C7): red at 13:19, green at 13:33 — but that same rewrite
+  left the uncited `client_stream` target red (C8), so the file's test surface is
+  still not clean.
+- Documentation is wrong in four places: telemetry (C1, under-claims), `/fast`
+  (C2, over-claims), editor 2c.3/2c.4 (C3, stale), extensions test count (F8).
+- One Python-suite failure is **purely environmental** and proven so (§Other
+  suites).
+- Two of the earlier findings were remediated while I verified: the committed
+  LaTeX oracle (C4) and the empty CHANGELOG (C5).
 
 ## Contradictions (each side quoted)
 
@@ -73,8 +87,10 @@ generator. No behavioral boundary test exists." Against HEAD:
 
 The `#[allow(dead_code)]` attributes at `telemetry/schema.rs:156` (`begin_typed`),
 `schema.rs:261` (`record`) and `spans.rs:244` (`context`) are also **stale** — all
-three are called from the live generator (locations above). Direction of the
-error is *under*claiming, but it must be corrected so the PR does not carry a
+three are called from the live generator (locations above). I re-ran the target:
+`cargo test -p octet-agent --test telemetry_conformance` → `ok. 9 passed`, which
+includes `typed_instrumentation_nests_children_under_the_typed_span`. Direction of
+the error is *under*claiming, but it must be corrected so the PR does not carry a
 false "not landed" line.
 
 **C2 — `docs/parity/providers.md:40` overclaims `/fast`.**
@@ -117,7 +133,7 @@ failing (`{"model": "other"}` → not rejected). Re-run on this host:
 the previously reported 55, so the owner also extended the suite.) This
 contradiction is resolved.
 
-## Contradiction C7 (blocking) — `octet-ai` tests fail and hang at HEAD
+## Contradiction C7 (was blocking; fixed mid-pass) — `octet-ai` lib was red and hanging
 
 This is the most serious finding. It was reported by the previous verifier and it
 is **still true at HEAD 9c43111d**; I reproduced it with my own run.
@@ -247,6 +263,46 @@ an *under*claim (telemetry.md), a stale *block* (editor.md 2c.3/2c.4) and an
 "(Rust 13 + 5 tests)"; the file contains exactly 13 `#[test]` functions and the
 source module has none, so "13 + 5" is not reproducible.
 
+**C9 (OPEN) — `cargo test -p octet-coding-agent --lib` is RED.**
+`cargo test --locked -p octet-coding-agent --lib --no-fail-fast` gave
+`FAILED. 1358 passed; 10 failed; 1 ignored` at ~13:39 and, on a re-run at 13:42,
+`FAILED. 1361 passed; 7 failed; 1 ignored; finished in 14.59s`. The seven still
+failing at 13:42 are the first six rows of the table below plus
+`tui::view::tests::subagent_panel_groups_states_and_collapses_finished_workers_by_default`;
+`tui::view::reasoning_render::…`, `tui::view::tests::queued_follow_up_heading_…`
+and `update::progress::…` were fixed between my two runs. **This target is red at
+the end of my pass.**
+
+| Failing test | Panic |
+| --- | --- |
+| `app::bootstrap::tests::disabled_tools_are_absent_from_both_schema_and_execution_registry` (seen alongside) | `app/bootstrap/tests.rs:2850` — `left: ["read","ls","find","grep"] right: ["read"]` |
+| `app::bootstrap::tests::tool_schema_reserve_is_positive_and_deterministic` | `app/bootstrap/tests.rs:3153` — `left: ["read","edit","write","bash","ls","find","grep"] right: ["read","edit","write","bash"]` |
+| `app::bootstrap::tests::unknown_api_03_last_initial_provider_model_preflights_restarts_and_reloads_with_fresh_routes` | `app/bootstrap/tests.rs:3111` — preflight did not project the fixture provider/model |
+| `modes::interactive::clipboard_read::tests::a_real_helper_is_read_bounded_and_its_exit_status_is_honoured` | `modes/interactive.rs:1166` — `left: Failed right: Empty` |
+| `modes::interactive::tests::active_session_commands_report_through_the_read_only_session` | `modes/interactive.rs:8017` — "export did not render a report" |
+| `tui::pickers::tests::live_subagent_picker_refreshes_and_keeps_the_stable_selection` | `tui/pickers.rs:1841` — `left: Some("node-c") right: Some("node-b")` |
+| `tui::view::reasoning_render::tests::activity_shimmer_highlight_is_measurably_visible_on_both_profiles` | `tui/view/reasoning_render.rs:1019` |
+| `tui::view::tests::queued_follow_up_heading_advertises_the_platform_edit_hint` | `tui/view/tests.rs:13805` — `left: "  └ steering only · +1 more" right: "  └ local follow-up"` |
+| `tui::view::tests::subagent_panel_groups_states_and_collapses_finished_workers_by_default` | `tui/view/tests.rs:990` |
+| `update::progress::tests::actual_updater_progress_pty_and_plain_streams` | `update/progress.rs:386` |
+
+Caveat and counter-caveat, honestly stated:
+
+- Several of these files were **being edited by other workers at that moment**
+  (`app/bootstrap.rs`, `lib.rs`, `tui/view/reasoning_render.rs`,
+  `cli/parity.rs` were dirty), so those particular failures may be mid-edit noise.
+- But two of them are **not** in any modified file and **reproduce
+  deterministically in isolation**:
+  `cargo test -p octet-coding-agent --lib -- --exact tui::pickers::tests::live_subagent_picker_refreshes_and_keeps_the_stable_selection modes::interactive::clipboard_read::tests::a_real_helper_is_read_bounded_and_its_exit_status_is_honoured`
+  → `FAILED. 0 passed; 2 failed; 0 ignored; 1367 filtered out; finished in 0.06s`.
+  `modes/interactive.rs` and `tui/pickers.rs` are **not** in `git status`.
+- Therefore, at least those two are real failures of the committed HEAD, and the
+  PR must not be cut until a clean re-run of this target is green.
+
+This is the second, independent reason the "workspace is green" claim does not
+hold: `cargo check` passes, but two of the four Rust test surfaces that were
+actually run are red (`octet-ai`, `octet-coding-agent --lib`).
+
 ## Rust test surface — my own runs
 
 All commands run with `--locked`. Timestamps are local (EDT).
@@ -254,7 +310,8 @@ All commands run with `--locked`. Timestamps are local (EDT).
 | Command | Observed result | Verdict |
 | --- | --- | --- |
 | `cargo check --workspace --all-targets --locked` (13:13) | `Finished` in 15.47s, 0 `error` lines, 154 warnings (112 `is never used`) | VERIFIED |
-| `cargo test -p octet-ai` (13:35) | lib: `351 passed; 0 failed`; then `tests/client_stream.rs`: `FAILED. 31 passed; 6 failed` (cargo fails fast and stops there) | **RED** |
+| `cargo test -p octet-ai` (13:35) | lib: `351 passed; 0 failed`; then `tests/client_stream.rs`: `FAILED. 31 passed; 6 failed` (cargo fails fast and stops there) | RED at 13:35, green at 13:42 |
+| `cargo test -p octet-ai --no-fail-fast` (13:42) | **every target ok**: 351, 5, 3, 18, 1, 38, 3, 2, 16, 4, 1, 1, 1 — 0 failures anywhere | GREEN now |
 | `cargo test -p octet-ai --lib -- --skip reconnect_…` (13:19) | `FAILED. 346 passed; 4 failed; 1 filtered out`, all 4 in `responses_ws::tests` | RED at 13:19 |
 | `cargo test -p octet-ai --lib` (13:33) | `ok. 350 passed; 0 failed; 1 filtered out` | GREEN now |
 | `cargo test -p octet-ai --lib -- --exact responses_ws::tests::reconnect_attempts_and_total_wait_are_bounded` (13:34) | `ok. 1 passed … finished in 1.79s` | GREEN now (hung earlier) |
@@ -264,8 +321,9 @@ All commands run with `--locked`. Timestamps are local (EDT).
 | `… --test activity_wait_pty` | `ok. 2 passed` | VERIFIED |
 | `… --test setup_cli_acceptance` | `ok. 6 passed` | VERIFIED |
 | `… --test setup_tui_acceptance` | `ok. 4 passed` | VERIFIED |
-| `cargo test -p octet-agent --test parity_tools --test telemetry_conformance --test read_concurrency_current --test agent_run --no-fail-fast` | **not completed** — see below | UNVERIFIED |
-| `cargo test -p octet-coding-agent --lib` | **not completed** | UNVERIFIED |
+| `cargo test -p octet-agent --test parity_tools --test telemetry_conformance --test read_concurrency_current --no-fail-fast` (13:53) | `parity_tools` `ok. 23 passed`; `read_concurrency_current` `ok. 5 passed`; `telemetry_conformance` `ok. 9 passed` | VERIFIED |
+| `cargo test -p octet-agent --test agent_run` | aborted: `websocket_connection_limit_is_retried_by_agent … FAILED` and `qualified_codex_ws_http_cumulative_twelve_attempt_envelope` ran >5 min (a `start_paused` loop asserting 20,200 `ProviderWaitingForNetwork` events, `agent_run.rs:7912`) | PARTIAL / RED |
+| `cargo test -p octet-coding-agent --lib --no-fail-fast` (13:39 / 13:42) | `FAILED. 1358 passed; 10 failed` then `FAILED. 1361 passed; 7 failed` — see C9 | **RED (open)** |
 
 Two hazards made the `octet-agent` half of this table hard to obtain, and both
 are relevant to the PR:
@@ -288,9 +346,12 @@ are relevant to the PR:
    edit by another worker. It compiled again by 13:47. Any "workspace is green"
    statement is only true between worker edits.
 
-**C8 (open) — pre-existing `client_stream.rs` tests are broken by this work.**
-`cargo test -p octet-ai --test client_stream` reproduces deterministically
-(twice): `FAILED. 31 passed; 6 failed`.
+**C8 (WAS RED AT 13:35, FIXED BY 13:42) — pre-existing `client_stream.rs` tests were broken.**
+`cargo test -p octet-ai --test client_stream` reproduced deterministically
+twice at 13:35: `FAILED. 31 passed; 6 failed`. The same command at 13:42 gives
+`test result: ok. 38 passed; 0 failed` — a worker fixed it while I was writing.
+The table below is the state I measured; keep it so the fix is not credited to
+luck.
 
 | Failing test | Panic |
 | --- | --- |
@@ -344,13 +405,14 @@ it; no source change is needed.
 
 ## What I could not verify (and what would be needed)
 
-- **`cargo test -p octet-agent` (incl. `parity_tools`, `telemetry_conformance`,
-  `read_concurrency_current`, `agent_run`) and `cargo test -p octet-coding-agent --lib`.**
-  Not obtained: the suite includes >10-minute tests and the tree was mid-edit.
-  Needed: a quiescent checkout and a generous per-target timeout. Note the
-  telemetry-boundary tests I *did* read exist (`agent_run.rs:9411`, `:9513`,
-  `:9598`; `telemetry_conformance.rs:113`; `delegation.rs:7316`) — their
-  *existence* is verified, their *pass* is not.
+- **`cargo test -p octet-agent --test agent_run` completion.** I captured the
+  `websocket_connection_limit_is_retried_by_agent` failure, but the sibling
+  `qualified_codex_ws_http_cumulative_twelve_attempt_envelope` ran for more than
+  five minutes so I did not get a full target summary. Needed: a quiet machine
+  and a large timeout.
+- **A clean re-run of `cargo test -p octet-coding-agent --lib`.** My red result
+  came from a working tree that other workers were actively editing. Needed: the
+  same command on a frozen commit.
 - **`cargo test -p octet-ai` at base (`df5a7e80`).** I did not build the base
   tree (it would need a separate `CARGO_TARGET_DIR` and a full compile), so I
   cannot say from my own run whether the 6 `client_stream` failures are new or
@@ -416,8 +478,30 @@ verifier's own invocation, not a worker receipt.
 | scripts tests | 42 + 10 OK | `Ran 42 ... OK`, `Ran 10 ... OK` | `python3 -m unittest scripts.tests.test_changelog ...`; `scripts.test_diff_model_catalog` | VERIFIED |
 | Dead code | No `todo!()`/`unimplemented!()`/`#[expect(dead_code)]` added | 0 hits | `rg 'todo!\(|unimplemented!\('`; `rg 'expect\(dead_code\)'` | VERIFIED |
 | Secret handling | No secret/session-id in argv or display strings | Launcher builds argv lists, validates shell-safe tokens | `rg` over `launcher.py` | VERIFIED (§5) |
-| Rust: octet-ai | per-crate test surface | lib `351 passed; 0 failed`; **`tests/client_stream.rs` `6 failed`** | `cargo test -p octet-ai` | CONTRADICTED (see C8) |
+| Rust: octet-ai | per-crate test surface | `6 failed` at 13:35 → **every target ok at 13:42** | `cargo test -p octet-ai --no-fail-fast` | RED at 13:35 → FIXED 13:42 (C7/C8) |
 | Rust: sexy-tui-rs | per-crate test surface | lib `190 passed; 0 failed`; all integration targets ok | `cargo test -p sexy-tui-rs --no-fail-fast` | VERIFIED |
 | Rust: named pty/acceptance targets | 5 coding-agent targets | `codex_context_window` 14, `slash_command_pty` 7, `activity_wait_pty` 2, `setup_cli_acceptance` 6, `setup_tui_acceptance` 4 — all `ok` | `cargo test -p octet-coding-agent --test …` | VERIFIED |
-| Rust: octet-agent targets | parity_tools / telemetry_conformance / read_concurrency_current / agent_run | `agent_run` shows `websocket_connection_limit_is_retried_by_agent … FAILED`; suite includes >10-min tests | `cargo test -p octet-agent --test … --no-fail-fast` | PARTIAL / RED |
-| Rust: coding-agent lib | per-crate test surface | not completed (tree mid-edit) | `cargo test -p octet-coding-agent --lib` | UNVERIFIED |
+| Rust: octet-agent targets | parity_tools / telemetry_conformance / read_concurrency_current | `23 passed`, `5 passed`, `9 passed` — all ok | `cargo test -p octet-agent --test … --no-fail-fast` | VERIFIED |
+| Rust: agent_run | websocket recovery in the agent | `websocket_connection_limit_is_retried_by_agent` FAILED; a sibling test ran >5 min | `cargo test -p octet-agent --test agent_run` | CONTRADICTED |
+| Rust: coding-agent lib | per-crate test surface | `1361 passed; 7 failed` at 13:42 (was `10 failed` at 13:39) | `cargo test -p octet-coding-agent --lib --no-fail-fast` | **CONTRADICTED — still red** (C9) |
+
+## Final state at HEAD `7be2dc96` (13:43 EDT)
+
+For a reader who only wants the bottom line:
+
+- `cargo test -p octet-ai --no-fail-fast` — **all 13 targets green**.
+- `cargo test -p sexy-tui-rs --no-fail-fast` — green (190 lib + integration).
+- `cargo test -p octet-agent --test parity_tools --test telemetry_conformance --test read_concurrency_current`
+  — green (23 / 9 / 5).
+- `cargo test -p octet-coding-agent --test codex_context_window --test slash_command_pty --test activity_wait_pty --test setup_cli_acceptance --test setup_tui_acceptance`
+  — green (14 / 7 / 2 / 6 / 4).
+- `cargo test -p octet-coding-agent --lib --no-fail-fast` — **RED: 1361 passed, 7 failed**.
+  This is the only red Rust surface at the end of the pass, and the two failures
+  in unmodified files (`tui/pickers.rs:1841`,
+  `modes/interactive.rs:1166`) are deterministic.
+- Python / web suites as tabulated above; the only failure is the proven
+  environmental `ygg_extension` namespace-package artifact, and `apps/web`'s two
+  timeouts are load-induced.
+- `cargo check --workspace --all-targets --locked` was clean at 13:13 but the
+  tree did not compile at ~13:45 (in-flight worker edit) — **re-run the workspace
+  check on the frozen commit before publishing.**
