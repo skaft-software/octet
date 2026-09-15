@@ -12,6 +12,13 @@ Phase 3 (acceptance audits, 20) → Phase 4 (later, 58) → epics (17 umbrellas)
 
 ---
 
+## Captured 2026-09-15 — subagent fan-out (found in a live session, not on the board)
+
+- [ ] **subagents: a worker must survive the parent turn** — today the host retires children with the owning run (`crates/octet-agent/src/delegation.rs`, `DelegatedAgentStatus::Shutdown` → *"worker was shut down by its owning run"*; the extension's `REFERENCE.md:219` documents the resulting `orphaned` rows). A spawned worker therefore dies the moment the parent turn ends, which makes any fan-out longer than a single turn impossible — the extension looks broken to anyone using it that way. Needs a session-scoped delegation lifetime: durable child records, reattachment by the owning session on a later turn, an explicit parent wait, and a documented answer for **unattended mutation** (children inherit the sandbox/approval authority, so "background" means tool use continues after the user's turn has ended). Security review.
+- [ ] **subagents: per-worker model selection** — `extensions/octet-subagents/octet_subagents/model.py:191-194` rejects any value but `"inherit"` ("API 0.2 agent_sessions can only inherit the parent model") and `runtime.py:57-59` hard-codes the enum in the advertised schema; the host bakes the parent model into every child (`delegation.rs` builds the child with `model: self.template.model.clone()`). Allow **any model the user has configured**, with `inherit` as the recommended default. Keep pricing/cost-ceiling validation (`delegation.rs:783` already requires trusted pricing when a child carries a cost ceiling). Motivation: cheap/fast child models are what make fan-out affordable — one 8-worker batch today cost ~3.6M input tokens on the parent's model for zero delivered rows.
+
+---
+
 ## Phase 0 — release gates (Queue: Now, 9)
 
 Roadmap “Now”: verify install/TUI/`/model`/resumable sessions (#354), dependable media (#379),
