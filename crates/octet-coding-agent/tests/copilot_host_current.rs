@@ -8,7 +8,7 @@ mod copilot;
 mod output;
 
 mod providers {
-    pub use octet_sdk::{
+    pub use octet_sdk::provider::{
         CopilotAvailabilityError, CopilotCredentialScheme, CopilotDeviceLogin,
         CopilotDeviceLoginStatus, CopilotDynamicHeader, CopilotEndpoint, CopilotHost, CopilotModel,
         CopilotProvider, CopilotSession,
@@ -118,7 +118,7 @@ async fn copilot_offline_and_missing_credentials_are_no_io_no_advertisement() {
     copilot::register_available_models(&mut catalog, true)
         .await
         .unwrap();
-    octet_sdk::CopilotProvider::register_available_models(&mut catalog, true)
+    octet_sdk::provider::CopilotProvider::register_available_models(&mut catalog, true)
         .await
         .unwrap();
     let (_temp, store, _) = private_store();
@@ -489,7 +489,7 @@ async fn copilot_registration_preserves_explicit_protocols_and_never_catalogs_se
         assert_eq!(resolved.spec.protocol, protocol);
         assert_eq!(resolved.endpoint.id.0, endpoint_id);
         assert!(matches!(&resolved.endpoint.auth, Auth::Dynamic(_)));
-        let metadata = serde_json::to_string(&resolved.spec).unwrap();
+        let metadata = serde_json::to_string(&*resolved.spec).unwrap();
         let diagnostics = format!("{:?}", resolved.endpoint.auth);
         for secret in [OAUTH, INFERENCE, DEVICE] {
             assert!(!metadata.contains(secret));
