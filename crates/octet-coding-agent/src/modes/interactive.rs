@@ -2111,6 +2111,15 @@ where
             // queued and never a silent no-op.
             Err(error) => shell.error(format!("/goal failed: {error}")),
         },
+        Command::Debug => {
+            let rendered = shell.dump_rendered_frame().await;
+            match inspection.read_only_session() {
+                Ok(session) => {
+                    write_debug_report(shell, &session, None, rendered).await;
+                }
+                Err(error) => shell.error(format!("/debug unavailable: {error}")),
+            }
+        }
         Command::Model(None) => {
             // The picker owns input while it is open, so it runs inline and the
             // chosen model is applied by the idle transition that already owns
@@ -4891,6 +4900,42 @@ fn expand_prompt_invocation(
 /// would otherwise list only the launch's own provider even though other
 /// credentials are present. Completion is idempotent, and a failure keeps the
 /// narrowed catalog and reports it instead of hiding the missing providers.
+/// Write the hidden `/debug` report and report the owner-private destination.
+///
+/// The frame is asked of the renderer; the messages come from the active branch
+/// so the log matches exactly what the provider receives. A failure is surfaced,
+/// never swallowed: a diagnostics surface that silently does nothing is useless.
+async fn write_debug_report(
+    shell: &mut InteractiveShell,
+    session: &Session,
+    terminal: Option<(u16, u16)>,
+    rendered: Option<Vec<String>>,
+) {
+    let Some(path) = crate::cli::debug_log_path() else {
+        shell.error("/debug unavailable: user home directory is unavailable".to_owned());
+        return;
+    };
+    write_debug_report_at(shell, &path, session, terminal, rendered).await;
+}
+
+/// The same report against an explicit destination, so the writer is testable
+/// without touching the operator's real `~/.octet` directory.
+async fn write_debug_report_at(
+    shell: &mut InteractiveShell,
+    path: &std::path::Path,
+    session: &Session,
+    terminal: Option<(u16, u16)>,
+    rendered: Option<Vec<String>>,
+) {
+    let messages = session.context().unwrap_or_default();
+    let report = commands::debug_report_text(terminal, rendered.as_deref(), &messages);
+    if let Err(error) = crate::auth::write_private_atomic(path, report.as_bytes(), ".octet-debug-") {
+        shell.error(format!("/debug could not write {}: {error}", path.display()));
+        return;
+    }
+    shell.notice(format!("debug log written: {}", path.display()));
+}
+
 fn prepare_model_picker_surface(app: &mut App, shell: &mut InteractiveShell) {
     if let Some(notice) = app.enrich_catalog_for_surface() {
         shell.notice(notice);
@@ -5182,6 +5227,10 @@ async fn run_idle_command(
                 shell.error(format!("failed to save thinking preference: {e}"));
             }
             app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+        }
+        Command::Debug => {
+            let rendered = shell.dump_rendered_frame().await;
+            write_debug_report(shell, app.agent.session(), None, rendered).await;
         }
         Command::Model(None) => {
             // The picker enumerates every provider. A narrowed launch deferred

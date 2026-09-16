@@ -55,6 +55,9 @@ impl SharedState {
 pub(super) enum RenderCommand {
     Render,
     Stop,
+    /// Hand the current composed frame to a diagnostics surface. The renderer
+    /// thread owns the terminal, so `/debug` can only read the frame here.
+    DumpFrame(mpsc::Sender<Vec<String>>),
 }
 
 pub(super) fn event_dot_animating(state: &ShellState) -> bool {
@@ -197,18 +200,34 @@ impl AnimationSchedule {
 /// Render notifications carry no semantic data. Fold them only until the frame
 /// deadline, then inspect at most one queued command (the production capacity)
 /// for Stop. A producer continuously refilling that slot cannot starve painting.
-fn coalesce_render_commands(rx: &Receiver<RenderCommand>, last_render: Option<Instant>) -> bool {
+fn coalesce_render_commands(
+    rx: &Receiver<RenderCommand>,
+    last_render: Option<Instant>,
+    tui: &TUI<'_>,
+) -> bool {
     let now = Instant::now();
     let deadline = now + frame_coalesce_delay(last_render, now);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return !matches!(
-                rx.try_recv(),
-                Ok(RenderCommand::Stop) | Err(mpsc::TryRecvError::Disconnected)
-            );
+            // The frame deadline already passed: inspect exactly one slot so a
+            // producer that keeps refilling it cannot starve painting.
+            return match rx.try_recv() {
+                // Diagnostics are answered before the decision returns.
+                Ok(RenderCommand::DumpFrame(reply)) => {
+                    let _ = reply.send(tui.rendered_frame().to_vec());
+                    true
+                }
+                Ok(RenderCommand::Render) | Err(mpsc::TryRecvError::Empty) => true,
+                Ok(RenderCommand::Stop) | Err(mpsc::TryRecvError::Disconnected) => false,
+            };
         }
         match rx.recv_timeout(remaining) {
+            // A diagnostics request must never be dropped or left unanswered: it
+            // changes no render decision, so answer it and keep coalescing.
+            Ok(RenderCommand::DumpFrame(reply)) => {
+                let _ = reply.send(tui.rendered_frame().to_vec());
+            }
             Ok(RenderCommand::Render) => {}
             Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return false,
             Err(mpsc::RecvTimeoutError::Timeout) => return true,
@@ -334,6 +353,12 @@ pub(super) fn render_loop_with_terminal(
         if matches!(command, Some(RenderCommand::Stop)) {
             break;
         }
+        if let Some(RenderCommand::DumpFrame(reply)) = command {
+            // Diagnostics read the retained frame; they never request a repaint
+            // and never disturb the differential-render baseline.
+            let _ = reply.send(tui.rendered_frame().to_vec());
+            continue;
+        }
 
         let resized = if command.is_none() {
             synchronize_size(&state, &size)
@@ -354,7 +379,7 @@ pub(super) fn render_loop_with_terminal(
             continue;
         }
 
-        if !coalesce_render_commands(&rx, last_render) {
+        if !coalesce_render_commands(&rx, last_render, &tui) {
             break;
         }
         {
@@ -621,6 +646,62 @@ mod scheduler_tests {
         assert_eq!(state.status_shimmer_frame, 13);
     }
 
+    use sexy_tui_rs::{Terminal, TerminalInput as TerminalInputEvent};
+
+    /// Minimal terminal for renderer unit tests: no terminal I/O.
+    struct NullTerminal;
+
+    impl Terminal for NullTerminal {
+        fn start_events(
+            &mut self,
+            _on_input: Box<dyn FnMut(TerminalInputEvent)>,
+            _on_resize: Box<dyn FnMut()>,
+        ) {
+        }
+
+        fn stop(&mut self) {}
+
+        fn write(&mut self, _data: &str) {}
+
+        fn columns(&self) -> u16 {
+            80
+        }
+
+        fn rows(&self) -> u16 {
+            24
+        }
+
+        fn move_by(&mut self, _lines: i16) {}
+
+        fn hide_cursor(&mut self) {}
+
+        fn show_cursor(&mut self) {}
+
+        fn clear_line(&mut self) {}
+
+        fn clear_from_cursor(&mut self) {}
+
+        fn clear_screen(&mut self) {}
+    }
+
+    fn test_renderer() -> TUI<'static> {
+        TUI::new(Box::new(NullTerminal))
+    }
+
+    #[test]
+    fn diagnostics_read_the_retained_frame_without_scheduling_a_repaint() {
+        let renderer = test_renderer();
+        let (tx, rx) = mpsc::channel();
+        // The request is answered from the retained frame and never dropped.
+        let (reply, receive) = mpsc::channel();
+        tx.send(RenderCommand::DumpFrame(reply)).unwrap();
+        assert!(coalesce_render_commands(&rx, Some(Instant::now()), &renderer));
+        let frame = receive
+            .recv_timeout(Duration::from_millis(50))
+            .expect("diagnostics reply");
+        assert_eq!(frame, renderer.rendered_frame());
+    }
+
     #[test]
     fn queued_notifications_have_a_fixed_drain_budget_and_stop_preempts_wait() {
         let (tx, rx) = mpsc::channel();
@@ -629,12 +710,13 @@ mod scheduler_tests {
         for _ in 0..1000 {
             tx.send(RenderCommand::Render).unwrap();
         }
-        assert!(coalesce_render_commands(&rx, None));
+        let renderer = test_renderer();
+        assert!(coalesce_render_commands(&rx, None, &renderer));
         assert_eq!(rx.try_iter().count(), 999);
         tx.send(RenderCommand::Stop).unwrap();
-        assert!(!coalesce_render_commands(&rx, Some(Instant::now())));
+        assert!(!coalesce_render_commands(&rx, Some(Instant::now()), &renderer));
         drop(tx);
-        assert!(!coalesce_render_commands(&rx, None));
+        assert!(!coalesce_render_commands(&rx, None, &renderer));
     }
 
     #[test]

@@ -3622,6 +3622,32 @@ impl InteractiveShell {
         self.render();
     }
 
+    /// The terminal frame as last composed, for diagnostics surfaces.
+    ///
+    /// Returns `None` when no renderer owns a frame yet or when the renderer
+    /// thread does not answer within the short diagnostics budget. The request
+    /// never triggers a repaint and never mutates renderer state.
+    pub async fn dump_rendered_frame(&mut self) -> Option<Vec<String>> {
+        if let Some(tui) = self.tui.as_ref() {
+            return Some(tui.rendered_frame().to_vec());
+        }
+        let sender = self
+            .render_tx
+            .lock()
+            .expect("renderer sender mutex poisoned")
+            .clone()?;
+        let (reply, receive) = std::sync::mpsc::channel();
+        sender.try_send(RenderCommand::DumpFrame(reply)).ok()?;
+        tokio::task::spawn_blocking(move || {
+            receive
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Queue a retained-frame render without doing layout on the async loop.
     /// The bounded renderer queue coalesces bursts of model/tool events.
     pub fn render(&mut self) {

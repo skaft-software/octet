@@ -53,6 +53,10 @@ pub enum Command {
     Name(Option<String>),
     Export(Option<String>),
     Exit,
+    /// Hidden diagnostics surface: writes rendered lines and message JSONL to
+    /// the owner-private debug log. Deliberately absent from the suggestion
+    /// list, matching the reference's hidden `/debug`.
+    Debug,
     /// List or invoke named prompt templates. The optional string preserves
     /// the template name and raw arguments for deterministic expansion.
     Prompt(Option<String>),
@@ -137,6 +141,10 @@ macro_rules! slash {
 
 // The popup is the command-discovery surface, so this stays a single flat list:
 // no one-off `Session` header; self-help commands live in the same catalog.
+/// Commands accepted by exact name but deliberately absent from the popup and
+/// from `/help`, matching the reference's hidden `/debug`.
+const HIDDEN_COMMANDS: &[&str] = &["debug"];
+
 const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     slash!("new", "/new", "start a fresh conversation", false),
     slash!(
@@ -648,6 +656,10 @@ pub fn parse(input: &str) -> Command {
         .collect();
     let full_name = if SLASH_COMMANDS.iter().any(|command| command.name == name) {
         name
+    } else if HIDDEN_COMMANDS.contains(&name) {
+        // Accepted by exact name only: hidden commands are never advertised and
+        // never resolved by prefix, so the popup cannot reveal them.
+        name
     } else if let [command] = matches.as_slice() {
         command.name
     } else {
@@ -796,6 +808,7 @@ pub fn parse(input: &str) -> Command {
         "update" if argument.is_none() => Command::Update,
         "changelog" if argument.is_none() => Command::Changelog,
         "exit" if argument.is_none() => Command::Exit,
+        "debug" if argument.is_none() => Command::Debug,
         _ => Command::Unknown(input.to_owned()),
     }
 }
@@ -929,6 +942,49 @@ fn add_usage(total: &mut Usage, turn: Usage) {
 
 /// Session facts from the active durable branch and the session-global ledger.
 /// Read-only and usable while a Run owns the writer through a read-only reopen.
+/// Diagnostics report written by `/debug`, mirroring the reference layout: the
+/// terminal size, every rendered line with its visible width, then the agent
+/// messages as JSONL. Bounded by the caller's frame and session sizes.
+pub fn debug_report_text(
+    terminal: Option<(u16, u16)>,
+    rendered: Option<&[String]>,
+    messages: &[octet_ai::Message],
+) -> String {
+    let mut report = String::from("octet debug output\n");
+    match terminal {
+        Some((columns, rows)) => {
+            report.push_str(&format!("Terminal: {columns}x{rows}\n"));
+        }
+        None => report.push_str("Terminal: unknown\n"),
+    }
+    match rendered {
+        Some(lines) => {
+            report.push_str(&format!("Total lines: {}\n\n", lines.len()));
+            report.push_str("=== All rendered lines with visible widths ===\n");
+            for (index, line) in lines.iter().enumerate() {
+                report.push_str(&format!(
+                    "[{index}] (w={}) {}\n",
+                    sexy_tui_rs::visible_width(line),
+                    serde_json::Value::String(line.clone())
+                ));
+            }
+        }
+        None => {
+            report.push_str("Total lines: unavailable (no renderer frame)\n\n");
+            report.push_str("=== All rendered lines with visible widths ===\n");
+        }
+    }
+    report.push_str("\n=== Agent messages (JSONL) ===\n");
+    for message in messages {
+        match serde_json::to_string(message) {
+            Ok(encoded) => report.push_str(&encoded),
+            Err(_) => report.push_str("{\"error\":\"unencodable message\"}"),
+        }
+        report.push('\n');
+    }
+    report
+}
+
 pub fn session_text(session: &Session) -> String {
     let mut messages = 0usize;
     let mut cursor = session.head();
@@ -1306,6 +1362,103 @@ pub(crate) fn status_text_with_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Row 2d.10: `/session` is the durable-fact surface, so every field it
+    /// claims must come from the session (file, id, head, message count, token
+    /// buckets, cost) and unknown exposure must be named rather than folded into
+    /// an exact-looking total.
+    #[test]
+    fn session_detail_reports_file_identity_messages_tokens_cost_and_uncertainty() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("detail-session.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("first question".into())],
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(
+                octet_ai::AssistantMessage {
+                    content: vec![AssistantPart::Text("first answer".into())],
+                    model: octet_ai::ModelId("fixture-model".into()),
+                    protocol: Protocol::OpenAiChat,
+                },
+            )))
+            .unwrap();
+        let text = session_text(&session);
+        assert!(text.contains("Session: detail-session"), "{text}");
+        assert!(text.contains(&format!("File: {}", path.display())), "{text}");
+        assert!(text.contains("Head: 002"), "{text}");
+        assert!(text.contains("Entries: 2"), "{text}");
+        assert!(text.contains("Active-branch messages: 2"), "{text}");
+        assert!(text.contains("Checkpoints: 0"), "{text}");
+        assert!(
+            text.contains("Tokens: 0 input · 0 cache-read · 0 cache-write · 0 output"),
+            "{text}"
+        );
+        assert!(text.contains("Cost: $0.000000"), "{text}");
+        assert!(
+            !text.contains("uncertain"),
+            "a fully priced, settled session is not uncertain: {text}"
+        );
+
+        // Unknown exposure must never read as an exact bill.
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("fixture-endpoint".into()),
+                octet_ai::ModelId("fixture-model".into()),
+                "assistant_turn",
+            )
+            .unwrap();
+        let text = session_text(&session);
+        assert!(
+            text.contains("known subtotal only; usage or pricing uncertain"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn debug_is_hidden_but_parses_and_reports_every_rendered_line() {
+        assert_eq!(parse("/debug"), Command::Debug);
+        assert!(matches!(parse("/debug extra"), Command::Unknown(_)));
+        // The reference hides this command from discovery; the popup must not
+        // advertise it even though it is accepted.
+        assert!(slash_suggestions("/deb").is_empty());
+        assert!(complete_slash_command("/deb").is_none());
+
+        let lines = vec![
+            "plain".to_owned(),
+            "wide 漢字".to_owned(),
+            "quote\"and\\slash".to_owned(),
+        ];
+        let report = debug_report_text(Some((120, 40)), Some(&lines), &[]);
+        assert!(report.contains("Terminal: 120x40"));
+        assert!(report.contains("Total lines: 3"));
+        assert!(
+            report.contains("[1] (w=9) \"wide 漢字\""),
+            "{report}"
+        );
+        assert!(
+            report.contains(r#"[2] (w=15) "quote\"and\\slash""#),
+            "{report}"
+        );
+        assert!(report.contains("=== Agent messages (JSONL) ==="));
+
+        let message = Message::User(octet_ai::UserMessage {
+            content: vec![octet_ai::UserPart::Text("hello".into())],
+        });
+        let report = debug_report_text(None, None, std::slice::from_ref(&message));
+        assert!(report.contains("Terminal: unknown"));
+        assert!(
+            report.contains("unavailable (no renderer frame)"),
+            "{report}"
+        );
+        assert!(
+            report.lines().any(|line| line.contains("\"hello\"")),
+            "{report}"
+        );
+    }
 
     #[test]
     fn changelog_parser_discovery_and_local_help() {

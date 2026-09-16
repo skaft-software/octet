@@ -53,7 +53,9 @@ pub fn use_windows_keybindings(platform: &str, wsl: bool) -> bool {
 #[must_use]
 pub fn default_definitions(platform: &str, wsl: bool) -> Vec<KeybindingDefinition> {
     let windows = use_windows_keybindings(platform, wsl);
-    let darwin = platform == "darwin";
+    // Platform-specific tree bindings were withdrawn with `/tree`; this
+    // helper still keys the remaining Windows-only defaults.
+    let _darwin = platform == "darwin";
 
     BASE_DEFINITIONS
         .iter()

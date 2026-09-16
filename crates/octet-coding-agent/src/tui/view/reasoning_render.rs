@@ -90,10 +90,25 @@ const ACTIVITY_RAINBOW: [Rgb; 7] = [
 // extreme, not by making the travelling band less readable. The previous
 // 0.85/0.01 baselines left too little visible movement, especially after ANSI256
 // quantization. The sweep endpoints (and the rainbow palette) stay unchanged.
-const ACTIVITY_DARK_BASE_LUMINANCE: f64 = 0.98;
+//
+// The resting extremes are deliberately eased off pure white and pure black:
+// 0.98 resolved to about #fd on a neutral identity, which reads as glaring on a
+// dark terminal, and 0.002 resolved to #00, which reads as a hard black on a
+// light one. 0.95 (#f9) and 0.0085 (about #16) keep the same hue, the same
+// monotone sweep and the same contrast behaviour while resting a step toward
+// grey. How far the easing may go is bounded by two measured invariants, not by
+// taste alone: on light the swept cell must stay at or above a 4.5:1 contrast
+// ratio against the #e0e0e0 composite, and the margin dot's pulse must still
+// quantize to a different neutral ANSI16 entry than its resting colour. A light
+// resting luminance of 0.009 fails the pinned 1.7:1 worst-case cell separation
+// for a blue identity (Meta) after ANSI256 quantization, so 0.0085 is the
+// largest easing that holds. The light sweep ceiling moves with the base
+// (0.095) so the sweep still travels at least the pinned 0.08 of relative
+// luminance.
+const ACTIVITY_DARK_BASE_LUMINANCE: f64 = 0.95;
 const ACTIVITY_DARK_SWEEP_LUMINANCE: f64 = 0.50;
-const ACTIVITY_LIGHT_BASE_LUMINANCE: f64 = 0.002;
-const ACTIVITY_LIGHT_SWEEP_LUMINANCE: f64 = 0.09;
+const ACTIVITY_LIGHT_BASE_LUMINANCE: f64 = 0.0085;
+const ACTIVITY_LIGHT_SWEEP_LUMINANCE: f64 = 0.095;
 
 // A single dot needs a larger pulse than a bold word. It rests at a quieter
 // model foreground and gains contrast when the same sweep crosses it: brighter
@@ -1550,10 +1565,20 @@ mod tests {
                     assert_eq!(codes(&dot).len(), 1);
                     assert_eq!(codes(&text).len(), label.len());
                     if frame == centre_frame(ACTIVITY_MARKER_INDEX) {
-                        assert_ne!(codes(&dot), codes(&rest_dot));
+                        assert_ne!(
+                            codes(&dot),
+                            codes(&rest_dot),
+                            "{background:?}/{label} frame {frame}: the dot must change code at \
+                             its centre frame"
+                        );
                     }
                     if frame == centre_frame(0) {
-                        assert_ne!(codes(&text)[0], codes(&rest_text)[0]);
+                        assert_ne!(
+                            codes(&text)[0],
+                            codes(&rest_text)[0],
+                            "{background:?}/{label} frame {frame}: the first label cell must \
+                             change code at its centre frame"
+                        );
                     }
                     if frame + 1 == activity_cycle(label) {
                         assert_eq!(dot, rest_dot);
