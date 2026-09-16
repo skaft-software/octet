@@ -64,9 +64,10 @@ use crate::tool::{
     AdaptivePreviewCoalescer, CancellationToken, OutputStream, PartialOutputCheckpointSink,
     PreviewPublication, ReplaySafety, Tool, ToolConcurrency, ToolContext, ToolError, ToolOutput,
     ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
-    ToolProgressDecoration, ToolProgressSink, ToolPromptContribution,
-    DEFAULT_PREVIEW_MIN_EMIT_INTERVAL, PROGRESS_CHANNEL_CAPACITY,
+    ToolProgressDecoration, ToolProgressSink, ToolPromptContribution, PROGRESS_CHANNEL_CAPACITY,
 };
+#[cfg(test)]
+use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
 #[cfg(any(unix, windows))]
 use crate::tools::{
     BashCheckpointPublisher, BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES,
@@ -4178,7 +4179,11 @@ async fn next_delegation_snapshot(
 struct LivePreviewPacer {
     coalescer: AdaptivePreviewCoalescer,
     pending: Option<ToolProgressDecoration>,
+    /// Publications observed; read by [`Self::stats`] in tests only.
+    #[cfg_attr(not(test), allow(dead_code))]
     published: u64,
+    /// Intermediate states collapsed away; read by [`Self::stats`] in tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     coalesced: u64,
 }
 
@@ -4239,6 +4244,10 @@ impl LivePreviewPacer {
     }
 
     /// Decorations published and intermediate states collapsed away.
+    ///
+    /// Test-only observability: the live path forwards the surviving
+    /// decoration itself, so production builds never read the counters.
+    #[cfg(test)]
     fn stats(&self) -> (u64, u64) {
         (self.published, self.coalesced)
     }
@@ -4632,15 +4641,45 @@ fn session_total_tokens_for_own_context(session: &Session) -> u64 {
 
 fn record_delegated_usage_once(
     session: &mut Session,
-    delegated: DelegatedUsage,
+    mut delegated: DelegatedUsage,
 ) -> Result<(), SessionError> {
-    let already_recorded = session.usage_records().iter().any(|record| {
-        matches!(&record.kind, UsageRecordKind::DelegatedAgent { agent_id, turn_count, tool_call_count }
-            if *agent_id == delegated.agent_id && *turn_count == delegated.turn_count && *tool_call_count == delegated.tool_call_count)
-            && record.usage == delegated.usage && record.cost == delegated.cost
-            && record.endpoint.as_ref() == Some(&delegated.endpoint) && record.model.as_ref() == Some(&delegated.model)
-    });
-    if already_recorded {
+    use crate::delegation::{
+        add_delegated_cost, add_delegated_usage, subtract_cost, subtract_usage,
+    };
+
+    // The root's committed ledger, not a process-local or fleet-file watermark,
+    // is authoritative across failed appends, repeated snapshots and restarts.
+    let mut mirrored_usage = Usage::default();
+    let mut mirrored_cost = Cost::default();
+    let mut mirrored_turns = 0;
+    let mut mirrored_tools = 0;
+    for record in session.usage_records() {
+        if let UsageRecordKind::DelegatedAgent {
+            agent_id,
+            turn_count,
+            tool_call_count,
+        } = &record.kind
+        {
+            if *agent_id != delegated.agent_id {
+                continue;
+            }
+            add_delegated_usage(&mut mirrored_usage, &record.usage);
+            if let Some(cost) = record.cost {
+                add_delegated_cost(&mut mirrored_cost, cost);
+            }
+            mirrored_turns = mirrored_turns.max(*turn_count);
+            mirrored_tools = mirrored_tools.max(*tool_call_count);
+        }
+    }
+    delegated.usage = subtract_usage(delegated.usage, mirrored_usage);
+    delegated.cost = delegated
+        .cost
+        .map(|cost| subtract_cost(cost, mirrored_cost));
+    if delegated.usage == Usage::default()
+        && delegated.cost.unwrap_or_default() == Cost::default()
+        && delegated.turn_count <= mirrored_turns
+        && delegated.tool_call_count <= mirrored_tools
+    {
         return Ok(());
     }
     session.record_delegated_agent_usage(delegated)
@@ -7667,6 +7706,9 @@ impl Agent {
                     };
                     match next {
                         Next::Abort | Next::Ctl(Some(Control::Abort)) => {
+                            if let Some(journal) = assistant_frame_journal.as_mut() {
+                                journal.settle();
+                            }
                             break Err(FinishReason::Aborted);
                         }
                         Next::Ctl(Some(Control::Steer(input))) => pending_steer.push(input),
@@ -7694,6 +7736,12 @@ impl Agent {
                             // Retire the failed stream before hooks, backoff,
                             // compaction or any replacement can open a transport.
                             drop(response_stream);
+                            // An observed failure is settled, unlike an undriven
+                            // Run drop. Its prefix must not block the replacement
+                            // journal or reappear after a successful retry.
+                            if let Some(journal) = assistant_frame_journal.as_mut() {
+                                journal.settle();
+                            }
                             if !attempt_saw_generation
                                 && context_retries < MAX_PROVIDER_RETRIES
                                 && looks_like_context_error(&error)
@@ -11679,6 +11727,78 @@ mod tests {
         assert_eq!(session_total_tokens_for_own_context(&session), 0);
         assert!(reserve_request_tokens(&session, 700, 200, Some(1_000)).is_ok());
         assert_eq!(session.usage_records()[0].usage.total_tokens, 50_000);
+    }
+
+    #[test]
+    fn delegated_snapshots_use_only_committed_root_usage_and_borrow_cost_remainders() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mirror-deltas.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let mut snapshot = DelegatedUsage {
+            agent_id: "child-1".into(),
+            turn_count: 1,
+            tool_call_count: 0,
+            endpoint: octet_ai::EndpointId("endpoint".into()),
+            model: octet_ai::ModelId("model".into()),
+            usage: Usage {
+                input_tokens: 10,
+                total_tokens: 10,
+                ..Usage::default()
+            },
+            cost: Some(Cost {
+                total_picodollars_remainder: 900_000,
+                ..Cost::default()
+            }),
+        };
+        record_delegated_usage_once(&mut session, snapshot.clone()).unwrap();
+        // A failed append must leave the previous committed baseline intact.
+        let mut read_only = Session::open_read_only(&path).unwrap();
+        snapshot.usage.input_tokens = 20;
+        snapshot.usage.total_tokens = 20;
+        snapshot.cost = Some(Cost {
+            total: 1,
+            total_picodollars_remainder: 200_000,
+            ..Cost::default()
+        });
+        assert!(record_delegated_usage_once(&mut read_only, snapshot.clone()).is_err());
+        assert_eq!(read_only.usage_records().len(), 1);
+        drop(read_only);
+        drop(session);
+
+        let mut session = Session::open(&path).unwrap();
+        record_delegated_usage_once(&mut session, snapshot.clone()).unwrap();
+        assert_eq!(session.usage_records().len(), 2);
+        assert_eq!(session.usage_records()[1].usage.total_tokens, 10);
+        assert_eq!(session.usage_records()[1].cost.unwrap().total, 0);
+        assert_eq!(
+            session.usage_records()[1]
+                .cost
+                .unwrap()
+                .total_picodollars_remainder,
+            300_000
+        );
+        record_delegated_usage_once(&mut session, snapshot.clone()).unwrap();
+        assert_eq!(session.usage_records().len(), 2);
+        assert_eq!(session.total_cost_microdollars(), 1);
+        assert_eq!(session.total_cost_picodollars_remainder(), 200_000);
+
+        // Auxiliary/cost-only updates can arrive with the same turn/tool counts.
+        snapshot.cost.as_mut().unwrap().total_picodollars_remainder = 400_000;
+        record_delegated_usage_once(&mut session, snapshot.clone()).unwrap();
+        assert_eq!(session.usage_records().len(), 3);
+        assert_eq!(session.total_cost_picodollars_remainder(), 400_000);
+        drop(session);
+        let mut session = Session::open(&path).unwrap();
+        record_delegated_usage_once(&mut session, snapshot).unwrap();
+        assert_eq!(session.usage_records().len(), 3);
+        assert_eq!(
+            session
+                .usage_records()
+                .iter()
+                .map(|record| record.usage.total_tokens)
+                .sum::<u64>(),
+            20
+        );
     }
 
     #[test]

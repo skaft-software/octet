@@ -4937,10 +4937,13 @@ async fn websocket_connection_limit_is_retried_by_agent() {
         ReasoningConfig::Off,
     );
 
-    let output = agent
-        .complete("continue after the socket refresh")
-        .await
-        .unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        agent.complete("continue after the socket refresh"),
+    )
+    .await
+    .expect("socket refresh recovery must remain bounded")
+    .unwrap();
     assert_eq!(output.text, "recovered");
     assert_eq!(server.websocket_requests.load(Ordering::SeqCst), 1);
     assert_eq!(server.http_requests.load(Ordering::SeqCst), 1);
@@ -7833,13 +7836,10 @@ async fn qualified_codex_terminal_gate_recovery_does_not_discard_main_answer() {
 }
 
 // Keep Tokio from auto-advancing provider I/O deadlines while the loopback
-// server is scheduled by the OS. Only observed retry delays advance the clock.
+// server is scheduled by the OS. Only observed host retry delays advance the
+// clock. A hidden transport timer is a regression, not permission to spin
+// forever: use a real-time per-event watchdog even with Tokio time paused.
 async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEvent> {
-    let runnable = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
     let mut delay = None;
     let mut events = Vec::new();
     loop {
@@ -7849,7 +7849,23 @@ async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEv
             assert!(futures_util::poll!(&mut next).is_pending());
             tokio::time::advance(wait).await;
         }
-        let Some(event) = next.await else { break };
+        let started = std::time::Instant::now();
+        let event = loop {
+            if let std::task::Poll::Ready(event) = futures_util::poll!(&mut next) {
+                break event;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "no event after 15s wall time with provider clock paused; hidden transport wait? last event: {:?}",
+                events.last(),
+            );
+            // Stay runnable to prevent virtual auto-advance, but do not burn a
+            // core while the OS services the loopback socket. No detached
+            // spinner survives a panic or cancellation of this collector.
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let Some(event) = event else { break };
         delay = match &event {
             AgentEvent::ProviderRetry { delay, .. }
             | AgentEvent::ProviderWaitingForNetwork { delay, .. }
@@ -7858,7 +7874,6 @@ async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEv
         };
         events.push(event);
     }
-    runnable.abort();
     events
 }
 
@@ -7881,6 +7896,9 @@ async fn qualified_codex_four_eofs_then_success_preserves_unknown_usage() {
     );
     assert_eq!(wire_requests(&server).await.len(), 5);
     assert_eq!(agent.session().usage_uncertainty_records().len(), 4);
+    let mut recovered_session = Session::open(&session_path).unwrap();
+    assert!(recovered_session.take_partial_assistant().unwrap().is_none());
+    drop(recovered_session);
     drop(agent);
     let mut agent = build_responses_agent_from_session(
         recovery_codex_model(&server.uri()),
@@ -9586,6 +9604,166 @@ async fn typed_spans_label_failed_runs_without_changing_accounting() {
     assert_eq!(
         observed[0], observed[1],
         "an installed observer must not change the durable outcome or accounting"
+    );
+}
+
+/// The telemetry hard gate: the inert and recording adapters are business
+/// neutral. The identical scripted two-turn run is replayed under
+/// `NOOP_TELEMETRY_CONTEXT` and under the recording adapter, and their full
+/// business projections — streamed deltas, finish reasons, durable entries with
+/// timing stripped, usage numbers, and cost totals — must match exactly while
+/// the recording adapter really recorded every boundary.
+#[tokio::test]
+async fn noop_and_in_memory_telemetry_keep_identical_business_outcomes() {
+    use octet_agent::telemetry::spans::{InMemoryTelemetryContext, NOOP_TELEMETRY_CONTEXT};
+
+    /// Timing-free business projection of one scripted two-turn run.
+    #[derive(Debug, PartialEq)]
+    struct Outcome {
+        deltas: Vec<(OutputChannel, String)>,
+        finishes: Vec<String>,
+        entries: Vec<(String, Option<String>, String)>,
+        record_types: Vec<String>,
+        usage: Vec<(String, u64, u64, u64)>,
+        assistant_texts: Vec<String>,
+        cost_microdollars: u64,
+        cost_picodollars_remainder: u32,
+        uncertain: bool,
+    }
+
+    async fn run_under(context: octet_agent::telemetry::spans::TelemetryContext) -> Outcome {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(Script {
+                bodies: vec![text_turn("first answer"), text_turn("second answer")],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let workspace = workspace_dir.path().canonicalize().unwrap();
+        let session_path = session_dir.path().join("noop-vs-in-memory.jsonl");
+        let mut agent = build_agent(&server.uri(), &workspace, &session_path, Some(4));
+        agent.set_telemetry_context(context);
+
+        let mut deltas = Vec::new();
+        let mut finishes = Vec::new();
+        for prompt in ["first prompt", "second prompt"] {
+            let mut run = agent.prompt(prompt).await.unwrap();
+            let events = collect(&mut run).await;
+            drop(run);
+            finishes.push(format!("{:?}", assert_single_run_finished(&events)));
+            for event in &events {
+                if let AgentEvent::OutputDelta { channel, text } = event {
+                    deltas.push((*channel, text.clone()));
+                }
+            }
+        }
+        let entries = agent
+            .session()
+            .entries()
+            .iter()
+            .map(|entry| {
+                let mut metadata = entry.metadata.clone();
+                if let Some(metadata) = metadata.as_mut() {
+                    metadata.tool_started_unix_ms = None;
+                    metadata.tool_finished_unix_ms = None;
+                    metadata.run_outcome = None;
+                }
+                (
+                    entry.id.0.clone(),
+                    entry.parent.as_ref().map(|parent| parent.0.clone()),
+                    format!("{:?}|{:?}", entry.value, metadata),
+                )
+            })
+            .collect::<Vec<_>>();
+        let usage = agent
+            .session()
+            .usage_records()
+            .iter()
+            .map(|record| {
+                (
+                    format!("{:?}", record.kind),
+                    record.usage.input_tokens,
+                    record.usage.output_tokens,
+                    record.usage.total_tokens,
+                )
+            })
+            .collect();
+        let assistant_texts = agent
+            .session()
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.value {
+                EntryValue::Message(Message::Assistant(assistant)) => Some(
+                    assistant
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            AssistantPart::Text(text) => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect();
+        let outcome = Outcome {
+            deltas,
+            finishes,
+            entries,
+            record_types: Vec::new(),
+            usage,
+            assistant_texts,
+            cost_microdollars: agent.session().total_cost_microdollars(),
+            cost_picodollars_remainder: agent.session().total_cost_picodollars_remainder(),
+            uncertain: agent.session().has_uncertain_usage(),
+        };
+        drop(agent);
+        // Durable record shape, timing excluded: the two adapters must write the
+        // same session log records, and a telemetry adapter must never add one.
+        let record_types = std::fs::read_to_string(&session_path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        Outcome {
+            record_types,
+            ..outcome
+        }
+    }
+
+    let fixture = InMemoryTelemetryContext::default();
+    let recorded = run_under(fixture.context()).await;
+    let inert = run_under(NOOP_TELEMETRY_CONTEXT).await;
+    assert_eq!(
+        inert, recorded,
+        "NOOP and InMemory must keep identical business outcomes"
+    );
+
+    // The equality above is only meaningful because the run really happened and
+    // the recording adapter really observed it.
+    assert_eq!(inert.deltas.len(), 2, "both scripted turns streamed");
+    assert_eq!(
+        inert.entries.len(),
+        4,
+        "two prompts and two assistant turns were durably compared"
+    );
+    assert_eq!(inert.assistant_texts, ["first answer", "second answer"]);
+    assert!(!inert.usage.is_empty(), "usage must be accounted");
+    assert!(inert.record_types.iter().any(|kind| kind == "usage"));
+    let spans = fixture.get_spans();
+    assert!(
+        !spans.is_empty() && spans.iter().all(|span| span.settled),
+        "the recording adapter observes every settled boundary: {spans:#?}"
     );
 }
 

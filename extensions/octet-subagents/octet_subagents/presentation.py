@@ -303,7 +303,8 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         ownership = (
             "still owned by this parent session; currently detached from any host "
             "run (a recoverable state, not a terminal one). Use /subagents wait to "
-            "reattach, or open its live session pane with /subagents open-all."
+            "reattach. /subagents open-all remains Partial: pane execution is "
+            "blocked until atomic host writer claim/settlement is available."
         )
     else:
         ownership = "attached to a host run owned by this parent session."

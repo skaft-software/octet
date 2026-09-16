@@ -3250,6 +3250,13 @@ fn register_selected_preset_inventories(catalog: &mut ModelCatalog, routes: &[&'
             register_declaration_inventory(catalog, declaration);
         }
     }
+    // One boundary for the selected-route inventory wait. `catalog.base` is
+    // emitted before it, so the harness reads the delta as the time readiness
+    // may attribute to the user's own selection; with a Codex route this phase
+    // is skipped because that route initializes inside `catalog.codex`.
+    if routes.iter().any(|route| *route != crate::providers::CODEX.id) {
+        startup_phase("catalog.selected");
+    }
 }
 
 /// Discover configured provider catalogs concurrently, then merge them on the
@@ -5742,6 +5749,7 @@ fn base_model_catalog_with_readiness(
     // session behavior without ambient secrets.
     #[cfg(not(test))]
     catalog.retain_configured_models();
+    startup_phase("catalog.base");
     if cfg!(test) && readiness.is_fleet() {
         // Tests keep the historical deterministic DeepSeek fixture and never
         // use ambient credentials or contact provider discovery endpoints. A
@@ -5866,13 +5874,16 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 ///
 /// This trace is the off-screen timing signal every frontend shares; nothing in
 /// it is ever rendered on the startup screen. Stable phase names:
-/// `catalog.base`, `catalog.codex`, `catalog.copilot`, `catalog.fallback`,
-/// `catalog.enrich`, `codex.credentials`, `codex.inventory`, `bootstrap.ready`,
-/// `session.resolve`, `session.replay`, `extensions.provider-preflight`,
-/// `extensions.prestart`, `extensions.activate`, `app.build`,
-/// `history.hydrate`, `frame.ready`. The last two are emitted by the interactive
-/// frontend; `codex.credentials` and `codex.inventory` separate credential
-/// refresh from the inventory request inside one selected-route wait.
+/// `catalog.base`, `catalog.selected`, `catalog.codex`, `catalog.copilot`,
+/// `catalog.fallback`, `catalog.enrich`, `codex.credentials`, `codex.inventory`,
+/// `bootstrap.ready`, `session.resolve`, `session.replay`,
+/// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
+/// `app.build`, `history.hydrate`, `frame.ready`. The last two are emitted by the
+/// interactive frontend; `codex.credentials` and `codex.inventory` separate
+/// credential refresh from the inventory request inside one selected-route wait,
+/// and `catalog.selected` bounds the selected-route inventory wait itself (the
+/// delta after `catalog.base`) so a configured but unselected provider's
+/// discovery is never attributed to readiness.
 pub(crate) fn startup_phase(phase: &str) {
     if !startup_trace_enabled(std::env::var_os(STARTUP_TRACE_ENV).as_deref()) {
         return;
@@ -5916,7 +5927,6 @@ pub(crate) fn model_catalog_for_readiness(
     readiness: &CatalogReadiness,
 ) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
     let mut catalog = base_model_catalog_with_readiness(offline, None, readiness)?;
-    startup_phase("catalog.base");
     let mut notes = CodexContextNotes::default();
     if readiness.includes(crate::providers::CODEX.id) {
         register_codex_catalog(&mut catalog, offline, &mut notes);
@@ -6992,9 +7002,18 @@ pub fn rebuild_app(
     let system = app.system.clone();
     let old_skills = Arc::clone(&app.skills);
     let goal_store = Arc::clone(&app.goal_store);
-    // The note latch survives a rebuild: a note already delivered stays
-    // delivered, and a note still owed is carried to the new App exactly once.
+    // Idle rebuilds of the same session preserve delivery. A new or resumed
+    // different session owns a fresh latch; the previous session's notice must
+    // not suppress the effective-model note in the newly opened transcript.
     let codex_context_notes = app.codex_context_notes.clone();
+    if selection.as_ref().is_some_and(|selection| {
+        let path = match selection {
+            SessionSelection::CreateNew(path) | SessionSelection::OpenExisting(path) => path,
+        };
+        path != app.agent.session().path()
+    }) {
+        codex_context_notes.delivered.set(false);
+    }
     let readiness = app.readiness.clone();
     let compact_model = config
         .compaction

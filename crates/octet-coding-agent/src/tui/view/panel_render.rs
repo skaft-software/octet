@@ -1643,18 +1643,21 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                 .subagent_panel()
                 .zip(searched.as_ref())
                 .map(|(panel, searched)| {
-                    let counts = panel.counts(searched);
+                    // A collapsed group can still contain the individually
+                    // revealed selection. Match the renderer's item-level
+                    // visibility or its heading steals a worker's body row.
                     let visible = panel
                         .groups
                         .iter()
-                        .zip(&counts)
-                        .filter(|(group, count)| {
-                            **count > 0 && !(panel.collapsed && group.collapsible)
+                        .filter(|group| {
+                            group.indices.iter().any(|index| filtered.contains(index))
                         })
                         .count();
-                    let hidden = usize::from(panel.groups.iter().zip(&counts).any(
-                        |(group, count)| panel.collapsed && group.collapsible && *count > 0,
-                    ));
+                    let hidden = usize::from(panel.groups.iter().any(|group| {
+                        group.indices.iter().any(|index| {
+                            searched.contains(index) && panel.hides(*index)
+                        })
+                    }));
                     visible + hidden + usize::from(!filtered.is_empty())
                 })
                 .unwrap_or(0);
@@ -1840,29 +1843,24 @@ fn render_panel_output_with_limit(
                 .zip(searched.as_ref())
                 .map(|(panel, searched)| panel.counts(searched));
             let hidden_groups: Vec<(String, usize)> =
-                match (subagents, subagent_counts.as_ref()) {
-                    (Some(panel), Some(counts)) => panel
+                match (subagents, searched.as_ref()) {
+                    (Some(panel), Some(searched)) => panel
                         .groups
                         .iter()
-                        .zip(counts)
-                        .filter(|(group, count)| {
-                            panel.collapsed && group.collapsible && **count > 0
+                        .filter_map(|group| {
+                            let count = group.indices.iter().filter(|index| {
+                                searched.contains(index) && panel.hides(**index)
+                            }).count();
+                            (count > 0).then(|| (group.label.clone(), count))
                         })
-                        .map(|(group, count)| (group.label.clone(), *count))
                         .collect(),
                     _ => Vec::new(),
                 };
-            let visible_groups = match (subagents, subagent_counts.as_ref()) {
-                (Some(panel), Some(counts)) => panel
-                    .groups
-                    .iter()
-                    .zip(counts)
-                    .filter(|(group, count)| {
-                        **count > 0 && !(panel.collapsed && group.collapsible)
-                    })
-                    .count(),
-                _ => 0,
-            };
+            let visible_groups = subagents.map_or(0, |panel| {
+                panel.groups.iter().filter(|group| {
+                    group.indices.iter().any(|index| filtered.contains(index))
+                }).count()
+            });
             // A column header is chrome, so it yields before any worker row.
             let show_subagent_header =
                 subagents.is_some() && max_body >= SUBAGENT_HEADER_MIN_BODY;

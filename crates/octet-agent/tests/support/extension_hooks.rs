@@ -65,6 +65,40 @@ async fn before_persistence_metadata_is_namespaced_durable_and_never_model_conte
         extensions,
     );
     agent.complete("first-prompt").await.unwrap();
+    // Roadmap #265: the namespaced value is fixed *before* its own durable
+    // append, and it is never rewritten afterwards. Each turn therefore
+    // contributes exactly one occurrence of each value to the append-only log.
+    let first_turn = agent
+        .session()
+        .entries()
+        .iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.extension_metadata.len() == 2)
+        })
+        .cloned()
+        .expect("the first assistant turn carries both namespaces");
+    let first_metadata = first_turn.metadata.clone().unwrap();
+    let needles = first_metadata
+        .extension_metadata
+        .iter()
+        .map(|(namespace, value)| {
+            (
+                namespace.clone(),
+                serde_json::to_string(&value.value).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let durable_once = std::fs::read_to_string(agent.session().path()).unwrap();
+    for (namespace, needle) in &needles {
+        assert_eq!(
+            durable_once.matches(needle.as_str()).count(),
+            1,
+            "{namespace} must be written with its own turn, exactly once"
+        );
+    }
     let entries = agent.session().entries();
     let metadata = entries
         .iter()
@@ -99,6 +133,7 @@ async fn before_persistence_metadata_is_namespaced_durable_and_never_model_conte
     assert!(!requests.contains("public-sentinel"));
     assert!(requests.contains("canonical-answer"));
     let session_path = agent.session().path().to_owned();
+    let durable_after = std::fs::read_to_string(&session_path).unwrap();
     drop(agent);
     let reopened = Session::open(session_path).unwrap();
     assert_eq!(
@@ -111,6 +146,26 @@ async fn before_persistence_metadata_is_namespaced_durable_and_never_model_conte
                 .is_some_and(|metadata| metadata.extension_metadata.len() == 2))
             .count(),
         2
+    );
+    // Roadmap #265, second half: never rewritten after persistence. Two
+    // persisted turns leave exactly two copies of each value, and the first
+    // turn's stored envelope is byte-identical after the second turn.
+    for (namespace, needle) in &needles {
+        assert_eq!(
+            durable_after.matches(needle.as_str()).count(),
+            2,
+            "{namespace} must be appended once per turn and never rewritten"
+        );
+    }
+    let rewritten = reopened
+        .entries()
+        .iter()
+        .find(|entry| entry.id == first_turn.id)
+        .expect("the first turn survives reopen");
+    assert_eq!(
+        rewritten.metadata.as_ref(),
+        Some(&first_metadata),
+        "metadata set before persistence must not change after later turns"
     );
     assert!(!format!("{:?}", reopened.context().unwrap()).contains("sentinel"));
 }

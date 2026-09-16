@@ -590,8 +590,29 @@ mod tests {
         !process_is_alive(pid)
     }
 
+    // These tests exercise process I/O and deadlines, not executable startup
+    // latency. Fresh temporary scripts can take over a second to enter /bin/sh
+    // on macOS. Keep paused Tokio time from auto-advancing while real I/O runs,
+    // but bound every wait in wall time without a detached keepalive task.
     #[cfg(unix)]
-    #[tokio::test]
+    async fn drive_without_advancing_time<F: std::future::Future>(future: F) -> F::Output {
+        tokio::pin!(future);
+        let started = Instant::now();
+        loop {
+            if let std::task::Poll::Ready(result) = futures_util::poll!(&mut future) {
+                return result;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "search fixture made no progress within the wall-clock watchdog"
+            );
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
     async fn stderr_saturation_does_not_block_search() {
         let f = fixture();
         let program = executable_script(
@@ -605,12 +626,15 @@ mod tests {
         let mut sandbox = f.sandbox.clone();
         sandbox.bash_timeout = Duration::from_secs(2);
         let ctx = f.ctx_with(&sandbox);
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
 
-        let error = SearchTool
-            .execute_with_program(json!({"query": "needle"}), &ctx, &program)
-            .await
-            .unwrap_err();
+        let error = drive_without_advancing_time(SearchTool.execute_with_program(
+            json!({"query": "needle"}),
+            &ctx,
+            &program,
+        ))
+        .await
+        .unwrap_err();
 
         assert!(started.elapsed() < sandbox.bash_timeout);
         assert!(
@@ -620,37 +644,52 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stdout_eof_does_not_bypass_search_timeout_or_cleanup() {
         let f = fixture();
         let program = executable_script(
             &f.workspace,
             "rg-closes-stdout",
             r#"
-            printf '%s' "$$" > child.pid
             exec 1>&-
-            exec /bin/sleep 5
+            printf '%s\n' "$$" > child.pid
+            kill -STOP "$$"
+            exit 2
             "#,
         );
         let mut sandbox = f.sandbox.clone();
         sandbox.bash_timeout = Duration::from_millis(150);
         let ctx = f.ctx_with(&sandbox);
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
+        let search = SearchTool.execute_with_program(json!({"query": "needle"}), &ctx, &program);
+        tokio::pin!(search);
 
-        let error = SearchTool
-            .execute_with_program(json!({"query": "needle"}), &ctx, &program)
-            .await
-            .unwrap_err();
+        // The PID is published only after stdout is closed. Do not expire the
+        // search before the shell has entered the EOF-with-live-child state.
+        let pid = drive_without_advancing_time(std::future::poll_fn(|cx| {
+            assert!(
+                std::future::Future::poll(search.as_mut(), cx).is_pending(),
+                "search completed before its deadline with a live child"
+            );
+            let pid = std::fs::read_to_string(f.workspace.join("child.pid"))
+                .ok()
+                .filter(|text| text.ends_with('\n'))
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            match pid {
+                Some(pid) => std::task::Poll::Ready(pid),
+                None => std::task::Poll::Pending,
+            }
+        }))
+        .await;
+        assert!(process_is_alive(pid), "EOF fixture child exited early");
+        assert_eq!(started.elapsed(), Duration::ZERO);
 
+        tokio::time::advance(sandbox.bash_timeout).await;
+        let error = drive_without_advancing_time(&mut search).await.unwrap_err();
         assert!(error.message.contains("execution limit"), "{error}");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "search waited for a child that had already closed stdout"
-        );
-        let pid: i32 = std::fs::read_to_string(f.workspace.join("child.pid"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        assert_eq!(started.elapsed(), sandbox.bash_timeout);
+        // Reaping is an OS observation, so retain a real-time cleanup bound.
+        tokio::time::resume();
         assert!(
             wait_for_process_exit(pid, Duration::from_secs(1)).await,
             "timed-out search child was not reaped"

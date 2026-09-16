@@ -344,3 +344,54 @@ START 2026-09-15T18:21:35Z verify12 alive
 START 2026-09-15T18:29:30Z verify12b alive
 
 START 2026-09-15T19:02:42Z verify12c alive
+START 2026-09-15T21:37:57Z verify12d alive
+
+## [verify12d §P5.1] Identity + priority-1 (footer/telemetry cost, subagents replay) — 2026-09-15T21:38–22:05Z
+
+**Identity.** Committed HEAD is `e0129391` ("wave 12"). My first `git status
+--porcelain` (21:37:57Z) showed **only 5 audit docs modified — no source file**,
+so every result below labelled "HEAD" is committed `e0129391` content, and
+"WT" means the uncommitted wave that landed between 21:45Z and 22:05Z (mtimes:
+`view/tests.rs` 17:40:22, `view.rs` 17:41:49, `status_telemetry.rs` 17:42:52;
+sha256 `tests.rs` HEAD `ed577d1a3c12` / WT `0a2ea9a437b0`,
+`status_telemetry.rs` HEAD `4455f9d98a47` / WT `1e751b3156e6`,
+`view.rs` HEAD `b4b40d542a78` / WT `3ec6ea8a7c66`). `composer_surface.rs`,
+`shell_chrome.rs` and `transcript_render.rs` are byte-identical to HEAD
+(`5b599b8f9015` / `0846cd345f41` / `e278a5db9a61`).
+
+### Footer/telemetry cost — code landed; the tests that prove it DID NOT
+
+| # | Claim | Observation (HEAD `e0129391` unless stated) | Verdict |
+| --- | --- | --- | --- |
+| P1 | Footer is a plain dollar estimate, no `subtotal`/`+`/`~`/`?` | `tui/composer_surface.rs:803-806` renders only `format_microdollars(cost)`; the old `format!("subtotal {} + ?", …)` is gone. New committed test `footer_cost_is_plain_dollars_even_when_usage_is_uncertain` (`:1114`) asserts `!footer.contains(forbidden)` for `["subtotal","+","?","unknown","usage/cost"]` and fails if any leaks. | VERIFIED (code) |
+| P2 | Telemetry panel is plain dollars | `tui/view/status_telemetry.rs:184-190` renders only `Turn cost`/`Session cost` dollar figures and asserts the forbidden list `["subtotal","+","~","?","unknown"]`; `:60` comment: never rendered as `+ unknown` or `~`. | VERIFIED (code) |
+| P3 | `usage_uncertain` still set and still durable (display must not weaken accounting) | `view.rs:3748` `AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true`; `view.rs:6821` hydrate sets it from `session.has_uncertain_usage()`. Agent side unchanged at HEAD: `agent.rs:2968,4659,7084,7513` call `session.record_usage_uncertainty(...)`; `delegation.rs:3670` `mark_agent_usage_uncertain`, `:3731-3732` propagate into `record.usage_uncertain`; non-TUI channels still surface it (`session_commands.rs:129`, `modes/print.rs:53`, `modes/plain.rs:369`, server `serve.rs:8135`). | VERIFIED |
+| P4 | The claim is backed by a green behavioural test | **NO.** At HEAD on the clean tree I ran the two uncertainty tests: `cargo test -p octet-coding-agent --lib -- --exact tui::view::tests::provider_usage_uncertain_survives_success_settlement_and_resume tui::view::tests::provider_usage_uncertain_never_infers_zero_from_pricing` → `test result: FAILED. 0 passed; 2 failed; 1443 filtered out` (21:41Z). Panics: `tests.rs:14105` `assert!(footer.contains("subtotal"))` with the real footer `octet · $0.0042`; `tests.rs:14147`. In the 21:38–21:40Z full-suite run two more cost tests failed: `tui::view::tests::default_footer_groups_live_metadata_and_right_aligns_workspace` (`tests.rs:9981` `assert!(unknown.contains("subtotal $296 + ?"))`) and the same two above. | CONTRADICTED (4 red tests) |
+| P5 | The in-flight wave fixes them | **NO (as of 22:05Z).** The WT diff to `view/tests.rs` is +116 lines and is *only* the new subagent test; the seven stale assertions are still in WT at lines `9981, 9984, 14221, 14222, 14224, 14225, 14242, 14263` (`rg -n 'subtotal\|totals unknown\|usage/cost unknown\|\+ \?' crates/octet-coding-agent/src/tui/view/tests.rs`). `status_telemetry.rs` WT *removes* the `(exact)` suffix and fixes the startup `Paste` fixture, but the footer-era tests in `view/tests.rs` are untouched. | CONTRADICTED (still red) |
+
+**Which side is right?** Both requirements in the task brief are met by the
+*code*: plain dollars, and `usage_uncertain` preserved as a durable state fact
+(P3). The red tests are the previous contract written down. Two of them
+(`subtotal`/`+ ?`) simply cannot pass against the new renderer — they are stale.
+One (`provider_usage_uncertain_never_infers_zero_from_pricing`) encodes "never
+show `$0` when pricing is `ExplicitZero` and usage is uncertain"; the new code
+deliberately renders `$0 (configured zero-priced)` in that state while keeping
+`PriceDisplay::Unknown` honest ("unavailable (pricing not configured)"). That is
+a **product-contract decision that must be stated in the PR body**, not a
+silent test failure. Whichever way it is resolved, `cargo test -p
+octet-coding-agent --lib` is red at HEAD and in the WT because of it.
+
+### Subagents replay — the fix is real; one test cannot pass
+
+| # | Claim | Observation | Verdict |
+| --- | --- | --- | --- |
+| P6 | The block is no longer rendered from state into pinned chrome | `view/shell_chrome.rs:143-151` `fn render_subagent_activity(_state, _width) -> Vec<String> { Vec::new() }`, doc comment: "Retired: … a session-scoped roster that outlives its turn reappeared under every new prompt". Call site `:235` still exists and returns empty. Committed test `subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once` (`tests.rs:10204`) now asserts `chrome.subagents.is_empty()` and that the same activity IS in the transcript. | VERIFIED (HEAD, byte-identical in WT) |
+| P7 | It settles into the transcript at the interrupting turn | `view/transcript_render.rs:90` `render_subagent_activity_panel`, consumed at `:223` as a transcript `Tool` block; `view.rs:2419-2431` suppresses a roster that arrives after its turn ended when `!active && !workers.is_empty() && failure_reason.is_none() && all workers in settled_subagent_workers` — "Render nothing - no transcript block below the new prompt, no chrome strip above the editor". `view.rs:3608-3615`: the settled set is deliberately NOT cleared at the new-prompt boundary ("every new prompt re-opened a block of already-finished workers"), cleared only when the session is replaced (`:6841`). | VERIFIED (code) |
+| P8 | Tests: settled roster never replays / stays at its point / all-completed opens nothing | Committed `a_settled_subagent_roster_never_replays_under_a_later_prompt` (`tests.rs:10797`), `the_settled_subagent_block_stays_at_the_point_the_delegation_happened` (`:11154`), `terminal_subagent_snapshots_hide_the_activity_strip` (`:11324`) are absent from the FAILED list of my 21:40Z full run (I could not re-run them: the tree stopped compiling at 21:44Z — `agent.rs:68` syntax error, then `octet-ai` E0425 from another worker's save). WT adds `an_all_completed_roster_never_opens_a_block_under_a_later_prompt` (+116 lines). | VERIFIED-with-caveat (not re-run on a quiet tree) |
+| P9 | Live workers still open a block in the new turn | **RED.** `tui::view::tests::live_workers_for_the_current_turn_still_open_a_block` fails standalone at `tests.rs:11024` `assert!(rendered.contains("agent-2"))`; the rendered transcript prints task names, never child ids, so this assertion **can never pass**. The behaviour it is testing is present (the dump shows one settled block for turn 1 and a second block for turn 2 containing the live worker). | CONTRADICTED (test defect) |
+
+Net: the maintainer's two priority items are **landed as code at `e0129391`
+(and unchanged by the WT)**; each is accompanied by at least one **red or
+unfalsifiable test**, so neither can be reported as "Landed" under the
+CHANGELOG's own definition ("code plus a behavioural test that was actually
+run").

@@ -667,10 +667,20 @@ fn aws_instance_identity_from(root: &std::path::Path) -> Option<String> {
 
 fn read_dmi_marker(path: &std::path::Path) -> Option<String> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_AWS_DMI_BYTES {
+    if !metadata.file_type().is_file() {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
+    // sysfs attributes report a page-sized st_size (usually 4096) even when
+    // their actual contents are one short line. Bound the read itself, not the
+    // advertised size, or genuine EC2 DMI markers are always discarded.
+    read_dmi_marker_from(std::fs::File::open(path).ok()?)
+}
+
+fn read_dmi_marker_from(reader: impl std::io::Read) -> Option<String> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    reader.take(MAX_AWS_DMI_BYTES + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() > MAX_AWS_DMI_BYTES as usize {
         return None;
     }
@@ -868,7 +878,13 @@ where
             &AWS_METADATA_ENDPOINT_MODE_VARIABLES,
         )?,
         product_opt_in: read_env(AWS_METADATA_OPT_IN_VARIABLE)?,
-        profile_credential_source: profile_value(&profile_values, "credential_source"),
+        // `credential_source` is documented for the shared *config* file
+        // (`~/.aws/config`, where role-assumption profiles live); the shared
+        // credentials file accepts it too, so it is read as a fallback rather
+        // than ignored. Reading only the credentials file would silently
+        // suppress an intentional EC2/ECS-backed Bedrock profile.
+        profile_credential_source: profile_value(&profile_config, "credential_source")
+            .or_else(|| profile_value(&profile_values, "credential_source")),
         profile_metadata_service_endpoint: profile_value(&profile_config, "ec2_metadata_service_endpoint"),
         instance_identity: read_instance_identity(),
     })
@@ -2164,6 +2180,55 @@ ignored key = ignored
     }
 
     #[test]
+    fn profile_credential_source_is_read_from_the_config_file_it_is_documented_in() {
+        // `credential_source` is documented for `~/.aws/config` (where
+        // role-assumption profiles are declared), so a profile that only exists
+        // there must still activate: reading the credentials file alone silently
+        // suppressed an intentional EC2/ECS-backed Bedrock profile. The
+        // credentials file stays a tolerated fallback for the profiles that
+        // declare it there.
+        use std::collections::BTreeMap;
+
+        let in_config = |values: BTreeMap<String, String>| {
+            move |config_file: bool| {
+                Ok(if config_file { Some(values.clone()) } else { None })
+            }
+        };
+
+        for source in ["Ec2InstanceMetadata", "EcsContainer", "ec2instancemetadata"] {
+            let inputs = aws_metadata_activation_inputs_with(
+                |_| Ok(None),
+                in_config(BTreeMap::from([(
+                    "credential_source".to_owned(),
+                    source.to_owned(),
+                )])),
+                || None,
+            )
+            .unwrap();
+            assert_eq!(
+                aws_metadata_activation_from(&inputs),
+                AwsMetadataActivation::Enabled(AwsMetadataIndication::ProfileCredentialSource),
+                "credential_source = {source} in ~/.aws/config must indicate the metadata probe"
+            );
+        }
+
+        let inputs = aws_metadata_activation_inputs_with(
+            |_| Ok(None),
+            in_config(BTreeMap::from([(
+                "credential_source".to_owned(),
+                "Environment".to_owned(),
+            )])),
+            || None,
+        )
+        .unwrap();
+        assert_eq!(
+            aws_metadata_activation_from(&inputs),
+            AwsMetadataActivation::Disabled(AwsMetadataSuppression::Unindicated),
+            "a config profile that declares another credential source is not an indication"
+        );
+    }
+
+    #[test]
     fn indicated_metadata_probe_reaches_the_ec2_source() {
         // The intentional path: an EC2 user who opts in still resolves, and the
         // probe runs against the default IMDS endpoint.
@@ -2449,6 +2514,36 @@ ignored key = ignored
             None,
             "a directory is not a marker file"
         );
+    }
+
+    #[test]
+    fn dmi_reads_are_bounded_by_content_not_file_size() {
+        assert_eq!(
+            read_dmi_marker_from(&b"Amazon EC2\n"[..]).as_deref(),
+            Some(AWS_EC2_DMI_VENDOR)
+        );
+        assert_eq!(read_dmi_marker_from(&b"\xff"[..]), None);
+        assert_eq!(read_dmi_marker_from(&b" \n"[..]), None);
+
+        // Even a source with no EOF consumes only the bound plus one byte.
+        let mut infinite = std::io::repeat(b'x');
+        assert_eq!(read_dmi_marker_from(&mut infinite), None);
+        let data = vec![b'x'; MAX_AWS_DMI_BYTES as usize + 16];
+        let mut reader = std::io::Cursor::new(data);
+        assert_eq!(read_dmi_marker_from(&mut reader), None);
+        assert_eq!(reader.position(), MAX_AWS_DMI_BYTES + 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sysfs_dmi_page_sized_metadata_does_not_hide_a_short_marker() {
+        // A real sysfs attribute has page-sized metadata, unlike a tempfile.
+        // DMI is optional (containers/ARM may not expose it); no network or
+        // credential sources are consulted by this regression.
+        let path = std::path::Path::new(AWS_EC2_DMI_MARKERS[0]);
+        let Ok(file) = std::fs::File::open(path) else { return };
+        let expected = read_dmi_marker_from(file);
+        assert_eq!(read_dmi_marker(path), expected);
     }
 
     #[test]

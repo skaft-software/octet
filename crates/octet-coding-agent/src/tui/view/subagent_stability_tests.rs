@@ -163,3 +163,169 @@ fn fallback_subagent_call_counts_are_retained_without_invalidating_rows() {
     assert!(shell.state.borrow().block_revisions[index] > revision);
     assert_ne!(*shell.state.borrow().rendered_transcript(80), rows);
 }
+
+// Exercise both native telemetry and the extension-presentation fallback at
+// their public shell entry points; both receive session-wide rosters.
+fn publish_roster(
+    shell: &mut InteractiveShell,
+    native: bool,
+    children: &[octet_agent::DelegationTelemetryChild],
+) {
+    if native {
+        shell.on_agent_event(&AgentEvent::DelegationUpdated {
+            snapshot: octet_agent::DelegationTelemetrySnapshot {
+                revision: 1,
+                captured_at_ms: 1,
+                children: children.to_vec(),
+                total_cost_microdollars: None,
+                failure_reason: None,
+                failure_class: None,
+            },
+        });
+    } else {
+        let snapshot = serde_json::from_value(serde_json::json!({
+            "revision": 1,
+            "status": {"state": "active", "label": "Subagents"},
+            "activities": children.iter().map(|child| serde_json::json!({
+                "id": child.child_id,
+                "kind": "subagent",
+                "state": if child.state == "completed" { "succeeded" } else { child.state.as_str() },
+                "summary": child.task_name,
+                "metrics": {
+                    "input_tokens": child.input_tokens,
+                    "output_tokens": child.output_tokens,
+                    "cost_microdollars": child.cost_microdollars,
+                },
+            })).collect::<Vec<_>>(),
+            "actions": [],
+        })).unwrap();
+        shell.set_subagent_presentation(Some(&snapshot), true);
+    }
+}
+
+fn named_worker(name: &str, state: &str) -> octet_agent::DelegationTelemetryChild {
+    octet_agent::DelegationTelemetryChild {
+        child_id: name.into(),
+        task_name: name.into(),
+        state: state.into(),
+        ..child()
+    }
+}
+
+fn transcript_text(shell: &InteractiveShell) -> String {
+    strip_terminal_sequences(&shell.state.borrow().rendered_transcript(120).join("\n"))
+}
+
+#[test]
+fn mixed_session_rosters_do_not_replay_known_or_unseen_terminal_workers() {
+    for native in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        let run = shell.begin_run("fixture");
+        shell.on_prompt_submitted("first prompt");
+        publish_roster(&mut shell, native, &[named_worker("OLD-WORKER", "running")]);
+        publish_roster(&mut shell, native, &[named_worker("OLD-WORKER", "completed")]);
+        shell.on_run_event(
+            run,
+            &AgentEvent::RunFinished {
+                head: octet_agent::EntryId("head".into()),
+                reason: octet_agent::FinishReason::Completed,
+            },
+        );
+
+        shell.begin_run("fixture");
+        shell.on_prompt_submitted("second prompt");
+        shell.state.borrow_mut().session_cost_microdollars = Some(100_000);
+        let old = named_worker("OLD-WORKER", "completed");
+        let unseen = named_worker("UNSEEN-OLD-WORKER", "completed");
+        // A first-observed all-terminal roster is history, even after resume.
+        publish_roster(
+            &mut shell,
+            native,
+            &[old.clone(), named_worker("FINISHED-BEFORE-ATTACH", "completed")],
+        );
+        assert!(shell.state.borrow().subagent_activity_block.is_none());
+
+        let fresh = named_worker("FRESH-WORKER", "running");
+        publish_roster(&mut shell, native, &[old.clone(), unseen.clone(), fresh.clone()]);
+        let index = shell.state.borrow().subagent_activity_block.unwrap();
+        let text = transcript_text(&shell);
+        let tail = text.split_once("second prompt").unwrap().1;
+        assert!(tail.contains("FRESH-WORKER"), "{text}");
+        assert!(!tail.contains("OLD-WORKER"), "{text}");
+        assert_eq!(text.matches("Subagents").count(), 2, "{text}");
+        assert_eq!(
+            shell.state.borrow().displayed_session_cost_microdollars(),
+            Some(107_200)
+        );
+
+        let settled = named_worker("FRESH-WORKER", "completed");
+        publish_roster(&mut shell, native, &[old.clone(), unseen.clone(), settled.clone()]);
+        let settled_text = transcript_text(&shell);
+        for _ in 0..3 {
+            publish_roster(&mut shell, native, &[old.clone(), unseen.clone(), settled.clone()]);
+            assert_eq!(shell.state.borrow().subagent_activity_block, Some(index));
+            assert_eq!(transcript_text(&shell), settled_text);
+            assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now()).subagents.is_empty());
+        }
+
+        // The same durable worker can legitimately be continued later, after
+        // the owning parent run (not just its workers) has settled.
+        let run = shell.current_run_id().unwrap();
+        shell.on_run_event(run, &AgentEvent::RunFinished {
+            head: octet_agent::EntryId("second-head".into()),
+            reason: octet_agent::FinishReason::Completed,
+        });
+        shell.begin_run("fixture");
+        shell.on_prompt_submitted("third prompt");
+        publish_roster(&mut shell, native, &[old, unseen, settled]);
+        assert!(shell.state.borrow().subagent_activity_block.is_none());
+        let text = transcript_text(&shell);
+        assert!(!text.split_once("third prompt").unwrap().1.contains("Subagents"));
+        publish_roster(&mut shell, native, &[fresh]);
+        let text = transcript_text(&shell);
+        assert!(text.split_once("third prompt").unwrap().1.contains("FRESH-WORKER"));
+    }
+}
+
+#[test]
+fn live_strip_is_active_only_and_settles_in_the_original_transcript_block() {
+    for native in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("fixture");
+        shell.on_prompt_submitted("owning prompt");
+        publish_roster(&mut shell, native, &[
+            named_worker("LIVE-WORKER", "running"),
+            named_worker("DONE-WORKER", "running"),
+        ]);
+        let index = shell.state.borrow().subagent_activity_block.unwrap();
+        publish_roster(&mut shell, native, &[
+            named_worker("LIVE-WORKER", "running"),
+            named_worker("DONE-WORKER", "completed"),
+        ]);
+        // Transcript controls must not hide the live worker in the strip.
+        shell.state.borrow_mut().subagent_activity.as_mut().unwrap().state_filter =
+            Some(SubagentStateGroup::Failed);
+        let chrome = shell_chrome(&shell.state.borrow(), 120, Instant::now());
+        let strip = strip_terminal_sequences(&chrome.subagents.join("\n"));
+        assert!(strip.contains("LIVE-WORKER"), "{strip}");
+        assert!(!strip.contains("DONE-WORKER"), "{strip}");
+        assert!(!strip.contains("completed"), "{strip}");
+        for (width, height) in [(24, 4), (46, 8), (120, 40)] {
+            shell.set_size(width, height);
+            let state = shell.state.borrow();
+            let chrome = shell_chrome(&state, width, Instant::now());
+            assert!(shell_chrome::shell_chrome_rows(&chrome) <= usize::from(height));
+            assert!(chrome.subagents.iter().all(|row| visible_width(row) <= usize::from(width)));
+            assert!(chrome.composer.iter().any(|row| row.contains(sexy_tui_rs::CURSOR_MARKER)));
+        }
+        publish_roster(&mut shell, native, &[
+            named_worker("LIVE-WORKER", "completed"),
+            named_worker("DONE-WORKER", "completed"),
+        ]);
+        assert_eq!(shell.state.borrow().subagent_activity_block, Some(index));
+        assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now()).subagents.is_empty());
+        let text = transcript_text(&shell);
+        assert_eq!(text.matches("Subagents").count(), 1, "{text}");
+        assert!(text.contains("LIVE-WORKER") && text.contains("DONE-WORKER"), "{text}");
+    }
+}

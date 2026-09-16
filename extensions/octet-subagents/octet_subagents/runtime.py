@@ -611,7 +611,7 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
 
     @extension.command(
         name="subagents",
-        description="Browse workers, inspect read-only delegated transcripts, and open one pane per running worker",
+        description="Browse workers, inspect read-only delegated transcripts, and report blocked pane plans pending atomic host writer ownership",
         usage="/subagents [list|inspect <name-or-id>|wait <name-or-id>|reattach <name-or-id>|stop <name-or-id|all>|open-all tmux|open-all herdr]",
     )
     def subagents_command(arguments: list[str], context: Mapping[str, Any]):
@@ -636,6 +636,11 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
                     "text": _result_text("status", result),
                     "notifications": [],
                 }
+            if arguments and arguments[0] == "open-all":
+                _require_agent_sessions(extension)
+                return orchestrator.open_all_owned(
+                    sessions, Owner.from_context(context), arguments[1:], current_cancellation()
+                )
             if (
                 len(arguments) in {1, 2}
                 and arguments[0] in {"wait", "reattach"}

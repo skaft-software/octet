@@ -10443,6 +10443,16 @@ fn api_v03_host_offer_for_services(
     session_lifecycle: bool,
 ) -> Result<api_v03::ContractOffer, api_v03::ContractError> {
     let mut offer = api_v03::host_offer(max_frame_bytes, max_pending_requests)?;
+    // Generated optional services are not automatically product services.
+    // Theme selection has no host-owned catalog/namespace binding or handler;
+    // offering it would route a negotiated call into the legacy fallback.
+    offer
+        .optional_capabilities
+        .retain(|capability| capability != "theme_selection");
+    offer.optional_methods.retain(|method| {
+        api_v03::method_spec(method)
+            .is_none_or(|specification| specification.capability != "theme_selection")
+    });
     if !session_lifecycle {
         offer
             .optional_capabilities
@@ -15055,6 +15065,22 @@ confirmations = true
                 assert_eq!(actual_data, Some(data));
             }
             other => panic!("remote terminal error was reclassified: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_v03_theme_selection_is_omitted_without_a_host_handler() {
+        for session_lifecycle in [false, true] {
+            let offer = api_v03_host_offer_for_services(1024, 4, session_lifecycle).unwrap();
+            assert!(!offer
+                .optional_capabilities
+                .iter()
+                .any(|capability| capability == "theme_selection"));
+            assert!(!offer
+                .optional_methods
+                .iter()
+                .any(|method| method == "theme/select"));
+            api_v03::validate_offer(&offer).unwrap();
         }
     }
 

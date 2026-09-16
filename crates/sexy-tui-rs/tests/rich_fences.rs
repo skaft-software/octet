@@ -455,3 +455,179 @@ fn streaming_keeps_failed_diagram_fences_as_source() {
     assert!(after.contains("\\cfrac{1}{x}"), "{after}");
     assert!(after.contains("trailing prose"), "{after}");
 }
+
+/// Independent oracle for "did the parser close this fence?", read from
+/// pulldown's own source (`firstpass.rs::parse_fenced_code_block` +
+/// `scanners.rs::scan_closing_code_fence`): the closing line may be indented at
+/// most three spaces **relative to the container content indent** — *not*
+/// relative to the opening fence — must repeat the opening marker at least as
+/// many times, and may be followed by spaces only (a tab does not close a
+/// fence).
+fn parser_closes_fence(closer: &str, marker: char, count: usize) -> bool {
+    let indent = closer.len() - closer.trim_start_matches(' ').len();
+    let run = closer[indent..].chars().take_while(|c| *c == marker).count();
+    let rest = &closer[indent + run..];
+    indent <= 3 && run >= count && rest.chars().all(|c| c == ' ')
+}
+
+/// The closure check must be *sound* on every shape a fence can take in one
+/// flat document: a fence is dispatched exactly when a valid closing line ends
+/// it, and every malformed/trailing-junk closer stays the original source. This
+/// is the assertion that the dispatcher is not a match arm that fires on
+/// fence-shaped text inside an open block.
+#[test]
+fn closure_matrix_dispatches_only_complete_fences() {
+    let body = "graph LR\n  A[One] --> B[Two]";
+    let mut cases = 0usize;
+    for opener_indent in 0..=3usize {
+        for closer_indent in 0..=5usize {
+            for tail in ["", " ", "\t", " not a close"] {
+                for marker in ["```", "~~~"] {
+                    let source = format!(
+                        "{o}{marker}mermaid\n{body}\n{c}{marker}{tail}\n",
+                        o = " ".repeat(opener_indent),
+                        c = " ".repeat(closer_indent),
+                    );
+                    let closed = parser_closes_fence(
+                        &format!("{}{marker}{tail}", " ".repeat(closer_indent)),
+                        marker.chars().next().expect("marker"),
+                        marker.len(),
+                    );
+                    let rendered = RichRenderer::plain()
+                        .render(&markdown::parse(&source), 80)
+                        .plain_text();
+                    let art = rendered.contains('┌') && rendered.contains('▶');
+                    assert_eq!(
+                        art, closed,
+                        "dispatch mismatch (closed={closed}) for {source:?}\n{rendered}"
+                    );
+                    if !art {
+                        // The degraded case must keep the whole source, closer
+                        // line and all, rather than partial art.
+                        assert!(rendered.contains("A[One] --> B[Two]"), "{rendered}");
+                    }
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert!(cases >= 100, "matrix shrank to {cases} cases");
+}
+
+/// Streaming a fence one byte at a time: the diagram is published exactly when
+/// the closing fence line completes, it never disappears again (no flicker), no
+/// prefix ever shows a partial diagram, and the published rows equal the rows a
+/// full-document render produces. Completed rows stay put after the close.
+#[test]
+fn streaming_prefix_scan_publishes_the_diagram_once() {
+    let source = "intro\n\n```mermaid\ngraph LR\n  A[One] --> B[Two]\n```\n\noutro\n";
+    let renderer = RichRenderer::plain();
+    let mut stream = StreamingMarkdown::new();
+    let mut cache = StreamingRenderCache::default();
+    let closing = source.rfind("```\n").expect("closing fence");
+    let mut first_art = None;
+    let mut lost_art = None;
+    let mut published: Option<Vec<String>> = None;
+
+    for (index, character) in source.char_indices() {
+        stream.push_str(&character.to_string());
+        let end = index + character.len_utf8();
+        let rows = cache.render_lines(&stream, &renderer, 80, false);
+        let art = rows.join("\n").contains('▶');
+        if art && first_art.is_none() {
+            first_art = Some(end);
+        }
+        if published.is_some() && !art {
+            lost_art = Some(end);
+        }
+        if end >= closing + "```\n".len() {
+            match &published {
+                None => published = Some(rows.clone()),
+                Some(prefix) => assert!(
+                    rows.iter().take(prefix.len()).eq(prefix.iter()),
+                    "completed rows moved at byte {end}:\n{prefix:?}\n{rows:?}"
+                ),
+            }
+        }
+    }
+
+    assert_eq!(
+        first_art,
+        Some(closing + "```\n".len()),
+        "the diagram must appear exactly when its closing fence completes"
+    );
+    assert!(lost_art.is_none(), "the diagram flickered away at {lost_art:?}");
+    let committed = cache.render_lines(&stream, &renderer, 80, false);
+    let direct: Vec<String> = renderer
+        .render(&markdown::parse(source), 80)
+        .lines
+        .iter()
+        .map(|line| line.styled.clone())
+        .collect();
+    assert_eq!(committed, direct, "streamed rows diverged from the final render");
+}
+
+/// A closing line more than three spaces past the *container content* indent (a
+/// nested list item whose closer is written at the item's raw indentation) is a
+/// deliberate fail-closed boundary: the raw range does not reveal the content
+/// indent, so the closure check cannot prove closure even though the parser
+/// accepted the closer and produced a clean body. The fence therefore stays
+/// literal source — no art, no panic — and streaming agrees with the
+/// full-document render. The common shapes (top-level list item, blockquote) do
+/// dispatch.
+#[test]
+fn deeply_indented_container_closers_stay_literal() {
+    // Content indent 2, closer at raw indent 2: dispatched.
+    let dispatched = "- ```mermaid\n  graph LR\n    A[One] --> B[Two]\n  ```\n";
+    assert!(
+        RichRenderer::plain()
+            .render(&markdown::parse(dispatched), 80)
+            .plain_text()
+            .contains('▶'),
+        "a list fence whose closer sits at the content indent must dispatch"
+    );
+
+    // Nested list: content indent 4, closer at raw indent 4 (content-relative
+    // 0). The parser closes the fence and the body is clean, but the raw
+    // indentation is indistinguishable from a body line, so the fence keeps its
+    // source.
+    let literal = "  - ```mermaid\n    graph LR\n      A[One] --> B[Two]\n    ```\n";
+    let document = markdown::parse(literal);
+    let code = match document.blocks.as_slice() {
+        [Block::List(list)] => match list.items[0].blocks.as_slice() {
+            [Block::CodeBlock(code)] => code.clone(),
+            other => panic!("expected one code block, got {other:?}"),
+        },
+        other => panic!("expected one list, got {other:?}"),
+    };
+    assert_eq!(code.language.as_deref(), Some("mermaid"));
+    assert_eq!(
+        code.code, "graph LR\n  A[One] --> B[Two]\n",
+        "the parser closed the fence: the closer line is not part of the body"
+    );
+
+    let renderer = RichRenderer::plain();
+    let rendered = renderer.render(&document, 80).plain_text();
+    assert!(rendered.contains("A[One] --> B[Two]"), "{rendered}");
+    assert!(!rendered.contains('┌'), "no art from an unproven closure:\n{rendered}");
+
+    // Streaming must agree with the document render for the same source: the
+    // literal rows are what the reader sees while the fence arrives and after
+    // the message completes.
+    let mut stream = StreamingMarkdown::new();
+    let mut cache = StreamingRenderCache::default();
+    for chunk in literal.as_bytes().chunks(5) {
+        stream.push_bytes(chunk);
+        let rows = cache.render_lines(&stream, &renderer, 80, false).join("\n");
+        assert!(!rows.contains('┌'), "art mid-stream:\n{rows}");
+    }
+    stream.finish();
+    let streamed = cache.render_lines(&stream, &renderer, 80, false);
+    let direct: Vec<String> = renderer
+        .render(&markdown::parse(literal), 80)
+        .lines
+        .iter()
+        .map(|line| line.styled.clone())
+        .collect();
+    assert_eq!(streamed, direct, "streamed rows diverged");
+}

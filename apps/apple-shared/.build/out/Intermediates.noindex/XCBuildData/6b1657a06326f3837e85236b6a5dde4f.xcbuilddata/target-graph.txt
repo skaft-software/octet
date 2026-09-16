@@ -1,7 +1,0 @@
-Target dependency graph (3 targets)
-Target 'AllExcludingTests' in project 'Aggregate'
-➜ Explicit dependency on target 'OctetServe-product' in project 'OctetServe'
-➜ Explicit dependency on target 'OctetServe' in project 'OctetServe'
-Target 'OctetServe-product' in project 'OctetServe'
-➜ Explicit dependency on target 'OctetServe' in project 'OctetServe'
-Target 'OctetServe' in project 'OctetServe' (no dependencies)

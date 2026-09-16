@@ -548,6 +548,8 @@ struct ExtensionDurableSpawn {
     profile: Option<String>,
     fingerprint: Option<String>,
     policy: Option<ExtensionAgentSessionPolicy>,
+    resource_owner: Option<String>,
+    message_sha256: Option<String>,
     result: Value,
 }
 
@@ -889,11 +891,15 @@ impl ExtensionDelegationService {
         // Durable idempotency: the worker survived the owning run (or a
         // restart) as a session-owned record. Re-issue its original result
         // instead of spawning a duplicate worker, and re-arm the fast path.
-        if let Some(durable) = manager.extension_owned_record(&self.principal, &idempotency_key) {
+        if let Some(durable) =
+            manager.extension_owned_record(&self.principal, resource_owner, &idempotency_key)
+        {
             if durable.task_name != task_name
                 || durable.profile != profile
                 || durable.fingerprint != fingerprint
                 || durable.policy.as_ref() != Some(&policy)
+                || durable.resource_owner.as_deref() != Some(resource_owner)
+                || durable.message_sha256.as_deref() != Some(message_sha256.as_str())
             {
                 return Err(reject_spawn(
                     "spawn idempotency_key was reused with different input".into(),
@@ -1273,6 +1279,9 @@ struct AgentRecord {
     extension_principal: Option<String>,
     extension_profile: Option<String>,
     extension_idempotency_key: Option<String>,
+    extension_resource_owner: Option<String>,
+    extension_message_sha256: Option<String>,
+    extension_requested_policy: Option<ExtensionAgentSessionPolicy>,
     extension_fingerprint: Option<String>,
     created_at_ms: u64,
     started_at_ms: Option<u64>,
@@ -1305,12 +1314,6 @@ struct AgentRecord {
     /// Bounded diagnostic retained when a durable record could not be
     /// reattached (unknown state), so it fails closed visibly.
     durable_diagnostic: Option<String>,
-    /// Cumulative accounting already mirrored to the root ledger so a worker
-    /// that survives several runs is mirrored as deltas, never double-counted.
-    mirrored_usage: Usage,
-    mirrored_cost: Option<Cost>,
-    mirrored_turn_count: u64,
-    mirrored_tool_call_count: u64,
 }
 
 /// Bounded durable snapshot of one session-owned worker.
@@ -1345,20 +1348,18 @@ struct DurableFleetRecord {
     extension_principal: Option<String>,
     extension_profile: Option<String>,
     extension_idempotency_key: Option<String>,
+    #[serde(default)]
+    extension_resource_owner: Option<String>,
+    #[serde(default)]
+    extension_message_sha256: Option<String>,
+    #[serde(default)]
+    extension_requested_policy: Option<ExtensionAgentSessionPolicy>,
     extension_fingerprint: Option<String>,
     extension_policy: Option<ExtensionAgentSessionPolicy>,
     #[serde(default)]
     resource_owner: Option<String>,
     #[serde(default)]
     durable_diagnostic: Option<String>,
-    #[serde(default)]
-    mirrored_usage: Usage,
-    #[serde(default)]
-    mirrored_cost: Option<Cost>,
-    #[serde(default)]
-    mirrored_turn_count: u64,
-    #[serde(default)]
-    mirrored_tool_call_count: u64,
 }
 
 /// Versioned durable fleet file written to the session-scoped delegation
@@ -2050,6 +2051,9 @@ impl DelegationManager {
                     extension_principal: durable.extension_principal,
                     extension_profile: durable.extension_profile,
                     extension_idempotency_key: durable.extension_idempotency_key,
+                    extension_resource_owner: durable.extension_resource_owner,
+                    extension_message_sha256: durable.extension_message_sha256,
+                    extension_requested_policy: durable.extension_requested_policy,
                     extension_fingerprint: durable.extension_fingerprint,
                     created_at_ms: durable.created_at_ms,
                     started_at_ms: durable.started_at_ms,
@@ -2068,10 +2072,6 @@ impl DelegationManager {
                     live_task: false,
                     detached_commands: recoverable.then_some(command_rx),
                     durable_diagnostic: durable.durable_diagnostic,
-                    mirrored_usage: durable.mirrored_usage,
-                    mirrored_cost: durable.mirrored_cost,
-                    mirrored_turn_count: durable.mirrored_turn_count,
-                    mirrored_tool_call_count: durable.mirrored_tool_call_count,
                 },
             );
             state.total_agents = state.total_agents.saturating_add(1);
@@ -2416,6 +2416,7 @@ impl DelegationManager {
             }
             ExtensionDelegationService::validate_resource_owner(&provenance.resource_owner)?;
         }
+        let extension_requested_policy = extension_policy.clone();
         if let Some(policy) = extension_policy.as_mut() {
             policy.validate()?;
             if owner.depth.saturating_add(1) > policy.max_depth {
@@ -2647,6 +2648,13 @@ impl DelegationManager {
                     extension_idempotency_key: extension_provenance
                         .as_ref()
                         .map(|provenance| provenance.idempotency_key.clone()),
+                    extension_resource_owner: extension_provenance
+                        .as_ref()
+                        .map(|provenance| provenance.resource_owner.clone()),
+                    extension_message_sha256: extension_provenance
+                        .as_ref()
+                        .map(|_| format!("{:x}", Sha256::digest(initial_task.as_bytes()))),
+                    extension_requested_policy,
                     extension_fingerprint: extension_provenance
                         .as_ref()
                         .and_then(|provenance| provenance.fingerprint.clone()),
@@ -2671,10 +2679,6 @@ impl DelegationManager {
                     live_task: true,
                     detached_commands: None,
                     durable_diagnostic: None,
-                    mirrored_usage: Usage::default(),
-                    mirrored_cost: None,
-                    mirrored_turn_count: 0,
-                    mirrored_tool_call_count: 0,
                 },
             );
             state.total_agents += 1;
@@ -4785,14 +4789,13 @@ impl DelegationManager {
         )
     }
 
-    /// Accounting deltas for extension-owned children of `owner_id`.
+    /// Cumulative accounting snapshots for extension-owned descendants.
     ///
-    /// Child records are cumulative snapshots. A worker that survives several
-    /// runs is mirrored as the increment since the last mirror, so the root
-    /// ledger neither double-counts cumulative snapshots nor loses accounting
-    /// when a worker is still running at the run boundary.
+    /// Reading never consumes a watermark: only the owning session's synced
+    /// usage ledger establishes which increments have actually been mirrored.
+    /// Include uncertainty-only snapshots even when no turn completed.
     fn extension_usage_records(&self, owner_id: &str) -> Vec<DelegatedUsageRecord> {
-        let mut state = self
+        let state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4807,43 +4810,33 @@ impl DelegationManager {
         let Some(owner_path) = owner_path else {
             return Vec::new();
         };
-        let mut records = Vec::new();
-        for record in state.records.values_mut() {
-            if record.extension_principal.is_none()
-                || !is_descendant_path(&record.identity.path, &owner_path)
-            {
-                continue;
-            }
-            let usage = subtract_usage(record.usage, record.mirrored_usage);
-            let cost = record
-                .cost
-                .map(|cost| subtract_cost(cost, record.mirrored_cost.unwrap_or_default()));
-            let unchanged = usage == Usage::default()
-                && record.turn_count == record.mirrored_turn_count
-                && record.tool_call_count == record.mirrored_tool_call_count;
-            record.mirrored_usage = record.usage;
-            record.mirrored_cost = record.cost;
-            record.mirrored_turn_count = record.turn_count;
-            record.mirrored_tool_call_count = record.tool_call_count;
-            if unchanged {
-                continue;
-            }
-            records.push(DelegatedUsageRecord {
+        state
+            .records
+            .values()
+            .filter(|record| {
+                record.extension_principal.is_some()
+                    && is_descendant_path(&record.identity.path, &owner_path)
+            })
+            .map(|record| DelegatedUsageRecord {
                 agent_id: record.identity.id.clone(),
-                usage,
+                usage: record.usage,
                 usage_uncertain: record.usage_uncertain,
-                cost,
+                cost: record.cost,
                 turn_count: record.turn_count,
                 tool_call_count: record.tool_call_count,
-            });
-        }
-        records
+            })
+            .collect()
     }
 
     /// Durable idempotency: the spawn result for an extension principal's
     /// idempotency key, reconstructed from the session-owned record that
     /// survived the parent turn or a process restart.
-    fn extension_owned_record(&self, principal: &str, idempotency_key: &str) -> Option<ExtensionDurableSpawn> {
+    fn extension_owned_record(
+        &self,
+        principal: &str,
+        resource_owner: &str,
+        idempotency_key: &str,
+    ) -> Option<ExtensionDurableSpawn> {
         let state = self
             .state
             .lock()
@@ -4851,6 +4844,9 @@ impl DelegationManager {
         let record = state.records.values().find(|record| {
             record.extension_principal.as_deref() == Some(principal)
                 && record.extension_idempotency_key.as_deref() == Some(idempotency_key)
+                // Legacy records without an owner are returned only to refuse
+                // an unverifiable retry, never to create a duplicate worker.
+                && record.extension_resource_owner.as_deref().is_none_or(|owner| owner == resource_owner)
         })?;
         Some(ExtensionDurableSpawn {
             task_name: record
@@ -4859,7 +4855,9 @@ impl DelegationManager {
                 .unwrap_or_else(|| record.task_name.clone()),
             profile: record.extension_profile.clone(),
             fingerprint: record.extension_fingerprint.clone(),
-            policy: record.extension_policy.clone(),
+            policy: record.extension_requested_policy.clone(),
+            resource_owner: record.extension_resource_owner.clone(),
+            message_sha256: record.extension_message_sha256.clone(),
             result: extension_spawn_result_value(record),
         })
     }
@@ -5658,14 +5656,13 @@ fn durable_fleet_record(record: &AgentRecord) -> DurableFleetRecord {
         extension_principal: record.extension_principal.clone(),
         extension_profile: record.extension_profile.clone(),
         extension_idempotency_key: record.extension_idempotency_key.clone(),
+        extension_resource_owner: record.extension_resource_owner.clone(),
+        extension_message_sha256: record.extension_message_sha256.clone(),
+        extension_requested_policy: record.extension_requested_policy.clone(),
         extension_fingerprint: record.extension_fingerprint.clone(),
         extension_policy: record.extension_policy.clone(),
         resource_owner: record.resource_owner.clone(),
         durable_diagnostic: record.durable_diagnostic.clone(),
-        mirrored_usage: record.mirrored_usage,
-        mirrored_cost: record.mirrored_cost,
-        mirrored_turn_count: record.mirrored_turn_count,
-        mirrored_tool_call_count: record.mirrored_tool_call_count,
     }
 }
 
@@ -6077,7 +6074,7 @@ fn validate_durable_text(kind: &str, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn add_delegated_usage(total: &mut Usage, next: &Usage) {
+pub(crate) fn add_delegated_usage(total: &mut Usage, next: &Usage) {
     total.input_tokens = total.input_tokens.saturating_add(next.input_tokens);
     total.cache_read_tokens = total
         .cache_read_tokens
@@ -6093,7 +6090,7 @@ fn add_delegated_usage(total: &mut Usage, next: &Usage) {
     total.total_tokens = total.total_tokens.saturating_add(next.total_tokens);
 }
 
-fn add_delegated_cost(total: &mut Cost, next: Cost) {
+pub(crate) fn add_delegated_cost(total: &mut Cost, next: Cost) {
     total.input = total.input.saturating_add(next.input);
     total.output = total.output.saturating_add(next.output);
     total.reasoning = total.reasoning.saturating_add(next.reasoning);
@@ -6110,7 +6107,7 @@ fn add_delegated_cost(total: &mut Cost, next: Cost) {
 
 /// Increment of a cumulative token snapshot. Saturating, so a record that was
 /// somehow rolled back can never underflow the root ledger.
-fn subtract_usage(total: Usage, mirrored: Usage) -> Usage {
+pub(crate) fn subtract_usage(total: Usage, mirrored: Usage) -> Usage {
     Usage {
         input_tokens: total.input_tokens.saturating_sub(mirrored.input_tokens),
         cache_read_tokens: total.cache_read_tokens.saturating_sub(mirrored.cache_read_tokens),
@@ -6129,17 +6126,20 @@ fn subtract_usage(total: Usage, mirrored: Usage) -> Usage {
 }
 
 /// Increment of a cumulative cost snapshot.
-fn subtract_cost(total: Cost, mirrored: Cost) -> Cost {
+pub(crate) fn subtract_cost(total: Cost, mirrored: Cost) -> Cost {
+    let scale = u128::from(PICODOLLARS_PER_MICRODOLLAR);
+    let delta = (u128::from(total.total) * scale + u128::from(total.total_picodollars_remainder))
+        .saturating_sub(
+            u128::from(mirrored.total) * scale + u128::from(mirrored.total_picodollars_remainder),
+        );
     Cost {
         input: total.input.saturating_sub(mirrored.input),
         output: total.output.saturating_sub(mirrored.output),
         reasoning: total.reasoning.saturating_sub(mirrored.reasoning),
         cache_read: total.cache_read.saturating_sub(mirrored.cache_read),
         cache_write: total.cache_write.saturating_sub(mirrored.cache_write),
-        total: total.total.saturating_sub(mirrored.total),
-        total_picodollars_remainder: total
-            .total_picodollars_remainder
-            .saturating_sub(mirrored.total_picodollars_remainder),
+        total: (delta / scale) as u64,
+        total_picodollars_remainder: (delta % scale) as u32,
     }
 }
 
@@ -6741,6 +6741,9 @@ mod tests {
                     extension_principal: None,
                     extension_profile: None,
                     extension_idempotency_key: None,
+                    extension_resource_owner: None,
+                    extension_message_sha256: None,
+                    extension_requested_policy: None,
                     extension_fingerprint: None,
                     created_at_ms: 1,
                     started_at_ms: Some(1),
@@ -6759,10 +6762,6 @@ mod tests {
                     live_task: false,
                     detached_commands: None,
                     durable_diagnostic: None,
-                    mirrored_usage: Usage::default(),
-                    mirrored_cost: None,
-                    mirrored_turn_count: 0,
-                    mirrored_tool_call_count: 0,
                 },
             );
             state.total_agents += 1;
@@ -7160,6 +7159,9 @@ mod tests {
                 extension_principal: None,
                 extension_profile: None,
                 extension_idempotency_key: None,
+                extension_resource_owner: None,
+                extension_message_sha256: None,
+                extension_requested_policy: None,
                 extension_fingerprint: None,
                 created_at_ms: 1,
                 started_at_ms: Some(1),
@@ -7178,10 +7180,6 @@ mod tests {
                 live_task: false,
                 detached_commands: None,
                 durable_diagnostic: None,
-                mirrored_usage: Usage::default(),
-                mirrored_cost: None,
-                mirrored_turn_count: 0,
-                mirrored_tool_call_count: 0,
             },
         );
         state.total_agents += 1;
@@ -7232,6 +7230,9 @@ mod tests {
                 extension_principal: None,
                 extension_profile: None,
                 extension_idempotency_key: None,
+                extension_resource_owner: None,
+                extension_message_sha256: None,
+                extension_requested_policy: None,
                 extension_fingerprint: None,
                 created_at_ms: 1,
                 started_at_ms: Some(1),
@@ -7250,10 +7251,6 @@ mod tests {
                 live_task: false,
                 detached_commands: Some(command_rx),
                 durable_diagnostic: None,
-                mirrored_usage: Usage::default(),
-                mirrored_cost: None,
-                mirrored_turn_count: 0,
-                mirrored_tool_call_count: 0,
             },
         );
         state.total_agents += 1;
@@ -8361,6 +8358,11 @@ mod tests {
             .unwrap();
 
         manager.prepare_owning_run(&root_identity()).unwrap();
+        // Force the durable path: a new service process has no local cache.
+        service.state.lock().unwrap().owners.clear();
+        assert!(service
+            .spawn("root-owner", test_extension_spawn("research", None, None, "different task", "spawn-1"))
+            .unwrap_err().contains("different input"));
         // The session owns the worker, so the same idempotency key re-issues
         // the original result instead of spawning a duplicate worker.
         let second = service
@@ -9017,6 +9019,104 @@ mod tests {
     }
 
     #[test]
+    fn delegated_snapshot_reads_do_not_consume_uncertainty_only_accounting() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let manager = writable_manager(&root);
+        let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        {
+            let mut state = manager.state.lock().unwrap();
+            let record = state.records.get_mut(&identity.id).unwrap();
+            record.extension_principal = Some("extension".into());
+            record.usage = Usage::default();
+            record.turn_count = 0;
+            record.tool_call_count = 0;
+            record.cost = None;
+            record.usage_uncertain = true;
+        }
+        for _ in 0..2 {
+            let snapshots = manager.extension_usage_records(ROOT_AGENT_ID);
+            assert_eq!(snapshots.len(), 1);
+            assert!(snapshots[0].usage_uncertain);
+            assert_eq!(snapshots[0].usage, Usage::default());
+        }
+        // Fleet persistence cannot acknowledge a root ledger append.
+        {
+            let mut state = manager.state.lock().unwrap();
+            manager.persist_durable_fleet_locked(&mut state);
+        }
+        let reopened = writable_manager(&root);
+        reopened.restore_durable_fleet();
+        let snapshots = reopened.extension_usage_records(ROOT_AGENT_ID);
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].usage_uncertain);
+    }
+
+    #[test]
+    fn durable_spawn_idempotency_checks_original_message_owner_and_policy_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let manager = writable_manager_with_core_tools(&root);
+        let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        let mut requested_policy = test_extension_policy();
+        requested_policy.max_turns = None; // The effective child policy is Some(4).
+        {
+            let mut state = manager.state.lock().unwrap();
+            let record = state.records.get_mut(&identity.id).unwrap();
+            record.display_task_name = Some("research".into());
+            record.extension_principal = Some("extension-a".into());
+            record.extension_idempotency_key = Some("spawn-1".into());
+            record.extension_resource_owner = Some("root-owner".into());
+            record.extension_message_sha256 = Some(format!("{:x}", Sha256::digest(b"find it")));
+            record.extension_requested_policy = Some(requested_policy.clone());
+            record.extension_policy = Some(test_extension_policy());
+            manager.persist_durable_fleet_locked(&mut state);
+        }
+        drop(manager);
+        let manager = writable_manager_with_core_tools(&root);
+        manager.restore_durable_fleet();
+        let service = manager
+            .root_binding()
+            .extension_service("extension-a", "parent-session", "root-owner")
+            .unwrap();
+        let request = |message: &str| {
+            let mut request = test_extension_spawn("research", None, None, message, "spawn-1");
+            request.policy = requested_policy.clone();
+            request
+        };
+        assert_eq!(
+            service.spawn("root-owner", request("find it")).unwrap()["agent_id"],
+            identity.id
+        );
+        service.state.lock().unwrap().owners.clear(); // Force durable fallback, not the cache.
+        assert!(service
+            .spawn("root-owner", request("changed task"))
+            .unwrap_err()
+            .contains("different input"));
+        assert!(manager
+            .extension_owned_record("extension-a", "foreign-owner", "spawn-1")
+            .is_none());
+        assert!(manager
+            .extension_owned_record("extension-b", "root-owner", "spawn-1")
+            .is_none());
+        assert_eq!(manager.state.lock().unwrap().records.len(), 1);
+        // Old rosters without verifiable ownership/hash must refuse, not silently replay.
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .get_mut(&identity.id)
+            .unwrap()
+            .extension_resource_owner = None;
+        assert!(service
+            .spawn("root-owner", request("find it"))
+            .unwrap_err()
+            .contains("different input"));
+        assert_eq!(manager.state.lock().unwrap().records.len(), 1);
+    }
+
+    #[test]
     fn child_unknown_usage_is_sticky_and_preserves_the_known_subtotal_for_root_mirroring() {
         let directory = tempfile::tempdir().unwrap();
         let manager = writable_manager(directory.path());
@@ -9305,6 +9405,9 @@ mod tests {
                     extension_principal: None,
                     extension_profile: None,
                     extension_idempotency_key: None,
+                    extension_resource_owner: None,
+                    extension_message_sha256: None,
+                    extension_requested_policy: None,
                     extension_fingerprint: None,
                     created_at_ms: 1,
                     started_at_ms: Some(1),
@@ -9323,10 +9426,6 @@ mod tests {
                     live_task: false,
                     detached_commands: None,
                     durable_diagnostic: None,
-                    mirrored_usage: Usage::default(),
-                    mirrored_cost: None,
-                    mirrored_turn_count: 0,
-                    mirrored_tool_call_count: 0,
                 },
             );
         }

@@ -447,6 +447,27 @@ fn real_octet_slash_help_renders_while_a_response_is_streaming() {
 }
 
 #[test]
+fn real_octet_slash_goal_mutates_and_reports_while_a_response_is_streaming() {
+    let (api, mut octet) = streaming_octet();
+    octet.pty.write_input(b"/goal held-stream objective\r");
+    octet.pty.wait_for(b"goal set");
+    octet.pty.write_input(b"/goal status\r");
+    octet.pty.wait_for(b"Active goal: held-stream objective");
+    assert!(!contains_bytes(&octet.pty.output, TAIL_MARKER));
+    assert!(!api.completed.load(Ordering::SeqCst));
+
+    // Close the report, then clear the goal before settlement so this fixture
+    // never schedules a second inference request after releasing the tail.
+    octet.pty.write_input(b"\r");
+    octet.pty.write_input(b"/goal clear\r");
+    octet.pty.wait_for(b"goal cleared");
+    assert!(!api.completed.load(Ordering::SeqCst));
+    api.release();
+    octet.pty.wait_for(TAIL_MARKER);
+    octet.shutdown();
+}
+
+#[test]
 fn real_octet_slash_cost_renders_while_a_response_is_streaming() {
     let (api, mut octet) = streaming_octet();
     octet.pty.write_input(b"/cost\r");

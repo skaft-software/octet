@@ -72,6 +72,7 @@ const API_0_3_OPTIONAL_CAPABILITIES = [
   "provider_catalog",
   "provider_stream",
   "session_lifecycle",
+  "theme_selection",
 ];
 const API_0_3_PROVIDER_CAPABILITIES = ["provider_auth", "provider_catalog", "provider_stream"];
 const API_0_3_REQUIRED_METHODS = ["$/cancelRequest", "initialize", "shutdown", "tool/call"];
@@ -92,6 +93,7 @@ const API_0_3_OPTIONAL_METHODS = [
   "session/fork",
   "session/reload",
   "session/switch",
+  "theme/select",
 ];
 const API_0_3_OPTIONAL_METHOD_CAPABILITIES = new Map([
   ["hook/run", "lifecycle_events"],
@@ -110,6 +112,8 @@ const API_0_3_OPTIONAL_METHOD_CAPABILITIES = new Map([
   ["session/fork", "session_lifecycle"],
   ["session/reload", "session_lifecycle"],
   ["session/switch", "session_lifecycle"],
+  // Recognize the host offer without selecting theme authority for the bridge.
+  ["theme/select", "theme_selection"],
 ]);
 // The original provider surface remains an all-or-nothing selection. Catalog
 // completion is additive so a newer bridge can still run against a host that

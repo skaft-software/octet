@@ -734,3 +734,120 @@ fn print_and_rpc_unresolved_startup_are_actionable_and_noninteractive() {
         assert_no_prompt(&output);
     }
 }
+
+/// Process-isolated phase ordering: an unavailable selected model still brackets
+/// its own inventory work before the conservative fleet repair. No credentials,
+/// inference request, or timing threshold is involved.
+#[test]
+fn selected_route_trace_brackets_inventory_after_the_cheap_base_phase() {
+    for (model, selected_inventory) in [
+        ("openai/gpt-4o-mini", true),
+        ("codex/gpt-6-astra", false),
+    ] {
+        let fixture = Fixture::new();
+        let mut command = fixture.base_command();
+        command
+            .args(["--model", model, "--mode", "rpc"])
+            .env("OCTET_STARTUP_TRACE", "1")
+            .env("AWS_EC2_METADATA_DISABLED", "true");
+        let output = capture_command(command);
+        assert!(!output.status.success(), "an unconfigured route must not run");
+        let phases: Vec<_> = output.stderr.lines()
+            .filter_map(|line| line.strip_prefix("octet-startup: "))
+            .filter_map(|line| line.split_whitespace().next())
+            .take_while(|phase| *phase != "catalog.fallback")
+            .collect();
+        let expected = if selected_inventory {
+            vec!["catalog.base", "catalog.selected", "catalog.codex", "catalog.copilot"]
+        } else {
+            vec!["catalog.base", "catalog.codex", "catalog.copilot"]
+        };
+        assert_eq!(phases, expected, "{}", output.stderr);
+        assert_no_prompt(&output);
+        assert_secret_free(&output);
+    }
+}
+
+/// RPC can create multiple sessions in one ephemeral invocation. Seed durable
+/// usage while each session is idle; no inference or live credential is needed.
+#[test]
+fn no_session_rpc_preserves_both_sessions_accounting_before_discarding_transcripts() {
+    use std::io::BufRead as _;
+    use octet_ai::{Cost, EndpointId, ModelId, Usage};
+
+    let fixture = Fixture::new();
+    fs::write(fixture.registry_path(), serde_json::json!({
+        "base_url":"http://127.0.0.1:9/v1/", "api_key":"", "api_name":"probe",
+        "auto_discover":false, "models":[{"api_name":"probe"}],
+    }).to_string()).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(fixture.registry_path(), fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = fixture.base_command();
+    command.args([
+        "--offline", "--no-tools", "--model", "custom/probe", "--mode", "rpc", "--no-session",
+    ]).stdin(Stdio::piped()).stdout(Stdio::piped());
+    let stderr = tempfile::tempfile().unwrap();
+    command.stderr(Stdio::from(stderr.try_clone().unwrap()));
+    configure_child_process_group(&mut command);
+    let mut child = command.spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut captured = CapturedChild { child, stdout: tempfile::tempfile().unwrap(), stderr };
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in io::BufReader::new(stdout.take(MAX_CAPTURE_BYTES as u64)).lines() {
+            if sender.send(line.unwrap()).is_err() { break; }
+        }
+    });
+    let response = |captured: &mut CapturedChild, id: &str, kind: &str| {
+        writeln!(captured.child.stdin.as_mut().unwrap(), "{}",
+            serde_json::json!({"id":id,"type":kind})).unwrap();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let line = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("bounded RPC response");
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if value["id"] == id {
+                assert_eq!(value["success"], true, "{value}");
+                break value;
+            }
+        }
+    };
+    let mut transcripts = Vec::new();
+    for index in 0..2 {
+        if index != 0 {
+            response(&mut captured, "new", "new_session");
+        }
+        let state = response(&mut captured, "state", "get_state");
+        let path = PathBuf::from(state["data"]["sessionFile"].as_str().unwrap());
+        let mut session = octet_agent::Session::open(path.clone()).unwrap();
+        session.record_terminal_gate_usage(
+            EndpointId("custom".into()), ModelId("probe".into()),
+            Usage { input_tokens: 40, output_tokens: 10, total_tokens: 50, ..Usage::default() },
+            Some(Cost { total: 7, ..Cost::default() }), Some(true),
+        ).unwrap();
+        if index == 0 {
+            session.record_usage_uncertainty(
+                EndpointId("custom".into()), ModelId("probe".into()), "rpc-fixture",
+            ).unwrap();
+        }
+        transcripts.push(path);
+    }
+    assert_ne!(transcripts[0], transcripts[1]);
+    drop(captured.child.stdin.take());
+    let output = captured.wait();
+    reader.join().unwrap();
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(transcripts.iter().all(|path| !path.exists()));
+    let ledgers: Vec<_> = fs::read_dir(&fixture.sessions).unwrap()
+        .map(|entry| entry.unwrap().path().join(".accounting/ephemeral-sessions.jsonl"))
+        .filter(|path| path.is_file())
+        .collect();
+    assert_eq!(ledgers.len(), 1);
+    let ledger = fs::read_to_string(&ledgers[0]).unwrap();
+    assert_eq!(ledger.lines().count(), 1);
+    let record: serde_json::Value = serde_json::from_str(ledger.trim()).unwrap();
+    assert_eq!(record["usage_records"].as_array().unwrap().len(), 2);
+    assert_eq!(record["session_cost_microdollars"], 14);
+    assert_eq!(record["usage_uncertainty_records"].as_array().unwrap().len(), 1);
+    assert_eq!(record["has_uncertain_usage"], true);
+}

@@ -2187,9 +2187,11 @@ fn export_delegated_session_bytes(
     let sessions = SessionStore::new(temporary.path(), workspace);
     octet_agent::secure_fs::create_private_directory_all(sessions.dir())
         .map_err(|_| ServiceError::Internal)?;
-    let copied_path = sessions
-        .dir()
-        .join(format!("{}.jsonl", session_id.as_str()));
+    // This is an already-authorized, read-only snapshot, not a launchable
+    // worker. A delegated handle makes SessionStore consult the durable roster,
+    // which intentionally does not exist in this temporary export store.
+    let copied_id = SessionId::new("delegated-export").map_err(|_| ServiceError::Internal)?;
+    let copied_path = sessions.dir().join(format!("{}.jsonl", copied_id.as_str()));
     let mut copied = octet_agent::secure_fs::create_regular_file_for_append(&copied_path)
         .map_err(|_| ServiceError::Internal)?;
     copied
@@ -2197,7 +2199,17 @@ fn export_delegated_session_bytes(
         .and_then(|()| copied.sync_all())
         .map_err(|_| ServiceError::Internal)?;
     drop(copied);
-    export_session_bytes(&sessions, session_id, serve_state_dir, max_bytes)
+    let exported = export_session_bytes(&sessions, &copied_id, serve_state_dir, max_bytes)?;
+    let mut package: serde_json::Value =
+        serde_json::from_slice(&exported).map_err(|_| ServiceError::Internal)?;
+    // Restore only the host-generated, path-free identity after the ordinary
+    // portable exporter has validated and redacted the entire snapshot.
+    package["source_id"] = serde_json::Value::String(session_id.as_str().to_owned());
+    let bytes = serde_json::to_vec_pretty(&package).map_err(|_| ServiceError::Internal)?;
+    if bytes.len() > max_bytes {
+        return Err(ServiceError::PayloadTooLarge);
+    }
+    Ok(bytes::Bytes::from(bytes))
 }
 
 #[cfg(any())]
@@ -11811,7 +11823,9 @@ mod tests {
         let mut child = Session::open(&path).unwrap();
         child
             .append(EntryValue::Message(Message::User(UserMessage {
-                content: vec![UserPart::Text("new live child turn".into())],
+                content: vec![UserPart::Text(
+                    "new live child turn: sk-1234567890123456".into(),
+                )],
             })))
             .unwrap();
         drop(child);
@@ -11831,10 +11845,44 @@ mod tests {
             saw_live_item,
             "delegated inspector did not stream the durable turn"
         );
+        let original = std::fs::read(&path).unwrap();
         let exported = host.session_export(&session_id).await.unwrap();
         let exported = String::from_utf8(exported.to_vec()).unwrap();
         assert!(exported.contains("new live child turn"));
         assert!(!exported.contains(path.to_str().unwrap()));
+        assert!(!exported.contains("sk-1234567890123456"));
+        assert!(exported.contains("[REDACTED]"));
+        let package: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(package["source_id"], child_reference);
+        assert_eq!(package["redacted"], true);
+
+        // Neither inspection nor export requires a launchable fleet roster.
+        // Both the raw snapshot and the final restored export ID remain bounded.
+        assert!(!sessions.dir().join(".delegation/fleet.json").exists());
+        let context = host.delegated_session_context(&session_id).unwrap();
+        assert!(original.len() < exported.len() - 1);
+        for limit in [16, exported.len() - 1] {
+            assert_eq!(
+                export_delegated_session_bytes(
+                    &path,
+                    context.fingerprint,
+                    &session_id,
+                    &context.config.workspace,
+                    &host.serve_state_dir,
+                    limit,
+                ),
+                Err(ServiceError::PayloadTooLarge)
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(std::fs::read_dir(&host.serve_state_dir)
+            .unwrap()
+            .all(|entry| {
+                let name = entry.unwrap().file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with(".delegated-session-export-")
+                    && !name.starts_with(".session-export-")
+            }));
 
         let discovery = driver.command_discovery().await.unwrap();
         assert!(discovery.commands.is_empty());
@@ -11868,6 +11916,10 @@ mod tests {
             host.open_session(&session_id).await,
             Err(ServiceError::NotFound)
         ));
+        assert_eq!(
+            host.session_export(&session_id).await,
+            Err(ServiceError::NotFound)
+        );
 
         let mut missing_principal = serde_json::to_vec(&serde_json::json!({
             "event": "agent_spawned",
@@ -11888,6 +11940,10 @@ mod tests {
             host.open_session(&session_id).await,
             Err(ServiceError::NotFound)
         ));
+        assert_eq!(
+            host.session_export(&session_id).await,
+            Err(ServiceError::NotFound)
+        );
     }
 
     #[tokio::test]
@@ -13364,46 +13420,64 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
             &executable,
             concat!(
                 "#!/bin/sh\n",
-                "/bin/sh -c 'trap \"\" TERM; while :; do /bin/sleep 1; done' &\n",
-                "echo $! > descendant.pid\n",
+                "/bin/sh -c 'trap \"\" TERM; printf \"%s\\n\" \"$$\" > descendant.pid; while :; do /bin/sleep 1; done' &\n",
                 "while :; do /bin/sleep 1; done\n",
             ),
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        // This cleanup probe must start its fixture, not be rejected because
-        // parallel refresh tests have exhausted process-wide query admission.
-        // Allow cold process startup before exercising timeout cleanup; this
-        // tests descendant retirement, not sub-100ms spawn latency.
+        // Use private admission and poll once to start the owned process. Do
+        // not poll the query again until the descendant has installed its TERM
+        // trap: cold executable startup can exceed the query timeout under load.
+        // Keeping the future local also retains its drop cleanup on test panic.
         let permits = tokio::sync::Semaphore::new(1);
-        let started = std::time::Instant::now();
-        assert_eq!(
-            query_github_pull_request_with_timeout_and_permits(
-                directory.path(),
-                None,
-                &executable,
-                std::time::Duration::from_millis(500),
-                &permits,
-            )
-            .await,
-            PullRequestObservation::Unavailable
+        let timeout = std::time::Duration::from_millis(500);
+        let query = query_github_pull_request_with_timeout_and_permits(
+            directory.path(),
+            None,
+            &executable,
+            timeout,
+            &permits,
         );
+        tokio::pin!(query);
+        assert!(
+            futures_util::poll!(&mut query).is_pending(),
+            "GitHub query completed before its fixture started"
+        );
+        let query_deadline = tokio::time::Instant::now() + timeout;
+        let startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&descendant_pid)
+                .ok()
+                .filter(|text| text.ends_with('\n'))
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < startup_deadline,
+                "GitHub query descendant did not publish readiness"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let process_exists = |pid: i32| {
+            let result = unsafe { libc::kill(pid, 0) };
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        };
+        assert!(process_exists(pid), "GitHub query descendant exited early");
+
+        // Expire the real query timer before resuming it, then measure cleanup
+        // independently of OS startup. The production timeout path is unchanged.
+        tokio::time::sleep_until(query_deadline).await;
+        let started = std::time::Instant::now();
+        assert_eq!(query.await, PullRequestObservation::Unavailable);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "GitHub query cleanup exceeded its bound: {:?}",
             started.elapsed()
         );
 
-        let pid: i32 = std::fs::read_to_string(&descendant_pid)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let process_exists = |pid: i32| {
-            let result = unsafe { libc::kill(pid, 0) };
-            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-        };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while process_exists(pid) && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

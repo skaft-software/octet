@@ -1,4 +1,0 @@
-module OctetServe {
-header "OctetServe-Swift.h"
-export *
-}

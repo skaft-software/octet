@@ -26,6 +26,9 @@ except ImportError:  # unittest discover -s tests
 
 from fake_agent_sessions import fake_session_reference
 from octet_subagents.launcher import (
+    ATOMIC_WRITER_CLAIM_BLOCKED_REASON,
+    Pane,
+    _pane_argv,
     DETACHED_WORKER_NOT_OPENED_REASON,
     MAX_OPEN_ALL_PANES,
     MULTIPLEXERS,
@@ -305,321 +308,220 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(stub.recorded(), [])
 
 
-class PlanTests(unittest.TestCase):
-    def test_parent_and_running_worker_argv_is_exact(self):
-        stub = Stub()
-        octet = os.path.join(stub.directory.name, "octet")
-        try:
-            with stub.path(TMUX=None):
-                plan = plan_open_all(
-                    multiplexer="tmux",
-                    parent_session_id=PARENT_ID,
-                    workers=[worker(name="explore-auth", index=1)],
-                    workspace="/workspace",
-                )
-        finally:
-            stub.close()
-        self.assertIsInstance(plan, LaunchPlan)
-        self.assertEqual(plan.session_name, "octet-fleet-%s" % PARENT_ID[:32])
-        self.assertEqual(
-            plan.panes[0].argv,
-            (
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                "octet-fleet-%s" % PARENT_ID[:32],
-                "-n",
-                "parent",
-                "-c",
-                "/workspace",
-                "--",
-                octet,
-                "--resume",
-                PARENT_ID,
-            ),
-        )
-        self.assertEqual(
-            plan.panes[1].argv,
-            (
-                "tmux",
-                "new-window",
-                "-d",
-                "-t",
-                "octet-fleet-%s" % PARENT_ID[:32],
-                "-n",
-                "explore-auth",
-                "-c",
-                "/workspace",
-                "--",
-                octet,
-                "--resume",
-                fake_session_reference("agent-1"),
-            ),
-        )
-        # Every element is a separate argv element: no interpolation anywhere.
-        for pane in plan.panes:
-            self.assertIsInstance(pane.argv, tuple)
-            self.assertTrue(all(isinstance(token, str) and token for token in pane.argv))
-            self.assertNotIn(" ", pane.handle)
+def ready_worker(**values):
+    return worker("done", launchable=True, live_task=False, **values)
 
-    def test_inside_tmux_reuses_the_current_session(self):
-        stub = Stub()
-        try:
-            with stub.path(TMUX="/tmp/tmux-501/default,123,0"):
-                plan = plan_open_all(
-                    multiplexer="tmux",
-                    parent_session_id=PARENT_ID,
-                    workers=[worker()],
-                    workspace=None,
-                )
-        finally:
-            stub.close()
-        self.assertTrue(plan.inside_multiplexer)
-        self.assertEqual(plan.panes[0].argv[:3], ("tmux", "new-window", "-d"))
+
+def adapter_plan(octet_binary, workers, multiplexer="tmux", workspace="/workspace"):
+    """Direct low-level executor fixture; never product launch authorization."""
+    panes = tuple(
+        Pane(role="worker", name=item.name, handle_kind="opaque_session_reference",
+             handle=item.session, resolvable=True,
+             argv=_pane_argv(multiplexer=multiplexer, octet_binary=octet_binary,
+                             handle=item.session, label=item.name, workspace=workspace,
+                             inside=False, session_name="octet-fleet-parent-session",
+                             first=index == 0))
+        for index, item in enumerate(workers)
+    )
+    return LaunchPlan(multiplexer=multiplexer, binary=multiplexer, panes=panes,
+                      workspace=workspace, session_name="octet-fleet-parent-session",
+                      inside_multiplexer=False)
+
+
+class LauncherTestCase(unittest.TestCase):
+    def setUp(self):
+        self.stub = Stub()
+        self.addCleanup(self.stub.close)
+        self.environment = self.stub.path(TMUX=None, HERDR_ENV="1")
+        self.environment.__enter__()
+        self.addCleanup(self.environment.__exit__, None, None, None)
+
+    def plan(self, workers=(), multiplexer="tmux", workspace="/workspace"):
+        return plan_open_all(multiplexer=multiplexer, parent_session_id=PARENT_ID,
+                             workers=workers, workspace=workspace)
+
+
+class PlanTests(LauncherTestCase):
+    def test_parent_and_launchable_worker_stay_blocked_with_opaque_handle(self):
+        plan = self.plan([ready_worker(index=2)])
+        self.assertFalse(plan.panes[0].resolvable)
+        self.assertIn("second writer", plan.panes[0].blocked_reason)
+        self.assertFalse(plan.panes[1].resolvable)
+        self.assertEqual(plan.panes[1].blocked_reason, ATOMIC_WRITER_CLAIM_BLOCKED_REASON)
+        self.assertEqual(plan.panes[1].handle_kind, "opaque_session_reference")
+        self.assertEqual(plan.panes[1].argv, (
+            "tmux", "new-session", "-d", "-s", "octet-fleet-parent-session",
+            "-n", "explore-auth", "-c", "/workspace", "--",
+            self.stub.directory.name + "/octet", "--resume", fake_session_reference("agent-2")))
+
+    def test_inside_tmux_uses_new_window(self):
+        with mock.patch.dict(os.environ, {"TMUX": "fixture"}):
+            plan = self.plan([ready_worker()])
         self.assertEqual(plan.panes[1].argv[:3], ("tmux", "new-window", "-d"))
-        self.assertNotIn("new-session", plan.panes[0].argv)
         self.assertIsNone(plan.session_name)
 
-    def test_only_running_workers_get_a_pane(self):
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                plan = plan_open_all(
-                    multiplexer="tmux",
-                    parent_session_id=PARENT_ID,
-                    workers=[
-                        worker("running", name="live", index=1),
-                        worker("done", name="finished", index=2),
-                        worker("failed", name="broken", index=3),
-                        worker("orphaned", name="detached", index=4),
-                        worker("stopped", name="halted", index=5),
-                        worker("queued", name="pending", index=6),
-                    ],
-                    workspace=None,
-                )
-        finally:
-            stub.close()
-        self.assertEqual([pane.name for pane in plan.panes], ["parent", "live", "pending"])
-        # A worker pane is planned and validated, but its only host handle is the
-        # path-free opaque reference, which `octet --resume` cannot resolve today.
-        self.assertEqual([pane.resolvable for pane in plan.panes], [True, False, False])
-        self.assertEqual(plan.blocked[1].blocked_reason, plan.panes[1].blocked_reason)
-        self.assertIn("agent-session", plan.panes[1].blocked_reason)
-        # The blocked reason states the real, evidence-checked gap: the session
-        # store cannot resolve the reference, and the host's only resolver for it
-        # hands back a read-only locked inspection session -- the missing
-        # primitive is a *launchable* handle, not a resolver.
-        self.assertIn("octet --resume", plan.panes[1].blocked_reason)
-        self.assertIn("read-only", plan.panes[1].blocked_reason)
-        self.assertIn("launchable", plan.panes[1].blocked_reason)
+    def test_host_launchability_does_not_grant_writer_ownership(self):
+        plan = self.plan([ready_worker(index=1),
+                          worker("orphaned", index=2, launchable=True, live_task=False),
+                          worker(index=3, launchable=True, live_task=True),
+                          worker("awaiting_approval", index=4, launchable=True, live_task=False)])
+        self.assertEqual(plan.executable, ())
+        self.assertEqual(plan.panes[1].blocked_reason, ATOMIC_WRITER_CLAIM_BLOCKED_REASON)
+        self.assertEqual(plan.panes[2].blocked_reason, ATOMIC_WRITER_CLAIM_BLOCKED_REASON)
+        self.assertIn("live worker", plan.panes[3].blocked_reason)
+        self.assertIn("approval", plan.panes[4].blocked_reason)
+        self.assertEqual(plan.panes[2].argv[1], "new-window")
 
-    def test_session_owned_workers_that_are_not_opened_are_named_with_a_reason(self):
-        """A detached or parked worker is reported, never silently dropped."""
-        detached = skipped_worker_row(worker("orphaned", name="detached", index=4))
-        parked = skipped_worker_row(worker("awaiting_approval", name="parked", index=7))
-        self.assertEqual([row["state"] for row in (detached, parked)], ["orphaned", "awaiting_approval"])
-        self.assertEqual([row["name"] for row in (detached, parked)], ["detached", "parked"])
+    def test_launchability_fails_closed_on_missing_or_conflicting_fields(self):
+        for values in ({}, {"launchable": True}, {"launchable": 1, "live_task": False},
+                       {"launchable": True, "live_task": False, "host_present": False},
+                       {"launchable": True, "live_task": False, "launch_blocked": "transcript gone"}):
+            with self.subTest(values=values):
+                plan = self.plan([worker(**values)])
+                self.assertEqual(plan.executable, ())
+        plan = self.plan([worker(launch_blocked="transcript gone")])
+        self.assertEqual(plan.panes[1].blocked_reason, "transcript gone")
+
+    def test_duplicate_handles_are_refused_before_effect(self):
+        with self.assertRaises(Exception) as raised:
+            self.plan([ready_worker(index=1), ready_worker(index=1, name="duplicate")])
+        self.assertEqual(raised.exception.code, "invalid_launch")
+        self.assertEqual(self.stub.recorded(), [])
+
+    def test_herdr_requires_ownership(self):
+        with mock.patch.dict(os.environ, {"HERDR_ENV": "0"}):
+            with self.assertRaises(Exception) as raised:
+                self.plan([ready_worker()], multiplexer="herdr")
+        self.assertEqual(raised.exception.code, "multiplexer_not_owner")
+
+    def test_launchable_snapshot_alone_has_zero_pane_effects_on_repeated_open_all(self):
+        for multiplexer in MULTIPLEXERS:
+            for attempt in range(2):
+                with self.subTest(multiplexer=multiplexer, attempt=attempt):
+                    with mock.patch("octet_subagents.launcher._run") as run:
+                        plan, outcome = open_all(
+                            multiplexer=multiplexer, parent_session_id=PARENT_ID,
+                            workers=[ready_worker()], workspace="/workspace")
+                    run.assert_not_called()
+                    self.assertEqual(plan.executable, ())
+                    self.assertEqual(outcome.created, [])
+                    self.assertEqual(len(outcome.blocked), 2)
+                    self.assertIn("atomic host writer claim/settlement unavailable",
+                                  render_outcome(plan, outcome))
+        self.assertEqual(self.stub.recorded(), [])
+
+    def test_blocked_herdr_plan_preserves_validated_workspace(self):
+        with mock.patch.dict(os.environ, {"OCTET_WORKSPACE": "/workspace"}):
+            plan = self.plan([ready_worker()], multiplexer="herdr", workspace=None)
+        self.assertEqual(plan.workspace, "/workspace")
+        self.assertEqual(plan.executable, ())
+
+    def test_no_credentials_in_plan_or_outcome(self):
+        plan = self.plan([ready_worker()])
+        outcome = execute_plan(plan)
+        text = render_outcome(plan, outcome)
+        blob = json.dumps(plan_argv_rows(plan)) + text
+        for secret in SECRETS.values():
+            self.assertNotIn(secret, blob)
+        self.assertEqual(outcome.created, [])
+        self.assertIn("blocked (Partial)", text)
+        self.assertEqual(self.stub.recorded(), [])
+
+    def test_skipped_detached_and_parked_workers_keep_actionable_reasons(self):
+        detached = skipped_worker_row(worker("orphaned", host_present=False))
+        parked = skipped_worker_row(worker("awaiting_approval"))
         self.assertEqual(detached["reason"], DETACHED_WORKER_NOT_OPENED_REASON)
         self.assertEqual(parked["reason"], PARKED_WORKER_NOT_OPENED_REASON)
         self.assertTrue(detached["reattachable"])
         self.assertFalse(parked["reattachable"])
-        self.assertIn("Reattach", detached["reason"])
-        self.assertIn("stale pane", detached["reason"])
-        self.assertIn("unattended mutation", parked["reason"])
-
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                plan, outcome = open_all(
-                    multiplexer="tmux",
-                    parent_session_id=PARENT_ID,
-                    workers=[],
-                    workspace=None,
-                )
-        finally:
-            stub.close()
-        text = render_outcome(plan, outcome, skipped=[detached, parked])
-        self.assertIn("1 pane(s) created, 0 blocked, 2 not opened, clean", text)
-        self.assertIn("- not opened detached worker (detached)", text)
-        self.assertIn("- not opened parked worker (parked)", text)
-        for secret in SECRETS.values():
-            self.assertNotIn(secret, text)
-            self.assertNotIn(secret, json.dumps([detached, parked]))
-
-    def test_herdr_requires_ownership_and_builds_one_command_string(self):
-        stub = Stub()
-        try:
-            with stub.path(HERDR_ENV=None):
-                with self.assertRaises(Exception) as raised:
-                    plan_open_all(
-                        multiplexer="herdr",
-                        parent_session_id=PARENT_ID,
-                        workers=[worker()],
-                        workspace=None,
-                    )
-                self.assertEqual(
-                    getattr(raised.exception, "code", None), "multiplexer_not_owner"
-                )
-            with stub.path(HERDR_ENV="1"):
-                plan = plan_open_all(
-                    multiplexer="herdr",
-                    parent_session_id=PARENT_ID,
-                    workers=[worker()],
-                    workspace=None,
-                )
-                outcome = execute_plan(plan)
-                calls = stub.recorded()
-        finally:
-            stub.close()
-        self.assertEqual(plan.panes[0].argv[0], "__herdr__")
-        self.assertEqual(
-            plan.panes[0].argv[1:],
-            (os.path.join(stub.directory.name, "octet"), "--resume", PARENT_ID),
-        )
-        # The pane split and the submitted command are two separate argv calls.
-        # The split uses only the documented `--direction right` form.
-        self.assertEqual(
-            calls,
-            [
-                ["pane", "split", "--current", "--direction", "right", "--no-focus"],
-                [
-                    "pane",
-                    "run",
-                    "%7",
-                    "%s --resume %s"
-                    % (os.path.join(stub.directory.name, "octet"), PARENT_ID),
-                ],
-            ],
-        )
-        self.assertEqual(len(outcome.created), 1)
-
-    def test_no_credentials_or_tokens_reach_a_command_or_a_notice(self):
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                plan = plan_open_all(
-                    multiplexer="tmux",
-                    parent_session_id=PARENT_ID,
-                    workers=[worker()],
-                    workspace="/workspace",
-                )
-                outcome = execute_plan(plan)
-                text = render_outcome(plan, outcome)
-        finally:
-            stub.close()
-        blob = " ".join(token for row in plan_argv_rows(plan) for token in row["argv"])
-        for secret in tuple(SECRETS.values()) + ("API_KEY", "TOKEN", "token="):
-            self.assertNotIn(secret, blob)
-            self.assertNotIn(secret, text)
 
 
-class ExecutionTests(unittest.TestCase):
-    def test_execute_plan_reports_partial_failure_and_stays_re_runnable(self):
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                with mock.patch.dict(os.environ, {"STUB_FAIL_ON": "1"}):
-                    plan = plan_open_all(
-                        multiplexer="tmux",
-                        parent_session_id=PARENT_ID,
-                        workers=[],
-                        workspace="/workspace",
-                    )
-                    outcome = execute_plan(plan, workspace="/workspace")
-                text = render_outcome(plan, outcome)
-                calls = stub.recorded()
-        finally:
-            stub.close()
+class AdapterExecutionTests(LauncherTestCase):
+    """Exercise adapters directly without weakening product ownership checks."""
+
+    def adapter_plan(self, workers, multiplexer="tmux"):
+        return adapter_plan(self.stub.directory.name + "/octet", workers, multiplexer)
+
+    def test_tmux_adapter_creates_session_then_window(self):
+        plan = self.adapter_plan([ready_worker(index=1), ready_worker(index=2)])
+        outcome = execute_plan(plan)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(len(outcome.created), 2)
+        self.assertEqual(self.stub.recorded(), [list(pane.argv[1:]) for pane in plan.panes])
+        self.assertEqual(plan.panes[0].argv[1], "new-session")
+        self.assertEqual(plan.panes[1].argv[1], "new-window")
+        self.assertIn("interactive startup is not confirmed", render_outcome(plan, outcome))
+
+    def test_herdr_unsafe_binary_is_refused_before_split(self):
+        plan = adapter_plan("/app dir/octet", [ready_worker()], "herdr")
+        with self.assertRaises(Exception) as raised:
+            execute_plan(plan)
+        self.assertEqual(raised.exception.code, "unsafe_command_token")
+        self.assertEqual(self.stub.recorded(), [])
+
+    def test_herdr_split_and_submit_use_workspace_and_opaque_handle(self):
+        plan = self.adapter_plan([ready_worker()], multiplexer="herdr")
+        outcome = execute_plan(plan)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(self.stub.recorded(), [
+            ["pane", "split", "--current", "--direction", "right", "--no-focus", "--cwd", "/workspace"],
+            ["pane", "run", "%7", self.stub.directory.name + "/octet --resume " + fake_session_reference("agent-1")]])
+        self.assertEqual(outcome.created[0]["pane_id"], "%7")
+
+    def test_failure_stops_before_next_worker(self):
+        plan = self.adapter_plan([ready_worker(index=1), ready_worker(index=2)])
+        with mock.patch.dict(os.environ, {"STUB_FAIL_ON": "1"}):
+            outcome = execute_plan(plan)
         self.assertFalse(outcome.ok)
-        self.assertEqual(len(outcome.created), 0)
-        self.assertEqual(outcome.failure["returncode"], 1)
-        self.assertIn("open-all stopped at pane parent/parent", text)
-        self.assertIn("re-run", text)
-        self.assertEqual(
-            calls,
-            [
-                [
-                    "new-session",
-                    "-d",
-                    "-s",
-                    "octet-fleet-parent-session",
-                    "-n",
-                    "parent",
-                    "-c",
-                    "/workspace",
-                    "--",
-                    os.path.join(stub.directory.name, "octet"),
-                    "--resume",
-                    PARENT_ID,
-                ]
-            ],
-        )
+        self.assertEqual(outcome.created, [])
+        self.assertEqual(len(self.stub.recorded()), 1)
+        self.assertIn("inspect", render_outcome(plan, outcome))
 
-    def test_a_failed_pane_is_reported_exactly_and_the_command_stays_re_runnable(self):
-        """Clean failure: report exactly what exists, destroy nothing else, re-run."""
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                with mock.patch.dict(os.environ, {"STUB_FAIL_ON": "1"}):
-                    plan = plan_open_all(
-                        multiplexer="tmux",
-                        parent_session_id=PARENT_ID,
-                        workers=[worker(name="explore-auth", index=1)],
-                        workspace="/workspace",
-                    )
-                    first = execute_plan(plan, workspace="/workspace")
-                    first_calls = stub.recorded()
-                    # Re-runnable: the identical request is attempted again.
-                    second = execute_plan(plan, workspace="/workspace")
-                    second_calls = stub.recorded()
-        finally:
-            stub.close()
-        self.assertEqual(len(first.created), 0)
-        self.assertEqual(first.failure["pane"]["role"], "parent")
-        self.assertEqual(first.failure["returncode"], 1)
-        self.assertIn("stub failure", first.failure["stderr"])
-        self.assertEqual(len(first_calls), 1, "one failed pane stops the run")
-        self.assertEqual(first_calls[0][0], "new-session")
-        self.assertEqual(
-            second_calls[:1], first_calls, "re-running issues the same first command"
-        )
-        self.assertEqual(len(second_calls), 2)
-        self.assertEqual(len(second.blocked), 1, "the worker pane is still blocked")
-        # Transient failure cleared: the identical re-run opens the pane and the
-        # blocked worker pane is reported, not silently dropped.
-        self.assertTrue(second.ok)
-        self.assertEqual(len(second.created), 1)
+    def test_herdr_malformed_split_reports_possible_orphan_without_submission(self):
+        plan = self.adapter_plan([ready_worker()], multiplexer="herdr")
+        for stdout in ("not json", "null", '{"result":null}', '{"result":[]}',
+                       '{"result":{"pane":{"pane_id":"unsafe;id"}}}'):
+            with self.subTest(stdout=stdout):
+                with mock.patch("octet_subagents.launcher._run", return_value=subprocess.CompletedProcess([], 0, stdout, "")) as run:
+                    outcome = execute_plan(plan)
+                self.assertFalse(outcome.ok)
+                self.assertEqual(run.call_count, 1)
+                self.assertIsNone(outcome.failure["pane_created"])
+                self.assertIn("may exist", outcome.failure["stderr"])
+                self.assertNotIn("nothing was opened", render_outcome(plan, outcome))
 
-    def test_open_all_report_names_running_workers_and_the_unchanged_panel(self):
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                orchestrator = Orchestrator(publish=lambda snapshot: None)
-                result = orchestrator.open_all(
-                    owner=owner(),
-                    workers=[worker(name="explore-auth", index=1), worker("done", name="finished", index=2)],
-                    arguments=["tmux"],
-                )
-        finally:
-            stub.close()
-        self.assertIn("open-all tmux", result["text"])
+    def test_herdr_run_failure_or_timeout_retains_created_pane_id(self):
+        plan = self.adapter_plan([ready_worker(), ready_worker(index=2)], multiplexer="herdr")
+        split = subprocess.CompletedProcess([], 0, '{"result":{"pane":{"pane_id":"%7"}}}', "")
+        for failure in (subprocess.CompletedProcess([], 1, "", "submission failed"),
+                        subprocess.TimeoutExpired("herdr", 15), OSError("fixture")):
+            with self.subTest(failure=failure):
+                with mock.patch("octet_subagents.launcher._run", side_effect=[split, failure]) as run:
+                    outcome = execute_plan(plan)
+                self.assertFalse(outcome.ok)
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual(len(outcome.created), 1)
+                self.assertEqual(outcome.failure["pane_id"], "%7")
+                self.assertIsNone(outcome.failure["command_submitted"])
+                self.assertIn("id %7", render_outcome(plan, outcome))
+
+    def test_herdr_split_timeout_is_ambiguous(self):
+        plan = self.adapter_plan([ready_worker()], multiplexer="herdr")
+        with mock.patch("octet_subagents.launcher._run", side_effect=subprocess.TimeoutExpired("herdr", 15)):
+            outcome = execute_plan(plan)
+        self.assertFalse(outcome.ok)
+        self.assertIsNone(outcome.failure["pane_created"])
+        self.assertEqual(outcome.created, [])
+
+    def test_open_all_reports_blocked_parent_and_skipped_unlaunchable_worker(self):
+        result = Orchestrator(publish=lambda _: None).open_all(
+            owner=owner(), workers=[ready_worker(), worker("orphaned", host_present=False, index=2)],
+            arguments=["tmux"])
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn("blocked parent", result["text"])
+        self.assertIn("atomic host writer claim/settlement unavailable", result["text"])
         self.assertIn("unchanged", result["text"])
-        self.assertEqual([row["role"] for row in result["panes"]], ["parent", "worker"])
-        self.assertEqual([row["name"] for row in result["panes"]], ["parent", "explore-auth"])
-        self.assertEqual(len(result["notifications"]), 1)
-        self.assertIn("missing a host primitive", result["notifications"][0]["title"])
-
-    def test_open_all_requires_a_multiplexer_argument(self):
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                orchestrator = Orchestrator(publish=lambda snapshot: None)
-                with self.assertRaises(Exception) as raised:
-                    orchestrator.open_all(owner=owner(), workers=[worker()], arguments=[])
-        finally:
-            stub.close()
-        self.assertEqual(getattr(raised.exception, "code", None), "unsupported_multiplexer")
+        self.assertEqual(self.stub.recorded(), [])
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux is not installed on this host")
@@ -630,13 +532,9 @@ class RealTmuxTests(unittest.TestCase):
         session = "octet-openall-real-%d" % os.getpid()
         try:
             with stub.path(TMUX=None):
-                plan = plan_open_all(
-                    multiplexer="tmux",
-                    parent_session_id=PARENT_ID,
-                    workers=[],
-                    workspace=None,
-                )
-            parent = plan.panes[0]
+                plan = adapter_plan(stub.directory.name + "/octet", [ready_worker()],
+                                    workspace=None)
+            parent = plan.executable[0]
             argv = list(parent.argv)
             argv[4] = session  # use the guarded session name
             try:

@@ -98,7 +98,9 @@ distinguishes bridge fixtures from still-unrun Rust-host and real-Pi gates.
 provider bridge. API `0.2` remains the default; existing links are never upgraded
 in place. The `0.3` link contributes only host-owned `providers` and one fixed
 aggregate Pi-tool dispatcher. It omits legacy commands, UI, context,
-notifications, confirmation, process, and network contributions.
+notifications, confirmation, process, and network contributions. The host's
+optional `theme_selection` / `theme/select` offer is validated but never selected;
+it does not grant the bridge theme or legacy UI authority.
 
 Bounded secret-free `registerProvider`/`unregisterProvider` declarations synchronize
 to octet's `0.3` catalog. After the bounded initial collection window closes and

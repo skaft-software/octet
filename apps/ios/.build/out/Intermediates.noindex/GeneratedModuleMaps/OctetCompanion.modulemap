@@ -1,4 +1,0 @@
-module OctetCompanion {
-header "OctetCompanion-Swift.h"
-export *
-}

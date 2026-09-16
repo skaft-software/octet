@@ -350,3 +350,19 @@ fn semantic_scroll_keeps_reasoning_anchor_when_first_roster_is_inserted() {
         .any(|line| line.contains("Subagents")));
     assert_eq!(cache.block_starts.len(), state.transcript.len());
 }
+
+
+#[test]
+fn worker_strip_yields_to_history_and_returns_at_the_live_tail() {
+    let mut shell = worker_history_shell();
+    assert!(!shell_chrome(&shell.state.borrow(), WIDTH, Instant::now()).subagents.is_empty());
+    shell.scroll_lines(-24);
+    let before = rendered_history_rows(&shell);
+    assert!(!before.is_empty());
+    assert!(shell_chrome(&shell.state.borrow(), WIDTH, Instant::now()).subagents.is_empty());
+    assert!(shell.set_subagent_presentation(Some(&roster(8, "running")), true));
+    assert_eq!(rendered_history_rows(&shell), before);
+    shell.scroll_lines(i16::MAX);
+    assert!(shell.state.borrow().follow_tail);
+    assert!(!shell_chrome(&shell.state.borrow(), WIDTH, Instant::now()).subagents.is_empty());
+}

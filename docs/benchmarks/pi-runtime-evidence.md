@@ -62,7 +62,9 @@ python3 -m unittest discover -s scripts/tests -p 'test_bench_pi_runtime.py'
 while any release gate is unmet, so a fixture capture can never approve a
 release. The gates record what a candidate run still needs: a checked-in adapter
 backed by the real aggregate plan/evidence seam, separately retained inference
-server identity/resources, and the minimum repetition count.
+server identity/resources, the minimum repetition count, and explicit review of
+Linux and macOS candidate runs. A PID snapshot cannot satisfy attribution; this
+harness cannot supply the cross-platform release-review receipt.
 
 | Threshold metric | Default limit | Meaning |
 | --- | --- | --- |

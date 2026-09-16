@@ -28,26 +28,18 @@ const CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// response-progress deadline without burdening an otherwise idle socket.
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_HEARTBEAT_ACK_TIMEOUT: Duration = Duration::from_secs(10);
-/// Bounded reconnect attempts for one generation whose socket dropped before
-/// any consumer-visible output was forwarded.
-///
-/// A dropped socket must not end a long-running turn: the Codex path holds a
-/// 272K-context request whose first output token can be minutes away, so a
-/// heartbeat or read failure during that wait is far more likely than a
-/// failure after output. Retrying is only safe while nothing visible reached
-/// the consumer (see [`AttemptOutcome::Interrupted`]).
+/// Bounded cursor-retrieval attempts for one stored generation. This budget
+/// never authorizes replaying inference; only the host can replace a generation.
 const MAX_SOCKET_RECONNECT_ATTEMPTS: u32 = 3;
-/// First reconnect delay; doubled per attempt and capped by
+/// First stored-response retrieval delay; doubled per attempt and capped by
 /// [`RECONNECT_MAX_DELAY`].
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(250);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(2);
-/// Hard ceiling on total reconnect waiting for one generation. The attempt
-/// budget and this deadline bound both the number of provider requests and the
-/// time a caller can be held by an unreachable route.
+/// Hard ceiling on stored-response retrieval waiting for one generation. The
+/// attempt budget bounds cursor GET requests, never fresh inference sends.
 const RECONNECT_TOTAL_BUDGET: Duration = Duration::from_secs(6);
-/// Event types that carry no model output. They are buffered so a reconnect
-/// before the first output event can discard the abandoned attempt's prefix
-/// instead of publishing a duplicated prelude.
+/// Bounds for lifecycle-only buffering. The prefix is flushed on every terminal
+/// path so the host sees progress even when inference produced no output.
 const PRE_OUTPUT_BUFFER_EVENTS: usize = 16;
 const PRE_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 /// Upper bound on one interruption detail carried into a terminal error.
@@ -57,7 +49,7 @@ const MAX_INTERRUPTION_DETAIL_BYTES: usize = 512;
 /// initial value must be effectively never.
 const HEARTBEAT_ACK_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Bounded exponential backoff for one reconnect attempt (1-based).
+/// Bounded exponential backoff for one cursor retrieval attempt (1-based).
 fn reconnect_delay(attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1).min(8);
     RECONNECT_INITIAL_DELAY
@@ -65,9 +57,8 @@ fn reconnect_delay(attempt: u32) -> Duration {
         .min(RECONNECT_MAX_DELAY)
 }
 
-/// Whether an event is a pre-output lifecycle event that can be buffered and
-/// discarded by a retry. Anything else is consumer-visible content (or a
-/// terminal), after which a dropped socket can no longer be retried safely.
+/// Whether an event is a pre-output lifecycle event. Anything else is
+/// consumer-visible content (or a terminal). Neither permits inference replay.
 fn is_pre_output_event(value: &Value) -> bool {
     matches!(
         value.get("type").and_then(Value::as_str),
@@ -202,12 +193,8 @@ impl ResponsesWsLiveness {
     }
 }
 
-/// A post-send liveness failure is deliberately not replayable. The request may
-/// already be executing remotely, so the agent's timeout policy must not
-/// transparently replay it. The transport now recovers such a failure by
-/// reconnecting while nothing consumer-visible was published, and otherwise
-/// reports [`crate::error::StreamProtocolError::ResponseNotResumable`] instead
-/// of a replay-safe transport timeout.
+/// Post-send liveness failure does not authorize transport-local replay. The
+/// host owns any replacement, including attempt limits and unknown usage.
 fn transport_error(phase: TransportPhase, message: impl Into<String>) -> AiError {
     AiError::Transport(TransportError {
         phase,
@@ -382,10 +369,6 @@ fn update_continuation(full_body: &Value, value: &Value, continuation: &mut Opti
 
 struct RequestCommand {
     body: Value,
-    /// Endpoint URL and headers retained so a dropped socket can be dialed
-    /// again with the same handshake the pool used.
-    url: Url,
-    headers: http::HeaderMap,
     reply: mpsc::Sender<Result<Value, AiError>>,
     /// Taken by the actor before the generation loop so the command itself
     /// stays borrowable across reconnect attempts.
@@ -593,7 +576,7 @@ impl ResponsesWsPool {
         // without letting that outer timer misclassify a handshake timeout.
         tokio::time::timeout_at(
             deadline,
-            self.send_request(key, connection, url, headers, body, liveness, resumer),
+            self.send_request(key, connection, body, liveness, resumer),
         )
         .await
         .map_err(|_| {
@@ -610,8 +593,6 @@ impl ResponsesWsPool {
         &self,
         key: Option<&str>,
         connection: Connection,
-        url: Url,
-        headers: http::HeaderMap,
         body: Value,
         liveness: ResponsesWsLiveness,
         resumer: Option<ResponseResumer>,
@@ -620,8 +601,6 @@ impl ResponsesWsPool {
         let (started, started_result) = oneshot::channel();
         let command = RequestCommand {
             body,
-            url,
-            headers,
             reply,
             started: Some(started),
             liveness,
@@ -822,12 +801,9 @@ enum AttemptOutcome {
     /// The provider failed the generation or rejected the socket. The event is
     /// carried out of the attempt unpublished so the actor can retire first.
     Forwarded { value: Value },
-    /// The socket or heartbeat died, or the provider rejected the connection.
-    /// `visible` records whether output was already forwarded, and `progress`
-    /// carries the consumer's response cursor. Together they decide between a
-    /// bounded reconnect (before output), a bounded cursor resume (after output,
-    /// when the provider retains the generation), and a typed non-resumable
-    /// failure.
+    /// The socket or heartbeat died. `visible` and the response cursor permit
+    /// bounded stored-response retrieval after output, otherwise a typed
+    /// non-resumable failure. Provider rejections are forwarded unchanged.
     Interrupted {
         detail: String,
         visible: bool,
@@ -887,9 +863,9 @@ async fn flush_pre_output(
 
 /// Publishes one provider event.
 ///
-/// Pre-output lifecycle events are buffered until the first output-bearing
-/// event arrives, so an abandoned attempt's prefix is never duplicated by a
-/// retry. Returns `false` when the consumer is gone.
+/// Pre-output lifecycle events are buffered until output or a terminal outcome
+/// arrives. Failure paths flush that same prefix; inference is never replayed.
+/// Returns `false` when the consumer is gone.
 #[allow(clippy::too_many_arguments)]
 async fn publish_event(
     reply: &mpsc::Sender<Result<Value, AiError>>,
@@ -934,27 +910,13 @@ async fn handle_provider_event(
     progress: &mut GenerationProgress,
 ) -> Option<AttemptOutcome> {
     let is_terminal = terminal_kind(&value).is_some();
-    // A connection-lifetime rejection or a stale provider-side continuation
-    // before any output is retryable: nothing visible was published, so a fresh
-    // socket with the full local replay cannot duplicate output or work.
-    // Upstream does the same (`openai-codex-responses.ts:337-344`). Every other
-    // provider failure keeps the pre-existing behavior: retire the poisoned
-    // socket, then publish the failure event.
-    let retryable_provider = connection_refresh_error(&value) || stale_continuation_error(&value);
-    if retryable_provider && !*visible {
-        return Some(interrupted(
-            format!(
-                "Responses WebSocket provider rejection before output: {}",
-                issue_code(&value).unwrap_or_else(|| "unspecified code".to_owned())
-            ),
-            false,
-            progress,
-        ));
-    }
+    // Provider rejections belong to the host retry classifier and its shared
+    // physical-attempt budget. No transport-local generation replay is allowed,
+    // even before visible output: acceptance and billing can already have begun.
     if is_terminal {
         update_continuation(&command.body, &value, continuation);
     }
-    if connection_refresh_error(&value) || failed_terminal(&value) {
+    if connection_refresh_error(&value) || stale_continuation_error(&value) || failed_terminal(&value) {
         // The provider failed this generation or rejected the socket. Hand the
         // event back unpublished: the actor retires and fences the pool key
         // before it reaches the consumer, so an immediate retry observes the
@@ -1190,26 +1152,14 @@ where
     }
 }
 
-/// Runs one generation to completion, recovering a dropped socket.
-///
-/// A drop before any consumer-visible output replays the full local body on a
-/// fresh socket: the cached `previous_response_id` cursor belonged to the dead
-/// connection, and nothing visible was published, so the replay cannot
-/// duplicate output or provider work.
-///
-/// A drop after output is resumed instead of failing the turn when the provider
-/// retains the generation: the consumer's sequence cursor lets the retrieve
-/// endpoint hand back exactly the events nobody has seen, so every delta is
-/// delivered once. Both recoveries share one bounded attempt budget and one
-/// bounded total wait; when neither is possible the turn fails closed with the
-/// typed [`crate::error::StreamProtocolError::ResponseNotResumable`] error
-/// rather than replaying output or fabricating a terminal.
+/// Runs one generation without replaying inference. A stored response may be
+/// retrieved from an explicit cursor after interruption; that is a read of the
+/// same generation, not a new response.create. Missing storage/cursor authority
+/// fails closed so the host owns replacement budgets and usage uncertainty.
 async fn run_generation<S>(
     socket: &mut S,
     command: &RequestCommand,
     continuation: &mut Option<Continuation>,
-    replay_frame: Option<&str>,
-    dialer: &SocketDialer<S>,
 ) -> GenerationEnd
 where
     S: futures_core::Stream<Item = Result<Message, tungstenite::Error>>
@@ -1220,9 +1170,7 @@ where
     let mut attempts = 0_u32;
     let reconnect_started = tokio::time::Instant::now();
     let mut cursor = GenerationProgress::default();
-    // The current attempt's buffered lifecycle prelude. It belongs to the
-    // attempt, not to the generation: a retry rebuilds it so the abandoned
-    // attempt's prefix is never published twice.
+    // Preserve the generation's lifecycle prelude, including on failure.
     let mut prelude: Vec<Value> = Vec::new();
     let mut prelude_bytes = 0_usize;
     // Once output is visible a fresh socket cannot be replayed without
@@ -1252,11 +1200,6 @@ where
                 ),
             }
         } else {
-            // A retry replays the full body on a fresh socket, so the previous
-            // attempt's prelude can never be delivered and is replaced by the
-            // replacement attempt's own.
-            prelude.clear();
-            prelude_bytes = 0;
             pump_generation(
                 socket,
                 command,
@@ -1282,9 +1225,18 @@ where
                 progress,
             } => {
                 cursor.absorb(&progress);
-                if visible {
-                    resuming = true;
+                if !visible {
+                    // Zero output is not proof of nonacceptance. Surface this
+                    // physical attempt instead of silently resending it outside
+                    // the host's retry and accounting envelope.
+                    if !flush_pending_prelude(&command.reply, &mut prelude).await {
+                        return GenerationEnd::Abandoned;
+                    }
+                    return GenerationEnd::Fatal {
+                        error: not_resumable(attempts, false, &detail),
+                    };
                 }
+                resuming = true;
                 let elapsed = reconnect_started.elapsed();
                 if attempts >= MAX_SOCKET_RECONNECT_ATTEMPTS || elapsed >= RECONNECT_TOTAL_BUDGET {
                     if !flush_pending_prelude(&command.reply, &mut prelude).await {
@@ -1308,15 +1260,6 @@ where
                             error: not_resumable(attempts, true, &detail),
                         };
                     }
-                } else if replay_frame.is_none() {
-                    // Without a replayable body a reconnect cannot restart the
-                    // generation at all, so fail closed instead of guessing.
-                    if !flush_pending_prelude(&command.reply, &mut prelude).await {
-                        return GenerationEnd::Abandoned;
-                    }
-                    return GenerationEnd::Fatal {
-                        error: not_resumable(attempts, false, &detail),
-                    };
                 }
                 attempts += 1;
                 let delay = reconnect_delay(attempts).min(RECONNECT_TOTAL_BUDGET - elapsed);
@@ -1325,27 +1268,8 @@ where
                     _ = command.reply.closed() => return GenerationEnd::Abandoned,
                     _ = tokio::time::sleep(delay) => {}
                 }
-                if visible {
-                    // The next loop iteration dials the resume cursor; no socket
-                    // handshake is involved.
-                    continue;
-                }
-                // A fresh socket cannot use the dead connection's cursor.
-                *continuation = None;
-                match dialer(command.url.clone(), command.headers.clone()).await {
-                    Ok(reconnected) => *socket = reconnected,
-                    // The attempt budget, not the dial error, bounds this loop:
-                    // an unreachable route still terminates with the typed error.
-                    Err(_dial_error) => continue,
-                }
-                let resend = tokio::select! {
-                    biased;
-                    _ = command.reply.closed() => return GenerationEnd::Abandoned,
-                    result = socket.send(Message::Text(replay_frame.unwrap_or_default().to_owned().into())) => result,
-                };
-                if resend.is_err() {
-                    continue;
-                }
+                // Only a cursor GET can be attempted next. Never send another
+                // response.create on a fresh socket from inside this command.
             }
         }
     }
@@ -1413,7 +1337,7 @@ async fn run_connection<S>(
     key: Option<String>,
     state: Weak<Mutex<PoolState>>,
     idle_timeout: Duration,
-    dialer: SocketDialer<S>,
+    _dialer: SocketDialer<S>,
 ) where
     S: futures_core::Stream<Item = Result<Message, tungstenite::Error>>
         + futures_util::Sink<Message, Error = tungstenite::Error>
@@ -1511,9 +1435,6 @@ async fn run_connection<S>(
                 break 'actor;
             }
         };
-        // A reconnect replays the complete local window instead of the cached
-        // cursor: `previous_response_id` state belongs to the dead connection.
-        let replay_frame = full_replay_frame(&command.body);
         if command.reply.is_closed() {
             continue;
         }
@@ -1542,8 +1463,6 @@ async fn run_connection<S>(
             &mut socket,
             &command,
             &mut continuation,
-            replay_frame.as_deref(),
-            &dialer,
         )
         .await
         {
@@ -1577,20 +1496,6 @@ async fn run_connection<S>(
     alive.store(false, Ordering::Release);
     remove_connection(&state, key.as_deref(), &alive).await;
     close_socket(&mut socket).await;
-}
-
-/// The reconnect frame for one command: the complete local body, with no
-/// inherited `previous_response_id` cursor.
-fn full_replay_frame(body: &Value) -> Option<String> {
-    let (wire_body, _) = incremental_body(body, None);
-    let Value::Object(mut payload) = wire_body else {
-        return None;
-    };
-    payload.insert(
-        "type".to_owned(),
-        Value::String("response.create".to_owned()),
-    );
-    serde_json::to_string(&Value::Object(payload)).ok()
 }
 
 #[cfg(test)]
@@ -2012,8 +1917,6 @@ mod tests {
             .sender
             .send(RequestCommand {
                 body: serde_json::json!({"model": "gpt", "input": []}),
-                url: Url::parse("ws://127.0.0.1:1/").unwrap(),
-                headers: http::HeaderMap::new(),
                 reply,
                 started: Some(started),
                 liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
@@ -2071,8 +1974,6 @@ mod tests {
             .sender
             .send(RequestCommand {
                 body: serde_json::json!({"model": "gpt", "input": []}),
-                url: Url::parse("ws://127.0.0.1:1/").unwrap(),
-                headers: http::HeaderMap::new(),
                 reply,
                 started: Some(started),
                 liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
@@ -2147,8 +2048,6 @@ mod tests {
                 .sender
                 .send(RequestCommand {
                     body: serde_json::json!({"model": "gpt", "input": []}),
-                    url: Url::parse("ws://127.0.0.1:1/").unwrap(),
-                    headers: http::HeaderMap::new(),
                     reply,
                     started: Some(started),
                     liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
@@ -2252,8 +2151,6 @@ mod tests {
                     .sender
                     .send(RequestCommand {
                         body: serde_json::json!({"model": "gpt", "input": []}),
-                        url: Url::parse("ws://127.0.0.1:1/").unwrap(),
-                        headers: http::HeaderMap::new(),
                         reply,
                         started: Some(started),
                         liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
@@ -2465,7 +2362,7 @@ mod tests {
     /// drop path.
     async fn drive_command_with_resumer(
         connection: &Connection,
-        key_url: Url,
+        _key_url: Url,
         liveness: ResponsesWsLiveness,
         resumer: Option<ResponseResumer>,
     ) -> (Vec<Value>, Option<AiError>) {
@@ -2475,8 +2372,6 @@ mod tests {
             .sender
             .send(RequestCommand {
                 body: test_generation_request(),
-                url: key_url,
-                headers: http::HeaderMap::new(),
                 reply,
                 started: Some(started),
                 liveness,
@@ -2543,7 +2438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_drop_before_output_reconnects_and_resumes_with_each_delta_once() {
+    async fn a_drop_before_output_preserves_progress_without_replaying_inference() {
         let first = Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
             Box::pin(async move {
                 let body = next_generation_frame(&mut socket).await;
@@ -2565,50 +2460,7 @@ mod tests {
                 drop(socket);
             })
         });
-        let second = Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
-            Box::pin(async move {
-                let body = next_generation_frame(&mut socket).await;
-                assert!(
-                    body.get("previous_response_id").is_none(),
-                    "a reconnect must replay the full local body"
-                );
-                assert_eq!(body["input"], test_generation_request()["input"]);
-                socket
-                    .send(text_frame(serde_json::json!({
-                        "type": "response.created", "response": {"id": "resp_2"}
-                    })))
-                    .await
-                    .unwrap();
-                socket
-                    .send(text_frame(serde_json::json!({
-                        "type": "response.in_progress", "response": {"id": "resp_2"}
-                    })))
-                    .await
-                    .unwrap();
-                socket
-                    .send(text_frame(serde_json::json!({
-                        "type": "response.output_text.delta", "delta": "Hello "
-                    })))
-                    .await
-                    .unwrap();
-                socket
-                    .send(text_frame(serde_json::json!({
-                        "type": "response.output_text.delta", "delta": "world"
-                    })))
-                    .await
-                    .unwrap();
-                socket
-                    .send(text_frame(serde_json::json!({
-                        "type": "response.completed",
-                        "response": {"id": "resp_2", "output": []}
-                    })))
-                    .await
-                    .unwrap();
-                // Keep the socket alive until the terminal was delivered.
-                let _ = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
-            })
-        });
-        let (address, server) = scripted_server(vec![first, second]).await;
+        let (address, server) = scripted_server(vec![first]).await;
         let (dialer, attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
@@ -2628,26 +2480,18 @@ mod tests {
         )
         .await;
 
-        assert!(error.is_none(), "a resumable drop must not surface: {error:?}");
-        assert_eq!(attempts.load(Ordering::SeqCst), 1, "exactly one reconnect");
-        // Both attempts emit a lifecycle prelude. The abandoned attempt's
-        // prelude is buffered, then discarded with its socket; the replacement
-        // attempt publishes its own exactly once. Duplicating or leaking the
-        // abandoned prelude would show up as a count of 2 here.
-        assert_eq!(
-            count_of(&events, "response.created"),
-            1,
-            "the abandoned attempt's prelude must not be duplicated: {events:?}"
-        );
+        assert!(matches!(
+            error,
+            Some(AiError::StreamProtocol(crate::error::StreamProtocolError::ResponseNotResumable {
+                attempts: 0, visible_output: false, ..
+            }))
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no hidden inference replay");
+        assert_eq!(count_of(&events, "response.created"), 1);
         assert_eq!(count_of(&events, "response.in_progress"), 1);
-        assert_eq!(deltas(&events), vec![json!("Hello "), json!("world")]);
-        let message: String = deltas(&events)
-            .iter()
-            .map(|delta| delta.as_str().unwrap())
-            .collect();
-        assert_eq!(message, "Hello world", "each delta exactly once, no gap");
-        assert!(connection.alive.load(Ordering::Acquire));
-        assert!(!state.lock().await.disabled.contains("resume"));
+        assert!(deltas(&events).is_empty());
+        assert!(!connection.alive.load(Ordering::Acquire));
+        assert!(state.lock().await.disabled.contains("resume"));
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;
@@ -3040,7 +2884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_attempts_and_total_wait_are_bounded() {
+    async fn an_accepted_request_without_events_is_not_replayed() {
         // Every connection drops the generation frame immediately.
         let script = || {
             let script: ServerScript = Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
@@ -3051,10 +2895,7 @@ mod tests {
             });
             script
         };
-        let scripts: Vec<ServerScript> = (0..MAX_SOCKET_RECONNECT_ATTEMPTS as usize + 1)
-            .map(|_| script())
-            .collect();
-        let (address, server) = scripted_server(scripts).await;
+        let (address, server) = scripted_server(vec![script()]).await;
         let (dialer, attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
@@ -3067,19 +2908,17 @@ mod tests {
         )
         .await;
 
-        let started_at = std::time::Instant::now();
         let (_events, error) = drive_command(
             &connection,
             Url::parse(&format!("ws://{address}/")).unwrap(),
             liveness(),
         )
         .await;
-        let elapsed = started_at.elapsed();
 
         assert_eq!(
             attempts.load(Ordering::SeqCst),
-            MAX_SOCKET_RECONNECT_ATTEMPTS as usize,
-            "the reconnect budget must be exactly MAX_SOCKET_RECONNECT_ATTEMPTS"
+            0,
+            "an ambiguous physical attempt must never be hidden by replay"
         );
         match error.expect("an unreachable route must fail closed") {
             AiError::StreamProtocol(crate::error::StreamProtocolError::ResponseNotResumable {
@@ -3087,19 +2926,11 @@ mod tests {
                 visible_output,
                 ..
             }) => {
-                assert_eq!(attempts, MAX_SOCKET_RECONNECT_ATTEMPTS);
+                assert_eq!(attempts, 0);
                 assert!(!visible_output, "nothing was ever published");
             }
             other => panic!("expected a typed non-resumable error, got {other:?}"),
         }
-        assert!(
-            elapsed < RECONNECT_TOTAL_BUDGET + Duration::from_secs(2),
-            "reconnect waiting must stay inside the bounded budget: {elapsed:?}"
-        );
-        assert!(
-            elapsed >= RECONNECT_INITIAL_DELAY,
-            "attempts must be spaced by the bounded backoff: {elapsed:?}"
-        );
         assert!(!connection.alive.load(Ordering::Acquire));
 
         drop(connection);
@@ -3108,7 +2939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_continuation_is_retried_with_the_full_local_body() {
+    async fn a_stale_continuation_is_fenced_and_forwarded_without_replay() {
         // One connection serves two commands: the first completes and plants a
         // continuation cursor, the second rejects it as unknown.
         let first = Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
@@ -3146,30 +2977,7 @@ mod tests {
                 let _ = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
             })
         });
-        let second = Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
-            Box::pin(async move {
-                let body = next_generation_frame(&mut socket).await;
-                assert!(
-                    body.get("previous_response_id").is_none(),
-                    "a stale cursor must be dropped for the full local body"
-                );
-                socket
-                    .send(text_frame(serde_json::json!({
-                        "type": "response.created", "response": {"id": "resp_2"}
-                    })))
-                    .await
-                    .unwrap();
-                socket
-                    .send(text_frame(serde_json::json!({
-                        "type": "response.completed",
-                        "response": {"id": "resp_2", "output": []}
-                    })))
-                    .await
-                    .unwrap();
-                let _ = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
-            })
-        });
-        let (address, server) = scripted_server(vec![first, second]).await;
+        let (address, server) = scripted_server(vec![first]).await;
         let (dialer, attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
@@ -3188,21 +2996,12 @@ mod tests {
         assert_eq!(count_of(&first_events, "response.completed"), 1);
 
         let (second_events, second_error) = drive_command(&connection, url, liveness()).await;
-        assert!(
-            second_error.is_none(),
-            "the stale-cursor rejection must be recovered, not surfaced: {second_error:?}"
-        );
-        assert_eq!(count_of(&second_events, "response.created"), 1);
-        assert_eq!(
-            second_events.last().unwrap()["type"],
-            "response.completed"
-        );
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            1,
-            "the stale cursor is retried once on a fresh socket"
-        );
-        assert!(!state.lock().await.disabled.contains("stale"));
+        assert!(second_error.is_none(), "raw provider rejection, not a local error");
+        assert_eq!(second_events.len(), 1);
+        assert_eq!(second_events[0]["code"], "previous_response_not_found");
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no hidden retry");
+        assert!(!connection.alive.load(Ordering::Acquire));
+        assert!(state.lock().await.disabled.contains("stale"));
 
         drop(connection);
         let _ = tokio::time::timeout(Duration::from_secs(2), actor).await;

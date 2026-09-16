@@ -830,15 +830,23 @@ def release_decision(
                 "required": "a checked-in adapter backed by the real aggregate plan/evidence seam",
             }
         )
-    if not inference_included:
-        gates.append(
-            {
-                "gate": "inference_attribution",
-                "satisfied": False,
-                "observed": "no inference process was launched or sampled",
-                "required": "separately retained inference server identity and resources",
-            }
-        )
+    # An externally supplied PID proves only that a process was sampled, not
+    # its model/server identity or workload attribution. This harness has no
+    # reviewed cross-platform release receipt either; never infer approval.
+    gates.extend([
+        {
+            "gate": "inference_attribution",
+            "satisfied": False,
+            "observed": "external PID snapshot only" if inference_included else "no inference process was launched or sampled",
+            "required": "separately retained inference server identity and resources",
+        },
+        {
+            "gate": "cross_platform_review",
+            "satisfied": False,
+            "observed": "single-platform measurement; no release-review receipt",
+            "required": "reviewed Linux and macOS candidate runs and explicit release approval",
+        },
+    ])
     if repetitions < MIN_DECISION_REPETITIONS:
         gates.append(
             {

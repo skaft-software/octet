@@ -62,3 +62,13 @@ Names, tags, and other presentation metadata live in a `.metadata/<id>.json`
 sidecar (written with owner-only permissions) so the transcript stays readable
 without a format change. `octet sessions export` produces a redacted portable
 form; the raw JSONL is not a sharing format.
+
+One more sidecar exists only while an assistant attempt is streaming:
+`<session>.partial-assistant-frames` (owner-only) journals the compact
+`AssistantMessageFrame` sequence for the in-flight turn, bounded to 8192 frames
+or 1 MiB. It is never a session record and never enters provider-visible
+context, usage, or cost. Terminal stream events contribute no frame, so the
+journal holds partial progress only. The next start reduces the surviving
+prefix into the in-progress assistant message and republishes it once (a torn
+final line is dropped); terminal settlement removes the journal, so a completed
+turn is never replayed as partial progress.

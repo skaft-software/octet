@@ -1,6 +1,208 @@
 # Independent verification of the Pi-parity pass
 
-> **Pass 4 is the current truth — jump to "Pass 4 — verify12c, 2026-09-15 19:02Z+".**
+## Final review — final-audit (post-crash)
+
+**Authoritative final frozen receipt, 2026-09-16 UTC; not a parity or release
+approval.** Base `df5a7e809715961b9344af6b52e43a6ca48f56b3` through the shared
+worktree on HEAD `e01293917f452da94d603cdf3c43012b8365a627`. **Final workspace check,
+libraries and the recorded integration/doc-test receipts are green.** Behavioral
+evidence is assembled from completed shards/targets, not a claimed successful
+monolithic workspace-test invocation. Earlier failed, ENOSPC and interrupted
+runs remain historical. **Pi parity is not achieved:** missing implementations,
+policy exclusions and native/live/public gates below remain distinct from tests.
+This worker edits only the three assigned parity reports, ran no builds, and
+freezes them after this refresh; parent owns the final delivery/PR summaries.
+
+### Findings closed with bounded behavioral evidence
+
+| Original severity / defect | Current disposition and evidence | Remaining limit |
+| --- | --- | --- |
+| **P1** hidden WebSocket inference replay outside host budgets | **Fixed; agent regressions verified.** `responses_ws::run_generation` no longer resends `response.create`; rejection is fenced/forwarded. `websocket_connection_limit_is_retried_by_agent` and `qualified_codex_ws_http_cumulative_twelve_attempt_envelope` passed in `agent-integrations-final.log`; all **372 AI library tests** also passed. | `ai-confirmed.log` now passes **464 tests**, including the exact two physical requests (one WebSocket plus one explicit host HTTP request). Host budget/accounting assertions were not relaxed; live billing is not inferred. |
+| **P1** ephemeral RPC accounting retained only newest session | **Fixed; unit and process verified.** `session_store.rs::collect_ephemeral_accounting` combines all invocation-owned sessions; its regression passed in `coding-lib-final-receipt.log`, and `no_session_rpc_preserves_both_sessions_accounting_before_discarding_transcripts` passed in `cli-critical.log`. | The two-session RPC/EOF fixture seeds durable usage while sessions are idle; it does not make a live inference request. |
+| **P1** accounting append failure destroyed recovery | **Fixed; units verified.** Private accounting-only staging, retained pending state and locked idempotent/torn-tail ledger repair; `ephemeral_append_failure_keeps_private_accounting_only_and_retries_once` and `ephemeral_accounting_retry_repairs_a_torn_append` passed. | Total failure to write even the recovery snapshot permits only in-process retry; no automatic recovery CLI or impossible storage guarantee is claimed. |
+| **P2** optional theme service advertised without handler | **Fixed; real-process verified.** Product offer removes `theme_selection`/methods; `unimplemented_theme_selection_is_not_offered_and_returns_a_canonical_refusal` passed in `agent-integrations-final.log` (exact `-32601 / unknown or unnegotiated method`, healthy shutdown). | **Theme selection itself remains unavailable** until a host-owned catalog/namespace-bound handler exists. Generated helper tests are not feature implementation. |
+| **P2** Codex override exceeded authenticated maximum | **Fixed; unit verified.** Resolver intersects discovered and static ceilings; `live_discovery_bounds_acknowledged_overrides_below_the_family_table` passed: 500K refused against live 400K, acknowledged 400K allowed, ordinary 272K cap unchanged. | No live provider entitlement/billing qualification follows from this deterministic unit test. |
+
+Fresh source inspection and passing-test names above supersede the initial open
+findings, not their historical diagnosis. See [host-boundary report](REVIEW-host-boundary.md),
+[bootstrap review](REVIEW-bootstrap.md), [agent review](REVIEW-agent.md) and
+[AI review](REVIEW-ai.md).
+
+### Remaining implementation/release gates and verified repairs
+
+- **High-priority ownership containment:** product `open-all` now marks **all**
+  parent/worker panes unresolvable in source (`launcher.py:279–332,384`). The host
+  lacks atomic writer claim/settlement; fresh launchability, opaque handles,
+  per-append locking or documented races cannot substitute. This is **disabled
+  functionality**, not qualified pane handover. The extension owner now reports
+  **88 tests passed**, including repeated tmux/herdr requests with fresh launchable
+  snapshots producing zero product pane effects. This supersedes the earlier 84-test
+  result and verifies refusal, not ownership transfer.
+- **Release packaging blocker:** parent fixed importer entrypoint Git modes to
+  `100755` (independently inspected). Separately,
+  `scripts/package-octet-extension-release.sh:119–120` still requires API **0.2**,
+  rejecting API 0.3 despite runtime bundle support. Runtime, manifest and mode
+  tests do not qualify this release packager.
+- **Agent fixes verified individually:** cumulative delegated snapshots against
+  committed root usage, uncertainty-only records, exact picodollar borrowing,
+  durable spawn principal/owner/message/policy identity, and secure bounded
+  exclusive sidecar I/O all passed their unit tests. Partial republish integration
+  passed. Journals are recovery observations, not authoritative usage/effect
+  outcomes or exactly-once frontend delivery. Search startup/paused-clock fixture
+  repairs now pass in `agent-lib-confirmed.log`: **556 passed / 0 failed / 1 ignored**.
+- **Coding library and UI repairs verified:** `coding-lib-final-receipt.log`
+  completed **1569 passed / 0 failed / 1 ignored**, all features, four test threads.
+  This includes prior TUI/bootstrap/host-Serve failures, goal commands during a
+  live run, shimmer neutral/rest behavior, footer uncertainty persistence,
+  completed-worker no-replay and silent-startup composer tests. The slash-command
+  PTY suite passed **8 tests**, including `/goal` against a held response stream.
+  No-color clipping, off-tail anchoring and stable-picker repairs are exercised;
+  this does not promote unrelated Unverified parity rows or physical appearance.
+- **MCP credential boundary:** exact enabled static `(server, variable)` binding
+  prevents the mixed-server broker reference from resolving another server's
+  static token. Extension-owner suite: **76 passed**, including zero broker
+  endpoint requests. Herdr preflight/partial-failure reporting, Pi offer drift and
+  vendored inert SDK synchronization have owner test receipts. None introduces
+  host OAuth, bus authority or atomic writer handover.
+
+### Final verification evidence
+
+All named logs are under `/tmp/octet-final`. Completed logs/exit files were
+inspected here; parent/owner-reported ancillary checks are marked. A passing
+target inside an interrupted command is evidence for that target, **not** a
+successful command. Overlapping earlier executions are not added to totals.
+
+| Check | Final observed result / receipt | Scope |
+| --- | --- | --- |
+| Workspace check | `workspace-check-final.log` + `.exit = 0`, **42.2s** | `cargo check --workspace --all-targets --all-features --locked`; compilation, not execution. |
+| Coding-agent library | `coding-lib-final-receipt.log` + `.exit = 0`: **1569 passed / 0 failed / 1 ignored**, **32.60s** test time | `--all-features --lib --locked -- --test-threads=4`; supersedes prior library failures/interruption. |
+| Agent library | `agent-lib-confirmed.log` + `.exit = 0`: **556 passed / 0 failed / 1 ignored** | `--lib --locked -- --test-threads=4`; search fixture repairs verified. |
+| Agent integrations, all features | `agent-integrations-final.log` + `.exit = 0`: **230 passed / 0 failed / 1 ignored**, **48.2s** | Fresh clean command: `--all-features --test '*' --locked --no-fail-fast`. Includes **146 agent_run**, runnable API **2**, conformance **4 + 5**, theme policy **13**, telemetry **9**. Supersedes the integration receipt inside the earlier failed combined command; counts are not added twice. |
+| AI all targets/features | `ai-confirmed.log` + `.exit = 0`: **464 passed / 0 failed**, including **372 library + 38 client_stream** | Exact physical sends, heartbeat fallback and computer-call regressions pass. |
+| Coding-agent integrations | **All 26 targets have passing receipts; 169 distinct tests passed.** Target inventory checked against all 26 `tests/*.rs` files. | Detailed shard mapping below; PTY targets now have their own clean final command receipt. |
+| Renderer/migration all targets/features | `renderer-migration-final.log` + `.exit = 0`: **294 passed / 0 failed**, **70.3s** | `sexy-tui-rs` and `octet-migrate-types`, all targets/all features; not an upstream oracle rerun. |
+| Binaries/examples smoke | `binaries-examples-final.log` + `.exit = 0`: **3 targets, 0 tests**, **18.1s** | `octet`, `octet-host`, and agent `session_bench`, all features. Compile/harness smoke only; **adds zero behavioral tests**. |
+| Workspace doc tests | `doctests-final.log` + `.exit = 0`: **6 passed / 0 failed across 5 crates** | `cargo test --workspace --all-features --doc --locked --no-fail-fast`. |
+| Independent excluded Serve workspace | `serve-final.log` + `.exit = 0`: **284 passed / 0 failed**, **10.0s** | Separate `--manifest-path extensions/octet-serve/Cargo.toml --locked --no-fail-fast -- --test-threads=4`; distinct from coding-agent host-Serve units, which now also pass. Not a full security audit. |
+| Full web checks | `web-test.log`: **35 files / 299 tests passed**; parent reports lint/typecheck/build/fonts/external/bundle-check all passed; corresponding logs inspected | Supersedes the earlier 18-test subset. No physical-browser/native automation claim. |
+| Cargo audit | `audit-workspace.log`, `audit-serve.log`; parent reports both `--no-fetch` checks **passed** | Cached advisory DB. Allowed unmaintained warnings: workspace **bincode + ttf-parser**, Serve **ttf-parser**. Not warning-free/security approval. |
+| Cargo deny | `deny-workspace.log`, `deny-serve.log`: **advisories/bans/licenses/sources ok**; parent reports both offline checks passed | Warnings retained; no network refresh or absence-of-all-risk claim. |
+| Extension/SDK owner suites | [REVIEW-extensions](REVIEW-extensions.md): Subagents **88**, MCP **76**, computer use **93**, shared Python SDK **101**, Browse **80 passed / 2 skipped**, importers **11 / 8 / 4**, Pi **71 passed / 3 skipped**, Node UI **17**, TS SDK **39 fixtures** | Bounded local/mock evidence. Final Subagents tests verify repeated zero-effect open-all refusal; no atomic handover or real tmux/native/remote/Pi campaign implied. |
+| Repository scripts | `scripts-unittest-final.log` + `.exit = 0`: **51 passed** | Archive-generated-content and explicit benchmark review-gate regressions included. |
+| Packaged docs/resources | `packaged-docs.log` + `.exit = 0`: **443 public files, 43 extra references**; parent reports later resource consistency green before final textual edits | Latest documentation changes are not retroactively covered by the earlier packaged-doc receipt; this worker checks owned links/whitespace separately. |
+| Binary installer | `binary-installer.exit = 0`; parent reports full offline harness **11 UI + 18 version + 3 cleanup passed** | No public installation/publication claim. |
+| Catalog diff / generated API | Parent reports **10 passed** / generator `--check` passed | Contract generation is not feature execution. |
+| Formatting | `fmt-final.log` + `.exit = 1`: **90 unique files / 683 hunks**, independently counted from diff headers | Unchanged-baseline drift and changed files both involved; no blanket attribution or global format. Supersedes the earlier 88-file/663-hunk receipt. |
+
+#### Coding integration target receipts
+
+| Receipt | Passing target results counted | Command disposition |
+| --- | --- | --- |
+| `cli-critical.log` | **37**: Codex context 14, parity CLI 15, setup CLI 8 (including real two-session ephemeral RPC accounting) | Exit **0**. |
+| `tui-pty-final.log` | **37**, five targets: activity 2, late-terminal 6, setup TUI 4, SIGTERM 17, slash commands 8 (including held-stream `/goal`) | Exit **0**, **42.2s**. Replaces the completed-target evidence from interrupted `tui-pty-confirmed`; no double counting. |
+| `startup-pty-short.log` | **14** startup tests; matrix test explicitly filtered | Exit **0**. |
+| `startup-redraw-matrix.log` | Remaining **1** startup test: **30 composed-screen cases**, **92.09s** | Exit **0**; completes the same startup target without double-counting short-run tests. |
+| `coding-integrations-providers.log` | **43** across six passing provider/frontend targets | Exit **101** from separate provider_contract stale expected **31** versus actual **36**; that failed target is not counted here. |
+| `coding-integrations-host.log` | **19** across six targets, including corrected provider_contract **1** | Exit **0**; provider contract now passes with count 36. |
+| `coding-integrations-migration.log` | **18** across five targets: delegated resume, eval harness, host migration, import, Pi install | Exit **0**; scripted eval fixtures do not implement real model-backed evaluation. |
+
+#### Historical failures/interruption, not the current verdict
+
+- `test-workspace.log` failed with ENOSPC. Recovery `build-lowdisk` exit 0 was
+  `--no-run` compilation only. No successful monolithic workspace-test execution
+  is claimed; the completed final shards above are the behavioral evidence.
+- `agent-tests-final` library **554/2/1**, `coding-lib-final` **1551/15/1** and
+  `ai-final` **463/1** retain their original failed results. Final receipts above
+  supersede them; they are not current failed-library claims or extra test totals.
+- Parent identified two intermittent extension timing failures in interrupted
+  `coding-lib-green`, alongside a **test-only** deadlock introduced by temporary
+  MutexGuards in an array expression. Parent repaired the fixture deadlock; it is
+  not a production deadlock finding. The complete final library receipt is green.
+- `tui-pty-confirmed` remains an interrupted command, not a pass. Its five targets
+  now pass again in clean `tui-pty-final`; startup passes in the two dedicated
+  receipts above. The old provider-contract command still exited 101, with its
+  failed target subsequently verified by `coding-integrations-host`. Likewise,
+  `agent-integrations-final` now provides a clean all-feature integration command
+  receipt rather than relying on completed targets from `agent-tests-final`.
+- Earlier `tests-renderer-ai` **741 passed** and this worker's **14 Python theme
+  helper tests** remain historical/diagnostic, not additional final counts. The
+  real-process canonical theme refusal is now the product-boundary evidence.
+
+Parent's disk cleanup and removal of tracked Swift artifacts are repository
+hygiene, not source validation. Native/physical/public acceptance and exhaustive
+Serve/companion security review remain separate. No Git mutation by this worker.
+
+### Ledger reconciliation against actual consumers
+
+The shared README distinguishes verified behaviors from missing primitives.
+“Verified” is bounded by the named receipt, not by unrelated suite outcomes.
+“Implemented” still means source-inspected with its own verification outstanding.
+
+| Rows | Current source fact; obsolete claim removed |
+| --- | --- |
+| `1b.1`, `1b.2`, `1b.5` | `RequestOverrides` and `ModelPreset` remain declared data (`octet-ai/src/declarations/mod.rs:272–328,399–417`). The actual `Request` / `ModelSpec` and client wire path (`types.rs:727,1315`; `client.rs:2064,2097`) do not consume these values. “Landed” becomes **Partial**, not runtime support. |
+| `1b.4` | Conditional inventory is **verified**: all five `provider_conditional_inventory_tests` passed in `coding-lib-final-receipt.log` (200/304, validator reset/scope/bounds, error preservation). Old “Pending” is stale. |
+| `1c.1`, `1c.8`, `1c.10` | Explicit strict/grammar declarations emit, but custom-call decoding/history/result replay is missing (AI owner confirmation; Responses stream dispatch only handles function/computer calls), unspecified tools do not default to strict (`constrained_sampling.rs:122–130`), and per-model compatibility is missing. Mistral reasoning remains rejected (`catalog.rs:369`). `Response.diagnostics` already exists (`types.rs:1578`); raw/model/thinking and per-tool usage fields do not. Grouped rows are not fully landed. |
+| `1e.2` | `agent.rs:7007` consumes a bounded journal and republishes partial text/reasoning; the encoder/journal are created in the stream (`:7654`), and `agent_run.rs::a_killed_stream_republishes_its_partial_assistant_prefix_once` exists. The republish integration **passed** in `agent-integrations-final.log`; secure/bounded/torn-tail/replacement-safe journal units **passed** in `agent-lib-confirmed.log`. Not atomic frontend delivery. |
+| `2b.1`–`2b.5` | Reusable editor actions, JSON binding manager and prompt-zone parser exist, but `tui/keymap.rs:252–469` does not dispatch the new undo/redo, yank/pop, word/line/jump actions or load the user manager. `view/input_overlays.rs:500–509` explicitly documents the unresolved live binding. Primitive tests do not qualify product key behavior. Prompt zones still need viewport indexing/jump dispatch. |
+| `3.5` | Agent/delegation span consumers and behavioral tests exist (`agent_run.rs:9444,9546,9791`; `delegation.rs` DelegationSpan). `typed_spans_nest_run_turn_provider_and_tool_boundaries`, `typed_spans_cover_compaction_and_summary_boundaries`, failed-run and delegation-span tests **passed**. Old consumer/test-pending labels are stale. |
+| `4.8`, `4.10`, `4.13` | Real consumers now exist: `LivePreviewPacer` in tool execution; unanimous batch check after durable results (`agent.rs:9116`); opt-in prompt assembly (`set_tool_prompt_section_enabled`, `model_visible_system`). Tests are `live_panel_decorations_are_coalesced_and_settle_the_latest_state`, `unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not`, `tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools`. All three named tests **passed** in `agent-integrations-final.log`; rows are **Verified**, without inventing coding-product default enablement. |
+| `4.7`, `4.11`, `4.12`, `4.14` | Checkpoint publication has an opt-in agent consumer, but no product durable sink. `DurableInvocationStore` is memory-backed; deferred poll/suspend is a decision core; the summary-retry helper is not called by `CompactionContext::compact_boundary` (`agent.rs:5431` still calls `self.summarize`). These remain **Partial**. |
+| `4.6` | Windows runtime opt-in exists, but `config.rs:119–128` has no coding-product PowerShell allowlist entry. This is a missing product primitive **in addition to** Windows evidence, not hardware-only. |
+| `5.4` | All-session teardown and append-failure/torn-write recovery are **verified**, including the real-binary two-session RPC/EOF regression in `cli-critical.log`. No stale backend/failure/process-test-pending claim remains. |
+| `5.8` | `modes/export_html.rs:47–63` safely escapes pretty-printed JSON into `<pre>` plus bounded raster previews. It does not render Markdown, syntax highlighting or ANSI styles. The so-called golden test compares two calls of the same implementation, not an external expected artifact. Safe projection is not the full requested renderer. |
+| `5.11` | `cli/eval.rs:67–79,269,317–335` measures scripted loopback replies. It explicitly cannot select a real model/backend. The fixture harness exists; model-backed evaluation remains a separate missing primitive, not merely a missing live run. |
+
+Other unverified TUI inventory rows remain **Unverified** rather than being
+promoted by neighboring tests. This review does not establish all 88 rows.
+
+### Exact missing implementation versus deliberate exclusions and evidence gates
+
+**Missing implementation (not hardware excuses):** PiMessages/radius request and
+SSE codec, protocol/declaration/discovery integration; pinned static catalogs for
+the new provider declarations; request-hook/override and model preset merges;
+proxy-resolver-to-transport integration; custom grammar-call decode/replay and
+strict-prefer defaults/model compatibility; Anthropic model-compat/beta/fallback
+pricing; Bedrock model/profile-ARN region plumbing; per-request Codex transport
+modes/debug statistics; Azure deployment map/overrides; Mistral reasoning profile
+and emit path; xAI Responses declaration (shared encrypted replay exists);
+response metadata/per-tool usage; faux/deferred provider fetch and durable
+suspended-run leaves/permits; image-generation API/OpenRouter adapter/catalog
+and generator; product editor binding/viewport integrations; session-backed
+keyed invocation memos/checkpoints and summary-retry integration; real
+model-backed evaluation; full rich HTML export; host `bus/*` mediation;
+principal-bound `theme/select` handler; configuration/migration PostMutation
+emitters; cross-process delegated writer claim/settlement and mailbox recovery
+(product pane execution blocked); API 0.3 release-packager admission.
+
+**Deliberate exclusions / authority decisions:** persisted project-trust changes;
+new host-brokered OAuth/credential-policy/store/flow expansion; clipboard **image**
+capture; rg/fd auto-download; chord/CBOR/Unix-socket architecture; dedicated
+ls/find/grep tools withdrawn by maintainer (bash + rg are not identical built-in
+APIs). Codex's default context cap is intentional. `store: true` would change
+provider retention/privacy and is **not** an automatic fix for missing live
+cursor resumption. Computer-use execution needs separately authorized host
+approval/target/settlement services, not fabricated tool authority.
+
+**Evidence/hardware/release gates:** real Windows PowerShell/native UIA; native
+macOS accessibility and human-observed takeover/process-loss release; physical
+terminal/SSH color, input, scrollback and Browse focus; live remote MCP and live
+provider acceptance (including any xAI wire switch); real tmux/herdr ownership
+handover; signed/public installation and release assets. Native Firefox/Safari
+operation additionally lacks an implementation—it is not simply awaiting a
+hardware run. SDK/process fixtures and mock backends cannot close these gates.
+
+`ROADMAP.md` remains selected outcomes rather than a promise to finish BACKLOG.
+BACKLOG's captured run-scoped worker and inherited-only model descriptions are
+historical and should not be used as current code evidence. No board/issue closure,
+remote publication, full Serve/companion security qualification, unchanged-Pi
+extension compatibility, or Pi-parity completion follows from this local pass.
+
+---
+
+> **Current authority: [Final review — final-audit (post-crash)](#final-review--final-audit-post-crash).**
+> Passes 1–4 below are preserved historical snapshots, not current release verdicts.
+> **Historical Pass 4 introduction:**
 > Pass 4 was taken at committed HEAD `03c4c31c` with a *moving* worktree (workers
 > editing `agent.rs`, `auth.rs`, `view.rs`, `view/tests.rs`, `interactive.rs`,
 > `bootstrap.rs`, `markdown.rs` while it ran). It overturns Pass 3 on three

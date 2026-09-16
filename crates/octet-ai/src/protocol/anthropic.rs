@@ -168,6 +168,57 @@ struct AnthropicOutputFormat {
     schema: serde_json::Value,
 }
 
+/// OAuth bearer variables for the Anthropic Messages route.
+///
+/// Anthropic documents these as OAuth/subscription token variables rather than
+/// API keys. Keying the rule on the *variable* keeps it declarative: a route
+/// reusing the variable inherits the behavior, no provider name is consulted.
+const ANTHROPIC_OAUTH_BEARER_VARIABLES: [&str; 2] =
+    ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"];
+
+/// Betas a Claude Code client sends when it authenticates with an OAuth token.
+const ANTHROPIC_CLAUDE_CODE_BETA: &str = "claude-code-20250219";
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Interleaved thinking, paired with extended (budget) thinking.
+const ANTHROPIC_INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
+
+/// Whether the declared route authenticates with an Anthropic OAuth token.
+fn route_uses_oauth_bearer(model: &crate::catalog::Model) -> bool {
+    matches!(
+        &model.endpoint.auth,
+        crate::auth::Auth::BearerEnv { var }
+            if ANTHROPIC_OAUTH_BEARER_VARIABLES.contains(&var.as_str())
+    )
+}
+
+/// Beta features inferred from the declared route and the request.
+///
+/// These are only used when the caller configured no `anthropic-beta` list at
+/// all: an explicit caller list stays authoritative and replaces (never merges
+/// with) the inferred features, exactly like upstream `getBetaFeatures`.
+///
+/// Not inferred here because the declarative record does not exist yet:
+/// `fine-grained-tool-streaming-2025-05-14` (upstream emits it only when the
+/// route does *not* support eager tool input streaming; the compliant default is
+/// "supports it"), `server-side-fallback-2026-07-01` (requires a declared
+/// allowed-fallback-model list), and `mid-conversation-output-config-2026-07-01`
+/// + `thinking-binding-controls-2026-08-01` (require a declared
+/// supports-mid-conversation-effort capability).
+fn inferred_anthropic_betas(
+    model: &crate::catalog::Model,
+    extended_thinking: bool,
+) -> Vec<&'static str> {
+    let mut betas = Vec::new();
+    if route_uses_oauth_bearer(model) {
+        betas.push(ANTHROPIC_CLAUDE_CODE_BETA);
+        betas.push(ANTHROPIC_OAUTH_BETA);
+    }
+    if extended_thinking {
+        betas.push(ANTHROPIC_INTERLEAVED_THINKING_BETA);
+    }
+    betas
+}
+
 /// Map a portable reasoning effort onto Anthropic's adaptive-thinking effort
 /// scale. Anthropic exposes `low`|`medium`|`high`|`xhigh`|`max` (no `minimal`
 /// tier), so `Minimal` folds into `low`.
@@ -264,6 +315,35 @@ enum AnthropicResponseDelta {
 #[derive(Deserialize)]
 struct AnthropicResponseMsgDelta {
     stop_reason: Option<String>,
+    #[serde(default)]
+    stop_details: Option<AnthropicRefusalStopDetails>,
+}
+
+/// Anthropic `stop_details` for a `refusal` stop reason.
+///
+/// The explanation is provider prose about *why* the model refused. It is
+/// surfaced as a bounded response diagnostic rather than dropped, because a
+/// refusal with no explanation is not actionable for the user.
+#[derive(Deserialize)]
+struct AnthropicRefusalStopDetails {
+    #[serde(default)]
+    explanation: Option<String>,
+}
+
+/// Upper bound on the refusal explanation copied into a diagnostic. Provider
+/// prose is untrusted input; anything longer is truncated on a character
+/// boundary rather than rejected (the refusal itself already happened).
+const MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES: usize = 8192;
+
+fn bounded_refusal_explanation(explanation: &str) -> String {
+    if explanation.len() <= MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES {
+        return explanation.to_owned();
+    }
+    let mut end = MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES;
+    while end > 0 && !explanation.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &explanation[..end])
 }
 
 #[derive(Deserialize)]
@@ -656,6 +736,11 @@ pub(crate) fn build_request(
         _ => None,
     };
 
+    // Extended (budget) thinking is the only mode upstream pairs with the
+    // interleaved-thinking beta: adaptive thinking is already interleaved by
+    // construction, and a disabled/toggle-off request sends no beta at all.
+    let extended_thinking = matches!(&thinking_opt, Some(config) if config.r#type == "enabled");
+
     let output_config = if format_opt.is_some() || effort_opt.is_some() {
         Some(AnthropicOutputConfig {
             format: format_opt,
@@ -697,6 +782,8 @@ pub(crate) fn build_request(
     // Current Pi treats an explicit caller beta list as authoritative (not
     // additive to inferred defaults). Normalize repeated/comma-separated values
     // without dropping caller features or introducing OAuth/provider defaults.
+    // When the caller configured no list at all, the route's inferred features
+    // are used instead (see `inferred_anthropic_betas`).
     let configured_betas = model.endpoint.default_headers.get_all("anthropic-beta");
     let mut betas = Vec::new();
     for value in configured_betas.iter() {
@@ -723,6 +810,15 @@ pub(crate) fn build_request(
             http::HeaderValue::from_str(&betas.join(","))
                 .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?,
         );
+    } else {
+        let inferred = inferred_anthropic_betas(&model, extended_thinking);
+        if !inferred.is_empty() {
+            headers.insert(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_str(&inferred.join(","))
+                    .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?,
+            );
+        }
     }
     if model.spec.cache.send_session_affinity_headers {
         if let Some(session_id) = crate::protocol::cache_session_id(&req) {
@@ -988,6 +1084,23 @@ pub(crate) fn decode_stream_event(
                 let stop = map_stop_reason(reason);
                 builder.set_stop_reason(stop);
             }
+            // Upstream maps Anthropic `refusal` + `stop_details.explanation` onto
+            // the assistant message's error text. The canonical `Response` has no
+            // error-message field yet (roadmap 1c.10), so the explanation is
+            // carried by the response's diagnostics channel instead of being
+            // dropped: a refusal nobody can explain is not actionable.
+            if let Some(explanation) = delta
+                .stop_details
+                .as_ref()
+                .and_then(|details| details.explanation.as_deref())
+                .map(str::trim)
+                .filter(|explanation| !explanation.is_empty())
+            {
+                builder.add_diagnostic(crate::error::Diagnostic {
+                    code: "anthropic_refusal".to_owned(),
+                    message: bounded_refusal_explanation(explanation),
+                });
+            }
 
             if let Some(u_dto) = usage {
                 // `message_delta` usage is cumulative and authoritative (apidocs
@@ -1241,8 +1354,7 @@ mod tests {
     #[test]
     fn caller_anthropic_beta_list_is_authoritative_and_deduplicated() {
         let mut model = make_test_model(false);
-        {
-            let endpoint = Arc::make_mut(&mut model.endpoint);
+        {            let endpoint = Arc::make_mut(&mut model.endpoint);
             // Repeated headers and comma-joined values both occur in practice;
             // the caller's list replaces inferred defaults and is deduplicated.
             endpoint.default_headers.append(
@@ -1284,6 +1396,134 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+        );
+    }
+
+    /// A minimal Anthropic Messages request for beta-header tests.
+    fn beta_test_request(reasoning: ReasoningConfig) -> Request {
+        Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("Hello".to_string())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::None,
+            session_id: None,
+        }
+    }
+
+    fn beta_header(parts: &crate::protocol::HttpRequestParts) -> Option<String> {
+        parts
+            .headers
+            .get("anthropic-beta")
+            .map(|value| value.to_str().unwrap().to_owned())
+    }
+
+    #[test]
+    fn oauth_routes_infer_the_claude_code_betas() {
+        // Upstream `getBetaFeatures`: an OAuth/subscription token implies the
+        // Claude Code betas. The rule keys on the declared credential variable,
+        // so it is data, not a provider-name branch.
+        for var in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"] {
+            let mut model = make_test_model(false);
+            Arc::make_mut(&mut model.endpoint).auth = crate::auth::Auth::BearerEnv {
+                var: var.to_string(),
+            };
+            let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
+            assert_eq!(
+                beta_header(&parts).as_deref(),
+                Some("claude-code-20250219,oauth-2025-04-20"),
+                "{var} must select the OAuth betas"
+            );
+        }
+
+        // An ordinary API-key route infers nothing: the beta header is absent
+        // rather than carrying an empty value.
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.endpoint).auth =
+            crate::auth::Auth::header_env(http::HeaderName::from_static("x-api-key"), "ANTHROPIC_API_KEY");
+        let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
+        assert_eq!(beta_header(&parts), None);
+    }
+
+    #[test]
+    fn extended_thinking_infers_the_interleaved_thinking_beta_only_when_enabled() {
+        use crate::types::ReasoningControl;
+
+        // Budget-controlled model: an effort selection becomes extended thinking.
+        // (`Medium` keeps the derived 4096-token budget under the fixture's
+        // 8192-token output limit; `High` would equal it and fail validation.)
+        let extended = make_test_model(true);
+        let parts = build_request(
+            &extended,
+            &beta_test_request(ReasoningConfig::Effort(
+                crate::types::ReasoningEffort::Medium,
+            )),
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(
+            beta_header(&parts).as_deref(),
+            Some("interleaved-thinking-2025-05-14"),
+            "extended thinking must pair with the interleaved-thinking beta"
+        );
+
+        // Adaptive (effort) thinking is interleaved by construction: upstream
+        // suppresses the beta when the route forces adaptive thinking.
+        let mut adaptive = make_test_model(true);
+        Arc::make_mut(&mut adaptive.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .expect("the fixture model declares reasoning")
+            .control = ReasoningControl::Effort;
+        let parts = build_request(
+            &adaptive,
+            &beta_test_request(ReasoningConfig::Effort(
+                crate::types::ReasoningEffort::Medium,
+            )),
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(beta_header(&parts), None);
+
+        // Thinking disabled: no beta.
+        let parts = build_request(&extended, &beta_test_request(ReasoningConfig::Off)).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(beta_header(&parts), None);
+    }
+
+    #[test]
+    fn an_explicit_caller_beta_list_still_replaces_inferred_features() {
+        let mut model = make_test_model(false);
+        {
+            let endpoint = Arc::make_mut(&mut model.endpoint);
+            endpoint.auth = crate::auth::Auth::BearerEnv {
+                var: "ANTHROPIC_OAUTH_TOKEN".to_string(),
+            };
+            endpoint.default_headers.insert(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_static("caller-feature-2026-01-01"),
+            );
+        }
+        let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
+        assert_eq!(
+            beta_header(&parts).as_deref(),
+            Some("caller-feature-2026-01-01"),
+            "an explicit caller list stays authoritative and is never merged with inferred betas"
         );
     }
 
@@ -1578,7 +1818,8 @@ mod tests {
 /// (design §19; plan Task 10.2).
 #[cfg(test)]
 mod fixture_tests {
-    use super::decode_stream_event;
+    use super::{bounded_refusal_explanation, decode_stream_event};
+    use super::MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES;
     use crate::error::{AiError, StreamProtocolError};
     use crate::protocol::harness;
     use crate::stream::StreamEvent;
@@ -1824,6 +2065,51 @@ mod fixture_tests {
         assert_eq!(
             harness::finished(&run(fx!("pause_turn.sse"), 0).await.unwrap()).stop_reason,
             StopReason::PauseTurn
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_stop_details_explanation_is_surfaced_and_bounded() {
+        let events = run(fx!("refusal.sse"), 0).await.unwrap();
+        let resp = harness::finished(&events);
+        assert_eq!(resp.stop_reason, StopReason::Refusal);
+        let diagnostic = resp
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "anthropic_refusal")
+            .expect("a refusal must carry its stop_details explanation");
+        assert!(
+            diagnostic.message.contains("usage policy prohibits"),
+            "{diagnostic:?}"
+        );
+
+        // A refusal without stop_details still carries the canonical reason and
+        // fabricates no explanation.
+        let data = br#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_r2","usage":{"input_tokens":1,"output_tokens":0}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+        let events = run(data, 0).await.unwrap();
+        let resp = harness::finished(&events);
+        assert_eq!(resp.stop_reason, StopReason::Refusal);
+        assert!(resp.diagnostics.is_empty(), "{:?}", resp.diagnostics);
+
+        // Provider prose is untrusted: the diagnostic is truncated on a
+        // character boundary, never copied whole.
+        let long = "é".repeat(MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES);
+        let bounded = bounded_refusal_explanation(&long);
+        assert!(bounded.len() <= MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES + 3);
+        assert!(bounded.ends_with('…'));
+        assert_eq!(
+            bounded_refusal_explanation("short").as_str(),
+            "short",
+            "a short explanation is copied unchanged"
         );
     }
 

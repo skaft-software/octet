@@ -782,7 +782,7 @@ class StreamableHttpTests(unittest.TestCase):
         token = "static-secret-value"
         rotated = "static-secret-rotated"
         environ = {"OCTET_MCP_REMOTE_TOKEN": token, "OPENAI_API_KEY": "ambient-provider-token"}
-        provider = StaticEnvironmentCredentialProvider(environ)
+        provider = StaticEnvironmentCredentialProvider({"remote": "OCTET_MCP_REMOTE_TOKEN"}, environ=environ)
         session = "static-session"
         calls: list[str] = []
 
@@ -871,6 +871,28 @@ class StreamableHttpTests(unittest.TestCase):
         from octet_mcp.config import BridgeConfig
 
         self.assertIsNone(static_credential_provider(BridgeConfig.empty()))
+
+    def test_static_source_does_not_resolve_a_different_servers_broker_reference(self) -> None:
+        from dataclasses import replace
+        from unittest.mock import patch
+        from octet_mcp.runtime import static_credential_provider
+
+        fixture = self.fixture(lambda request: _HttpReply(status=400))
+        static = replace(_remote_config(fixture.url), id="static",
+                         auth=HttpAuthConfig("OCTET_MCP_SHARED", type="static-bearer"))
+        broker = replace(_remote_config(fixture.url), id="broker",
+                         auth=HttpAuthConfig("OCTET_MCP_SHARED", type="bearer"))
+        provider = static_credential_provider(BridgeConfig(servers=(static, broker), limits=limits()))
+        with patch.dict("os.environ", {"OCTET_MCP_SHARED": "synthetic-secret"}):
+            self.assertEqual(provider.bearer_token("OCTET_MCP_SHARED", server_id="static", resource_owner=OWNER), "synthetic-secret")
+            self.assertIsNone(provider.bearer_token("OCTET_MCP_SHARED", server_id="broker", resource_owner=OWNER))
+            client = McpStreamableHttpClient(broker, limits(), resource_owner=OWNER, credential_provider=provider)
+            try:
+                with self.assertRaises(McpAuthenticationError):
+                    client.start()
+            finally:
+                client.close()
+        self.assertEqual(fixture.requests, ())
 
     def test_permanent_get_stream_reconnects_with_the_committed_cursor(self) -> None:
         session = "stream-session"

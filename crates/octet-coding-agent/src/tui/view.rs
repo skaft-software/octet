@@ -626,6 +626,9 @@ pub(crate) struct SubagentPanel {
     pub groups: Vec<SubagentGroup>,
     /// Whether collapsible groups are currently hidden.
     pub collapsed: bool,
+    /// Keep the focused worker visible when a refresh moves it into a collapsed
+    /// terminal group, without expanding its siblings or changing identity.
+    pub revealed_node: Option<String>,
     /// Active declared-state view filter. `None` shows every group;
     /// `Some(label)` shows only workers in that group. Stored by group label,
     /// never by index, so a refresh that reorders or drops groups cannot
@@ -637,6 +640,7 @@ impl SubagentPanel {
     /// True when the item is hidden behind a collapsed group heading.
     fn hides(&self, index: usize) -> bool {
         self.collapsed
+            && self.node_ids.get(index) != self.revealed_node.as_ref()
             && self
                 .groups
                 .iter()
@@ -665,6 +669,7 @@ impl SubagentPanel {
     /// Cycling past the last group returns to `All`, so a reader can always
     /// restore the full list without remembering how many groups exist.
     pub(crate) fn cycle_state_filter(&mut self) {
+        self.revealed_node = None;
         let mut order: Vec<Option<String>> = vec![None];
         order.extend(
             self.groups
@@ -694,6 +699,7 @@ impl SubagentPanel {
 
     pub(crate) fn toggle_collapsed(&mut self) {
         self.collapsed = !self.collapsed;
+        self.revealed_node = None;
     }
 }
 
@@ -1293,6 +1299,12 @@ fn subagent_columns(rows: &[SubagentRow], width: u16, unicode: bool) -> (Vec<Sub
     (columns, widths)
 }
 
+// Cells are plain semantic text. The ANSI truncator emits resets even for
+// plain input; remove them before applying the selected theme's styling.
+fn truncate_subagent_cell(text: &str, width: usize, ellipsis: Option<&str>) -> String {
+    strip_terminal_sequences(&sexy_tui_rs::truncate_to_width(text, width, ellipsis))
+}
+
 fn subagent_grid_line(
     theme: &OctetTheme,
     elbow: &str,
@@ -1311,7 +1323,7 @@ fn subagent_grid_line(
             .get(index)
             .map(|(text, _)| text.as_str())
             .unwrap_or_default();
-        let clipped = sexy_tui_rs::truncate_to_width(cell, widths[index], Some(ellipsis));
+        let clipped = truncate_subagent_cell(cell, widths[index], Some(ellipsis));
         let padding = widths[index].saturating_sub(visible_width(&clipped));
         let role = cells
             .get(index)
@@ -1403,7 +1415,7 @@ fn collapsed_subagent_groups_row(
         .max(8);
     let head = format!("{}{separator}{count}", group.declared());
     if visible_width(&head) > budget {
-        return sexy_tui_rs::truncate_to_width(&head, budget, Some(ellipsis));
+        return truncate_subagent_cell(&head, budget, Some(ellipsis));
     }
     let mut text = head;
     let mut room = budget - visible_width(&text);
@@ -1424,7 +1436,7 @@ fn collapsed_subagent_groups_row(
             text.push_str(&cell);
             room -= cell_width;
         } else if room > visible_width(separator) + 2 {
-            text.push_str(&sexy_tui_rs::truncate_to_width(&cell, room, Some(ellipsis)));
+            text.push_str(&truncate_subagent_cell(&cell, room, Some(ellipsis)));
             room = 0;
         }
     }
@@ -1587,7 +1599,7 @@ pub(super) fn subagent_activity_render_rows(
                         "error",
                         &format!(
                             "{ACTIVITY_DETAIL_INDENT}  {}",
-                            sexy_tui_rs::truncate_to_width(
+                            truncate_subagent_cell(
                                 &text,
                                 usize::from(width)
                                     .saturating_sub(visible_width(ACTIVITY_DETAIL_INDENT) + 2)
@@ -1833,14 +1845,6 @@ pub(crate) struct ShellState {
     /// block. It is reset at the next root run so settled history remains
     /// immutable while a new delegation event gets its own row.
     pub(crate) subagent_activity_block: Option<usize>,
-    /// Worker identities already settled into the transcript. The delegation
-    /// team is scoped to the session, so its final snapshot keeps being
-    /// republished after the turn that produced it has ended; a snapshot that
-    /// brings no live worker and no worker identity that has not already been
-    /// rendered must not open a second block. Without this, every new prompt
-    /// replayed the previous turn's completed workers underneath the new prompt
-    /// and displaced the new turn's `Working` row.
-    pub(crate) settled_subagent_workers: std::collections::BTreeSet<String>,
     slash_selection: usize,
     slash_scroll: usize,
     slash_popup_dismissed: bool,
@@ -2377,9 +2381,44 @@ impl ShellState {
     /// A transient empty thinking row is removed before the first event so the
     /// new block is immediately followed by the model's replacement thinking
     /// row, matching the tool-call presentation.
-    fn set_subagent_activity(&mut self, view: SubagentActivityView) {
+    fn set_subagent_activity(&mut self, mut view: SubagentActivityView) {
+        // A session roster is not a new delegation event. With no current
+        // block, an entirely terminal roster belongs to an earlier run, even
+        // if this shell never observed those workers alive (e.g. after resume).
         let workers = subagent_worker_ids(&view);
-        let active = subagent_activity_is_active(&view);
+        if self.subagent_activity_block.is_none()
+            && !subagent_activity_is_active(&view)
+            && !workers.is_empty()
+        {
+            self.subagent_activity = None;
+            return;
+        }
+
+        // Mixed snapshots also contain the session's older terminal workers.
+        // Keep current-block members through their settlement and genuinely
+        // new/resumed work. Unseen terminal rows are also old session material,
+        // not evidence that a worker participated in this turn.
+        let current_workers = self
+            .subagent_activity_block
+            .and_then(|index| match self.transcript.get(index) {
+                Some(TranscriptBlock::Tool(panel)) => panel.subagent_activity.as_ref(),
+                _ => None,
+            })
+            .map(subagent_worker_ids)
+            .unwrap_or_default();
+        view.telemetry.retain(|child| {
+            matches!(child.state.as_str(), "pending" | "running")
+                || current_workers.contains(&child.child_id)
+        });
+        view.activities.retain(|activity| {
+            matches!(
+                activity.state,
+                octet_agent::ExtensionPresentationState::Loading
+                    | octet_agent::ExtensionPresentationState::Pending
+                    | octet_agent::ExtensionPresentationState::Active
+                    | octet_agent::ExtensionPresentationState::Running
+            ) || current_workers.contains(&activity.id)
+        });
         if let Some(index) = self.subagent_activity_block {
             if let Some(TranscriptBlock::Tool(panel)) = self.transcript.get_mut(index) {
                 if let Some(previous) = panel.subagent_activity.as_ref() {
@@ -2392,7 +2431,6 @@ impl ShellState {
                     // moves on every snapshot - including one whose row
                     // projection did not change.
                     self.subagent_activity = Some(view);
-                    self.settled_subagent_workers.extend(workers);
                     if same_presentation {
                         return;
                     }
@@ -2408,23 +2446,6 @@ impl ShellState {
             self.subagent_activity_block = None;
         }
 
-        // Only a roster that has something to hide can be suppressed: an empty
-        // snapshot that carries a failure reason is a spawn that never produced
-        // workers, and that evidence must still reach the transcript.
-        if self.subagent_activity_block.is_none()
-            && !active
-            && !workers.is_empty()
-            && view.failure_reason.is_none()
-            && workers
-                .iter()
-                .all(|worker| self.settled_subagent_workers.contains(worker))
-        {
-            // Settled already: this snapshot is the session-scoped roster
-            // arriving after its own turn ended. Render nothing - no transcript
-            // block below the new prompt, no chrome strip above the editor.
-            self.subagent_activity = None;
-            return;
-        }
         if let Some(index) = self.active_reasoning {
             let empty = matches!(
                 self.transcript.get(index),
@@ -2440,7 +2461,6 @@ impl ShellState {
         let active = !panel.finished;
         self.insert_block(index, TranscriptBlock::Tool(Box::new(panel)));
         self.subagent_activity_block = Some(index);
-        self.settled_subagent_workers.extend(workers);
         self.subagent_activity = Some(view);
         if active {
             self.register_active_event(index);
@@ -3600,19 +3620,10 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         state.run_label.clear();
         state.clear_turn_telemetry();
-        // A delegation team is scoped to one owning run. Do not carry the
-        // previous run's already-accounted worker costs into the new live
-        // overlay while its first authoritative refresh is still pending.
+        // The roster is session-scoped, but this presentation belongs to one
+        // run. Do not carry previously accounted costs into the next live view.
         state.subagent_activity = None;
         state.subagent_activity_block = None;
-        // `settled_subagent_workers` is deliberately NOT cleared here. This
-        // boundary is reached by EVERY new prompt, while the delegation team is
-        // scoped to the SESSION: the manager keeps republishing the same
-        // completed roster after the turn that spawned it ended. Clearing the
-        // set per prompt therefore re-armed the replay this set exists to stop -
-        // every new prompt re-opened a block of already-finished workers under
-        // the fresh prompt and displaced the new turn's `Working` row. It is
-        // cleared only when the session itself is replaced.
         state.run_model = Some(state.model.clone());
         state.run_model_lab = state.model_lab;
         state.run_prompt_color = state.prompt_color.clone();
@@ -5926,6 +5937,9 @@ impl InteractiveShell {
             *current = next;
             current.collapsed = collapsed;
             current.state_filter = state_filter;
+            current.revealed_node = current_id.clone().filter(|id| {
+                current.node_ids.iter().any(|candidate| candidate == id)
+            });
         }
         let filtered =
             filtered_indices_for_action(current_items, current_descriptions, action, filter);
@@ -6836,9 +6850,6 @@ impl InteractiveShell {
         // hydrated history never contains an executable worker event.
         state.subagent_activity = None;
         state.subagent_activity_block = None;
-        // A different session has a different delegation team: nothing from the
-        // previous session is "already settled" for this one.
-        state.settled_subagent_workers.clear();
         state.session_work_elapsed = Duration::ZERO;
         state.run_model = None;
         state.run_model_lab = None;

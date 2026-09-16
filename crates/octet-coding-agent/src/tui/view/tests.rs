@@ -867,6 +867,63 @@ fn select_list_filter_narrows_items_and_confirm_returns_original_index() {
 }
 
 #[test]
+fn selected_worker_remains_visible_when_it_settles_without_revealing_its_siblings() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 24);
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Subagents"),
+        items: vec!["alpha".into(), "beta".into()],
+        descriptions: vec![None, None],
+        selected: 1,
+        filter: String::new(),
+        action: PanelAction::SelectSubagent(SubagentPanel {
+            node_ids: vec!["node-a".into(), "node-b".into()],
+            groups: vec![SubagentGroup {
+                label: "Running".into(), indices: vec![0, 1], collapsible: false,
+            }],
+            collapsed: true,
+            revealed_node: None,
+            state_filter: None,
+        }),
+    });
+    for _ in 0..2 {
+        shell.refresh_subagent_panel(
+            "Subagents".into(),
+            vec!["beta".into(), "gamma".into(), "hidden-sibling".into()],
+            vec![None, None, None],
+            SubagentPanel {
+                node_ids: vec!["node-b".into(), "node-c".into(), "node-d".into()],
+                groups: vec![
+                    SubagentGroup { label: "Running".into(), indices: vec![1], collapsible: false },
+                    SubagentGroup { label: "Done".into(), indices: vec![0, 2], collapsible: true },
+                ],
+                collapsed: true,
+                revealed_node: None,
+                state_filter: None,
+            },
+        );
+        // Exercise both the natural-height test wrapper and the bounded
+        // renderer used by production chrome. Both groups fit in this budget.
+        let rendered = {
+            let state = shell.state.borrow();
+            [
+                render_panel(&state, 120),
+                super::panel_render::render_panel_with_limit(&state, 120, 20),
+            ]
+        };
+        for rows in rendered {
+            assert!(rows.len() <= 20);
+            let painted = strip_terminal_sequences(&rows.join("\n"));
+            assert!(painted.contains("beta") && painted.contains("gamma"), "{painted}");
+            assert!(!painted.contains("hidden-sibling"), "{painted}");
+        }
+    }
+    let (result, action) = shell.panel_input(&panel_key(crossterm::event::KeyCode::Enter)).unwrap();
+    assert_eq!(result, PanelResult::Confirm(0));
+    assert!(matches!(action, PanelAction::SelectSubagent(panel) if panel.node_ids[0] == "node-b"));
+}
+
+#[test]
 fn live_subagent_refresh_preserves_selection_by_stable_node_id() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 24);
@@ -891,6 +948,7 @@ fn live_subagent_refresh_preserves_selection_by_stable_node_id() {
                 },
             ],
             collapsed: true,
+            revealed_node: None,
             state_filter: None,
         }),
     });
@@ -914,6 +972,7 @@ fn live_subagent_refresh_preserves_selection_by_stable_node_id() {
                 },
             ],
             collapsed: true,
+            revealed_node: None,
             state_filter: None,
         },
     );
@@ -970,6 +1029,7 @@ fn open_grouped_subagent_panel(shell: &mut InteractiveShell, live: usize, finish
             node_ids,
             groups,
             collapsed: true,
+            revealed_node: None,
             state_filter: None,
         }),
     });
@@ -1080,6 +1140,7 @@ fn subagent_panel_refresh_keeps_collapsed_groups_and_a_visible_selection() {
                 },
             ],
             collapsed: false,
+            revealed_node: None,
             state_filter: None,
         },
     );
@@ -9978,10 +10039,13 @@ fn default_footer_groups_live_metadata_and_right_aligns_workspace() {
     }
     shell.state.borrow_mut().usage_uncertain = true;
     let unknown = plain_footer(&shell, 100, now);
-    assert!(unknown.contains("subtotal $296 + ?"), "{unknown:?}");
+    assert!(unknown.contains("$296"), "{unknown:?}");
+    assert!(!unknown.contains("subtotal") && !unknown.contains('?'), "{unknown:?}");
+    assert!(shell.state.borrow().usage_uncertain);
     shell.state.borrow_mut().session_cost_microdollars = None;
     let unknown = plain_footer(&shell, 100, now);
-    assert!(unknown.contains("usage/cost unknown"), "{unknown:?}");
+    assert!(!unknown.contains("usage/cost unknown"), "{unknown:?}");
+    assert!(shell.state.borrow().usage_uncertain);
     assert!(!unknown.contains('$'));
 }
 
@@ -10229,8 +10293,7 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
         .unwrap();
 
     assert!(shell.set_subagent_presentation(Some(&snapshot), true));
-    // Delegated workers are transcript events now; the chrome strip stays empty
-    // so the same activity is not duplicated below the composer.
+    // Idle snapshots never park worker activity above the composer.
     let chrome = shell_chrome(&shell.state.borrow(), 120, Instant::now());
     assert!(chrome.subagents.is_empty(), "{:?}", chrome.subagents);
     let activity = shell
@@ -10317,7 +10380,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         failure_reason: Some("spawn rejected: worker limit reached".into()),
         failure_class: Some("spawn_rejected".into()),
     };
-    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated { snapshot });
+    publish_current_turn_roster(&mut shell, snapshot);
     let block = shell
         .state
         .borrow()
@@ -10472,6 +10535,32 @@ fn subagent_transcript_test_view(native: bool) -> SubagentActivityView {
     }
 }
 
+// Renderer/control fixtures represent workers seen in this turn, not a stale
+// session roster. Observe at most eight live workers at once before publishing
+// their mixed or settled states.
+fn publish_current_turn_roster(
+    shell: &mut InteractiveShell,
+    snapshot: octet_agent::DelegationTelemetrySnapshot,
+) {
+    let mut observed = Vec::new();
+    for wave in snapshot.children.chunks(8) {
+        let mut live = snapshot.clone();
+        live.children = observed.clone();
+        live.children.extend(wave.iter().cloned().map(|mut worker| {
+            worker.state = "running".into();
+            worker.failure_reason = None;
+            worker
+        }));
+        live.failure_reason = None;
+        shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated { snapshot: live });
+        observed.extend(wave.iter().cloned().map(|mut worker| {
+            worker.state = "completed".into();
+            worker
+        }));
+    }
+    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated { snapshot });
+}
+
 fn subagent_transcript_test_rows(
     view: &SubagentActivityView,
     theme: &OctetTheme,
@@ -10490,6 +10579,25 @@ fn subagent_transcript_test_rows(
     .iter()
     .map(|line| strip_terminal_sequences(line))
     .collect()
+}
+
+#[test]
+fn subagent_clipping_never_injects_sgr_into_no_color_rows() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    for unicode in [false, true] {
+        let theme = crate::tui::theme::test_theme_with(
+            TerminalCapabilities::test(true, unicode, ColorDepth::None),
+        );
+        for width in [16, 24, 40, 80, 120] {
+            for expanded in [false, true] {
+                let rows = subagent_activity_render_rows(
+                    &subagent_transcript_test_view(true), &theme, width, expanded,
+                );
+                assert!(rows.iter().all(|row| !row.contains("\x1b[")), "{rows:?}");
+                assert!(rows.iter().all(|row| visible_width(row) <= usize::from(width)));
+            }
+        }
+    }
 }
 
 #[test]
@@ -10939,7 +11047,7 @@ fn live_workers_for_the_current_turn_still_open_a_block() {
     let mut shell = InteractiveShell::test_shell();
     let live = |id: &str| octet_agent::DelegationTelemetryChild {
         child_id: id.into(),
-        task_name: "Inspect tests".into(),
+        task_name: format!("Inspect tests {id}"),
         profile: Some("explore".into()),
         model: "test-model".into(),
         state: "running".into(),
@@ -11021,13 +11129,130 @@ fn live_workers_for_the_current_turn_still_open_a_block() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("agent-2"), "{rendered}");
+    assert!(rendered.contains("Inspect tests agent-2"), "{rendered}");
+    assert_eq!(rendered.matches("Inspect tests agent-1").count(), 1, "{rendered}");
     assert_eq!(
         rendered.matches("Subagents").count(),
         2,
         "the new turn gets exactly one additional block: {rendered}"
     );
     assert!(shell.state.borrow().subagent_activity_block.is_some());
+}
+
+/// The maintainer's correction, spelled out: "EVERY new prompt shows the current
+/// session's subagents even if they're completed!" A session-scoped roster that
+/// has no live worker is not fresh turn material even when this transcript never
+/// saw those workers live - a resumed session, an interrupted parent that settled
+/// before its first snapshot, or a manager whose team finished before the UI was
+/// attached. It must render nothing at all, and it must not displace the new
+/// turn's `Working` row.
+#[test]
+fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
+    use octet_agent::{EntryId, FinishReason};
+
+    let mut shell = InteractiveShell::test_shell();
+    let child = |id: &str, state: &str| octet_agent::DelegationTelemetryChild {
+        child_id: id.into(),
+        task_name: "Inspect tests".into(),
+        profile: Some("explore".into()),
+        model: "test-model".into(),
+        state: state.into(),
+        phase: "using_tool".into(),
+        current_tool: None,
+        tool_use_count: 1,
+        input_tokens: 100,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        output_tokens: 10,
+        reasoning_tokens: 0,
+        total_tokens: 110,
+        cost: None,
+        cost_microdollars: Some(1),
+        elapsed_ms: 500,
+        failure_class: None,
+        failure_reason: None,
+        effective_tool_policy: test_effective_tool_policy(),
+        orchestration_provenance: inherited_delegation_provenance(),
+        session: Some("agent-session:opaque".into()),
+    };
+    let transcript = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(120)
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let ends_with_working = |rendered: &str| {
+        rendered.trim_end().ends_with("Working (0s • esc to interrupt)")
+            || rendered.trim_end().ends_with("Working")
+    };
+
+    // Turn one is interrupted before the delegation is ever published live.
+    let run_id = shell.begin_run("test-provider");
+    shell.on_prompt_submitted("first question");
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::RunFinished {
+            head: EntryId("head".into()),
+            reason: FinishReason::Aborted,
+        },
+    );
+
+    // Turn two: the reader submits a new prompt, and the session-scoped manager
+    // republishes the roster with every worker already finished.
+    shell.begin_run("test-provider");
+    shell.on_prompt_submitted("second question");
+    let submitted = transcript(&shell);
+    assert!(
+        ends_with_working(&submitted),
+        "the new turn's working indicator must appear immediately: {submitted}"
+    );
+
+    shell.on_agent_event(&AgentEvent::DelegationUpdated {
+        snapshot: octet_agent::DelegationTelemetrySnapshot {
+            revision: 9,
+            captured_at_ms: 1_700_000_000_009,
+            children: vec![child("agent-1", "completed"), child("agent-2", "completed")],
+            total_cost_microdollars: Some(2),
+            failure_reason: None,
+            failure_class: None,
+        },
+    });
+
+    let state = shell.state.borrow();
+    assert!(
+        state.subagent_activity.is_none(),
+        "an all-completed roster must not become live state"
+    );
+    assert!(
+        state.subagent_activity_block.is_none(),
+        "an all-completed roster must not open a transcript block"
+    );
+    let rendered = state
+        .rendered_transcript(120)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        rendered.matches("Subagents").count(),
+        0,
+        "completed workers produce no output at all: {rendered}"
+    );
+    assert!(!rendered.contains("Inspect tests"), "{rendered}");
+    assert!(
+        ends_with_working(&rendered),
+        "the working indicator keeps its place after the roster settles: {rendered}"
+    );
+    assert!(
+        shell_chrome(&state, 120, Instant::now())
+            .subagents
+            .is_empty(),
+        "nothing about the roster may be composed into pinned chrome"
+    );
 }
 
 /// The settled delegation event is transcript material: it must end up at the
@@ -11245,7 +11470,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
     assert!(shell.state.borrow().subagent_activity_block.is_some());
-    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+    assert!(!shell_chrome(&shell.state.borrow(), 120, Instant::now())
         .subagents
         .is_empty());
 
@@ -11263,6 +11488,9 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
     assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
     let settled = shell
         .state
         .borrow()
@@ -11338,25 +11566,24 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
-        snapshot: octet_agent::DelegationTelemetrySnapshot {
-            revision: 1,
-            captured_at_ms: 1_700_000_000_000,
-            children: vec![
-                child("agent-1", "Read release history", "running"),
-                child("agent-2", "Audit release surface", "running"),
-                child("agent-3", "Scan changelog", "completed"),
-                child("agent-4", "Inspect tests", "running"),
-                child("agent-5", "Check package map", "running"),
-                child("agent-6", "Review docs", "completed"),
-                child("agent-7", "Audit extensions", "running"),
-                child("agent-8", "Verify release", "completed"),
-            ],
-            total_cost_microdollars: Some(3),
-            failure_reason: None,
-            failure_class: None,
-        },
-    });
+    let snapshot = octet_agent::DelegationTelemetrySnapshot {
+        revision: 1,
+        captured_at_ms: 1_700_000_000_000,
+        children: vec![
+            child("agent-1", "Read release history", "running"),
+            child("agent-2", "Audit release surface", "running"),
+            child("agent-3", "Scan changelog", "completed"),
+            child("agent-4", "Inspect tests", "running"),
+            child("agent-5", "Check package map", "running"),
+            child("agent-6", "Review docs", "completed"),
+            child("agent-7", "Audit extensions", "running"),
+            child("agent-8", "Verify release", "completed"),
+        ],
+        total_cost_microdollars: Some(3),
+        failure_reason: None,
+        failure_class: None,
+    };
+    publish_current_turn_roster(&mut shell, snapshot);
 
     assert!(!shell.verbose_tools());
     let collapsed = render(&shell);
@@ -11468,16 +11695,15 @@ fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
     for index in 0..14 {
         children.push(child(&format!("stopped-{index}"), &format!("stopped worker {index}"), "stopped", 900 + index, None));
     }
-    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
-        snapshot: octet_agent::DelegationTelemetrySnapshot {
-            revision: 1,
-            captured_at_ms: 1_700_000_000_000,
-            children,
-            total_cost_microdollars: Some(1),
-            failure_reason: None,
-            failure_class: None,
-        },
-    });
+    let snapshot = octet_agent::DelegationTelemetrySnapshot {
+        revision: 1,
+        captured_at_ms: 1_700_000_000_000,
+        children,
+        total_cost_microdollars: Some(1),
+        failure_reason: None,
+        failure_class: None,
+    };
+    publish_current_turn_roster(&mut shell, snapshot);
 
     let render = |shell: &InteractiveShell, width: u16| {
         shell
@@ -11603,20 +11829,19 @@ fn subagent_panel_keyboard_cycles_the_state_filter_and_the_row_ordering() {
     };
     // `beta` is the slow worker with few tokens, `alpha` the fast one with many,
     // so ordered by elapsed and ordered by tokens differ observably.
-    shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
-        snapshot: octet_agent::DelegationTelemetrySnapshot {
-            revision: 1,
-            captured_at_ms: 1_700_000_000_000,
-            children: vec![
-                child("alpha", "running", 100, 2_000),
-                child("beta", "running", 900, 10),
-                child("gamma", "completed", 500, 500),
-            ],
-            total_cost_microdollars: Some(1),
-            failure_reason: None,
-            failure_class: None,
-        },
-    });
+    let snapshot = octet_agent::DelegationTelemetrySnapshot {
+        revision: 1,
+        captured_at_ms: 1_700_000_000_000,
+        children: vec![
+            child("alpha", "running", 100, 2_000),
+            child("beta", "running", 900, 10),
+            child("gamma", "completed", 500, 500),
+        ],
+        total_cost_microdollars: Some(1),
+        failure_reason: None,
+        failure_class: None,
+    };
+    publish_current_turn_roster(&mut shell, snapshot);
     let rows = |shell: &InteractiveShell| {
         shell
             .state
@@ -11712,6 +11937,7 @@ fn subagent_panel_enter_opens_and_esc_closes() {
 #[test]
 fn extension_presentation_hides_terminal_subagent_activities() {
     let mut shell = InteractiveShell::test_shell();
+    shell.begin_run("fixture");
     let snapshot = |state: &str| -> octet_agent::ExtensionPresentationSnapshot {
         serde_json::from_value(serde_json::json!({
             "revision": 1,
@@ -11739,7 +11965,7 @@ fn extension_presentation_hides_terminal_subagent_activities() {
     assert!(shell.set_subagent_presentation(Some(&snapshot("running")), true));
     assert!(shell.state.borrow().subagent_activity.is_some());
     assert!(shell.state.borrow().subagent_activity_block.is_some());
-    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+    assert!(!shell_chrome(&shell.state.borrow(), 120, Instant::now())
         .subagents
         .is_empty());
 
@@ -11748,6 +11974,9 @@ fn extension_presentation_hides_terminal_subagent_activities() {
     assert!(shell.set_subagent_presentation(Some(&snapshot("succeeded")), true));
     assert!(shell.state.borrow().subagent_activity.is_some());
     assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
     let settled = shell
         .state
         .borrow()
@@ -14071,6 +14300,7 @@ fn provider_retry_auxiliary_activity_preserves_answer_and_compaction_phase() {
 #[test]
 fn provider_usage_uncertain_survives_success_settlement_and_resume() {
     let mut shell = InteractiveShell::test_shell();
+    shell.state.borrow_mut().price_display = PriceDisplay::Priced;
     let id = shell.begin_run("test");
     shell.on_run_event(id, &AgentEvent::ProviderUsageUncertain);
     shell.on_run_event(
@@ -14102,11 +14332,12 @@ fn provider_usage_uncertain_survives_success_settlement_and_resume() {
         },
     );
     let footer = plain_footer(&shell, 120, Instant::now());
-    assert!(footer.contains("subtotal"), "{footer}");
-    assert!(footer.contains("+ ?"), "{footer}");
+    assert!(footer.contains("$0.0042"), "{footer}");
+    assert!(!footer.contains("subtotal") && !footer.contains('?'), "{footer}");
+    assert!(shell.state.borrow().usage_uncertain);
     let telemetry = status_telemetry::status_telemetry(&shell.state.borrow(), Instant::now());
-    assert!(telemetry.contains("totals unknown"));
-    assert!(telemetry.contains("Session subtotal"));
+    assert!(telemetry.contains("Session cost   $0.004200"));
+    assert!(!telemetry.contains("subtotal") && !telemetry.contains("unknown"));
     assert!(!telemetry.contains("(exact)"));
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("uncertain.jsonl");
@@ -14123,7 +14354,9 @@ fn provider_usage_uncertain_survives_success_settlement_and_resume() {
         .hydrate(&octet_agent::Session::open(&path).unwrap())
         .unwrap();
     assert!(shell.state.borrow().usage_uncertain);
-    assert!(plain_footer(&shell, 120, Instant::now()).contains("usage/cost unknown"));
+    let resumed_footer = plain_footer(&shell, 120, Instant::now());
+    assert!(!resumed_footer.contains("usage/cost unknown"), "{resumed_footer}");
+    assert!(shell.state.borrow().usage_uncertain);
     shell.begin_run("test");
     assert!(
         shell.state.borrow().usage_uncertain,
@@ -14138,16 +14371,19 @@ fn provider_usage_uncertain_survives_success_settlement_and_resume() {
 }
 
 #[test]
-fn provider_usage_uncertain_never_infers_zero_from_pricing() {
+fn provider_usage_uncertain_is_retained_with_configured_zero_price_display() {
     let mut shell = InteractiveShell::test_shell();
     shell.state.borrow_mut().price_display = PriceDisplay::ExplicitZero;
     let id = shell.begin_run("test");
     shell.on_run_event(id, &AgentEvent::ProviderUsageUncertain);
     let footer = plain_footer(&shell, 120, Instant::now());
-    assert!(footer.contains("usage/cost unknown"), "{footer}");
-    assert!(!footer.contains("$0"));
+    assert!(footer.contains("$0"), "{footer}");
+    assert!(!footer.contains("unknown"), "{footer}");
     let telemetry = status_telemetry::status_telemetry(&shell.state.borrow(), Instant::now());
-    assert!(!telemetry.contains("$0"));
+    assert!(telemetry.contains("$0 (configured zero-priced)"), "{telemetry}");
+    assert!(shell.state.borrow().usage_uncertain);
+    assert_eq!(shell.state.borrow().session_cost_microdollars, None);
+    assert!(!shell.state.borrow().run_cost_available);
     for width in [46, 80, 120] {
         let frame = render_shell(&shell.state.borrow(), width);
         assert!(frame

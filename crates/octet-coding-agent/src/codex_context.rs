@@ -513,7 +513,9 @@ pub fn resolve_codex_context_window(
     user_override: CodexContextOverride,
 ) -> Result<CodexContextWindow, CodexContextWindowError> {
     let working = working_context_window(model_id);
-    let entitled_max = entitled_max_context_window(model_id);
+    // The checked-in family ceiling is only a fallback, never authority to
+    // exceed the authenticated backend's advertised entitlement.
+    let entitled_max = entitled_max_context_window(model_id).min(discovered_max_context_window);
     let requested = if tier.selects_max_context_window() {
         discovered_max_context_window
     } else {
@@ -658,6 +660,36 @@ mod tests {
         assert_eq!(reporter.observe(None), None);
         assert_eq!(reporter.observe(Some(clamp.clone())), Some(clamp.clone()));
         assert_eq!(reporter.observe(Some(clamp)), None);
+    }
+
+    #[test]
+    fn live_discovery_bounds_acknowledged_overrides_below_the_family_table() {
+        let resolve = |override_| {
+            resolve_codex_context_window(
+                CODEX_ASTRA_MODEL_ID,
+                CodexContextTier::Extended,
+                CODEX_CONTEXT_WINDOW_CAP,
+                400_000,
+                None,
+                override_,
+            )
+        };
+        assert!(matches!(
+            resolve(CodexContextOverride::raising(500_000, true)),
+            Err(CodexContextWindowError::OverrideAboveEntitlement {
+                requested: 500_000,
+                entitled_max_context_window: 400_000,
+                ..
+            })
+        ));
+        let explicit = resolve(CodexContextOverride::raising(400_000, true)).unwrap();
+        assert_eq!(explicit.context_window, 400_000);
+        assert_eq!(explicit.entitled_max_context_window, 400_000);
+        assert!(explicit.has_uncertain_usage);
+        let default = resolve(CodexContextOverride::NONE).unwrap();
+        assert_eq!(default.context_window, CODEX_CONTEXT_WINDOW_CAP);
+        assert!(!default.has_uncertain_usage);
+        assert!(default.clamp.is_some());
     }
 
     #[test]
