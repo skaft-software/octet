@@ -389,4 +389,3 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
       └───┘           └───┘
       flowchart LR\n  subgraph S\n  A --> B\n  end =>
       Err "dropped, line 2: `subgraph` statements are not supported"
-
