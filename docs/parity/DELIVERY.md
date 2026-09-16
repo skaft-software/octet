@@ -65,6 +65,12 @@ during compilation; the final library receipt was taken after those edits settle
 
 ## Other observed checks
 
+- Final resource-embedding tests passed (28), and the refusal fixture passed after
+  preserving its SSE event delimiter with a trailing comment. These are reruns,
+  not additional tests in the aggregate counts above.
+- A committed-source archive was produced and inspected: generated build trees
+  are absent and all three importer entrypoints retain executable modes. This
+  qualifies source packaging, not the API 0.3 extension release packager.
 - Generated API 0.3 and Pi provider-compatibility `--check` gates passed. Final
   packaged-docs gate passed for 453 public files and 43 extra references, including
   producer-byte, relative-link and negative-boundary checks (`packaged-docs-final`).
@@ -116,7 +122,7 @@ preserved outside Cargo discovery in `/tmp/octet-final/scratch-tests`.
 
 The sole build supervisor checks free space and stops its owned process group
 below 25 GiB. Serve shares the root target, build jobs are capped at two, and
-incremental/debug artifacts are disabled. At final verification about **110 GiB
-was free**, with the shared target approximately 6 GiB. Source, Git history/index,
+incremental/debug artifacts are disabled. At final verification about **108 GiB
+was free**, with the shared target approximately 7 GiB. Source, Git history/index,
 credentials, sessions and test evidence were not deleted. No install replaced the
 running assistant binary.

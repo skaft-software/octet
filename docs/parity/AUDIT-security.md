@@ -267,4 +267,3 @@ Residual unknowns (each with the missing precondition):
   workers' in-flight edits at audit time: first `tui/view/reasoning_render.rs`, later
   `AgentEvent::UserMessage`/`FinishReason`/`DelegationTelemetrySnapshot`); the stub probes above are the primary
   evidence for Surface 9. The profile `credential_source` location remains UNVERIFIED for lack of a reachable IMDS.
-

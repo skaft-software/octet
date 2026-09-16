@@ -61,4 +61,3 @@ wall-clock timings still vary per run and host, so the recorded numbers are one 
 - Sanitization: nonessential CPU brand string omitted; measured samples, thresholds and limits unchanged.
 - Nothing here approves a release or claims production lazy activation, cross-workspace
   sharing, reload policy, FD limits or multi-session governance.
-
