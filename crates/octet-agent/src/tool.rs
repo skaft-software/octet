@@ -494,6 +494,7 @@ pub struct ToolProgressSink {
     tx: mpsc::Sender<ToolProgress>,
     dropped_bytes: Arc<AtomicU64>,
     dropped_events: Arc<AtomicU64>,
+    invocation: Option<crate::tools::durability::InvocationHandle>,
 }
 
 impl ToolProgressSink {
@@ -505,6 +506,7 @@ impl ToolProgressSink {
             tx,
             dropped_bytes: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
+            invocation: None,
         }
     }
 
@@ -525,7 +527,16 @@ impl ToolProgressSink {
             tx,
             dropped_bytes: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
+            invocation: None,
         }
+    }
+
+    pub(crate) fn with_invocation(
+        mut self,
+        invocation: crate::tools::durability::InvocationHandle,
+    ) -> Self {
+        self.invocation = Some(invocation);
+        self
     }
 
     /// Emit a stdout or stderr chunk. Non‑blocking; drops silently when
@@ -727,6 +738,14 @@ pub struct ToolContext<'a> {
 }
 
 impl ToolContext<'_> {
+    /// Session-backed, invocation-scoped replay memos and partial output.
+    /// Absent outside agent-dispatched calls (for example standalone tool tests).
+    /// Successful writes are synced before returning; partial output is never
+    /// evidence that an effect completed.
+    pub fn invocation(&self) -> Option<&crate::tools::durability::InvocationHandle> {
+        self.progress.invocation.as_ref()
+    }
+
     /// Resolves an existing local path. Relative paths use the workspace as
     /// their base; hosts that enable trusted-local access may also use absolute
     /// paths, `~/…`, parent components, and external symlinks.

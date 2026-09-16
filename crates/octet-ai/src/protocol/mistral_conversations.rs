@@ -168,7 +168,7 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     if let Some(temperature) = req.temperature {
         args.insert("temperature".into(), json!(temperature));
     }
-    if let Some(max_tokens) = req.max_output_tokens {
+    if let Some(max_tokens) = crate::effective_output_token_cap(model, req.max_output_tokens) {
         args.insert("max_tokens".into(), json!(max_tokens));
     }
     if !req.stop.is_empty() {

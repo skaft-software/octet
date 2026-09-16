@@ -18,6 +18,7 @@ use octet_ai::{
 fn fixture_model(base_url: &str) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            preset: Default::default(),
             id: ModelId("gemini-current-fixture".to_owned()),
             api_name: "gemini-2.5-flash".to_owned(),
             display_name: Some("Gemini current fixture".to_owned()),

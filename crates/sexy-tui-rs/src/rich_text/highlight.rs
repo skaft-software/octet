@@ -8,13 +8,7 @@ use syntect::util::LinesWithEndings;
 
 use crate::style::TextRole;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HighlightedRegion {
-    pub text: String,
-    pub role: Option<TextRole>,
-}
-
-pub(crate) type HighlightedLine = Vec<HighlightedRegion>;
+pub(crate) use super::{HighlightedLine, HighlightedRegion};
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();

@@ -32,6 +32,8 @@ pub(crate) enum StaticReasoningMode {
     Adaptive { off: bool, xhigh: bool },
     GoogleBudget { off: bool },
     GoogleLevels { pro: bool },
+    MistralEffort,
+    MistralPrompt,
 }
 
 /// Static model metadata used by multi-protocol providers.
@@ -1160,7 +1162,7 @@ pub const MISTRAL_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ),
+    ).with_reasoning_mode(StaticReasoningMode::MistralPrompt),
     StaticModelPreset::new(
         "mistral-large-latest",
         "Mistral Large",
@@ -1180,7 +1182,7 @@ pub const MISTRAL_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ),
+    ).with_reasoning_mode(StaticReasoningMode::MistralEffort),
     StaticModelPreset::new(
         "pixtral-large-latest",
         "Pixtral Large",

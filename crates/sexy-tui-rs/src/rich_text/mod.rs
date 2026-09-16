@@ -16,6 +16,83 @@ pub(crate) mod highlight;
 
 use crate::style::{TextRole, TextStyle};
 
+/// One source region classified with a backend-independent syntax role.
+/// Text is unescaped source, never trusted HTML/ANSI; each consumer must escape
+/// it for its output boundary. `None` means ordinary code text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HighlightedRegion {
+    pub text: String,
+    pub role: Option<TextRole>,
+}
+
+/// Regions in one source line, excluding its newline. A trailing newline is
+/// represented by a final empty line, so joining lines preserves source shape.
+pub type HighlightedLine = Vec<HighlightedRegion>;
+
+/// Classify bounded source using the same semantic highlighter as the terminal
+/// renderer. Returns `None` for unknown languages, disabled syntax highlighting,
+/// parse errors, or exceeded limits (64 KiB source, 8 KiB per line, 4096 lines,
+/// 128-byte language label). Fall back to escaped literal source in that case.
+/// This function generates no styles, terminal escapes, or HTML.
+pub fn highlight_code(code: &str, language: &str) -> Option<Vec<HighlightedLine>> {
+    if code.len() > 64 * 1024 || language.len() > 128 {
+        return None;
+    }
+    let mut lines = 0;
+    for line in code.split('\n') {
+        lines += 1;
+        if lines > 4096 || line.len() > 8 * 1024 {
+            return None;
+        }
+    }
+    #[cfg(feature = "syntax-highlighting")]
+    {
+        highlight::highlight(code, language)
+    }
+    #[cfg(not(feature = "syntax-highlighting"))]
+    {
+        None
+    }
+}
+
+#[cfg(test)]
+mod public_highlight_tests {
+    use super::*;
+
+    #[test]
+    fn public_highlighter_limits_and_unknown_language_fall_back() {
+        assert!(highlight_code(&"x".repeat(64 * 1024 + 1), "rust").is_none());
+        assert!(highlight_code(&"x".repeat(8 * 1024 + 1), "rust").is_none());
+        assert!(highlight_code(&"x\n".repeat(4096), "rust").is_none());
+        assert!(highlight_code("x", &"x".repeat(129)).is_none());
+        assert!(highlight_code("<script>", "not-a-language").is_none());
+    }
+
+    #[test]
+    fn public_highlighter_is_semantic_and_preserves_unescaped_source() {
+        let source = "// <script>&\nlet x = 3;\n";
+        let output = highlight_code(source, "rust");
+        #[cfg(feature = "syntax-highlighting")]
+        {
+            let output = output.unwrap();
+            assert_eq!(
+                output
+                    .iter()
+                    .map(|line| line.iter().map(|r| r.text.as_str()).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                source
+            );
+            assert!(output
+                .iter()
+                .flatten()
+                .any(|r| r.role == Some(TextRole::SyntaxComment)));
+        }
+        #[cfg(not(feature = "syntax-highlighting"))]
+        assert!(output.is_none());
+    }
+}
+
 /// A semantic document.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Document {

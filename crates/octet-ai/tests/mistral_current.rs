@@ -42,6 +42,7 @@ fn fixture_auth() -> Auth {
 fn fixture_model(base_url: &str, auth: Auth) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            preset: Default::default(),
             id: ModelId("mistral-current-fixture".to_owned()),
             api_name: "mistral-fixture".to_owned(),
             display_name: None,

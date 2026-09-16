@@ -5,7 +5,8 @@ use super::transcript_render::{
     render_assistant_update_planned, render_block_planned_with_rainbow,
 };
 use super::welcome_card::render_welcome_card;
-use super::ShellState;
+use super::{ShellState, TranscriptBlock};
+use sexy_tui_rs::text_editor::{PromptZone, PromptZones};
 
 /// Final block-local geometry shared by transcript rendering and semantic
 /// selection. Decorative rows and columns never enter copy offsets.
@@ -42,6 +43,8 @@ pub(super) struct RenderedTranscriptBlock {
 pub(super) struct TranscriptCache {
     pub(super) width: Option<u16>,
     pub(super) lines: Vec<String>,
+    pub(super) prompt_zones: PromptZones,
+    prompt_zones_generation: Option<u64>,
     /// Whether the cached welcome prefix was rendered while an overlay was
     /// active. Overlays suppress that prefix without changing transcript
     /// blocks, so this is part of cache staleness rather than a block revision.
@@ -102,6 +105,8 @@ impl Default for TranscriptCache {
         Self {
             width: None,
             lines: Vec::new(),
+            prompt_zones: PromptZones::default(),
+            prompt_zones_generation: None,
             welcome_overlay_active: false,
             block_starts: Vec::new(),
             block_lengths: Vec::new(),
@@ -144,7 +149,41 @@ fn replace_welcome_prefix(
 }
 
 impl ShellState {
+    pub(super) fn prompt_jump_target(&self, row: usize, forward: bool) -> Option<usize> {
+        let mut cache = self.transcript_cache.borrow_mut();
+        // Navigation builds this lazily: streamed tokens must not add an O(history)
+        // pass to the existing block-local render path.
+        if cache.prompt_zones_generation != Some(cache.generation) {
+            // Boundaries come from semantic blocks and the same width/revision
+            // cache as the rows. Host text containing OSC133 cannot forge jumps.
+            cache.prompt_zones = PromptZones::from_boundaries(
+                cache.lines.len(),
+                self.transcript
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, block)| {
+                        let geometry = cache.block_geometries[index];
+                        let row = cache.block_starts[index]
+                            + geometry.transition_rows
+                            + geometry.leading_rows;
+                        let zones: &[PromptZone] = match block {
+                            TranscriptBlock::User { .. } => {
+                                &[PromptZone::PromptStart, PromptZone::CommandStart]
+                            }
+                            TranscriptBlock::Assistant(_) => &[PromptZone::OutputStart],
+                            _ => &[],
+                        };
+                        zones.iter().copied().map(move |zone| (row, zone))
+                    }),
+            );
+
+            cache.prompt_zones_generation = Some(cache.generation);
+        }
+        cache.prompt_zones.jump(row, forward)
+    }
+
     pub(super) fn rendered_transcript(&self, width: u16) -> Ref<'_, Vec<String>> {
+        let width = self.transcript_content_width(width);
         let stale = {
             let cache = self.transcript_cache.borrow();
             cache.dirty
@@ -369,6 +408,8 @@ mod tests {
         let mut cache = TranscriptCache {
             width: Some(80),
             lines: vec!["old 1".into(), "old 2".into(), "history".into()],
+            prompt_zones: PromptZones::default(),
+            prompt_zones_generation: None,
             welcome_overlay_active: false,
             block_starts: vec![2],
             block_lengths: vec![1],

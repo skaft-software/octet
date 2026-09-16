@@ -94,6 +94,8 @@ async fn post_mutation_sdk_round_trip_validates_subsets_and_deduplicates_across_
             PostMutationRescan {
                 extension: "hook-fixture".into(),
                 mutation_id: "mutation:commit".into(),
+                kind: PostMutationKind::Configuration,
+                process_generation: 1,
                 generation: 7,
                 resource_ids: vec!["resource:settings".into()],
             }
@@ -341,8 +343,8 @@ async fn product_drain_drops_out_of_scope_and_stale_rescans_with_bounded_diagnos
         "hook-fixture",
     ));
 
-    // A configuration mutation names a non-extension resource: the request is
-    // admitted, then dropped at re-resolution because no running owner matches.
+    // A configuration mutation uses its resource revision, not the requesting
+    // process generation; an unbound file remains a content-free refusal.
     let before = extensions.processes[0].health_snapshot().generation;
     let admitted = extensions
         .notify_post_mutation(mutation("mutation:settings", PostMutationState::Committed))
@@ -350,7 +352,7 @@ async fn product_drain_drops_out_of_scope_and_stale_rescans_with_bounded_diagnos
     assert_eq!(admitted.len(), 1);
     assert_eq!(
         extensions.drain_post_mutation_rescans(),
-        ["warning: discarded stale or unavailable post_mutation resource rescan"]
+        ["warning: rescan of resource:settings unavailable or invalid; active configuration unchanged"]
     );
     assert!(extensions.take_post_mutation_rescans().is_empty());
     assert_eq!(extensions.processes.len(), 1);
@@ -369,7 +371,7 @@ async fn product_drain_drops_out_of_scope_and_stale_rescans_with_bounded_diagnos
     extensions.shutdown().await;
     assert_eq!(
         extensions.drain_post_mutation_rescans(),
-        ["warning: discarded stale or unavailable post_mutation resource rescan"]
+        ["warning: discarded stale post_mutation requesting process"]
     );
     assert!(extensions.take_post_mutation_rescans().is_empty());
     assert!(extensions.processes.is_empty());
@@ -394,5 +396,137 @@ async fn product_drain_fails_closed_without_a_bound_discovery_configuration() {
     assert!(extensions.take_post_mutation_rescans().is_empty());
     // An empty queue is not a diagnostic.
     assert!(extensions.drain_post_mutation_rescans().is_empty());
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn committed_configuration_and_completed_rollback_notify_once_and_rescan_without_applying_trust(
+) {
+    let root = tempfile::tempdir().unwrap();
+    let mut extensions = fixture(root.path(), "valid", false).await;
+    extensions.rescan_config = Some(super::tests::executable_extension_config(
+        root.path(),
+        root.path(),
+        "hook-fixture",
+    ));
+    let path = root.path().join("settings.toml");
+    extensions.rescan_global_config = Some(path.clone());
+    let committed = b"model = 'gpt-4o-mini'\ntrusted_extensions = ['never-apply-me']\n";
+    octet_agent::secure_fs::write_atomic_if_unchanged(&path, None, committed, 1024 * 1024).unwrap();
+    let requests = extensions
+        .notify_configuration_changed("configuration:commit", 7, PostMutationState::Committed)
+        .await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].generation, 7);
+    assert_eq!(requests[0].process_generation, 1);
+    assert!(extensions
+        .notify_configuration_changed("configuration:commit", 7, PostMutationState::Committed)
+        .await
+        .is_empty());
+    assert_eq!(
+        extensions.drain_post_mutation_rescans(),
+        ["rescanned resource:settings (generation 7); active configuration unchanged"]
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap().as_slice(),
+        committed.as_slice()
+    );
+    assert!(extensions
+        .rescan_config
+        .as_ref()
+        .unwrap()
+        .trusted_extensions
+        .is_empty());
+
+    let restored = b"model = 'gpt-4o'\n";
+    octet_agent::secure_fs::write_atomic_if_unchanged(
+        &path,
+        Some(committed),
+        restored,
+        1024 * 1024,
+    )
+    .unwrap();
+    extensions
+        .notify_configuration_changed("configuration:rollback", 8, PostMutationState::RolledBack)
+        .await;
+    assert_eq!(
+        extensions.drain_post_mutation_rescans(),
+        ["rescanned resource:settings (generation 8); active configuration unchanged"]
+    );
+    let log = std::fs::read_to_string(root.path().join("hooks.jsonl")).unwrap();
+    let records: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records[0]["payload"]["affected_resources"],
+        serde_json::json!(["resource:settings"])
+    );
+    assert_eq!(records[1]["payload"]["state"], "rolled_back");
+    assert!(!log.contains("never-apply-me"));
+    assert!(!log.contains("settings.toml"));
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn migration_family_rescans_are_revision_fenced_private_and_no_follow() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let mut extensions = fixture(root.path(), "valid", false).await;
+    extensions.rescan_config = Some(super::tests::executable_extension_config(
+        root.path(),
+        root.path(),
+        "hook-fixture",
+    ));
+    let config = root.path().join("config.toml");
+    std::fs::write(&config, "model = 'gpt-4o'\n").unwrap();
+    extensions.rescan_global_config = Some(config.clone());
+    let mcp = root.path().join("mcp.json");
+    octet_agent::secure_fs::write_private_atomic_if_unchanged(
+        &mcp,
+        None,
+        br#"{"version":1,"servers":{}}"#,
+        256 * 1024,
+    )
+    .unwrap();
+    for generation in [41, 42] {
+        extensions
+            .notify_migration_ingested(
+                format!("migration:n{generation}"),
+                ["resource:settings".into(), "resource:mcp".into()],
+                generation,
+                PostMutationState::Committed,
+            )
+            .await;
+    }
+    let messages = extensions.drain_post_mutation_rescans();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.contains("stale post_mutation resource generation"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.starts_with("rescanned "))
+            .count(),
+        2
+    );
+    assert!(messages
+        .iter()
+        .filter(|message| message.starts_with("rescanned "))
+        .all(|message| message.contains("generation 42")));
+    std::fs::remove_file(&config).unwrap();
+    symlink(&mcp, &config).unwrap();
+    extensions
+        .notify_configuration_changed("configuration:symlink", 43, PostMutationState::Committed)
+        .await;
+    assert_eq!(extensions.drain_post_mutation_rescans(), ["warning: rescan of resource:settings unavailable or invalid; active configuration unchanged"]);
+    let log = std::fs::read_to_string(root.path().join("hooks.jsonl")).unwrap();
+    assert!(!log.contains("config.toml"));
+    assert!(!log.contains("mcp.json"));
     extensions.shutdown().await;
 }

@@ -66,11 +66,11 @@ pub use batch::{
     OpenRouterBatchRequest, OpenRouterBatchRequestCounts, OpenRouterBatchRequestItem,
     OpenRouterBatchResponse, OpenRouterBatchResult, OpenRouterBatchUsage,
 };
-pub use catalog::{AuthConfig, CatalogConfig, EndpointConfig, Model, ModelCatalog, ModelConfig};
+pub use catalog::{effective_output_token_cap, AuthConfig, CatalogConfig, EndpointConfig, Model, ModelCatalog, ModelConfig};
 pub use client::{AiClient, PendingResponsesCompact};
 pub use declarations::proxy::{proxy_env_value, resolve_http_proxy, ProxyError};
 pub use declarations::{
-    ChatTemplateValue, ChatTemplateVariable, DeclarationError, ModelPreset,
+    AzureRequestOptions, ChatTemplateValue, ChatTemplateVariable, DeclarationError, MistralReasoningProfile, ModelPreset,
     ProviderCredentialPreset, RequestOverrides, ThinkingFormat, ThinkingSelection,
     ThinkingTokenBudgetField, ThinkingVariable,
 };
@@ -81,7 +81,9 @@ pub use error::{
 };
 pub use host_transport::{HostStreamModel, HostStreamTransport};
 pub use mime::Mime;
-pub use pricing::{Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR};
+pub use pricing::{
+    responses_cost_of, Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR,
+};
 pub use responses::{
     ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest, ResponsesCompactResponse,
     ResponsesInput, ResponsesItem, ResponsesItemError, ResponsesOptions, ResponsesOutput,

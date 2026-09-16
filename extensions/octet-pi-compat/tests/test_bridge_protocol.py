@@ -118,6 +118,40 @@ class CompatibilityProfileTests(unittest.TestCase):
 
 @unittest.skipUnless(NODE, "node is required for the Pi compatibility subprocess tests")
 class BridgeProtocolTests(unittest.TestCase):
+    def test_fake_dependency_is_staged_only_in_disposable_runtime(self) -> None:
+        def source_snapshot() -> dict[str, bytes]:
+            return {
+                str(path.relative_to(FIXTURES)): path.read_bytes()
+                for root in (FAKE_PI, FIXTURES / "fake-pi-ai")
+                for path in root.rglob("*") if path.is_file()
+            }
+
+        before = source_snapshot()
+        self.assertFalse(list(FIXTURES.rglob("node_modules")))
+        with BridgeProcess() as bridge:
+            runtime = bridge.pi_package
+            self.assertFalse(runtime.is_relative_to(FIXTURES))
+            self.assertTrue((runtime / "node_modules/@earendil-works/pi-ai/index.js").is_file())
+            bridge.initialize()
+            response = bridge.request("tool/call", {"name": "fixture_echo", "arguments": {"value": "staged"}})
+            self.assertEqual("staged", response["result"]["content"][0]["text"])
+            self.assertEqual(before, source_snapshot())
+            self.assertFalse(list(FIXTURES.rglob("node_modules")))
+        self.assertFalse(runtime.exists())
+        self.assertEqual(before, source_snapshot())
+        self.assertFalse(list(FIXTURES.rglob("node_modules")))
+
+    def test_explicit_package_is_never_injected_with_fake_validator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "pi-package"
+            shutil.copytree(FAKE_PI, package)
+            with BridgeProcess(pi_package=package) as bridge:
+                self.assertEqual(package, bridge.pi_package)
+                response = bridge.request("initialize", {})
+                self.assertIn("pi-ai", response["error"]["message"])
+            self.assertTrue(package.is_dir())
+            self.assertFalse((package / "node_modules").exists())
+
     def test_staged_entrypoint_loads_helpers_from_host_package_directory(self) -> None:
         package = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temporary:
@@ -503,25 +537,74 @@ class BridgeProtocolTests(unittest.TestCase):
             self.assertNotIn("error", state)
 
     def test_explicit_runtime_selector_rejects_an_unpinned_pi_version(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "package.json").write_text(
-                json.dumps(
-                    {
-                        "name": "@earendil-works/pi-coding-agent",
-                        "version": "0.85.0",
-                        "type": "module",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with BridgeProcess(pi_package=root) as bridge:
-                response = bridge.request(
-                    "initialize",
-                    {"workspace": str(root), "host": {}, "protocol": {"optional_features": []}},
+        for version in ("0.85.0", "0.85.1"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "package.json").write_text(
+                    json.dumps(
+                        {
+                            "name": "@earendil-works/pi-coding-agent",
+                            "version": version,
+                            "type": "module",
+                        }
+                    ),
+                    encoding="utf-8",
                 )
-                self.assertEqual(-32000, response["error"]["code"])
-                self.assertIn("expected exactly 0.84.4", response["error"]["message"])
+                with BridgeProcess(pi_package=root) as bridge:
+                    response = bridge.request(
+                        "initialize",
+                        {"workspace": str(root), "host": {}, "protocol": {"optional_features": []}},
+                    )
+                    self.assertEqual(-32000, response["error"]["code"])
+                    self.assertIn("expected exactly 0.84.4", response["error"]["message"])
+
+    def test_invalid_tool_arguments_never_reach_execution_in_either_wire(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            for value in ({"value": {"not": "coercible"}}, {"value": "ok", "unexpected": True}):
+                with self.subTest(api_version=api_version, value=value):
+                    with BridgeProcess(api_version=api_version, fixture_mode="validation") as bridge:
+                        bridge.initialize()
+                        params = {"name": "fixture_echo", "arguments": value}
+                        if api_version == "0.3":
+                            params = {"name": "pi", "arguments": {"tool_name": "fixture_echo", "arguments": value}, "context": {}}
+                        response = bridge.request("tool/call", params)
+                        self.assertIn("error", response)
+                    self.assertFalse(any("fixture tool console output" in line for line in bridge.stderr))
+
+    def test_pi_validator_coercion_and_argument_preparation_precede_execution(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            for mode, value, expected in (("validation", {"value": 123}, "123"),
+                                          ("prepared-input", {"raw": "prepared"}, "prepared"),
+                                          ("prepared-input", {"raw": "invalid"}, None)):
+                with self.subTest(api_version=api_version, mode=mode, value=value):
+                    with BridgeProcess(api_version=api_version, fixture_mode=mode) as bridge:
+                        bridge.initialize()
+                        params = {"name": "fixture_echo", "arguments": value}
+                        if api_version == "0.3":
+                            params = {"name": "pi", "arguments": {"tool_name": "fixture_echo", "arguments": value}, "context": {}}
+                        response = bridge.request("tool/call", params)
+                        if expected is None:
+                            self.assertIn("error", response)
+                        else:
+                            self.assertEqual(expected, response["result"]["content"][0]["text"])
+                    if expected is None:
+                        self.assertFalse(any("fixture tool console output" in line for line in bridge.stderr))
+                    if mode == "validation":
+                        self.assertIn("fixture execution input type: string", bridge.stderr)
+
+    def test_invalid_hook_mutation_is_revalidated_before_execution(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version):
+                with BridgeProcess(api_version=api_version, fixture_mode="invalid-hook-input") as bridge:
+                    bridge.initialize()
+                    if api_version == "0.2":
+                        response = bridge.request("hook/run", {"hook": "before_tool_call",
+                                                              "payload": {"name": "fixture_echo", "arguments": {"value": "safe"}}})
+                    else:
+                        response = bridge.request("tool/call", {"name": "pi", "arguments": {
+                            "tool_name": "fixture_echo", "arguments": {"value": "safe"}}, "context": {}})
+                    self.assertIn("error", response)
+                self.assertFalse(any("fixture tool console output" in line for line in bridge.stderr))
 
     def test_explicit_runtime_selector_bounds_package_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -640,6 +723,85 @@ class BridgeProtocolTests(unittest.TestCase):
                     declared = manifest is not None and "extensions" in manifest.get("pi", {})
                     self.assertEqual(not declared, (root / "index.js").exists())
                     self.assertEqual(declared, (root / "selected.js").exists())
+
+    def test_declared_mjs_directory_fixture_keeps_exact_source_provenance(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                source = root / "pi-source"
+                (source / "nested").mkdir(parents=True)
+                (source / "node_modules/ignored").mkdir(parents=True)
+                state = source / "nested/state.json"
+                state.write_text('{"ok":true}\n', encoding="utf-8")
+                marker = root / "entrypoint-loaded"
+                (source / "index.mjs").write_text(
+                    'import { appendFileSync } from "node:fs";\n'
+                    f'appendFileSync({json.dumps(str(marker))}, "loaded\\n");\n'
+                    'export default function fixtureExtension() {}\n', encoding="utf-8",
+                )
+                (source / "node_modules/ignored/index.js").write_text(
+                    "throw new Error('excluded dependency must never execute');\n", encoding="utf-8",
+                )
+                # index.mjs is not Pi's implicit index.ts/index.js fallback.
+                with BridgeProcess(extension=source, strict_identity=True, api_version=api_version) as bridge:
+                    response = bridge.request("initialize", bridge.initialization_params())
+                    expected = "no enabled extension entrypoints" if api_version == "0.2" else "internal error"
+                    self.assertIn(expected, response["error"]["message"])
+                self.assertFalse(marker.exists())
+                (source / "package.json").write_text(
+                    '{"name":"pi-host-integration-fixture","version":"1.0.0","type":"module",'
+                    '"pi":{"extensions":["./index.mjs"]}}', encoding="utf-8",
+                )
+                with BridgeProcess(extension=source, strict_identity=True, api_version=api_version) as bridge:
+                    bridge.initialize()
+                self.assertEqual("loaded\n", marker.read_text())
+                with BridgeProcess(extension=source, strict_identity=True, api_version=api_version) as bridge:
+                    state.write_text('{"ok":false}\n', encoding="utf-8")
+                    response = bridge.request("initialize", bridge.initialization_params())
+                    expected = "changed after link publication" if api_version == "0.2" else "internal error"
+                    self.assertIn(expected, response["error"]["message"])
+                self.assertEqual("loaded\n", marker.read_text())
+
+    def test_one_pinned_package_can_load_multiple_unchanged_entrypoints_in_order(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                source = root / "source"
+                source.mkdir()
+                (source / "package.json").write_text(json.dumps({"pi": {"extensions": ["second.js", "first.js"]}}))
+                marker = root / "order"
+                before = {}
+                for name in ("first.js", "second.js"):
+                    before[name] = ('import { appendFileSync } from "node:fs";\n'
+                                    f'appendFileSync({json.dumps(str(marker))}, "{name}\\n");\n'
+                                    'export default function () {}\n')
+                    (source / name).write_text(before[name])
+                with BridgeProcess(extension=source, strict_identity=True, api_version=api_version) as bridge:
+                    response = bridge.request("initialize", bridge.initialization_params())
+                    self.assertNotIn("error", response)
+                    bridge.initialized = True
+                self.assertEqual("second.js\nfirst.js\n", marker.read_text())
+                self.assertEqual(before, {name: (source / name).read_text() for name in before})
+
+    def test_manifest_cannot_execute_an_entrypoint_outside_the_pinned_file_domain(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            for location in ("../unreviewed.js", "absolute", "node_modules/unreviewed.js", ".git/unreviewed.js"):
+                with self.subTest(api_version=api_version, location=location), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    source = root / "source"
+                    source.mkdir()
+                    entry = root / "unreviewed.js" if location == "absolute" else source / location
+                    entry.parent.mkdir(parents=True, exist_ok=True)
+                    marker = root / "unreviewed-executed"
+                    entry.write_text('import { writeFileSync } from "node:fs";\n'
+                                     f'writeFileSync({json.dumps(str(marker))}, "executed");\n'
+                                     'export default function () {}\n')
+                    declared = str(entry) if location == "absolute" else location
+                    (source / "package.json").write_text(json.dumps({"pi": {"extensions": [declared]}}))
+                    with BridgeProcess(extension=source, strict_identity=True, api_version=api_version) as bridge:
+                        response = bridge.request("initialize", bridge.initialization_params())
+                        self.assertIn("error", response)
+                    self.assertFalse(marker.exists(), "unreviewed entrypoint executed before integrity rejection")
 
     def test_strict_aggregate_preserves_load_order_shared_globals_and_restart_state(self) -> None:
         sources = [FIXTURES / "aggregate" / "first.mjs", FIXTURES / "aggregate" / "second.mjs"]
@@ -984,6 +1146,20 @@ class Api03ProviderBridgeTests(unittest.TestCase):
                     "initialize", bridge.initialization_params(contract=contract)
                 )
                 self.assertEqual(-32011, response["error"]["code"])
+
+    def test_api_03_typed_bus_offer_does_not_expand_pi_event_bus_authority(self) -> None:
+        with BridgeProcess(api_version="0.3") as bridge:
+            selected = bridge.initialize(contract=v03_contract(providers=False))["contract"]
+            self.assertNotIn("event_bus", selected["capabilities"])
+            self.assertFalse(any(method.startswith("bus/") for method in selected["methods"]))
+            response = bridge.request("bus/event", {"topic": "unselected"})
+            self.assertEqual(-32601, response["error"]["code"])
+            self.assertFalse(any(message.get("method", "").startswith("bus/") for message in bridge.messages))
+        with BridgeProcess(api_version="0.3") as bridge:
+            contract = v03_contract(providers=False)
+            contract["optional_capabilities"].remove("event_bus")
+            response = bridge.request("initialize", bridge.initialization_params(contract=contract))
+            self.assertEqual(-32011, response["error"]["code"])
 
     def test_api_03_selects_host_owned_provider_catalog_and_auth(self) -> None:
         bridge, catalog_requests, auth_requests = self.provider_bridge()

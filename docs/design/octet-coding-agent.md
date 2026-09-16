@@ -343,14 +343,13 @@ remain disabled; the appearance selector is not a theme loader. See
   sorting, current/all-workspace scopes, rename, and recoverable trash.
 - `/fork` — fork from a selected user message (or the whole current conversation)
   and prefill that message in the new session; `/clone` forks at the current head.
-- `/tree`, `/checkout <entry-id>` — inspect durable entries and switch branches.
 - `/name [name]`, `/export [path]` — name and safely export the current session.
 - `/prompt [name] [arguments]` — inspect or expand prompt templates.
 - `/skills search|load|reload|off ...` — inspect, invoke, reload, or deactivate skills; TUI load-prefill does not establish durable activation.
 - `/extensions [status|reload]` — interactively enable/disable managed executable bundles, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped.
 - `/subagents` — when supplied by the enabled `octet-subagents` package, navigate workers with arrow keys and open owner-authorized read-only transcripts with Enter.
 - `/help [command]` — show local command help and octet self-documentation.
-- `/status`, `/quit` — product status and lifecycle controls.
+- `/status`, `/exit` — product status and lifecycle controls.
 
 The top-level `octet doctor` command performs read-mostly prerequisite, provider,
 and model-visibility checks without constructing an Agent or starting executable

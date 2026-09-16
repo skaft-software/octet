@@ -66,12 +66,10 @@ use crate::tool::{
     ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
     ToolProgressDecoration, ToolProgressSink, ToolPromptContribution, PROGRESS_CHANNEL_CAPACITY,
 };
-#[cfg(test)]
-use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
+use crate::tools::durability::{synthesize_interruption, InvocationHandle};
 #[cfg(any(unix, windows))]
-use crate::tools::{
-    BashCheckpointPublisher, BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES,
-};
+use crate::tools::{BashCheckpointPublisher, BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES};
+use crate::tools::{SummarizationRetryPolicy, SummarizationRetryScheduled};
 
 /// Errors surfaced by [`Agent`] APIs.
 ///
@@ -115,6 +113,9 @@ pub enum AgentError {
         "session contains unsettled provider usage; hard token or cost ceilings cannot be enforced"
     )]
     UsageUncertain,
+    /// A declared model maximum is not a provider-enforced output bound.
+    #[error("hard token or cost ceilings require an enforceable provider output limit; this operation sends no output cap")]
+    OutputLimitUnavailable,
     /// A host-owned maximum outage duration expired during recovery.
     #[error("network recovery exceeded the host outage limit of {limit:?} (failed-attempt usage unknown: {usage_unknown})")]
     NetworkWaitLimit {
@@ -560,6 +561,7 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         | AgentError::InvalidCompactionPolicy(_)
         | AgentError::Cancelled
         | AgentError::UsageUncertain
+        | AgentError::OutputLimitUnavailable
         | AgentError::NetworkWaitLimit { .. }
         | AgentError::RunEnded => None,
     }
@@ -794,7 +796,8 @@ pub struct RunOutput {
     pub media: Vec<Media>,
     /// Total token usage across the run.
     pub usage: Usage,
-    /// Total microdollar cost accrued during this run.
+    /// Known microdollar subtotal for this run, not a full bill when
+    /// `Session::has_unpriced_usage` or `Session::has_uncertain_usage` is true.
     pub cost_microdollars: u64,
     /// Session entry ID after the run.
     pub head: EntryId,
@@ -1024,7 +1027,7 @@ impl AbortFlag {
     }
 
     fn is_set(&self) -> bool {
-        self.set.load(Ordering::Acquire)
+        self.set.load(Ordering::Acquire) || self.cancellation.is_cancelled()
     }
 
     async fn wait(&self) {
@@ -1033,7 +1036,10 @@ impl AbortFlag {
             if self.is_set() {
                 return;
             }
-            notified.await;
+            tokio::select! {
+                _ = notified => {},
+                _ = self.cancellation.cancelled() => return,
+            }
         }
     }
 }
@@ -1440,6 +1446,7 @@ fn completed_parallel_read_execution(
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_parallel_read_call(
+    invocation: InvocationHandle,
     tool: Arc<dyn Tool>,
     hooks: &[Arc<dyn ToolCallHook>],
     broker: &EffectBroker,
@@ -1457,7 +1464,7 @@ async fn prepare_parallel_read_call(
 ) -> ParallelReadPreparation {
     let start = std::time::Instant::now();
     let (progress_tx, progress_rx) = mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
-    let progress_sink = ToolProgressSink::live(progress_tx);
+    let progress_sink = ToolProgressSink::live(progress_tx).with_invocation(invocation);
     let tool_ctx = ToolContext {
         workspace: &sandbox.workspace,
         sandbox,
@@ -1670,6 +1677,7 @@ async fn execute_admitted_parallel_read(
 #[allow(clippy::too_many_arguments)]
 async fn execute_parallel_read_wave(
     calls: &[ToolCall],
+    invocations: &[InvocationHandle],
     tool_map: &HashMap<String, Arc<dyn Tool>>,
     hooks: &[Arc<dyn ToolCallHook>],
     broker: &EffectBroker,
@@ -1691,6 +1699,7 @@ async fn execute_parallel_read_wave(
             .arguments_value()
             .expect("parallel read wave validates arguments before admission");
         let prepared = prepare_parallel_read_call(
+            invocations[index].clone(),
             Arc::clone(
                 tool_map
                     .get(&call.name)
@@ -1967,12 +1976,37 @@ fn agent_compaction_reserve_tokens(model: &Model, reasoning: &ReasoningConfig) -
         .min(model_max)
 }
 
+/// Headroom reserved between the per-request input estimate and the provider's
+/// own input count.
+///
+/// The estimate is bytes/4 plus structural overhead, while a provider counts
+/// with its own tokenizer and chat template. Sizing the request as exactly
+/// `window - estimate` therefore sits on the boundary, where a one-token
+/// difference is a hard rejection: a real vLLM deployment answered
+/// "maximum context length is 131072 tokens ... you requested 30896 output
+/// tokens and your prompt contains at least 100177 input tokens, for a total of
+/// at least 131073 tokens". Reserving bounded slack keeps `input + output`
+/// inside the window without meaningfully shrinking a decoded answer.
+const REQUEST_OUTPUT_HEADROOM_PERCENT: u64 = 1;
+const REQUEST_OUTPUT_HEADROOM_DIVISOR: u64 = 100;
+const REQUEST_OUTPUT_HEADROOM_MINIMUM: u64 = 256;
+const REQUEST_OUTPUT_HEADROOM_MAXIMUM: u64 = 4096;
+
+fn request_output_headroom(context_window: u64) -> u64 {
+    ((context_window / REQUEST_OUTPUT_HEADROOM_DIVISOR) * REQUEST_OUTPUT_HEADROOM_PERCENT)
+        .clamp(REQUEST_OUTPUT_HEADROOM_MINIMUM, REQUEST_OUTPUT_HEADROOM_MAXIMUM)
+}
+
 fn resolve_request_max_output_tokens(
     context_window: u64,
     input_tokens: u64,
     provider_output_ceiling: u64,
 ) -> u64 {
-    provider_output_ceiling.min(context_window.saturating_sub(input_tokens))
+    provider_output_ceiling.min(
+        context_window
+            .saturating_sub(input_tokens)
+            .saturating_sub(request_output_headroom(context_window)),
+    )
 }
 
 fn add_usage(total: &mut Usage, turn: &Usage) {
@@ -2015,13 +2049,15 @@ fn usage_since(after: Usage, before: Usage) -> Usage {
 struct CostAccumulator {
     microdollars: u64,
     picodollars_remainder: u32,
+    unpriced_operations: u64,
 }
 
 impl CostAccumulator {
     /// Aggregate a request after its usage record durably updates the session.
-    /// Models without pricing contribute zero.
+    /// Missing prices remain unpriced; the numeric amount is a known subtotal.
     fn add(&mut self, cost: Option<Cost>) {
         let Some(cost) = cost else {
+            self.unpriced_operations = self.unpriced_operations.saturating_add(1);
             return;
         };
         let remainder = u64::from(self.picodollars_remainder)
@@ -2564,12 +2600,25 @@ fn looks_like_context_error(error: &AiError) -> bool {
         AiError::Http(http) => (http.provider_code.as_deref(), None),
         _ => unreachable!("context candidates were narrowed above"),
     };
+    // A bare request-size status is how a strict server reports a prompt that no
+    // longer fits, so it must not veto the compaction path: a real local vLLM
+    // answered HTTP 400 with `"type":"BadRequestError","code":400` plus
+    // "maximum context length is 131072 tokens", and the numeric code selected
+    // the permanent branch instead of compacting. Named policy/auth/quota codes
+    // and every other 4xx still veto, because compaction cannot repair those.
+    let recoverable_request_size_code = |code: &str| {
+        code == "context_length_exceeded"
+            || code
+                .parse::<u16>()
+                .ok()
+                .is_some_and(|status| matches!(status, 400 | 413 | 422))
+    };
     let veto = octet_ai::ProviderError {
         code: code
-            .filter(|code| *code != "context_length_exceeded")
+            .filter(|code| !recoverable_request_size_code(code))
             .map(str::to_owned),
         kind: kind
-            .filter(|kind| *kind != "context_length_exceeded")
+            .filter(|kind| !recoverable_request_size_code(kind))
             .map(str::to_owned),
         message: String::new(),
         request_id: None,
@@ -2947,7 +2996,10 @@ fn provider_rate_limit_delay(message: &str) -> Option<Duration> {
     Duration::try_from_secs_f64(seconds).ok()
 }
 
+type AuxiliaryDispatch = Arc<Mutex<Option<AiClient>>>;
+
 struct AuxiliaryRecovery<'a> {
+    dispatch: AuxiliaryDispatch,
     session: &'a mut Session,
     run_id: &'a str,
     resource_owner: &'a str,
@@ -2964,6 +3016,13 @@ struct AuxiliaryRecovery<'a> {
 }
 
 impl AuxiliaryRecovery<'_> {
+    fn disarm(&mut self) {
+        self.dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+
     fn record_uncertainty(&mut self) -> Result<(), AgentError> {
         let first = !self.session.has_uncertain_usage();
         let recorded = self.session.record_usage_uncertainty(
@@ -2971,6 +3030,41 @@ impl AuxiliaryRecovery<'_> {
             self.model.spec.id.clone(),
             match self.operation {
                 crate::events::ProviderOperation::LocalCompaction => "local_compaction",
+                crate::events::ProviderOperation::BranchSummary => "branch_summary",
+                crate::events::ProviderOperation::NativeCompaction => "native_compaction",
+                crate::events::ProviderOperation::TerminalGate => "terminal_gate",
+            },
+        );
+        recorded?;
+        if first {
+            let _ = self.events.send(AgentEvent::ProviderUsageUncertain);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AuxiliaryRecovery<'_> {
+    fn drop(&mut self) {
+        let pending = self
+            .dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(AiClient::request_may_have_been_sent);
+        if !pending {
+            return;
+        }
+        // An outer UI future can be dropped without setting AbortFlag. The
+        // transport tracker, not a guessed usage value, fences that exposure.
+        let first = !self.session.has_uncertain_usage();
+        // Persistence failure cannot be returned from Drop; the session also
+        // retains this marker in memory so later hard budgets still fail closed.
+        let _ = self.session.record_abandoned_usage_uncertainty(
+            self.model.endpoint.id.clone(),
+            self.model.spec.id.clone(),
+            match self.operation {
+                crate::events::ProviderOperation::LocalCompaction => "local_compaction",
+                crate::events::ProviderOperation::BranchSummary => "branch_summary",
                 crate::events::ProviderOperation::NativeCompaction => "native_compaction",
                 crate::events::ProviderOperation::TerminalGate => "terminal_gate",
             },
@@ -2978,23 +3072,24 @@ impl AuxiliaryRecovery<'_> {
         if first {
             let _ = self.events.send(AgentEvent::ProviderUsageUncertain);
         }
-        recorded?;
-        Ok(())
     }
 }
 
 // Auxiliary calls own an immutable, exclusively borrowed session snapshot until
 // they settle. No controls are committed or tool schema is dispatched inside
 // them, so a replacement may rebuild the same request from that snapshot.
-// This helper persists only uncertainty evidence, never completed usage/output
-// or main-answer retry events.
-async fn recover_auxiliary<T, F, Fut>(
+// The accepted-attempt guard remains armed until `settle` durably records known
+// usage. Cancellation may discard the response, never its billing evidence.
+// Output/history commits remain caller-owned, after cancellation checks.
+async fn recover_auxiliary<T, F, Fut, S>(
     mut context: AuxiliaryRecovery<'_>,
     mut call: F,
+    settle: S,
 ) -> Result<T, AgentError>
 where
-    F: FnMut(Option<tokio::time::Instant>) -> Fut,
+    F: FnMut(Option<tokio::time::Instant>, AuxiliaryDispatch) -> Fut,
     Fut: std::future::Future<Output = Result<T, AgentError>>,
+    S: FnOnce(&mut Session, &T) -> Result<(), AgentError>,
 {
     let mut retries = 0usize;
     let mut recovery_budget = ProviderRecoveryBudget::default();
@@ -3005,10 +3100,17 @@ where
         let result = tokio::select! {
             biased;
             _ = context.abort.wait() => return Err(AgentError::Cancelled),
-            result = call(network_deadline) => result,
+            result = call(network_deadline, Arc::clone(&context.dispatch)) => result,
         };
         let error = match result {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                // A successful future can set abort later in the same poll.
+                // Account first, and keep Drop's uncertainty fallback armed
+                // if the synced known-usage append fails.
+                settle(context.session, &value)?;
+                context.disarm();
+                return Ok(value);
+            }
             Err(AgentError::Ai(error)) => error,
             Err(
                 error @ AgentError::NetworkWaitLimit {
@@ -3017,6 +3119,7 @@ where
                 },
             ) => {
                 context.record_uncertainty()?;
+                context.disarm();
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -3060,6 +3163,9 @@ where
         if recovery.usage_unknown() {
             context.record_uncertainty()?;
         }
+        // Either durable uncertainty or positive no-exposure evidence now
+        // owns this failed attempt. A replacement gets a fresh tracker.
+        context.disarm();
         usage_unknown |= recovery.usage_unknown();
         let waiting = recovery.waiting_for_network();
         if waiting && network_deadline.is_none() {
@@ -3067,7 +3173,22 @@ where
                 .max_network_wait
                 .and_then(|limit| tokio::time::Instant::now().checked_add(limit));
         }
-        let limit = recovery_budget.limit(retries, &recovery);
+        // Tool-free summaries can replace a transient interrupted generation
+        // on ordinary routes too. Keep the qualified Codex recovery envelope
+        // intact; never stack another outer loop around it.
+        let summary_policy = SummarizationRetryPolicy::default();
+        let summary_retry = matches!(
+            context.operation,
+            crate::events::ProviderOperation::LocalCompaction
+                | crate::events::ProviderOperation::BranchSummary
+        ) && !context.qualified
+            && (retryable_stream_start(&recovery.error)
+                || interrupted_inference_error(&recovery.error));
+        let limit = if summary_retry {
+            summary_policy.attempts().saturating_sub(1)
+        } else {
+            recovery_budget.limit(retries, &recovery)
+        };
         if !context.enabled
             || (!waiting && retries >= limit)
             || (context.hard_budget && usage_unknown)
@@ -3083,8 +3204,11 @@ where
             network_waits = network_waits.saturating_add(1);
             delay
         } else {
-            let delay = retry_after(&recovery.error, retries);
+            let mut delay = retry_after(&recovery.error, retries);
             retries += 1;
+            if summary_retry {
+                delay = delay.max(summary_policy.backoff_for_retry(retries));
+            }
             delay
         };
         let decision_future = provider_retry_decision(ProviderRetryRequest {
@@ -3098,7 +3222,9 @@ where
                 host_delay: delay,
                 kind: if waiting {
                     ProviderRetryKind::WaitingForNetwork
-                } else if recovery.qualified && interrupted_inference_error(&recovery.error) {
+                } else if (recovery.qualified || summary_retry)
+                    && interrupted_inference_error(&recovery.error)
+                {
                     ProviderRetryKind::InterruptedInference
                 } else {
                     ProviderRetryKind::BeforeGeneration
@@ -3141,6 +3267,19 @@ where
                 if usage_unknown {
                     diagnostic = format!("failed_usage=unknown {diagnostic}");
                 }
+                if matches!(
+                    context.operation,
+                    crate::events::ProviderOperation::LocalCompaction
+                        | crate::events::ProviderOperation::BranchSummary
+                ) {
+                    diagnostic = SummarizationRetryScheduled {
+                        attempt: retries,
+                        max_attempts: limit.saturating_add(1),
+                        delay,
+                        error: diagnostic,
+                    }
+                    .diagnostic();
+                }
                 truncate_public_diagnostic(&mut diagnostic);
                 diagnostic
             },
@@ -3162,8 +3301,12 @@ async fn auxiliary_complete(
     request: Request,
     deadline: Option<tokio::time::Instant>,
     max_network_wait: Option<Duration>,
+    dispatch: AuxiliaryDispatch,
 ) -> Result<octet_ai::Response, AgentError> {
     let client = client.track_request_dispatch();
+    *dispatch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client.clone());
     let mut stream = tokio::select! {
         biased;
         _ = wait_network_deadline(deadline) => return Err(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: client.request_may_have_been_sent() }),
@@ -3188,8 +3331,12 @@ async fn auxiliary_compact(
     request: ResponsesCompactRequest,
     deadline: Option<tokio::time::Instant>,
     max_network_wait: Option<Duration>,
+    dispatch: AuxiliaryDispatch,
 ) -> Result<octet_ai::ResponsesCompactResponse, AgentError> {
     let client = client.track_request_dispatch();
+    *dispatch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client.clone());
     let pending = tokio::select! {
         biased;
         _ = wait_network_deadline(deadline) => return Err(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: client.request_may_have_been_sent() }),
@@ -3371,6 +3518,7 @@ fn provider_failure(error: AiError, retries: usize) -> AgentError {
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_recovery_call(
+    call_index: usize,
     tool: Arc<dyn Tool>,
     hooks: &[Arc<dyn ToolCallHook>],
     broker: &EffectBroker,
@@ -3397,7 +3545,7 @@ async fn execute_recovery_call(
             let (progress_tx, mut progress_rx) =
                 mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
             let progress_sink = ToolProgressSink::live(progress_tx);
-            let context = ToolContext {
+            let mut context = ToolContext {
                 workspace: &sandbox.workspace,
                 sandbox,
                 execution_scope: tool_scope,
@@ -3413,10 +3561,12 @@ async fn execute_recovery_call(
             };
             if !effect_is_repeatable_observation(effect) {
                 return Ok(Err(ToolError::new(format!(
-                    "indeterminate after restart: `{}` may have completed before its result was persisted; octet did not replay this host-classified effect. Inspect external state and retry explicitly if needed",
-                    call.name
+                    "indeterminate after restart: octet did not replay this host-classified effect for `{}`.\n{}",
+                    call.name, synthesize_interruption(session.invocation_partial_output(call_index)?.as_deref()).text
                 ))));
             }
+            let invocation = session.tool_invocation(call_index)?;
+            context.progress = context.progress.with_invocation(invocation.clone());
             // Bind admission to the same exact classification used by the
             // replay gate. A second classification could otherwise authorize
             // an effect different from the one that passed replay admission.
@@ -3447,6 +3597,9 @@ async fn execute_recovery_call(
             if let Err(error) = effect_reservation.commit(&intent) {
                 return Ok(Err(ToolError::new(error.to_string())));
             }
+            invocation
+                .clear_partial_output()
+                .map_err(|e| SessionError::Limit(e.to_string()))?;
             let execute = tool.execute(args, &context);
             tokio::pin!(execute);
             let result = loop {
@@ -4280,7 +4433,9 @@ fn forward_tool_progress(
 #[derive(Clone)]
 struct PartialOutputCheckpointConfig {
     tool: String,
-    sink: Arc<dyn PartialOutputCheckpointSink>,
+    // None binds the current session invocation at dispatch, never a global
+    // sink shared by different provider calls.
+    sink: Option<Arc<dyn PartialOutputCheckpointSink>>,
     interval: Duration,
     totals: Arc<PartialOutputCheckpointTotals>,
 }
@@ -4425,8 +4580,9 @@ fn render_partial_output(streams: &[PartialStream; 2]) -> String {
 impl LivePartialOutput {
     /// Creates the tracker for `call` when the host's opt-in names that tool.
     fn for_call(config: &PartialOutputCheckpointConfig, call: &str) -> Option<Self> {
+        let sink = config.sink.as_ref()?;
         (config.tool == call).then(|| Self {
-            sink: Arc::clone(&config.sink),
+            sink: Arc::clone(sink),
             publisher: BashCheckpointPublisher::new(config.interval),
             streams: [PartialStream::default(), PartialStream::default()],
             totals: Arc::clone(&config.totals),
@@ -4577,24 +4733,35 @@ fn deliver_control_inputs(
     ControlDelivery::Completed { event: None }
 }
 
-fn worst_case_request_cost(model: &Model, input_tokens: u64, output_tokens: u64) -> Option<u64> {
+fn worst_case_request_cost(
+    model: &Model,
+    input_tokens: u64,
+    output_tokens: u64,
+    service_tier: Option<ServiceTier>,
+) -> Option<u64> {
     let pricing = model.spec.pricing.as_ref()?;
+    let cache_write_1h_rate = match pricing.cache_write_1h {
+        Some(rate) => rate.0,
+        None => pricing.input.0.checked_mul(2)?,
+    };
     let mut input_rate = pricing
         .input
         .0
         .max(pricing.cache_read.0)
         .max(pricing.cache_write_5m.0)
-        .max(
-            pricing
-                .cache_write_1h
-                .map(|rate| rate.0)
-                .unwrap_or_else(|| pricing.input.0.saturating_mul(2)),
-        );
+        .max(cache_write_1h_rate);
     let mut output_rate = pricing
         .output
         .0
         .max(pricing.reasoning.map(|rate| rate.0).unwrap_or_default());
     for tier in &pricing.tiers {
+        // The implicit one-hour write price follows the active input tier,
+        // not the base catalog input rate. Never reserve below that bucket.
+        if pricing.cache_write_1h.is_none() {
+            if let Some(rate) = tier.input {
+                input_rate = input_rate.max(rate.0.checked_mul(2)?);
+            }
+        }
         for rate in [
             tier.input,
             tier.cache_read,
@@ -4610,11 +4777,37 @@ fn worst_case_request_cost(model: &Model, input_tokens: u64, output_tokens: u64)
             output_rate = output_rate.max(rate.0);
         }
     }
-    let numerator = u128::from(input_tokens)
-        .saturating_mul(u128::from(input_rate))
-        .saturating_add(u128::from(output_tokens).saturating_mul(u128::from(output_rate)));
-    let denominator = u128::from(PICODOLLARS_PER_MICRODOLLAR);
-    u64::try_from(numerator.div_ceil(denominator)).ok()
+    let conservative = octet_ai::Pricing {
+        input: octet_ai::TokenRate(input_rate),
+        output: octet_ai::TokenRate(output_rate),
+        cache_read: octet_ai::TokenRate(input_rate),
+        cache_write_5m: octet_ai::TokenRate(input_rate),
+        cache_write_1h: Some(octet_ai::TokenRate(input_rate)),
+        reasoning: Some(octet_ai::TokenRate(output_rate)),
+        tiers: Vec::new(),
+    };
+    let usage = Usage {
+        input_tokens,
+        output_tokens,
+        ..Usage::default()
+    };
+    let cost = octet_ai::responses_cost_of(
+        &conservative,
+        &usage,
+        model.endpoint.runtime.responses_profile,
+        &model.spec.api_name,
+        service_tier,
+        None,
+    )
+    .ok()??;
+    cost.total
+        .checked_add(u64::from(cost.total_picodollars_remainder > 0))
+}
+
+fn priced_session_subtotal(session: &Session, model: &Model) -> Option<u64> {
+    (!session.has_unpriced_usage()
+        && (session.total_cost_microdollars() > 0 || model.spec.pricing.is_some()))
+    .then(|| session.total_cost_microdollars())
 }
 
 fn usage_total_tokens(usage: &Usage) -> u64 {
@@ -4703,6 +4896,42 @@ fn mirror_delegated_uncertainty(
     Ok(true)
 }
 
+fn require_enforceable_output_cap(
+    session: &Session,
+    output_cap: Option<u64>,
+    token_limit: Option<u64>,
+    cost_limit: Option<u64>,
+) -> Result<(), AgentError> {
+    if token_limit.is_none() && cost_limit.is_none() {
+        return Ok(());
+    }
+    // Existing exposure is the more specific reason a ceiling cannot work.
+    if session.has_uncertain_usage() {
+        return Err(AgentError::UsageUncertain);
+    }
+    if let Some(limit) = cost_limit {
+        if session.has_unpriced_usage() {
+            return Err(AgentError::CostUnavailable { limit });
+        }
+    }
+    output_cap.ok_or(AgentError::OutputLimitUnavailable)?;
+    Ok(())
+}
+
+fn reservation_output_tokens(
+    session: &Session,
+    model: &Model,
+    requested: u64,
+    token_limit: Option<u64>,
+    cost_limit: Option<u64>,
+) -> Result<u64, AgentError> {
+    let cap = octet_ai::effective_output_token_cap(model, Some(requested));
+    require_enforceable_output_cap(session, cap, token_limit, cost_limit)?;
+    // Only operations without hard ceilings may use an unenforced planning
+    // estimate. It is never a fabricated bound for a hard reservation.
+    Ok(cap.unwrap_or(requested))
+}
+
 fn reserve_request_tokens(
     session: &Session,
     input_tokens: u64,
@@ -4734,6 +4963,17 @@ fn reserve_request_cost(
     output_tokens: u64,
     limit: Option<u64>,
 ) -> Result<(), AgentError> {
+    reserve_request_cost_with_tier(session, model, input_tokens, output_tokens, limit, None)
+}
+
+fn reserve_request_cost_with_tier(
+    session: &Session,
+    model: &Model,
+    input_tokens: u64,
+    output_tokens: u64,
+    limit: Option<u64>,
+    service_tier: Option<ServiceTier>,
+) -> Result<(), AgentError> {
     let Some(limit) = limit else {
         return Ok(());
     };
@@ -4741,7 +4981,10 @@ fn reserve_request_cost(
         return Err(AgentError::UsageUncertain);
     }
     let current = session.total_cost_microdollars();
-    let reserved = worst_case_request_cost(model, input_tokens, output_tokens)
+    if session.has_unpriced_usage() {
+        return Err(AgentError::CostUnavailable { limit });
+    }
+    let reserved = worst_case_request_cost(model, input_tokens, output_tokens, service_tier)
         .ok_or(AgentError::CostUnavailable { limit })?;
     if current >= limit || current.saturating_add(reserved) > limit {
         return Err(AgentError::CostLimit {
@@ -4777,6 +5020,7 @@ struct CompactionContext<'a> {
     model: &'a Model,
     /// Optional configured route used for the summary request itself.
     compaction_model: &'a Model,
+    summary_operation: crate::events::ProviderOperation,
     session: &'a mut Session,
     usage: &'a mut Usage,
     run_cost: &'a mut CostAccumulator,
@@ -5059,7 +5303,11 @@ impl CompactionContext<'_> {
                 budget: input_budget,
             });
         }
-        let reserved_output_tokens = request.max_output_tokens.unwrap_or(output_tokens);
+        let reserved_output_tokens = reservation_output_tokens(
+            self.session, self.compaction_model,
+            request.max_output_tokens.unwrap_or(output_tokens),
+            self.max_session_tokens, self.max_session_cost_microdollars,
+        )?;
         reserve_request_tokens(
             self.session,
             input_tokens,
@@ -5075,6 +5323,7 @@ impl CompactionContext<'_> {
         )?;
         let response = recover_auxiliary(
             AuxiliaryRecovery {
+                dispatch: AuxiliaryDispatch::default(),
                 session: self.session,
                 run_id: self.run_id,
                 resource_owner: self.resource_owner,
@@ -5087,36 +5336,36 @@ impl CompactionContext<'_> {
                     || self.max_session_cost_microdollars.is_some(),
                 abort: self.abort,
                 events: self.events,
-                operation: crate::events::ProviderOperation::LocalCompaction,
+                operation: self.summary_operation,
                 session_id: self.session_id,
             },
-            |deadline| {
+            |deadline, dispatch| {
                 auxiliary_complete(
                     self.client,
                     self.compaction_model,
                     request.clone(),
                     deadline,
                     self.max_network_wait,
+                    dispatch,
                 )
+            },
+            |session, response| {
+                session.record_compaction_usage(
+                    self.compaction_model.endpoint.id.clone(),
+                    self.compaction_model.spec.id.clone(),
+                    response.usage,
+                    response.cost,
+                )?;
+                add_usage(self.usage, &response.usage);
+                self.run_cost.add(response.cost);
+                Ok(())
             },
         )
         .await?;
-        // Cancellation wins a same-poll race and is checked again before the
-        // first accounting or session commit.
+        // Billing has settled; cancellation suppresses summary publication.
         if self.abort.is_set() {
             return Err(AgentError::Cancelled);
         }
-        add_usage(self.usage, &response.usage);
-        let request_cost = response.cost;
-        // Record even a response whose stop reason makes compaction fail: it
-        // was still billable provider work and must survive resume accurately.
-        self.session.record_compaction_usage(
-            self.compaction_model.endpoint.id.clone(),
-            self.compaction_model.spec.id.clone(),
-            response.usage,
-            request_cost,
-        )?;
-        self.run_cost.add(request_cost);
         if !matches!(
             response.stop_reason,
             StopReason::EndTurn | StopReason::StopSequence
@@ -5258,6 +5507,7 @@ impl CompactionContext<'_> {
         let operation_started = std::time::Instant::now();
         let usage_before = *self.usage;
         let cost_before = self.run_cost.microdollars;
+        let unpriced_before = self.run_cost.unpriced_operations;
         let mut operation = async {
             if self.model.spec.protocol != Protocol::OpenAiResponses {
                 return Err(AgentError::InvalidCompactionPolicy(
@@ -5294,6 +5544,7 @@ impl CompactionContext<'_> {
                 Some(self.session_id),
             )?;
             let input_tokens = estimate_compact_request_tokens(&request, &replay);
+            require_enforceable_output_cap(self.session, None, self.max_session_tokens, self.max_session_cost_microdollars)?;
             reserve_request_tokens(
                 self.session,
                 input_tokens,
@@ -5310,6 +5561,7 @@ impl CompactionContext<'_> {
             let covered_through = self.session.head().ok_or(SessionError::EmptySession)?;
             let response = recover_auxiliary(
                 AuxiliaryRecovery {
+                    dispatch: AuxiliaryDispatch::default(),
                     session: self.session,
                     run_id: self.run_id,
                     resource_owner: self.resource_owner,
@@ -5340,35 +5592,35 @@ impl CompactionContext<'_> {
                     operation: crate::events::ProviderOperation::NativeCompaction,
                     session_id: self.session_id,
                 },
-                |deadline| {
+                |deadline, dispatch| {
                     auxiliary_compact(
                         self.client,
                         self.model,
                         request.clone(),
                         deadline,
                         self.max_network_wait,
+                        dispatch,
                     )
+                },
+                |session, response| {
+                    let cost = self.model.spec.pricing.as_ref().and_then(|pricing| {
+                        octet_ai::pricing::cost_of(pricing, &response.usage).ok()
+                    });
+                    session.record_compaction_usage(
+                        self.model.endpoint.id.clone(),
+                        self.model.spec.id.clone(),
+                        response.usage,
+                        cost,
+                    )?;
+                    add_usage(self.usage, &response.usage);
+                    self.run_cost.add(cost);
+                    Ok(())
                 },
             )
             .await?;
             if self.abort.is_set() {
                 return Err(AgentError::Cancelled);
             }
-            let usage = response.usage;
-            let cost = self
-                .model
-                .spec
-                .pricing
-                .as_ref()
-                .and_then(|pricing| octet_ai::pricing::cost_of(pricing, &usage).ok());
-            add_usage(self.usage, &usage);
-            self.session.record_compaction_usage(
-                self.model.endpoint.id.clone(),
-                self.model.spec.id.clone(),
-                usage,
-                cost,
-            )?;
-            self.run_cost.add(cost);
             validate_native_compact_output(&response.output)?;
             let checkpoint = self.session.append_responses_compaction(
                 self.model.endpoint.id.clone(),
@@ -5396,6 +5648,7 @@ impl CompactionContext<'_> {
                 .spec
                 .pricing
                 .as_ref()
+                .filter(|_| self.run_cost.unpriced_operations == unpriced_before)
                 .map(|_| self.run_cost.microdollars.saturating_sub(cost_before));
         }
 
@@ -5424,6 +5677,7 @@ impl CompactionContext<'_> {
         let operation_started = std::time::Instant::now();
         let usage_before = *self.usage;
         let cost_before = self.run_cost.microdollars;
+        let unpriced_before = self.run_cost.unpriced_operations;
         let mut operation = async {
             let preparation = prepare_handoff(self.session, &first_kept)?;
             if preparation.messages.is_empty() && preparation.turn_prefix_messages.is_empty() {
@@ -5471,6 +5725,7 @@ impl CompactionContext<'_> {
                 .spec
                 .pricing
                 .as_ref()
+                .filter(|_| self.run_cost.unpriced_operations == unpriced_before)
                 .map(|_| self.run_cost.microdollars.saturating_sub(cost_before));
         }
 
@@ -5654,16 +5909,18 @@ impl TerminalGateContext<'_> {
                     budget,
                 });
             }
-            reserve_request_tokens(self.session, input_tokens, 1, self.max_session_tokens)?;
+            let reserved_output_tokens = reservation_output_tokens(self.session, self.model, 1, self.max_session_tokens, self.max_session_cost_microdollars)?;
+            reserve_request_tokens(self.session, input_tokens, reserved_output_tokens, self.max_session_tokens)?;
             reserve_request_cost(
                 self.session,
                 self.model,
                 input_tokens,
-                1,
+                reserved_output_tokens,
                 self.max_session_cost_microdollars,
             )?;
             let response = recover_auxiliary(
                 AuxiliaryRecovery {
+                    dispatch: AuxiliaryDispatch::default(),
                     session: self.session,
                     run_id: self.run_id,
                     resource_owner: self.resource_owner,
@@ -5679,14 +5936,27 @@ impl TerminalGateContext<'_> {
                     operation: crate::events::ProviderOperation::TerminalGate,
                     session_id: self.session_id,
                 },
-                |deadline| {
+                |deadline, dispatch| {
                     auxiliary_complete(
                         self.client,
                         self.model,
                         request.clone(),
                         deadline,
                         self.max_network_wait,
+                        dispatch,
                     )
+                },
+                |session, response| {
+                    session.record_terminal_gate_usage(
+                        self.model.endpoint.id.clone(),
+                        self.model.spec.id.clone(),
+                        response.usage,
+                        response.cost,
+                        parse_terminal_gate(response).map(|decision| decision == TerminalGateDecision::Return),
+                    )?;
+                    add_usage(self.usage, &response.usage);
+                    self.run_cost.add(response.cost);
+                    Ok(())
                 },
             )
             .await?;
@@ -5694,16 +5964,6 @@ impl TerminalGateContext<'_> {
                 return Err(AgentError::Cancelled);
             }
             let decision = parse_terminal_gate(&response);
-            add_usage(self.usage, &response.usage);
-            let request_cost = response.cost;
-            self.session.record_terminal_gate_usage(
-                self.model.endpoint.id.clone(),
-                self.model.spec.id.clone(),
-                response.usage,
-                request_cost,
-                decision.map(|decision| decision == TerminalGateDecision::Return),
-            )?;
-            self.run_cost.add(request_cost);
             if let Some(decision) = decision {
                 return Ok(decision);
             }
@@ -6119,6 +6379,8 @@ impl Agent {
         input_tokens: u64,
         output_tokens: u64,
     ) -> Result<(), AgentError> {
+        let output_tokens = reservation_output_tokens(&self.session, model, output_tokens, self.max_session_tokens, self.max_session_cost_microdollars)?;
+        reserve_request_tokens(&self.session, input_tokens, output_tokens, self.max_session_tokens)?;
         reserve_request_cost(
             &self.session,
             model,
@@ -6393,6 +6655,134 @@ impl Agent {
         )))
     }
 
+    /// Runs a tool-free summary through the same cancellable retry, hard-budget,
+    /// telemetry and durable usage path as autonomous compaction. Retries are
+    /// delivered as `ProviderOperationRetry`, not compaction failures. The
+    /// caller commits the returned summary once, after this method succeeds.
+    pub async fn summarize_with_retry(
+        &mut self,
+        model: &Model,
+        system: &str,
+        messages: Vec<Message>,
+        output_tokens: u64,
+        cancellation: CancellationToken,
+        on_event: impl FnMut(AgentEvent),
+    ) -> Result<String, AgentError> {
+        self.summary_call(
+            model,
+            system,
+            messages,
+            output_tokens,
+            crate::events::ProviderOperation::LocalCompaction,
+            cancellation,
+            on_event,
+        )
+        .await
+    }
+
+    /// Produces a structured abandoned-branch handoff using the same retry and
+    /// accounting consumer as compaction, with branch-specific retry identity.
+    /// It does not checkout or append a summary; the caller owns that one commit.
+    pub async fn summarize_branch_with_retry(
+        &mut self,
+        preparation: &crate::compaction::BranchHandoffPreparation,
+        cancellation: CancellationToken,
+        on_event: impl FnMut(AgentEvent),
+    ) -> Result<String, AgentError> {
+        let model = self
+            .compaction_model
+            .clone()
+            .unwrap_or_else(|| self.model.clone());
+        let summary = self
+            .summary_call(
+                &model,
+                SUMMARIZATION_SYSTEM_PROMPT,
+                vec![crate::compaction::build_branch_handoff_message(preparation)],
+                SUMMARY_OUTPUT_TOKENS,
+                crate::events::ProviderOperation::BranchSummary,
+                cancellation,
+                on_event,
+            )
+            .await?;
+        Ok(crate::compaction::finish_branch_handoff(
+            summary,
+            &preparation.details,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn summary_call(
+        &mut self,
+        model: &Model,
+        system: &str,
+        messages: Vec<Message>,
+        output_tokens: u64,
+        operation: crate::events::ProviderOperation,
+        cancellation: CancellationToken,
+        mut on_event: impl FnMut(AgentEvent),
+    ) -> Result<String, AgentError> {
+        if output_tokens == 0 {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "summary output limit must be positive".into(),
+            ));
+        }
+        let abort = AbortFlag {
+            cancellation,
+            ..AbortFlag::default()
+        };
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let tracker = ContextTracker::default();
+        let breakdown = self.request_context_breakdown()?;
+        let (tool_generation, _) = self.extensions.tool_snapshot();
+        let mut capacity = ContextCapacityCache::seeded(&self.session, tool_generation, &breakdown);
+        let mut usage = Usage::default();
+        let mut cost = CostAccumulator::default();
+        let mut context = CompactionContext {
+            run_id: &self.session_id,
+            resource_owner: &self.resource_owner,
+            retry_hooks: &self.extensions.provider_retry_hooks,
+            max_network_wait: self.max_network_wait,
+            provider_retries_enabled: self.provider_retries_enabled,
+            client: &self.client,
+            model: &self.model,
+            compaction_model: model,
+            summary_operation: operation,
+            session: &mut self.session,
+            usage: &mut usage,
+            run_cost: &mut cost,
+            cache_retention: self.cache_retention,
+            reasoning: &self.reasoning,
+            reasoning_mode: self.reasoning_mode,
+            session_id: &self.session_id,
+            max_session_tokens: self.max_session_tokens,
+            max_session_cost_microdollars: self.max_session_cost_microdollars,
+            abort: &abort,
+            mode: self.auto_compaction_mode,
+            threshold_fraction: self.compaction_threshold_fraction,
+            keep_recent_tokens: self.compaction_keep_recent_tokens,
+            events: &events,
+            context: &tracker,
+            tool_generation,
+            capacity: &mut capacity,
+            telemetry: self.telemetry.clone(),
+        };
+        let call = context.call(system, messages, output_tokens);
+        tokio::pin!(call);
+        let result = loop {
+            tokio::select! {
+                biased;
+                event = receiver.recv() => if let Some(event) = event { on_event(event); },
+                result = &mut call => break result,
+            }
+        };
+        while let Ok(event) = receiver.try_recv() {
+            on_event(event);
+        }
+        result?.ok_or_else(|| AgentError::IncompleteResponse {
+            stop_reason: "summary did not finish normally".into(),
+        })
+    }
+
     /// Performs one native Responses compaction while the agent is idle.
     ///
     /// The complete unpruned provider output is durably appended as a
@@ -6439,6 +6829,7 @@ impl Agent {
             Some(&self.session_id),
         )?;
         let input_tokens = estimate_compact_request_tokens(&request, &replay);
+        require_enforceable_output_cap(&self.session, None, self.max_session_tokens, self.max_session_cost_microdollars)?;
         reserve_request_tokens(
             &self.session,
             input_tokens,
@@ -6456,8 +6847,10 @@ impl Agent {
         let operation_started = std::time::Instant::now();
         let abort = AbortFlag::default();
         let (events, _receiver) = mpsc::unbounded_channel();
+        let mut cost = None;
         let response = recover_auxiliary(
             AuxiliaryRecovery {
+                dispatch: AuxiliaryDispatch::default(),
                 session: &mut self.session,
                 run_id: &self.session_id,
                 resource_owner: &self.resource_owner,
@@ -6489,29 +6882,30 @@ impl Agent {
                 operation: crate::events::ProviderOperation::NativeCompaction,
                 session_id: &self.session_id,
             },
-            |deadline| {
+            |deadline, dispatch| {
                 auxiliary_compact(
                     &self.client,
                     &self.model,
                     request.clone(),
                     deadline,
                     self.max_network_wait,
+                    dispatch,
                 )
+            },
+            |session, response| {
+                cost = self.model.spec.pricing.as_ref().and_then(|pricing| {
+                    octet_ai::pricing::cost_of(pricing, &response.usage).ok()
+                });
+                session.record_compaction_usage(
+                    self.model.endpoint.id.clone(),
+                    self.model.spec.id.clone(),
+                    response.usage,
+                    cost,
+                )?;
+                Ok(())
             },
         )
         .await?;
-        let cost = self
-            .model
-            .spec
-            .pricing
-            .as_ref()
-            .and_then(|pricing| octet_ai::pricing::cost_of(pricing, &response.usage).ok());
-        self.session.record_compaction_usage(
-            self.model.endpoint.id.clone(),
-            self.model.spec.id.clone(),
-            response.usage,
-            cost,
-        )?;
         validate_native_compact_output(&response.output)?;
         let checkpoint = self.session.append_responses_compaction(
             self.model.endpoint.id.clone(),
@@ -6564,8 +6958,8 @@ impl Agent {
     /// code-point boundary). The name is matched exactly against the executing
     /// tool's name; an unmatched name costs checkpoints and nothing else.
     ///
-    /// A checkpoint is auxiliary observation data: it is never persisted in the
-    /// session log, never becomes a tool result, never reaches the model, and
+    /// A checkpoint is auxiliary observation data: this external-sink variant
+    /// does not itself persist it in the session or turn it into a result, and
     /// never claims the command finished (no `complete_<stream>=true`). Nothing
     /// is published before the call starts or after its result is committed, so a
     /// settled invocation is never republished as progress. A host that instead
@@ -6573,8 +6967,8 @@ impl Agent {
     /// [`CheckpointedBashTool`](crate::tools::bash::CheckpointedBashTool))
     /// should not also enable this, so no invocation is published twice.
     ///
-    /// Disabled by default: an unopted host keeps byte-identical tool output and
-    /// no extra durable writes.
+    /// Disabled by default: an unopted host publishes no progress snapshots.
+    /// Invocation intent and memo records are independent of this opt-in.
     #[cfg(any(unix, windows))]
     pub fn enable_partial_output_checkpoints(
         &mut self,
@@ -6584,7 +6978,25 @@ impl Agent {
     ) {
         self.partial_output_checkpoints = Some(PartialOutputCheckpointConfig {
             tool: tool.into(),
-            sink,
+            sink: Some(sink),
+            interval,
+            totals: Arc::new(PartialOutputCheckpointTotals::default()),
+        });
+    }
+
+    /// Enables per-invocation checkpoints backed by this agent's private
+    /// synced session log. No external sink or process-local fixture is used.
+    /// Replay preserves the last bounded snapshot only as auxiliary data;
+    /// paired-result persistence atomically fences and clears its live value.
+    #[cfg(any(unix, windows))]
+    pub fn enable_session_partial_output_checkpoints(
+        &mut self,
+        tool: impl Into<String>,
+        interval: Duration,
+    ) {
+        self.partial_output_checkpoints = Some(PartialOutputCheckpointConfig {
+            tool: tool.into(),
+            sink: None,
             interval,
             totals: Arc::new(PartialOutputCheckpointTotals::default()),
         });
@@ -6790,10 +7202,16 @@ impl Agent {
                     "tool call skipped: per-turn tool-call limit reached",
                 ))
             } else {
+                let partial_output = self.session.invocation_partial_output(call_index)?;
                 match tool_map.get(&call.name) {
-                    None => Err(ToolError::new(format!("unknown tool: {}", call.name))),
+                    None => Err(ToolError::new(format!(
+                        "unknown tool: {}\n{}",
+                        call.name,
+                        synthesize_interruption(partial_output.as_deref()).text
+                    ))),
                     Some(tool) if tool.replay_safety() == ReplaySafety::Safe => {
                         execute_recovery_call(
+                            call_index,
                             Arc::clone(tool),
                             &tool_call_hooks,
                             &effect_broker,
@@ -6809,8 +7227,9 @@ impl Agent {
                         .await?
                     }
                     Some(_) => Err(ToolError::new(format!(
-                        "indeterminate after restart: `{}` may have completed before its result was persisted; octet did not replay it. Inspect external state and retry explicitly if needed",
-                        call.name
+                        "indeterminate after restart: `{}` was not replayed.\n{}",
+                        call.name,
+                        synthesize_interruption(partial_output.as_deref()).text
                     ))),
                 }
             };
@@ -7368,6 +7787,7 @@ impl Agent {
                         client: &client,
                         model: &model,
                         compaction_model: &compaction_model,
+                        summary_operation: crate::events::ProviderOperation::LocalCompaction,
                         session,
                         usage: &mut run_usage,
                         run_cost: &mut run_cost,
@@ -7506,20 +7926,27 @@ impl Agent {
                 let input_tokens = prepared.input_tokens;
                 let request = prepared.request;
 
+                let reserved_output_tokens = match reservation_output_tokens(
+                    session, &model, request_max_output_tokens, max_session_tokens, max_session_cost_microdollars,
+                ) {
+                    Ok(tokens) => tokens,
+                    Err(error) => break 'run FinishReason::Failed(error),
+                };
                 if let Err(error) = reserve_request_tokens(
                     session,
                     input_tokens,
-                    request_max_output_tokens,
+                    reserved_output_tokens,
                     max_session_tokens,
                 ) {
                     break 'run FinishReason::Failed(error);
                 }
-                if let Err(error) = reserve_request_cost(
+                if let Err(error) = reserve_request_cost_with_tier(
                     session,
                     &model,
                     input_tokens,
-                    request_max_output_tokens,
+                    reserved_output_tokens,
                     max_session_cost_microdollars,
+                    request.responses.as_ref().and_then(|options| options.service_tier),
                 ) {
                     break 'run FinishReason::Failed(error);
                 }
@@ -7577,6 +8004,7 @@ impl Agent {
                         client: &client,
                                 model: &model,
                                 compaction_model: &compaction_model,
+                                summary_operation: crate::events::ProviderOperation::LocalCompaction,
                                 session,
                                 usage: &mut run_usage,
                                 run_cost: &mut run_cost,
@@ -7758,6 +8186,7 @@ impl Agent {
                         client: &client,
                                         model: &model,
                                         compaction_model: &compaction_model,
+                                        summary_operation: crate::events::ProviderOperation::LocalCompaction,
                                         session,
                                         usage: &mut run_usage,
                                         run_cost: &mut run_cost,
@@ -7991,8 +8420,20 @@ impl Agent {
                     || matches!(stop_reason, StopReason::PauseTurn)
                     || matches!(&stop_reason, StopReason::Other(reason) if reason == "tool_output_locked");
                 if normal_end && calls.is_empty() && !assistant_has_terminal_content(&assistant) {
+                    // A reasoning-only completion is its own diagnosis: the model
+                    // finished normally having emitted thinking but no answer, which
+                    // is exactly what a local thinking model does when its whole
+                    // budget goes into reasoning and no final text follows.
+                    let reasoned_only = assistant
+                        .content
+                        .iter()
+                        .any(|part| matches!(part, AssistantPart::Reasoning(_)));
                     break 'run FinishReason::Failed(AgentError::IncompleteResponse {
-                        stop_reason: "provider returned no user-visible content".to_owned(),
+                        stop_reason: if reasoned_only {
+                            "provider returned reasoning but no answer text".to_owned()
+                        } else {
+                            "provider returned no user-visible content".to_owned()
+                        },
                     });
                 }
                 let gated_candidate = completion_policy == CompletionPolicy::TerminalGate
@@ -8002,13 +8443,12 @@ impl Agent {
                 // Candidate turns stay provisional until their isolated gate
                 // returns R. Tool turns and natural-policy answers commit now.
                 if !gated_candidate {
-                    let session_cost = (session.total_cost_microdollars() > 0
-                        || model.spec.pricing.is_some())
-                    .then(|| session.total_cost_microdollars());
+                    let session_cost = priced_session_subtotal(session, &model);
                     let ev = AgentEvent::TurnFinished {
                         message: assistant.clone(),
                         stop_reason: stop_reason.clone(),
                         turn_usage,
+                        turn_cost,
                         usage: run_usage,
                         session_cost_microdollars: session_cost,
                         run_cost_microdollars: run_cost.microdollars,
@@ -8066,9 +8506,7 @@ impl Agent {
                             let ev = AgentEvent::CandidateRejected {
                                 usage: run_usage,
                                 run_cost_microdollars: run_cost.microdollars,
-                                session_cost_microdollars: (session.total_cost_microdollars() > 0
-                                    || model.spec.pricing.is_some())
-                                .then(|| session.total_cost_microdollars()),
+                                session_cost_microdollars: priced_session_subtotal(session, &model),
                             };
                             notify_observers(&observers, &ev);
                             yield ev;
@@ -8091,13 +8529,12 @@ impl Agent {
                     // turn, so commit it without spending a gate request.
                     if !pending_steer.is_empty() {
                         if gated_candidate {
-                            let session_cost = (session.total_cost_microdollars() > 0
-                                || model.spec.pricing.is_some())
-                            .then(|| session.total_cost_microdollars());
+                            let session_cost = priced_session_subtotal(session, &model);
                             let ev = AgentEvent::TurnFinished {
                                 message: assistant.clone(),
                                 stop_reason: stop_reason.clone(),
                                 turn_usage,
+                                turn_cost,
                                 usage: run_usage,
                                 session_cost_microdollars: session_cost,
                                 run_cost_microdollars: run_cost.microdollars,
@@ -8109,13 +8546,12 @@ impl Agent {
                     }
                     if !followups.is_empty() {
                         if gated_candidate {
-                            let session_cost = (session.total_cost_microdollars() > 0
-                                || model.spec.pricing.is_some())
-                            .then(|| session.total_cost_microdollars());
+                            let session_cost = priced_session_subtotal(session, &model);
                             let ev = AgentEvent::TurnFinished {
                                 message: assistant.clone(),
                                 stop_reason: stop_reason.clone(),
                                 turn_usage,
+                                turn_cost,
                                 usage: run_usage,
                                 session_cost_microdollars: session_cost,
                                 run_cost_microdollars: run_cost.microdollars,
@@ -8223,13 +8659,12 @@ impl Agent {
                         }
                         let return_candidate = matches!(decision, Ok(TerminalGateDecision::Return));
                         if return_candidate {
-                            let session_cost = (session.total_cost_microdollars() > 0
-                                || model.spec.pricing.is_some())
-                            .then(|| session.total_cost_microdollars());
+                            let session_cost = priced_session_subtotal(session, &model);
                             let ev = AgentEvent::TurnFinished {
                                 message: assistant.clone(),
                                 stop_reason: stop_reason.clone(),
                                 turn_usage,
+                                turn_cost,
                                 usage: run_usage,
                                 session_cost_microdollars: session_cost,
                                 run_cost_microdollars: run_cost.microdollars,
@@ -8271,13 +8706,12 @@ impl Agent {
                             // turn, so commit it without spending a gate request.
                             if !pending_steer.is_empty() {
                                 if gated_candidate && !return_candidate {
-                                    let session_cost = (session.total_cost_microdollars() > 0
-                                        || model.spec.pricing.is_some())
-                                    .then(|| session.total_cost_microdollars());
+                                    let session_cost = priced_session_subtotal(session, &model);
                                     let ev = AgentEvent::TurnFinished {
                                         message: assistant.clone(),
                                         stop_reason: stop_reason.clone(),
                                         turn_usage,
+                                        turn_cost,
                                         usage: run_usage,
                                         session_cost_microdollars: session_cost,
                                         run_cost_microdollars: run_cost.microdollars,
@@ -8289,13 +8723,12 @@ impl Agent {
                             }
                             if !followups.is_empty() {
                                 if gated_candidate && !return_candidate {
-                                    let session_cost = (session.total_cost_microdollars() > 0
-                                        || model.spec.pricing.is_some())
-                                    .then(|| session.total_cost_microdollars());
+                                    let session_cost = priced_session_subtotal(session, &model);
                                     let ev = AgentEvent::TurnFinished {
                                         message: assistant.clone(),
                                         stop_reason: stop_reason.clone(),
                                         turn_usage,
+                                        turn_cost,
                                         usage: run_usage,
                                         session_cost_microdollars: session_cost,
                                         run_cost_microdollars: run_cost.microdollars,
@@ -8353,9 +8786,7 @@ impl Agent {
                                 let ev = AgentEvent::CandidateRejected {
                                     usage: run_usage,
                                     run_cost_microdollars: run_cost.microdollars,
-                                    session_cost_microdollars: (session.total_cost_microdollars() > 0
-                                        || model.spec.pricing.is_some())
-                                    .then(|| session.total_cost_microdollars()),
+                                    session_cost_microdollars: priced_session_subtotal(session, &model),
                                 };
                                 notify_observers(&observers, &ev);
                                 yield ev;
@@ -8370,9 +8801,7 @@ impl Agent {
                                 let ev = AgentEvent::CandidateRejected {
                                     usage: run_usage,
                                     run_cost_microdollars: run_cost.microdollars,
-                                    session_cost_microdollars: (session.total_cost_microdollars() > 0
-                                        || model.spec.pricing.is_some())
-                                    .then(|| session.total_cost_microdollars()),
+                                    session_cost_microdollars: priced_session_subtotal(session, &model),
                                 };
                                 notify_observers(&observers, &ev);
                                 yield ev;
@@ -8382,9 +8811,7 @@ impl Agent {
                                 let ev = AgentEvent::CandidateRejected {
                                     usage: run_usage,
                                     run_cost_microdollars: run_cost.microdollars,
-                                    session_cost_microdollars: (session.total_cost_microdollars() > 0
-                                        || model.spec.pricing.is_some())
-                                    .then(|| session.total_cost_microdollars()),
+                                    session_cost_microdollars: priced_session_subtotal(session, &model),
                                 };
                                 notify_observers(&observers, &ev);
                                 yield ev;
@@ -8442,6 +8869,7 @@ impl Agent {
                 let mut call_index = 0usize;
                 while call_index < calls.len() {
                     if parallel_results.is_empty()
+                        && !abort.is_set()
                         && parallel_read_candidate(
                             &calls[call_index],
                             call_index,
@@ -8468,6 +8896,14 @@ impl Agent {
                         // A single eligible call gains no overlap and keeps the
                         // ordinary sequential path's hook/control behavior.
                         if wave_end - call_index > 1 {
+                            // Only this admitted, bounded wave owns live slots.
+                            // Over-limit/static refusals never allocate handles.
+                            let invocation_handles = match (call_index..wave_end)
+                                .map(|index| session.tool_invocation(index))
+                                .collect::<Result<Vec<_>, _>>() {
+                                Ok(handles) => handles,
+                                Err(error) => break 'run FinishReason::Failed(error.into()),
+                            };
                             // Row 3.5: one tool boundary per call in the wave.
                             // They are settled together once the wave resolves.
                             let mut wave_tool_guards =
@@ -8493,6 +8929,7 @@ impl Agent {
 
                             let operation = execute_parallel_read_wave(
                                 &calls[call_index..wave_end],
+                                &invocation_handles,
                                 &tool_map,
                                 &tool_call_hooks,
                                 &effect_broker,
@@ -8569,6 +9006,22 @@ impl Agent {
                             }
                             None => (None, None),
                         };
+                    let invocation = if argument_error.is_none()
+                        && preexecuted.is_none()
+                        && !answer_only
+                        && !output_truncated
+                        && call_index < MAX_TOOL_CALLS_PER_TURN
+                        && !abort.is_set()
+                        && tool_map.contains_key(&call.name)
+                        && parsed.is_ok()
+                    {
+                        match session.tool_invocation(call_index) {
+                            Ok(handle) => Some(handle),
+                            Err(error) => break 'run FinishReason::Failed(error.into()),
+                        }
+                    } else {
+                        None
+                    };
                     let mut tool_guard: Option<SpanGuard> = None;
                     if preexecuted.is_none() {
                         // Row 3.5: one tool boundary per executed call, settled
@@ -8617,6 +9070,10 @@ impl Agent {
                         let (progress_tx, mut progress_rx) =
                             mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
                         let progress_sink = ToolProgressSink::live(progress_tx);
+                        let progress_sink = match &invocation {
+                            Some(handle) => progress_sink.with_invocation(handle.clone()),
+                            None => progress_sink,
+                        };
                         let mut cancellation_won = false;
                         let start = std::time::Instant::now();
                         let started_at = Arc::new(AtomicU64::new(u64::MAX));
@@ -8631,9 +9088,15 @@ impl Agent {
                         // dropped with the call, so a settled call has nothing
                         // left to republish.
                         #[cfg(any(unix, windows))]
-                        let mut live_partial_output = partial_output_checkpoints
-                            .as_ref()
-                            .and_then(|config| LivePartialOutput::for_call(config, &call.name));
+                        let mut live_partial_output = partial_output_checkpoints.as_ref().and_then(|config| {
+                            let mut resolved = config.clone();
+                            if resolved.sink.is_none() {
+                                resolved.sink = invocation.as_ref().map(|handle| {
+                                    Arc::new(handle.clone()) as Arc<dyn crate::tool::PartialOutputCheckpointSink>
+                                });
+                            }
+                            LivePartialOutput::for_call(&resolved, &call.name)
+                        });
                         let result: Result<ToolOutput, ToolError> = if answer_only {
                             Err(ToolError::new(format!(
                                 "tool call `{}` was not executed: the user requested an immediate final answer without tools",
@@ -9225,6 +9688,7 @@ impl Agent {
                 .spec
                 .pricing
                 .as_ref()
+                .filter(|_| run_cost.unpriced_operations == 0)
                 .map(|_| run_cost.microdollars);
             if let Err(error) = session.checkpoint_with_telemetry(
                 first_entry.clone(),
@@ -9339,6 +9803,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
 
     struct PromptTool {
         name: &'static str,
@@ -9522,10 +9987,40 @@ mod tests {
             resolve_request_max_output_tokens(200_000, 20_000, 65_536),
             65_536
         );
+        // The remaining window is 30_000; the reserved headroom is 1% of the
+        // window (2_000), so the request never sits on the boundary.
         assert_eq!(
             resolve_request_max_output_tokens(200_000, 170_000, 65_536),
-            30_000
+            28_000
         );
+    }
+
+    /// Regression for a real local vLLM rejection: the model's window is
+    /// 131_072, octet's estimate was one token below the provider's count, and
+    /// the requested output filled the gap exactly, so the provider refused with
+    /// `prompt + requested > window`. A provider that counts one token more than
+    /// the estimate must still fit.
+    #[test]
+    fn request_output_keeps_estimator_slack_for_a_locally_served_model() {
+        let window = 131_072;
+        let estimated_input = 100_176;
+        let requested = resolve_request_max_output_tokens(window, estimated_input, window);
+        assert_eq!(requested, 29_586);
+        // Provider-side counting differences of this size are covered.
+        for provider_input in [estimated_input + 1, estimated_input + 512, estimated_input + 1_310] {
+            assert!(
+                provider_input + requested <= window,
+                "provider input {provider_input} + requested {requested} exceeded {window}"
+            );
+        }
+        // A prompt that already fills or exceeds the window reserves nothing and
+        // cannot fabricate a negative cap.
+        assert_eq!(resolve_request_max_output_tokens(window, window, window), 0);
+        assert_eq!(resolve_request_max_output_tokens(window, window + 5_000, window), 0);
+        // Small windows keep a proportionate reserve rather than a fixed bite.
+        assert_eq!(request_output_headroom(8_192), 256);
+        assert_eq!(request_output_headroom(131_072), 1_310);
+        assert_eq!(request_output_headroom(1_048_576), 4_096);
     }
 
     #[test]
@@ -9728,6 +10223,101 @@ mod tests {
             code: Some("rate_limit_exceeded".into()),
             kind: Some("throttled".into()),
             message: "context window exceeded in shared capacity".into(),
+            request_id: None,
+        });
+        assert!(!looks_like_context_error(&throttled));
+    }
+
+    /// A strict local/self-hosted server rejects an over-long request with a
+    /// plain 400. That is a request-size condition compaction can repair, not a
+    /// permanent policy/auth/quota rejection, so every shape it can take must
+    /// reach the compaction path.
+    #[test]
+    fn request_size_rejections_reach_the_compaction_path_in_every_server_shape() {
+        const VLLM: &str = "This model's maximum context length is 131072 tokens. However, \
+you requested 30896 output tokens and your prompt contains at least 100177 input tokens, \
+for a total of at least 131073 tokens. Please reduce the length of the input prompt or the \
+number of requested output tokens. (parameter=input_tokens, value=100177)";
+        let shapes = [
+            // Bare status with no machine-readable provider code.
+            AiError::Http(octet_ai::HttpError {
+                status: "400".parse().unwrap(),
+                request_id: None,
+                retry_after: None,
+                provider_code: None,
+                body_snippet: Some(format!(r#"{{"object":"error","message":"{VLLM}","type":"BadRequestError","code":400}}"#)),
+                retryable: false,
+            }),
+            // Body carried a numeric machine-readable code.
+            AiError::Http(octet_ai::HttpError {
+                status: "400".parse().unwrap(),
+                request_id: None,
+                retry_after: None,
+                provider_code: Some("400".into()),
+                body_snippet: Some(VLLM.into()),
+                retryable: false,
+            }),
+            // Canonical provider envelope: code 400, kind BadRequestError.
+            AiError::Provider(octet_ai::ProviderError {
+                code: Some("400".into()),
+                kind: Some("BadRequestError".into()),
+                message: VLLM.into(),
+                request_id: None,
+            }),
+            // Some servers answer 413/422 for the same condition.
+            AiError::Http(octet_ai::HttpError {
+                status: "413".parse().unwrap(),
+                request_id: None,
+                retry_after: None,
+                provider_code: Some("413".into()),
+                body_snippet: Some(VLLM.into()),
+                retryable: false,
+            }),
+        ];
+        for (index, error) in shapes.into_iter().enumerate() {
+            assert!(
+                looks_like_context_error(&error),
+                "shape {index} did not reach the compaction path: {error:?}"
+            );
+        }
+        // A genuine policy/auth/quota/not-found rejection in the same envelope
+        // still vetoes, because compaction cannot repair it.
+        for (code, kind) in [
+            (Some("invalid_prompt"), None),
+            (Some("cyber_policy"), None),
+            (Some("invalid_api_key"), None),
+            (Some("insufficient_quota"), None),
+            (Some("401"), None),
+            (Some("403"), None),
+            (Some("404"), None),
+        ] {
+            let error = AiError::Provider(octet_ai::ProviderError {
+                code: code.map(str::to_owned),
+                kind: kind.map(str::to_owned),
+                message: VLLM.into(),
+                request_id: None,
+            });
+            assert!(
+                !looks_like_context_error(&error),
+                "{code:?}/{kind:?} must stay vetoed"
+            );
+        }
+        // 408/429 are excluded from the permanent set by design (they are
+        // connectivity/rate conditions), so a bare numeric 429 carrying an
+        // explicit context-overflow message still reaches the compaction path:
+        // the server stated the request no longer fits.
+        let throttled_with_context_text = AiError::Provider(octet_ai::ProviderError {
+            code: Some("429".into()),
+            kind: None,
+            message: VLLM.into(),
+            request_id: None,
+        });
+        assert!(looks_like_context_error(&throttled_with_context_text));
+        // A named rate-limit rejection still never destroys context.
+        let throttled = AiError::Provider(octet_ai::ProviderError {
+            code: Some("rate_limit_exceeded".into()),
+            kind: None,
+            message: VLLM.into(),
             request_id: None,
         });
         assert!(!looks_like_context_error(&throttled));
@@ -10697,7 +11287,7 @@ mod tests {
         (
             PartialOutputCheckpointConfig {
                 tool: "bash".to_owned(),
-                sink,
+                sink: Some(sink),
                 interval: BASH_CHECKPOINT_INTERVAL,
                 totals: Arc::clone(&totals),
             },
@@ -11196,7 +11786,14 @@ mod tests {
         agent.set_max_session_cost_microdollars(Some(0));
 
         let error = agent.compact_responses_native().await.unwrap_err();
-        assert!(matches!(error, AgentError::CostLimit { limit: 0, .. }));
+        // The native Responses compaction endpoint has no output-cap field, so a
+        // hard cost ceiling cannot be enforced and admission refuses before any
+        // provider request. It must not be reported as a reserve-and-compare
+        // cost limit that was never actually enforceable.
+        assert!(
+            matches!(error, AgentError::OutputLimitUnavailable),
+            "{error:?}"
+        );
         assert!(
             !matches!(
                 agent
@@ -12181,6 +12778,11 @@ mod inference_recovery_tests {
                 .mount(&server).await;
             let directory = tempfile::tempdir().unwrap();
             let mut model = model();
+            if hard_token_limit {
+                // HTTP uncertainty coverage needs a genuinely capped route;
+                // uncapped Codex hard ceilings now refuse before dispatch.
+                Arc::make_mut(&mut model.endpoint).runtime.responses_profile = octet_ai::ResponsesRuntimeProfile::Default;
+            }
             Arc::make_mut(&mut model.endpoint).base_url =
                 url::Url::parse(&format!("{}/", server.uri())).unwrap();
             Arc::make_mut(&mut model.endpoint).auth = octet_ai::Auth::bearer("synthetic");
@@ -12296,6 +12898,11 @@ mod sustained_network_recovery_tests {
         })
         .unwrap();
         agent.set_max_session_tokens(Some(u64::MAX));
+        assert!(matches!(agent.complete("bounded uncapped route").await, Err(AgentError::OutputLimitUnavailable)));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+        // The original long-outage behavior remains available only without a
+        // hard ceiling on this cap-omitting Codex route.
+        agent.set_max_session_tokens(None);
         let mut run = agent.prompt("wait through the outage").await.unwrap();
         let control = run.control();
         let mut waits = 0;
@@ -12325,7 +12932,29 @@ mod sustained_network_recovery_tests {
         assert_eq!(terminals, 1);
         assert_eq!(transport.calls.load(Ordering::SeqCst), waits);
         assert!(started.elapsed() > Duration::from_secs(14 * 24 * 60 * 60));
-        assert_eq!(agent.session().entries().len(), 1);
+        // The refused hard-ceiling admission leaves the prompt's own user entry
+        // plus the durable failed-turn marker, and the aborted prompt adds one
+        // user entry. No assistant answer and no usage may be invented for
+        // either of them.
+        let entries = agent.session().entries();
+        assert_eq!(entries.len(), 3, "{entries:#?}");
+        assert!(matches!(
+            &entries[0].value,
+            EntryValue::Message(Message::User(user))
+                if matches!(user.content.as_slice(), [UserPart::Text(text)] if text == "bounded uncapped route")
+        ));
+        assert!(matches!(
+            &entries[1].value,
+            EntryValue::Message(Message::Assistant(assistant))
+                if assistant.content.iter().all(|part| matches!(part, AssistantPart::Text(_)))
+        ));
+        assert!(matches!(
+            &entries[2].value,
+            EntryValue::Message(Message::User(user))
+                if matches!(user.content.as_slice(), [UserPart::Text(text)] if text == "wait through the outage")
+        ));
+        assert!(agent.session().usage_records().is_empty());
+        assert!(!agent.session().has_uncertain_usage());
     }
 
     #[tokio::test(start_paused = true)]
@@ -12348,6 +12977,7 @@ mod sustained_network_recovery_tests {
                 let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
                 let result = recover_auxiliary(
                     AuxiliaryRecovery {
+                        dispatch: AuxiliaryDispatch::default(),
                         session: &mut session,
                         run_id: "auxiliary-test",
                         resource_owner: "auxiliary-test",
@@ -12362,7 +12992,7 @@ mod sustained_network_recovery_tests {
                         operation,
                         session_id: "auxiliary-test",
                     },
-                    |_deadline| {
+                    |_deadline, _dispatch| {
                         let call = calls.fetch_add(1, Ordering::SeqCst);
                         async move {
                             if call == 0 {
@@ -12375,6 +13005,7 @@ mod sustained_network_recovery_tests {
                             }
                         }
                     },
+                    |_, _| Ok(()),
                 )
                 .await;
                 assert!(matches!(
@@ -12413,6 +13044,7 @@ mod sustained_network_recovery_tests {
         let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
         let result: Result<(), _> = recover_auxiliary(
             AuxiliaryRecovery {
+                dispatch: AuxiliaryDispatch::default(),
                 session: &mut session,
                 run_id: "auxiliary-test",
                 resource_owner: "auxiliary-test",
@@ -12427,7 +13059,10 @@ mod sustained_network_recovery_tests {
                 operation: crate::events::ProviderOperation::LocalCompaction,
                 session_id: "bounded",
             },
-            |_deadline| async { Err(AiError::Auth(octet_ai::AuthError::Unavailable).into()) },
+            |_deadline, _dispatch| async {
+                Err(AiError::Auth(octet_ai::AuthError::Unavailable).into())
+            },
+            |_, _| Ok(()),
         )
         .await;
         assert!(matches!(result, Err(AgentError::NetworkWaitLimit { .. })));
@@ -12518,4 +13153,155 @@ mod sustained_network_recovery_tests {
         });
         assert_eq!(retry_after(&error, 0), Duration::from_millis(11054));
     }
+    #[test]
+    fn tier_reservation_uses_the_declared_tariff_and_blocks_unpriced_history() {
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Codex;
+        Arc::make_mut(&mut model.spec).api_name = "gpt-5.5".into();
+        let base = worst_case_request_cost(&model, 1_000_000, 1_000_000, None).unwrap();
+        let priority =
+            worst_case_request_cost(&model, 1_000_000, 1_000_000, Some(ServiceTier::Priority))
+                .unwrap();
+        assert!(priority >= base.saturating_mul(5) / 2);
+        assert!(worst_case_request_cost(&model, 1, 1, Some(ServiceTier::Auto)).is_none());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unpriced.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        assert!(matches!(
+            reserve_request_cost_with_tier(
+                &session,
+                &model,
+                1_000_000,
+                1_000_000,
+                Some(base + 1),
+                Some(ServiceTier::Priority)
+            ),
+            Err(AgentError::CostLimit { .. })
+        ));
+        session
+            .record_compaction_usage(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                Usage {
+                    input_tokens: 1,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        drop(session);
+        let reopened = Session::open(path).unwrap();
+        assert!(matches!(
+            reserve_request_cost(&reopened, &model, 1, 1, Some(u64::MAX)),
+            Err(AgentError::CostUnavailable { .. })
+        ));
+        assert!(reserve_request_cost(&reopened, &model, 1, 1, None).is_ok());
+    }
+
+    #[test]
+    fn tariff_reservations_bound_exact_cost_across_usage_buckets_and_context_tiers() {
+        use octet_ai::{Pricing, PricingTier, ResponsesRuntimeProfile, TokenRate};
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut checked = 0usize;
+        for one_hour in [None, Some(TokenRate(31_000_000))] {
+            let pricing = Pricing {
+                input: TokenRate(2_000_000),
+                output: TokenRate(10_000_000),
+                cache_read: TokenRate(700_000),
+                cache_write_5m: TokenRate(3_000_000),
+                cache_write_1h: one_hour,
+                reasoning: Some(TokenRate(13_000_000)),
+                tiers: vec![PricingTier {
+                    min_input_tokens: 200_000,
+                    input: Some(TokenRate(12_000_000)),
+                    output: Some(TokenRate(20_000_000)),
+                    cache_read: None,
+                    cache_write_5m: Some(TokenRate(2_000_000)),
+                    cache_write_1h: None,
+                    reasoning: Some(TokenRate(30_000_000)),
+                }],
+            };
+            Arc::make_mut(&mut model.spec).pricing = Some(pricing.clone());
+            for profile in [
+                ResponsesRuntimeProfile::Default,
+                ResponsesRuntimeProfile::Codex,
+            ] {
+                Arc::make_mut(&mut model.endpoint).runtime.responses_profile = profile;
+                for api_name in ["gpt-5.4", "gpt-5.5"] {
+                    Arc::make_mut(&mut model.spec).api_name = api_name.into();
+                    for tier in [
+                        None,
+                        Some(ServiceTier::Default),
+                        Some(ServiceTier::Flex),
+                        Some(ServiceTier::Priority),
+                    ] {
+                        if profile == ResponsesRuntimeProfile::Default
+                            && matches!(tier, Some(ServiceTier::Flex | ServiceTier::Priority))
+                        {
+                            assert!(worst_case_request_cost(&model, 200_001, 8192, tier).is_none());
+                            continue;
+                        }
+                        for input in [0, 1, 7, 199_999, 200_000, 200_001] {
+                            for output in [0, 1, 29, 8192] {
+                                let reserved =
+                                    worst_case_request_cost(&model, input, output, tier).unwrap();
+                                for bucket in 0..5 {
+                                    let mut usage = Usage {
+                                        output_tokens: output,
+                                        total_tokens: input + output,
+                                        ..Usage::default()
+                                    };
+                                    match bucket {
+                                        0 => usage.input_tokens = input,
+                                        1 => usage.cache_read_tokens = input,
+                                        2 => usage.cache_write_tokens = input,
+                                        3 => {
+                                            usage.cache_write_tokens = input;
+                                            usage.cache_write_1h_tokens = input;
+                                        }
+                                        _ => {
+                                            usage.input_tokens = input / 3;
+                                            usage.cache_read_tokens = input / 3;
+                                            usage.cache_write_tokens =
+                                                input - usage.input_tokens - usage.cache_read_tokens;
+                                            usage.cache_write_1h_tokens = usage.cache_write_tokens / 2;
+                                        }
+                                    }
+                                    for reasoning in [0, output / 2, output] {
+                                        usage.reasoning_tokens = reasoning;
+                                        let actual = octet_ai::responses_cost_of(
+                                            &pricing, &usage, profile, api_name, tier, None,
+                                        )
+                                        .unwrap()
+                                        .unwrap();
+                                        let picodollars = u128::from(actual.total)
+                                            * u128::from(PICODOLLARS_PER_MICRODOLLAR)
+                                            + u128::from(actual.total_picodollars_remainder);
+                                        assert!(picodollars <= u128::from(reserved) * u128::from(PICODOLLARS_PER_MICRODOLLAR),
+                                            "under-reservation: profile={profile:?} model={api_name} tier={tier:?} usage={usage:?} actual={actual:?} reserved={reserved}");
+                                        checked += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    assert!(
+                        worst_case_request_cost(&model, 200_001, 8192, Some(ServiceTier::Auto))
+                            .is_none()
+                    );
+                }
+            }
+        }
+        assert_eq!(checked, 8640);
+    }
 }
+
+#[cfg(test)]
+mod auxiliary_settlement_tests;

@@ -462,7 +462,16 @@ def bridge_spec(
     if node is None:
         raise EvidenceError("node is required for the Pi runtime evidence harness")
     bridge = root / "extensions/octet-pi-compat/bridge.mjs"
-    fake_pi = root / "extensions/octet-pi-compat/tests/fixtures/fake-pi"
+    # The authored fixture dependency is deliberately absent from the tracked
+    # fixture tree, so assemble the disposable runtime inside caller-owned work
+    # storage. This never writes node_modules into the repository.
+    fake_pi = work / "pi-runtime"
+    if not fake_pi.exists():
+        shutil.copytree(root / "extensions/octet-pi-compat/tests/fixtures/fake-pi", fake_pi)
+        shutil.copytree(
+            root / "extensions/octet-pi-compat/tests/fixtures/fake-pi-ai",
+            fake_pi / "node_modules/@earendil-works/pi-ai",
+        )
     agent_dir = work / "agent"
     manifest = work / "manifest" / "extension.toml"
     manifest.parent.mkdir(parents=True, exist_ok=True)

@@ -316,8 +316,12 @@ raw provider envelopes or headers.
 Tool calls expose deterministic intent and lifecycle rows. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
-dot remains steady; active tool and shell dots may pulse through foreground and
-muted tones rather than changing size. Successful completed event dots use green,
+and activity dots keep a solid, fixed-size glyph but pulse in foreground contrast
+when the label sweep crosses them: brighter on dark profiles, darker on light
+ones, then back to rest. Reduced-motion and no-color paths keep them static.
+Assistant-response dots remain steady; active tool and shell dots may pulse
+through foreground and muted tones rather than changing size.
+Successful completed event dots use green,
 and failed tools use red. Raw protocol arguments and envelopes, unsanitized
 failure evidence, and extension-rendered payloads remain internal
 accountability/provenance data
@@ -372,9 +376,10 @@ whole-conversation head row, and restores the selected prompt into the new
 composer. `/clone` copies the active head without opening a picker. Both create
 provenance metadata before the ordinary idle-boundary session rebuild.
 
-`/tree` presents durable entry IDs and kinds in a deterministic connector tree.
+The durable connector tree presents entry IDs and kinds deterministically (`sessions
+inspect` on the command line; the withdrawn `/tree` overlay used the same renderer).
 It marks every ancestor on the selected branch with `+`, the exact durable head
-with `*`, and keeps abandoned forks visible. `/checkout <entry-id>` changes the
+with `*`, and keeps abandoned forks visible. The withdrawn `/checkout` command
 durable head and hydrates the selected branch. `/reload` recomposes AGENTS
 instructions, rescans skills and prompts, and rebuilds the Agent only at an idle
 boundary.

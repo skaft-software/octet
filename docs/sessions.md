@@ -33,8 +33,6 @@ startup; bare `--fork` opens the picker.
 | `/resume [id]` | Resume directly or open the picker. |
 | `/fork` | Pick an active-branch user message or the whole conversation for a new session. |
 | `/clone` | New session from the current head without a picker. |
-| `/tree` | Complete parent-linked history. `+` traces the selected branch; `*` marks its exact durable head. |
-| `/checkout <entry-id>` | Move the durable head and branch from there without deleting ancestry. |
 | `/name [name]` | Show or change the readable name. |
 | `/export [path]` | Redacted portable export. |
 
@@ -65,8 +63,8 @@ catalog. `list` searches IDs, names, derived titles, tags, internal JSONL paths,
 and dates encoded in IDs, scoped to the selected workspace store. Modified times
 appear as relative ages. `inspect` validates read-only and reports derived
 active-branch title, size, entries, head, checkpoints, usage, and branch roots/leaves;
-its connector tree and `/tree` include abandoned forks without treating them as
-active context. `doctor` performs read-mostly prerequisite/provider/model checks
+its connector tree includes abandoned forks without treating them as active
+context. `doctor` performs read-mostly prerequisite/provider/model checks
 without constructing an Agent or starting executable extensions.
 
 ## Recovery
@@ -91,10 +89,18 @@ assignments and URL queries, URL userinfo, private-key blocks, and JSON objects
 or arrays serialized inside strings. It preserves surrounding prose and UTF-8
 and reports replaced values/fragments. This is a safety filter, **not proof that
 arbitrary prose or media contains no secret**. `--include-secrets` requests raw
-values with an explicit warning; use only for a trusted destination.
+export-eligible values with an explicit warning; use only for a trusted
+destination. Private extension metadata (including annotations with no `public`
+flag) is always excluded, for both JSON and HTML, even with `--include-secrets`.
+This visibility projection does not modify the private source transcript.
 
-HTML export, hosted viewers, and cloud sharing are outside this local-first
-session boundary. [Media/privacy](media.md#privacy-and-remote-reads).
+`octet sessions export SESSION_ID --format html --output ./session.html` writes
+one owner-private, script-free file with formatted Markdown, bounded code
+highlighting, branch links, and validated inline raster previews. Author HTML,
+external links and terminal controls remain inert; audio and remote media are
+not fetched. Arbitrary metadata keys named `Image` or `Audio` remain literal
+data, not previews. Hosted viewers and cloud sharing are separate from this
+local export. [Media/privacy](media.md#privacy-and-remote-reads).
 
 ## Discovery catalog
 

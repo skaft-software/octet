@@ -35,10 +35,53 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
         .join("../../examples/extensions/api-v03-minimal")
         .canonicalize()
         .expect("canonical API 0.3 example path");
-    let manifest_path = repository.join(EXTENSION_MANIFEST_FILENAME);
-    let manifest = ExtensionManifest::load(&manifest_path).expect("minimal API 0.3 manifest");
+    let published_manifest_path = repository.join(EXTENSION_MANIFEST_FILENAME);
+    let published_manifest = std::fs::read_to_string(&published_manifest_path)
+        .expect("published API 0.3 example manifest");
+    let mut fixture_manifest: toml::Value =
+        toml::from_str(&published_manifest).expect("published manifest TOML");
+    assert_eq!(fixture_manifest["requires_octet"].as_str(), Some("=0.7.6"));
+    assert_eq!(fixture_manifest["api_version"].as_str(), Some("0.3"));
+    assert_eq!(fixture_manifest["version"].as_str(), Some("0.1.0"));
+    let released_requirement = semver::VersionReq::parse("=0.7.6").unwrap();
+    let current_host = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    if released_requirement.matches(&current_host) {
+        ExtensionManifest::load(&published_manifest_path).expect("matching released runtime pin");
+    } else {
+        let error = ExtensionManifest::load(&published_manifest_path)
+            .expect_err("an unchanged release example must reject a different host version");
+        assert!(error.to_string().contains("extension requires octet"));
+    }
+
+    // Qualify the unchanged process source against this checkout's host without
+    // republishing the example or loosening its released runtime requirement.
+    let staging = TempDir::new().expect("private example staging");
+    let example = staging.path().join("api-v03-minimal");
+    std::fs::create_dir(&example).unwrap();
+    let current_requirement = format!("={}", env!("CARGO_PKG_VERSION"));
+    fixture_manifest["requires_octet"] = toml::Value::String(current_requirement.clone());
+    let manifest_path = example.join(EXTENSION_MANIFEST_FILENAME);
+    std::fs::write(&manifest_path, toml::to_string(&fixture_manifest).unwrap()).unwrap();
+    std::fs::copy(
+        repository.join("extension.py"),
+        example.join("extension.py"),
+    )
+    .expect("copy byte-identical executable example with its permissions");
+    assert_eq!(
+        std::fs::read(repository.join("extension.py")).unwrap(),
+        std::fs::read(example.join("extension.py")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&published_manifest_path).unwrap(),
+        published_manifest
+    );
+    let manifest = ExtensionManifest::load(&manifest_path).expect("staged API 0.3 manifest");
     assert_eq!(manifest.api_version, "0.3");
-    assert_eq!(manifest.requires_octet.as_deref(), Some("=0.7.6"));
+    assert_eq!(manifest.version, "0.1.0");
+    assert_eq!(
+        manifest.requires_octet.as_deref(),
+        Some(current_requirement.as_str())
+    );
 
     let workspace = TempDir::new().expect("workspace");
     let mut config = ExtensionRuntimeConfig::new(workspace.path());
@@ -48,7 +91,7 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
     config.shutdown_timeout = Duration::from_secs(1);
     let process = ExtensionProcess::start(trusted_descriptor(manifest_path, manifest), config)
         .await
-        .expect("start the released-install API 0.3 example");
+        .expect("start the privately staged API 0.3 example for this host build");
 
     assert_eq!(process.api_version(), "0.3");
     let negotiated = process.negotiated_features();

@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod proxy;
+pub(crate) mod azure;
+pub use azure::AzureRequestOptions;
 
 /// Maximum serialized size of a single declaration object.
 pub const MAX_DECLARATION_BYTES: usize = 64 * 1024;
@@ -65,11 +67,52 @@ pub enum DeclarationError {
 }
 
 fn check_headers(headers: &BTreeMap<String, String>) -> Result<(), DeclarationError> {
+    let mut names = std::collections::BTreeSet::new();
     for (name, value) in headers {
-        http::HeaderName::from_bytes(name.as_bytes())
+        let parsed = http::HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| DeclarationError::InvalidHeaderName(name.clone()))?;
+        if !names.insert(parsed.as_str().to_owned()) || matches!(parsed.as_str(),
+            "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade"
+            | "proxy-authorization" | "content-encoding") || parsed.as_str().starts_with("sec-websocket-") {
+            return Err(DeclarationError::Invalid("duplicate or transport-owned request header".into()));
+        }
         http::HeaderValue::from_str(value)
             .map_err(|_| DeclarationError::InvalidHeaderValue { name: name.clone() })?;
+    }
+    Ok(())
+}
+
+fn check_object_size(value: &impl Serialize) -> Result<(), DeclarationError> {
+    if serde_json::to_vec(value).map_err(|_| DeclarationError::Invalid("invalid declaration".into()))?.len() > MAX_DECLARATION_BYTES {
+        return Err(DeclarationError::TooLarge { max: MAX_DECLARATION_BYTES });
+    }
+    Ok(())
+}
+
+pub(crate) fn check_sampling(values: &BTreeMap<String, serde_json::Value>) -> Result<(), DeclarationError> {
+    // Deliberately closed: new provider controls need explicit admission here.
+    // An unknown key must never become a tool/prompt/billing side channel.
+    for (name, value) in values {
+        let number_in = |min: f64, max: f64| value.as_f64().is_some_and(|v| v.is_finite() && v >= min && v <= max);
+        let valid = match name.as_str() {
+            "temperature" => number_in(0.0, 2.0),
+            "top_p" | "min_p" | "typical_p" => number_in(0.0, 1.0),
+            "frequency_penalty" | "presence_penalty" => number_in(-2.0, 2.0),
+            "repetition_penalty" => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.0),
+            "top_k" => value.as_i64().is_some_and(|v| (-1..=i64::from(i32::MAX)).contains(&v)),
+            "seed" => value.as_i64().is_some(),
+            "logprobs" => value.is_boolean(),
+            "top_logprobs" => value.as_u64().is_some_and(|v| v <= 20),
+            "logit_bias" => value.as_object().is_some_and(|values| values.iter().all(|(key, value)| {
+                !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit())
+                    && value.as_f64().is_some_and(|v| v.is_finite() && (-100.0..=100.0).contains(&v))
+            })),
+            "stop" => value.is_string() || value.as_array().is_some_and(|values| values.iter().all(serde_json::Value::is_string)),
+            _ => false,
+        };
+        if !valid {
+            return Err(DeclarationError::Invalid("unsupported or invalid sampling parameter".into()));
+        }
     }
     Ok(())
 }
@@ -264,7 +307,7 @@ impl ThinkingSelection {
 }
 
 /// Per-model preset metadata declared for a provider route.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelPreset {
     /// Default sampling parameters merged into the request body; per-request
     /// keys override these. Applies only to OpenAI-compatible codecs.
@@ -291,25 +334,77 @@ pub struct ModelPreset {
     /// Reasoning/thinking wire format selected for this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<ThinkingFormat>,
+    /// Exact effort remapping; a null value means omit that wire effort.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub thinking_level_map: BTreeMap<String, Option<String>>,
+    /// Whether a declared thinking format also emits reasoning_effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning_effort: Option<bool>,
+    /// Explicit Mistral Chat reasoning request contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mistral_reasoning: Option<MistralReasoningProfile>,
+}
+
+/// Mistral Chat reasoning controls, selected by model data rather than its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MistralReasoningProfile {
+    /// Emit reasoning_effort using the declared level mapping.
+    ReasoningEffort,
+    /// Emit prompt_mode = "reasoning" while enabled.
+    PromptMode,
+}
+
+impl std::fmt::Debug for ModelPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelPreset")
+            .field("sampling_params", &"<configured>")
+            .field("headers", &"<redacted>")
+            .field("thinking_format", &self.thinking_format)
+            .field("mistral_reasoning", &self.mistral_reasoning)
+            .finish_non_exhaustive()
+    }
+}
+
+// Config serialization remains explicit configuration, like EndpointConfig's
+// default headers. Runtime ModelSpec projections must never serialize secrets.
+pub(crate) fn serialize_public_preset<S: serde::Serializer>(preset: &ModelPreset, serializer: S) -> Result<S::Ok, S::Error> {
+    let mut public = preset.clone();
+    public.headers.clear();
+    public.serialize(serializer)
 }
 
 impl ModelPreset {
+    pub(crate) fn validate_protocol(&self, protocol: crate::Protocol) -> Result<(), DeclarationError> {
+        let chat = self.vllm_priority.is_some() || self.thinking_format.is_some()
+            || self.thinking_token_budget_field.is_some() || self.chat_template_args.is_some()
+            || self.chat_template_kwargs.is_some() || self.supports_reasoning_effort.is_some();
+        if (chat && protocol != crate::Protocol::OpenAiChat)
+            || (self.supports_max_output_tokens.is_some() && protocol != crate::Protocol::OpenAiResponses)
+            || (self.mistral_reasoning.is_some() && protocol != crate::Protocol::OpenAiChat)
+            || (!self.sampling_params.is_empty() && match protocol {
+                crate::Protocol::OpenAiChat => false,
+                crate::Protocol::OpenAiResponses => self.sampling_params.keys().any(|name| !matches!(name.as_str(), "temperature" | "top_p" | "top_logprobs")),
+                _ => true,
+            })
+            || (!self.thinking_level_map.is_empty() && !matches!(protocol,
+                crate::Protocol::OpenAiChat))
+        {
+            return Err(DeclarationError::Invalid("model preset is unsupported by this protocol".into()));
+        }
+        Ok(())
+    }
+
     /// Reject malformed preset metadata fail-closed.
     pub fn validate(&self) -> Result<(), DeclarationError> {
+        check_object_size(self)?;
         check_headers(&self.headers)?;
-        for (name, value) in &self.sampling_params {
-            if name.trim().is_empty() {
-                return Err(DeclarationError::Invalid(
-                    "sampling parameter name must not be empty".to_owned(),
-                ));
-            }
-            let encoded = serde_json::to_vec(value)
-                .map_err(|error| DeclarationError::Invalid(error.to_string()))?;
-            if encoded.len() > MAX_DECLARATION_BYTES {
-                return Err(DeclarationError::TooLarge {
-                    max: MAX_DECLARATION_BYTES,
-                });
-            }
+        check_sampling(&self.sampling_params)?;
+        if self.mistral_reasoning.is_some() && self.thinking_format.is_some() {
+            return Err(DeclarationError::Invalid("Mistral reasoning and generic thinking formats are mutually exclusive".into()));
+        }
+        if self.thinking_level_map.iter().any(|(key,value)| key.is_empty() || value.as_ref().is_some_and(|v| v.is_empty() || v.len() > 128)) {
+            return Err(DeclarationError::Invalid("invalid thinking level mapping".into()));
         }
         for values in [&self.chat_template_args, &self.chat_template_kwargs]
             .into_iter()
@@ -395,8 +490,14 @@ impl ProviderCredentialPreset {
 /// them through [`crate::HostStreamTransport`] and its authentication lifecycle.
 /// This type captures the bounded, data-only knobs so a host can validate them
 /// before applying overrides.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RequestOverrides {
+    /// Supported sampling controls, overriding model sampling defaults.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sampling_params: BTreeMap<String, serde_json::Value>,
+    /// Declared Azure Responses routing overrides, outside the canonical request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureRequestOptions>,
     /// Extra request headers; caller values override provider defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
@@ -414,9 +515,24 @@ pub struct RequestOverrides {
     pub max_retry_delay_ms: Option<u64>,
 }
 
+impl std::fmt::Debug for RequestOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestOverrides")
+            .field("headers", &"<redacted>")
+            .field("env", &"<redacted>")
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field("max_retry_delay_ms", &self.max_retry_delay_ms)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RequestOverrides {
     /// Reject overrides that are empty, collision-prone or unbounded.
     pub fn validate(&self) -> Result<(), DeclarationError> {
+        check_object_size(self)?;
+        check_sampling(&self.sampling_params)?;
+        if let Some(azure) = &self.azure { azure.validate()?; }
         check_headers(&self.headers)?;
         if self.timeout_ms == Some(0) {
             return Err(DeclarationError::Invalid(
@@ -431,10 +547,12 @@ impl RequestOverrides {
             }
         }
         for variable in self.env.keys() {
-            if variable.trim().is_empty() {
-                return Err(DeclarationError::Invalid(
-                    "provider environment variable name must not be empty".to_owned(),
-                ));
+            if variable.is_empty() || variable.len() > 256
+                || !variable.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                return Err(DeclarationError::Invalid("invalid provider environment variable name".into()));
+            }
+            if self.env[variable].len() > crate::auth::MAX_ENV_VALUE_BYTES {
+                return Err(DeclarationError::Invalid("provider environment value exceeds its byte limit".into()));
             }
         }
         Ok(())
@@ -610,6 +728,7 @@ mod tests {
             timeout_ms: Some(600_000),
             max_retries: Some(2),
             max_retry_delay_ms: Some(60_000),
+            ..Default::default()
         };
         ok.validate().unwrap();
         assert!(RequestOverrides {

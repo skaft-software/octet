@@ -18,7 +18,7 @@ use crate::tui::view::{fit_line, footer_width, EditorDisplayMap, FooterSegment};
 const CURSOR_CELL_RESERVATION: usize = 1;
 
 fn composer_cursor_marker(state: &super::view::ShellState) -> &'static str {
-    if state.panel.is_some() {
+    if state.panel.is_some() || state.transcript_search_active() {
         ""
     } else {
         CURSOR_MARKER

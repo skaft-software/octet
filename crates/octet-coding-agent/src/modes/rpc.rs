@@ -138,7 +138,7 @@ impl JsonEventStream {
             "type": "session", "version": 1, "format": "octet-json-events",
             "id": session_id(app), "cwd": app.config.workspace,
             "timestamp": now_millis(),
-            "usageUncertain": app.agent.session().has_uncertain_usage()
+            "usageUncertain": (app.agent.session().has_uncertain_usage() || app.agent.session().has_unpriced_usage())
         }))
     }
 
@@ -548,20 +548,22 @@ fn user_value(text: &str) -> Value {
 }
 
 fn usage_value(usage: &Usage, cost: Option<Cost>) -> Value {
-    let cost = cost.unwrap_or_default();
+    // Unknown pricing stays null; only settled provider cost can make this a
+    // known amount. Dollar numbers are display projections of the exact ledger.
+    let cost = cost.map(|cost| json!({
+        "input": dollars(cost.input),
+        "output": dollars(cost.output.saturating_add(cost.reasoning)),
+        "cacheRead": dollars(cost.cache_read),
+        "cacheWrite": dollars(cost.cache_write),
+        "total": dollars(cost.total) + f64::from(cost.total_picodollars_remainder) / 1_000_000_000_000.0
+    }));
     json!({
         "input": usage.input_tokens,
         "output": usage.output_tokens,
         "cacheRead": usage.cache_read_tokens,
         "cacheWrite": usage.cache_write_tokens,
         "totalTokens": usage.total_tokens,
-        "cost": {
-            "input": dollars(cost.input),
-            "output": dollars(cost.output.saturating_add(cost.reasoning)),
-            "cacheRead": dollars(cost.cache_read),
-            "cacheWrite": dollars(cost.cache_write),
-            "total": dollars(cost.total)
-        }
+        "cost": cost
     })
 }
 
@@ -1108,7 +1110,7 @@ fn state_value(
         "thinkingLevel": reasoning_label(&app.reasoning),
         "isStreaming": streaming,
         "isCompacting": false,
-        "usageUncertain": app.agent.session().has_uncertain_usage(),
+        "usageUncertain": (app.agent.session().has_uncertain_usage() || app.agent.session().has_unpriced_usage()),
         "steeringMode": settings.steering_mode,
         "followUpMode": settings.follow_up_mode,
         "sessionFile": app.agent.session().path(),
@@ -1270,7 +1272,7 @@ impl EventTranslator {
             last_assistant_text: String::new(),
             retry_attempt: None,
             pending_retry_end: None,
-            usage_uncertain: app.agent.session().has_uncertain_usage(),
+            usage_uncertain: (app.agent.session().has_uncertain_usage() || app.agent.session().has_unpriced_usage()),
         }
     }
 
@@ -1713,20 +1715,16 @@ impl EventTranslator {
                 message,
                 stop_reason,
                 turn_usage,
+                turn_cost,
                 ..
             } => {
                 self.ensure_turn_started(output)?;
-                let cost = self
-                    .model
-                    .spec
-                    .pricing
-                    .as_ref()
-                    .and_then(|pricing| octet_ai::pricing::cost_of(pricing, &turn_usage).ok());
+                self.usage_uncertain |= turn_cost.is_none();
                 let value = assistant_value(
                     &message,
                     &self.endpoint,
                     &turn_usage,
-                    cost,
+                    turn_cost,
                     &stop_reason,
                     Some(now_millis() as u64),
                 );
@@ -2250,7 +2248,7 @@ fn session_stats_for_session(session: &octet_agent::Session) -> Value {
             "total": total_tokens
         },
         "cost": dollars(session.total_cost_microdollars()),
-        "usageUncertain": session.has_uncertain_usage()
+        "usageUncertain": (session.has_uncertain_usage() || session.has_unpriced_usage())
     })
 }
 
@@ -2870,6 +2868,86 @@ mod tests {
             known_records
         );
         assert_eq!(session.head(), head);
+    }
+
+    #[test]
+    fn resumed_stats_do_not_claim_an_exact_bill_for_unpriced_completed_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unpriced.jsonl");
+        let mut session = octet_agent::Session::create(&path).unwrap();
+        session.record_compaction_usage(
+            octet_ai::EndpointId("codex".into()), ModelId("codex/gpt-5.5".into()),
+            Usage { input_tokens: 10, total_tokens: 10, ..Usage::default() }, None,
+        ).unwrap();
+        assert!(!session.has_uncertain_usage());
+        assert!(session.has_unpriced_usage());
+        let current = session_stats_for_session(&session);
+        assert_eq!(current["usageUncertain"], true);
+        assert_eq!(current["tokens"]["total"], 10);
+        assert_eq!(current["cost"], dollars(0)); // known subtotal, not a whole-bill assertion
+        drop(session);
+        let resumed = octet_agent::Session::open(&path).unwrap();
+        assert_eq!(session_stats_for_session(&resumed), current);
+    }
+
+    #[test]
+    fn rpc_settled_turn_cost_beats_mapper_catalog_and_matches_durable_replay() {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes); Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let settled = Cost { input: 5, output: 2, total: 7, total_picodollars_remainder: 250_123, ..Cost::default() };
+        for turn_cost in [Some(settled), None, Some(Cost::default())] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("rpc-cost.jsonl");
+            let mut model = octet_ai::ModelCatalog::builtin().unwrap().resolve(&ModelId("gpt-4o-mini".into())).unwrap();
+            let pricing = Arc::make_mut(&mut model.spec).pricing.as_mut().unwrap();
+            pricing.input = octet_ai::TokenRate(900_000_000);
+            pricing.output = octet_ai::TokenRate(900_000_000);
+            let usage = Usage { input_tokens: 10, output_tokens: 2, total_tokens: 12, ..Usage::default() };
+            assert_ne!(octet_ai::pricing::cost_of(pricing, &usage).ok(), turn_cost);
+            let message = AssistantMessage { model: model.spec.id.clone(), protocol: model.spec.protocol, content: vec![AssistantPart::Text("settled".into())] };
+            let mut session = octet_agent::Session::create(&path).unwrap();
+            session.append_assistant_turn(message.clone(), model.endpoint.id.clone(), model.spec.id.clone(), usage, turn_cost, StopReason::EndTurn, None).unwrap();
+            drop(session);
+            let reopened = octet_agent::Session::open(&path).unwrap();
+            let record = &reopened.usage_records()[0];
+            assert_eq!(record.cost, turn_cost);
+            let durable = assistant_value(&message, &model.endpoint.id.0, &record.usage, record.cost, &StopReason::EndTurn, record.completed_at_unix_ms);
+            let mut translator = EventTranslator {
+                endpoint: model.endpoint.id.0.clone(), api: protocol_name(&model.spec.protocol).into(), model,
+                partial_text: String::new(), partial_reasoning: String::new(), channels: Vec::new(),
+                message_started: false, message_timestamp: 0, turn_open: true, pending_turn: None,
+                pending_tool_results: Vec::new(), expected_tools: 0, tools: HashMap::new(),
+                messages: Vec::new(), run_messages: Vec::new(), last_assistant_text: String::new(),
+                retry_attempt: None, pending_retry_end: None, usage_uncertain: false,
+            };
+            let capture = Capture::default();
+            let mut output = RpcOutput { delta_only: false, stdout: Box::new(capture.clone()) };
+            translator.observe(AgentEvent::TurnFinished {
+                message, stop_reason: StopReason::EndTurn, turn_usage: usage, turn_cost, usage,
+                session_cost_microdollars: turn_cost.map(|cost| cost.total),
+                // Deliberately includes unrelated auxiliary spend; never derive a turn cost from it.
+                run_cost_microdollars: 999_999,
+            }, &mut output, &mut QueueState::default()).unwrap();
+            let bytes = capture.0.lock().unwrap();
+            let frames: Vec<Value> = serde_json::Deserializer::from_slice(&bytes).into_iter().collect::<Result<_,_>>().unwrap();
+            let live = &frames.iter().find(|value| value["type"] == "message_end").unwrap()["message"];
+            assert_eq!(live["usage"], durable["usage"]);
+            assert_eq!(translator.usage_uncertain, turn_cost.is_none());
+            match turn_cost {
+                Some(cost) => {
+                    let expected = dollars(cost.total) + f64::from(cost.total_picodollars_remainder) / 1e12;
+                    assert_eq!(live["usage"]["cost"]["total"], json!(expected));
+                    if cost.total_picodollars_remainder != 0 { assert_ne!(live["usage"]["cost"]["total"], json!(dollars(cost.total))); }
+                }
+                None => assert!(live["usage"]["cost"].is_null()),
+            }
+        }
     }
 
     #[test]

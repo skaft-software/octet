@@ -1,97 +1,147 @@
 # Extension event bus (bounded, host-mediated)
 
-Status: **SDK primitive and host contract landed; host mediation NOT
-implemented.** No extension can publish or subscribe today: the host has no
-`event_bus` capability and no `bus/*` method, so `HostEventBus` calls fail closed
-with the host's `unknown_method`. The row is recorded as `Partial` in
-[docs/parity/extensions.md](../parity/extensions.md), with the exact remaining
-work listed below.
+API `0.3` has an optional `event_bus` service with a Rust process dispatcher and
+coding-product binding. Its binding-scoped lifecycle contract is implemented in
+the host, the generated contract and the Python SDK: every request and event
+carries the host-issued `binding_id`, the host pushes `bus/lifecycle` control
+notices, and the SDK owns a cancellable rebinding worker. Host bus unit tests,
+two real Python process fixtures and product discovery/bus tests execute in the
+current receipts. **A real active-session switch A→B→A with both surviving
+processes, and fenced incoming requests across that switch, are still not
+captured as product evidence**, so surviving-peer recovery is not claimed as
+qualified behavior. See the [generated contract](API-0.3-REFERENCE.md) for exact
+wire models and [extension parity](../parity/extensions.md) for remaining gates.
 
-Why a host-mediated bus: extensions are separate processes. They cannot share an
-in-process queue, and they must never address each other directly. A bus that let
-one extension hand another a capability, a handle, or a private path would be an
-authority-escalation channel, so the design keeps the host as the only mediator
-and the only identity authority.
+The coding product binds one bus to its active session's isolated API `0.3`
+processes, after ordinary enablement, trust, source and process-policy checks.
+Workspace-shared processes and legacy API `0.1`/`0.2` processes do not receive the
+service. Generic hosts must explicitly supply `ExtensionRuntimeConfig.event_bus`;
+without it, the capability and all `bus/*` methods are omitted and calls receive
+canonical `unknown_method`. No bus grant changes persisted project trust.
 
-## What exists now
+## Wire and ownership
 
-`octet_extension.event_bus` (dependency-free, Python 3.9+) provides:
+Select `event_bus` and the methods used; a subscriber must also select the
+host-to-extension `bus/event` notification. The host derives identities from the
+registered process, never from request parameters.
 
-| Piece | Purpose |
-| --- | --- |
-| `BusLimits` | Bounded, validated limits: message bytes, payload fields/depth, string bytes, queue messages/bytes, subscriptions, topic bytes/segments, identifier bytes, message age, drain bound. Limits can only be lowered; values above the internal ceiling are refused. |
-| `FieldSpec` / `TopicSpec` | Typed topic declarations (`string`, `integer`, `boolean`, `enum`) with per-field byte bounds and optional min/max. |
-| `TopicRegistry` | Unique, owner-scoped declarations. Duplicate topics, forbidden field names, and malformed names fail closed. |
-| `validate_topic` / `validate_payload` | The enforcement kernel: strict `bus.<owner>.<name>` syntax, exact field match, no unknown fields, no forbidden shapes, no PII/secret/private-path values, no control characters, bounded size and depth. |
-| `BoundedQueue` | Bounded, ordered queue. A full queue raises `resource_exhausted`; it never silently drops, reorders, or overwrites. |
-| `EventBusKernel` | Deterministic reference semantics for the host: declare, subscribe, publish (owner-only), per-`(extension, topic)` delivery, monotonic per-publisher sequence, age-based expiry at delivery. No I/O, no filesystem, no authority. |
-| `HostEventBus` | Extension-side participant. Outbound `bus/publish`, `bus/subscribe`, `bus/unsubscribe` through the SDK host-request API; inbound `bus/event` validated with the same kernel rules before the extension sees it. |
+Every request below and every `bus/event` carries `binding_id`, an opaque
+host-issued identity for one active bus incarnation. A peer captures the value
+it was granted; a request whose captured value is not the current incarnation is
+refused with `capability_mismatch` and never replayed under the new one.
 
-Topic names are `bus.<owner>.<name>` where both segments are lowercase
-`[a-z0-9][a-z0-9_-]*` and bounded. Only the owner may publish to its topic; any
-extension may subscribe to another's topic. Subscribing is not a capability, and
-a delivery carries only the topic, publisher identity, sequence, timestamp, and
-validated payload.
+1. `bus/declare` registers an immutable topic `bus.<owner>.<name>` and a bounded
+   list of scalar `BusFieldSpec` fields. The owner must equal the host-derived
+   manifest name. Duplicate declarations and foreign namespaces fail closed.
+2. `bus/subscribe` / `bus/unsubscribe` use one exact, already-declared topic.
+   There are no wildcard subscriptions and no direct peer addressing. A subscribe
+   returns a typed result: `active` with the publisher instance/generation when a
+   current declaration exists, or `pending`, which admits a bounded interest only.
+   A pending interest is not an active subscription and delivers nothing until a
+   later availability notice and a fresh subscribe acknowledgement.
+3. `bus/publish` contains only `topic` and `payload`. The host validates the exact
+   declared fields, assigns sequence and Unix-millisecond publication time, and
+   atomically admits the event to all current subscribers' bounded writers.
+4. `bus/event` carries `topic`, `publisher`, `publisher_instance_id`,
+   `process_generation`, `sequence`, `published_at_ms`, and `payload`.
+   These identity fields are inert provenance, not redeemable handles.
 
-## Fail-closed behavior
+The host-to-extension `bus/lifecycle` notification is required of any peer that
+selects `event_bus`. It reports either a replacement `binding` (new `binding_id`
+and monotonic `binding_revision`) or a `topic_available` / `topic_unavailable`
+transition with the exact topic, topic revision and publisher instance/generation.
+Control notices share the same physical writer slots and credits as data: a peer
+with no credit left is retired rather than silently missing a lifecycle change.
 
-| Situation | Result |
-| --- | --- |
-| Unknown/malformed/foreign-prefix topic | `invalid_params` (`-32602`), nothing queued |
-| Topic not declared in the registry | `invalid_params` (`unknown_topic`) |
-| Publisher is not the topic owner | `capability_mismatch` (`-32011`, `foreign_topic`) |
-| Subscriber reads without a subscription | `capability_mismatch` (`-32011`, `not_subscribed`) |
-| Unknown field, wrong type, missing required field, enum miss, min/max miss | `invalid_params` |
-| Authority/credential/private-shaped field name | `invalid_params` (`forbidden_field`) |
-| E-mail, token/bearer/PEM-shaped, phone-shaped, absolute/home path, or control character in a string | `invalid_params` (`pii_detected`, `private_path`, `control_character`) |
-| Message, field, string, depth, subscription, or queue bound exceeded | `resource_exhausted` (`-32012`) |
-| Stale or duplicate inbound sequence | `invalid_params` (`stale_sequence`), delivery refused |
-| Host rejects the call (for example `unknown_method`) | the `RpcError` propagates; nothing is swallowed or retried silently |
+Sequences increase for the whole publisher process generation (and therefore
+for each of its topics); session resets do not rewind that counter, while a
+reload is a new generation with its own sequence. A replacement process must
+redeclare; its subscribers must subscribe again. Unsubscribe, publisher removal,
+subscriber shutdown and active-session replacement invalidate pending frames.
+The session reset discards topics, subscriptions and the previous binding, not
+extension-private memory. A trusted executable process is not an OS sandbox.
 
-PII screening is a bounded deny-list heuristic, not a classifier. The host
-implementation must apply at least these rules; a topic author who needs a
-path-like or credential-like value must not put it on the bus at all.
+## Bounds and failure semantics
 
-## Host contract still required
+| Bound | Maximum |
+| --- | ---: |
+| Topics per session / attached process generations | 128 / 64 |
+| Fields per topic / alternatives per enum | 24 / 32 |
+| Exact-topic subscriptions per process | 16 |
+| Topic / identifier bytes | 96 / 64 |
+| String bytes / complete event-frame bytes (excluding LF) | 1024 / 8192 |
+| Queued events / queued bytes per subscriber process | 64 / 256 KiB |
+| Queued event age | 30 seconds |
 
-The schema is the source of truth; the Rust host and both SDK bindings are
-generated from it (`python3 scripts/generate-extension-api-v03.py`). Adding the
-bus therefore means, in this order:
+Negotiated frame bounds and physical writer capacity can narrow these limits.
+Queue credit is held until the frame is written or discarded, not just dequeued.
+Session resets and publisher reloads do not refund pending subscriber credits.
+All recipient slots are reserved before any publication is committed: pressure
+returns `resource_exhausted`, does not partially fan out, and does not consume a
+sequence. Successful publication acknowledges **admission**, not guaranteed peer
+processing. Expired or invalidated queued frames are discarded before writing.
+If expiry or invalidation interrupts an already-started write, the writer fails
+closed and terminates that process rather than completing a stale partial frame.
+Bytes already written cannot be retracted. Process loss is not replayed; no
+automatic retry is implied by a lost acknowledgement.
 
-1. `protocol/extension-api-v0.3.schema.json`: add the `event_bus` capability
-   alongside `theme_selection` (`:280` is the capability anchor, `:541` the
-   theme method anchor) and the methods
-   `bus/publish`, `bus/subscribe`, `bus/unsubscribe` (extension → host) and
-   `bus/event` (host → extension notification, `required: false`, `available:
-   false` until the host service is safely bound).
-2. `crates/octet-agent/src/extension_api_v03.rs`: `CAPABILITY_SPECS` (`:80`) and
-   `METHOD_SPECS` (`:106`); then regenerate the Python and TypeScript bindings
-   and commit the regenerated `sdk/python/octet_extension/api_v03.py` and
-   `sdk/typescript/src/api_v03.*`.
-3. Host runtime: a per-session bus service that owns the registry and queues,
-   applies the kernel semantics above, stamps the publisher identity and
-   generation, and delivers only to subscribers. It must not persist payloads,
-   expose them to the model or provider stream, or let a delivery carry a
-   capability, handle, or trust change. Queue pressure must answer
-   `resource_exhausted` rather than drop.
-4. Tests: a Rust behavioral fixture mirroring
-   `sdk/python/tests/test_event_bus.py` (owner-only publish, per-extension
-   delivery, bounded queue, unknown topic, forbidden field, PII value, stale
-   sequence) plus one end-to-end two-extension fixture through a real host.
+Payload fields are only `string`, portable `integer`, `boolean`, or bounded
+`enum`; no nested objects, arrays, unknown fields, omitted required fields, or
+out-of-range integers are accepted. String and enum values are screened for
+control characters, credentials/PEM/bearer-shaped values, e-mail/phone-shaped
+values and private paths. Authority/credential/path-shaped field names are
+rejected at declaration. Screening is deliberately conservative, not a PII
+classifier or a proof about arbitrary encoded strings.
 
-Until (1)–(4) land, `HostEventBus.subscribe`/`publish` are usable only against
-an injected request callable, and any real call surfaces the host error. That is
-the intended fail-closed state, not a degraded success.
+Malformed/unknown topics and payloads return `invalid_params`; foreign ownership
+returns `capability_mismatch`; byte, subscription, registry and queue limits
+return `resource_exhausted`. Errors use canonical API `0.3` code/message pairs.
+A valid rejected request does not require killing an otherwise healthy process.
+
+## SDK and evidence
+
+`octet_extension.event_bus` contains the Python `HostEventBus` participant and a
+deterministic reference kernel. No operation is attempted before the host has
+delivered a binding notice through `accept_lifecycle`; without one, requests fail
+closed as unbound. `declare` sends `bus/declare` before local registration,
+`subscribe` requires a typed acknowledgement, publish timestamps and sequences
+come from the host, and inbound events are validated against generated types,
+topic ownership, binding and sequence fences. The request adapter is
+`(method, params, cancelled)`: the serial reader never waits for an RPC response,
+and one separate cancellable worker performs rebinding, so a replacement binding
+clears the declaration/subscription/sequence ledger and re-establishes only the
+bounded desired set. Missing or invalid lifecycle control fails the participant
+closed instead of continuing on an apparently current stale ledger.
+
+The SDK's legacy `Extension` runtime does **not** become an API `0.3` runtime;
+wire these helpers to an ordinary current-API process loop. Recreating a helper
+still is not a substitute for consuming `bus/lifecycle`, and no publication is
+replayed: a peer that misses a notice is retired, not silently resynchronized.
+
+The schema generates Rust, Python and TypeScript models, canonical fixtures and
+the API reference. Regenerate/check with:
+
+```console
+python3 scripts/generate-extension-api-v03.py --check
+PYTHONPATH=sdk/python python3 -m unittest discover -s sdk/python/tests
+node sdk/typescript/tests/api_v03_conformance.mjs
+```
+
+Behavioral fixtures (Rust execution is parent-owned):
+
+- `crates/octet-agent/src/extension_process/event_bus.rs`: atomic queue pressure,
+  message/byte held-frame credit across reset/reload, generation/subscription/
+  session/age fencing, blocked partial-write cancellation, and hostile fields.
+- `crates/octet-agent/tests/extension_event_bus.rs`: two real Python processes,
+  owner-only publication, typed refusals, ordered subscription delivery, reload,
+  and separate-session/unavailable-service isolation.
+- `crates/octet-coding-agent/src/extensions/bus_tests.rs`: actual product discovery
+  and delivery, with no bus event in general host observations or durable session.
+- `sdk/python/tests/test_event_bus.py`: bounded SDK/kernel/client regressions.
 
 ## Not claimed
 
-- No cross-extension authority escalation of any kind: a bus message cannot
-  carry a capability grant, a resource handle, a credential, a file path, or a
-  project-trust change, and no delivery can start or steer a session.
-- No persistence, no cross-session or cross-workspace delivery, no LAN/remote
-  bus, and no delivery to a client that is not a subscribed extension instance
-  of the same host.
-- No telemetry: payload bytes are not written to telemetry, logs, or session
-  records.
-- Nothing here changes the persisted project-trust, OAuth/credential,
-  clipboard-image, rg/fd download, or chord/CBOR/unix-socket gates.
+No payload persistence, model/provider-stream delivery, telemetry, remote bus,
+authority delegation, session steering, capability transfer, credential service,
+or project-trust mutation. No Pi bridge compatibility is implied by an API `0.3`
+service: a legacy bridge would need its own reviewed adapter and negotiation.

@@ -738,6 +738,12 @@ impl CredentialRedactor {
         self.values.push(value);
     }
 
+    pub(crate) fn include(&mut self, other: Self) {
+        for value in other.values {
+            self.insert(value);
+        }
+    }
+
     /// Treat endpoint-default header values as sensitive configuration. These
     /// headers are already fully redacted from [`crate::types::Endpoint`]'s
     /// `Debug` output and commonly carry gateway API keys.
@@ -750,6 +756,35 @@ impl CredentialRedactor {
                 self.insert(Secret::from(value));
             }
         }
+    }
+
+    /// A selected proxy is transport configuration, never diagnostic content.
+    /// Include encoded/decoded userinfo and the Basic presentation so a proxy's
+    /// error body cannot echo credentials past the ordinary redaction boundary.
+    pub(crate) fn include_proxy_url(&mut self, proxy: &url::Url) {
+        if proxy.username().is_empty() && proxy.password().is_none() {
+            return;
+        }
+        self.insert(Secret::from(proxy.as_str()));
+        fn decoded(value: &str) -> String {
+            let form = format!("v={}", value.replace('+', "%2B"));
+            url::form_urlencoded::parse(form.as_bytes())
+                .next()
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default()
+        }
+        let username = decoded(proxy.username());
+        let password = decoded(proxy.password().unwrap_or_default());
+        self.insert(Secret::from(proxy.username()));
+        if let Some(password) = proxy.password() {
+            self.insert(Secret::from(password));
+        }
+        self.insert(Secret::from(username.clone()));
+        self.insert(Secret::from(password.clone()));
+        use base64::Engine as _;
+        let basic =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        self.insert(Secret::from(basic));
     }
 
     /// Replaces every exact credential occurrence without rescanning the
@@ -812,6 +847,19 @@ where
 /// credential redactor.
 pub(crate) async fn resolve_headers(auth: &Auth) -> Result<ResolvedHeaders, AuthError> {
     resolve_headers_with_env(auth, &read_bounded_env).await
+}
+
+/// Reads a request-local environment overlay without changing process state.
+pub(crate) fn read_request_env(env: &BTreeMap<String, String>, var: &str) -> Result<Option<String>, ConfigError> {
+    match env.get(var) {
+        Some(value) => bounded_env_value(var, Ok(value.clone())),
+        None => read_bounded_env(var),
+    }
+}
+
+/// Resolve only the selected auth binding through the request-local overlay.
+pub(crate) async fn resolve_headers_in_environment(auth: &Auth, env: &BTreeMap<String, String>) -> Result<ResolvedHeaders, AuthError> {
+    resolve_headers_with_env(auth, &|var| read_request_env(env, var)).await
 }
 
 /// Resolves regular credentials or invokes a signer against the exact prepared

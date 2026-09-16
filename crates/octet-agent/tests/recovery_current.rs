@@ -181,6 +181,7 @@ fn codex_model(uri: &str, transport: EndpointTransport) -> Model {
             },
             pricing: None,
             cache: octet_ai::CacheCompatibility::default(),
+            preset: Default::default(),
         }),
         endpoint: Arc::new(Endpoint {
             id: endpoint_id,

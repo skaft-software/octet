@@ -192,6 +192,7 @@ fn test_model(uri: &str, protocol: Protocol, audio: bool) -> Model {
             },
             pricing: None,
             cache: CacheCompatibility::default(),
+            preset: Default::default(),
         }),
         endpoint: Arc::new(Endpoint {
             id: EndpointId("read-concurrency-test".into()),

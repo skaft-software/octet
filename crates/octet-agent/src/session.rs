@@ -38,6 +38,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::session_writer::SessionWriter;
+use crate::tools::durability::{
+    DurableInvocationStore, InvocationHandle, InvocationRecord, InvocationScope,
+};
 
 use fs2::FileExt;
 use octet_ai::{
@@ -623,6 +629,13 @@ pub struct SkillResourceSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionRecord {
+    /// Replaceable auxiliary state for an unresolved tool call. Never context.
+    ToolInvocation {
+        /// Host-derived assistant entry and source position, not provider call ID.
+        scope: InvocationScope,
+        /// Bounded memos and the latest partial-output snapshot.
+        record: InvocationRecord,
+    },
     /// An appended entry.
     Entry(Box<Entry>),
     /// A durable head update: the current head entry ID and cumulative cost.
@@ -708,8 +721,52 @@ fn write_json_line<T: Serialize>(buf: &mut Vec<u8>, record: &T) -> Result<(), Se
     Ok(())
 }
 
-const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_SESSION_RECORDS: usize = 1_000_000;
+pub(crate) const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_SESSION_RECORDS: usize = 1_000_000;
+
+fn result_invocation_scopes<'a>(
+    value: &EntryValue,
+    mut cursor: Option<&'a EntryId>,
+    entries: &'a [Entry],
+    index: &HashMap<EntryId, usize>,
+) -> Vec<InvocationScope> {
+    let EntryValue::Message(Message::User(user)) = value else {
+        return Vec::new();
+    };
+    let results = user
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            UserPart::ToolResult(result) => Some(&result.tool_call_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if results.is_empty() {
+        return Vec::new();
+    }
+    while let Some(id) = cursor {
+        let Some(entry) = index.get(id).and_then(|position| entries.get(*position)) else {
+            break;
+        };
+        if let EntryValue::Message(Message::Assistant(assistant)) = &entry.value {
+            return assistant
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    octet_ai::AssistantPart::ToolCall(call) => Some(call),
+                    _ => None,
+                })
+                .enumerate()
+                .filter(|(_, call)| results.contains(&&call.id))
+                .filter_map(|(position, _)| {
+                    InvocationScope::new(entry.id.0.clone(), position.to_string()).ok()
+                })
+                .collect();
+        }
+        cursor = entry.parent.as_ref();
+    }
+    Vec::new()
+}
 
 /// Build DFS entry/exit times for the parent-linked entry forest in linear
 /// time. Parent records are guaranteed to precede children during replay, but
@@ -838,13 +895,10 @@ pub enum SessionError {
 pub struct Session {
     path: PathBuf,
     file: File,
-    /// The file length observed after the last successful replay/write. Every
-    /// mutation verifies this under an exclusive advisory lock so two stale
-    /// `Session` handles cannot append colliding entry IDs.
-    persisted_len: u64,
-    /// Number of complete JSONL records durably present. This includes head,
-    /// checkpoint, and usage records, not only conversation entries.
-    persisted_records: usize,
+    // Shared only with host-issued invocation handles. Every append uses the
+    // same descriptor-bound mutation line and stale-length fence.
+    writer: Arc<SessionWriter>,
+    invocations: Arc<DurableInvocationStore>,
     entries: Vec<Entry>,
     index: HashMap<EntryId, usize>,
     head: Option<EntryId>,
@@ -870,6 +924,14 @@ pub struct Session {
     usage_records: Vec<UsageRecord>,
     /// Session-global exposure; checkout and compaction never clear it.
     usage_uncertainty_records: Vec<UsageUncertaintyRecord>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // A retained callback cannot keep writing after the owning session
+        // closes. Durable pending state remains for a newly opened session.
+        self.invocations.close();
+    }
 }
 
 impl std::fmt::Debug for Session {
@@ -921,11 +983,13 @@ impl Session {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
+        let writer = Arc::new(SessionWriter::new(file.try_clone()?, 0, 0, true));
+        let invocations = Arc::new(DurableInvocationStore::with_journal(Arc::clone(&writer)));
         Ok(Self {
             path: path.into(),
             file,
-            persisted_len: 0,
-            persisted_records: 0,
+            writer,
+            invocations,
             entries: Vec::new(),
             index: HashMap::new(),
             head: None,
@@ -1071,6 +1135,7 @@ impl Session {
         let mut checkpoint_lines: Vec<usize> = Vec::new();
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut usage_uncertainty_records = Vec::new();
+        let restored_invocations = DurableInvocationStore::new();
 
         // Byte offset of the end of the last accepted record, so a torn tail
         // can be truncated away below. Only one physical line is buffered at a
@@ -1143,6 +1208,14 @@ impl Session {
             final_record_had_newline = has_newline;
             persisted_records += 1;
             match record {
+                SessionRecord::ToolInvocation { scope, record } => {
+                    restored_invocations
+                        .restore(scope, record)
+                        .map_err(|error| SessionError::Corrupt {
+                            line: line_no,
+                            message: error.to_string(),
+                        })?;
+                }
                 SessionRecord::Entry(entry) => {
                     if index.contains_key(&entry.id) {
                         return Err(SessionError::Corrupt {
@@ -1226,6 +1299,14 @@ impl Session {
                             });
                         }
                         _ => {}
+                    }
+                    for scope in result_invocation_scopes(
+                        &entry.value,
+                        entry.parent.as_ref(),
+                        &entries,
+                        &index,
+                    ) {
+                        restored_invocations.restore_result(&scope);
                     }
                     index.insert(entry.id.clone(), entries.len());
                     entries.push(*entry);
@@ -1374,11 +1455,18 @@ impl Session {
         }
         let persisted_len = file.metadata()?.len();
         FileExt::unlock(&file)?;
+        let writer = Arc::new(SessionWriter::new(
+            file.try_clone()?,
+            persisted_len,
+            persisted_records,
+            recover_tail,
+        ));
+        let invocations = Arc::new(restored_invocations.attach_journal(Arc::clone(&writer)));
         Ok(Self {
             path,
             file,
-            persisted_len,
-            persisted_records,
+            writer,
+            invocations,
             entries,
             next_id,
             index,
@@ -1440,73 +1528,72 @@ impl Session {
     /// listing can still open active sessions, while a second writer fails
     /// before it can reuse stale entry IDs.
     fn persist(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
-        // The flock acquisition, staleness check, append, and sync_data form
-        // one critical section that must run as a single unit on one thread so
-        // the advisory lock is never held across an await point.
-        fn critical_section(session: &mut Session, bytes: &[u8]) -> Result<(), SessionError> {
-            session.file.lock_exclusive()?;
-            let result = (|| {
-                if session.file.metadata()?.len() != session.persisted_len {
-                    return Err(SessionError::ConcurrentModification);
-                }
-                let byte_count = u64::try_from(bytes.len()).map_err(|_| {
-                    SessionError::Limit("record write length does not fit u64".to_owned())
-                })?;
-                let new_len = session
-                    .persisted_len
-                    .checked_add(byte_count)
-                    .ok_or_else(|| {
-                        SessionError::Limit("session file length overflow".to_owned())
-                    })?;
-                if new_len > MAX_SESSION_FILE_BYTES {
-                    return Err(SessionError::Limit(format!(
-                        "write would grow session to {new_len} bytes (limit {MAX_SESSION_FILE_BYTES})"
-                    )));
-                }
-                let added_records = bytes.iter().filter(|byte| **byte == b'\n').count();
-                let new_records = session
-                    .persisted_records
-                    .checked_add(added_records)
-                    .ok_or_else(|| {
-                        SessionError::Limit("session record count overflow".to_owned())
-                    })?;
-                if new_records > MAX_SESSION_RECORDS {
-                    return Err(SessionError::Limit(format!(
-                        "write would grow session past {MAX_SESSION_RECORDS} records"
-                    )));
-                }
-                session.file.seek(std::io::SeekFrom::End(0))?;
-                session.file.write_all(bytes)?;
-                session.file.sync_data()?;
-                session.persisted_len = new_len;
-                session.persisted_records = new_records;
-                Ok(())
-            })();
-            let unlock_result = FileExt::unlock(&session.file);
-            result?;
-            unlock_result?;
-            Ok(())
-        }
+        self.writer.persist(bytes)
+    }
 
-        // Every blocking filesystem operation below (flock wait, metadata,
-        // write_all, sync_data) executes on an async runtime worker in
-        // production (`worker_threads = 2`). On a multi-threaded runtime,
-        // block_in_place tells the scheduler this worker will stall, letting
-        // it migrate queued tasks to other workers instead of starving while
-        // a slow disk holds flock or fsync. The whole critical section stays
-        // together inside one call, so locking and error semantics are
-        // unchanged; outside a multi-threaded runtime (tests, sync callers)
-        // it runs inline exactly as before.
-        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            matches!(
-                handle.runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            )
-        }) {
-            tokio::task::block_in_place(|| critical_section(self, bytes))
-        } else {
-            critical_section(self, bytes)
+    #[cfg(test)]
+    pub(crate) fn fail_next_append(&self) {
+        self.writer.fail_next_append();
+    }
+
+    /// Issues a durable memo/checkpoint capability for one unresolved call in
+    /// the current assistant batch. Identity is assistant entry + source index,
+    /// so a provider's reused call ID never aliases another invocation.
+    pub fn tool_invocation(&self, call_index: usize) -> Result<InvocationHandle, SessionError> {
+        self.invocations
+            .open(self.invocation_scope(call_index)?)
+            .map_err(|e| SessionError::Limit(e.to_string()))
+    }
+
+    /// Recovery refusals may retain existing progress without allocating a
+    /// pending-effect slot for a call that will never execute.
+    pub(crate) fn invocation_partial_output(
+        &self,
+        call_index: usize,
+    ) -> Result<Option<String>, SessionError> {
+        self.invocations
+            .partial_output_for_scope(&self.invocation_scope(call_index)?)
+            .map_err(|e| SessionError::Limit(e.to_string()))
+    }
+
+    fn invocation_scope(&self, call_index: usize) -> Result<InvocationScope, SessionError> {
+        let mut cursor = self.head_ref();
+        let mut completed = std::collections::HashSet::new();
+        while let Some(id) = cursor {
+            let entry = self.entry(id).expect("session ancestry is valid");
+            match &entry.value {
+                EntryValue::Message(Message::Assistant(assistant)) => {
+                    let call = assistant
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            octet_ai::AssistantPart::ToolCall(call) => Some(call),
+                            _ => None,
+                        })
+                        .nth(call_index)
+                        .ok_or_else(|| SessionError::Limit("unknown tool invocation".into()))?;
+                    if completed.contains(&call.id) {
+                        return Err(SessionError::Limit(
+                            "tool invocation already settled".into(),
+                        ));
+                    }
+                    return InvocationScope::new(id.0.clone(), call_index.to_string())
+                        .map_err(|e| SessionError::Limit(e.to_string()));
+                }
+                EntryValue::Message(Message::User(user)) => {
+                    for part in &user.content {
+                        if let UserPart::ToolResult(result) = part {
+                            completed.insert(result.tool_call_id.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cursor = entry.parent.as_ref();
         }
+        Err(SessionError::Limit(
+            "no pending assistant tool batch".into(),
+        ))
     }
 
     /// Appends an entry (parented on the current head) and records the new
@@ -1623,9 +1710,17 @@ impl Session {
                 total_cost_picodollars_remainder: &self.total_cost_picodollars_remainder,
             },
         )?;
-        // `persist` performs the unbuffered, synced write while excluding
-        // stale concurrent writers.
-        self.persist(&buf)?;
+        // The immutable paired result doubles as the invocation tombstone.
+        // Hold the store fence across its synced append so late memos cannot
+        // revive state; replay performs the same cleanup from this entry.
+        let settled = result_invocation_scopes(
+            &entry.value,
+            entry.parent.as_ref(),
+            &self.entries,
+            &self.index,
+        );
+        self.invocations
+            .commit_results(&settled, || self.writer.persist(&buf))?;
 
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);
@@ -2073,6 +2168,36 @@ impl Session {
         self.persist(&buffer)?;
         self.usage_uncertainty_records.push(record);
         Ok(())
+    }
+
+    /// Drop cannot return a persistence failure to its caller. Retain the same
+    /// uncertainty in memory on failure so a later hard ceiling cannot mistake
+    /// the abandoned accepted attempt for zero exposure. Disk failure still
+    /// prevents any promise of recovery after process exit.
+    pub(crate) fn record_abandoned_usage_uncertainty(
+        &mut self,
+        endpoint: EndpointId,
+        model: ModelId,
+        operation: &str,
+    ) -> Result<(), SessionError> {
+        let result = self.record_usage_uncertainty(endpoint.clone(), model.clone(), operation);
+        if result.is_err() {
+            self.usage_uncertainty_records.push(UsageUncertaintyRecord {
+                endpoint,
+                model,
+                operation: operation.to_owned(),
+            });
+        }
+        result
+    }
+
+    /// Whether any completed operation lacks exact pricing. Token usage can
+    /// still be known; catalog availability for the active model cannot price
+    /// a historical request, provider-selected tier, or child retroactively.
+    pub fn has_unpriced_usage(&self) -> bool {
+        self.usage_records
+            .iter()
+            .any(|record| record.cost.is_none() && record.cost_microdollars.is_none())
     }
 
     /// Whether any durable accepted-attempt usage is unknown, on any branch.
@@ -3723,16 +3848,16 @@ mod tests {
         let mut session = Session::create(&path).unwrap();
         let near_limit = MAX_SESSION_FILE_BYTES - 1;
         session.file.set_len(near_limit).unwrap();
-        session.persisted_len = near_limit;
+        session.writer.state.lock().unwrap().len = near_limit;
         let before_next_id = session.next_id;
-        let before_records = session.persisted_records;
+        let before_records = session.writer.state.lock().unwrap().records;
 
         let error = session.append(user("must not be written")).unwrap_err();
 
         assert!(matches!(error, SessionError::Limit(_)), "{error}");
         assert_eq!(session.file.metadata().unwrap().len(), near_limit);
-        assert_eq!(session.persisted_len, near_limit);
-        assert_eq!(session.persisted_records, before_records);
+        assert_eq!(session.writer.state.lock().unwrap().len, near_limit);
+        assert_eq!(session.writer.state.lock().unwrap().records, before_records);
         assert_eq!(session.next_id, before_next_id);
         assert!(session.entries.is_empty());
         assert!(session.index.is_empty());
@@ -3744,7 +3869,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_path(&dir);
         let mut session = Session::create(&path).unwrap();
-        session.persisted_records = MAX_SESSION_RECORDS - 1;
+        session.writer.state.lock().unwrap().records = MAX_SESSION_RECORDS - 1;
         let before_next_id = session.next_id;
 
         let error = session
@@ -3753,8 +3878,11 @@ mod tests {
 
         assert!(matches!(error, SessionError::Limit(_)), "{error}");
         assert_eq!(session.file.metadata().unwrap().len(), 0);
-        assert_eq!(session.persisted_len, 0);
-        assert_eq!(session.persisted_records, MAX_SESSION_RECORDS - 1);
+        assert_eq!(session.writer.state.lock().unwrap().len, 0);
+        assert_eq!(
+            session.writer.state.lock().unwrap().records,
+            MAX_SESSION_RECORDS - 1
+        );
         assert_eq!(session.next_id, before_next_id);
         assert!(session.entries.is_empty());
         assert!(session.index.is_empty());
@@ -4230,7 +4358,7 @@ mod tests {
         assert!(record_unknown_attempt(&mut read_only).is_err());
         assert!(!read_only.has_uncertain_usage());
         assert_eq!(std::fs::read(&path).unwrap(), before);
-        writer.persisted_records = MAX_SESSION_RECORDS;
+        writer.writer.state.lock().unwrap().records = MAX_SESSION_RECORDS;
         assert!(matches!(
             record_unknown_attempt(&mut writer),
             Err(SessionError::Limit(_))

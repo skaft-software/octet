@@ -458,6 +458,9 @@ pub(super) fn render_input_suggestions(
     width: u16,
     max_rows: usize,
 ) -> Vec<String> {
+    if state.transcript_search_active() {
+        return Vec::new();
+    }
     let extension = render_extension_autocomplete(state, width, max_rows);
     if !extension.is_empty() {
         return extension;
@@ -681,7 +684,10 @@ mod tests {
         // Windows-flavoured defaults declare `alt+q` for the same binding while
         // the translator still consumes `KeyCode::Up + ALT`, so the hint names
         // the chord the binary accepts. Recorded in the TODO above.
-        assert_eq!(queued_edit_key_id_for("windows"), QUEUED_EDIT_TRANSLATOR_CHORD);
+        assert_eq!(
+            queued_edit_key_id_for("windows"),
+            QUEUED_EDIT_TRANSLATOR_CHORD
+        );
         assert_eq!(
             keybindings::default_definitions("win32", false)
                 .into_iter()

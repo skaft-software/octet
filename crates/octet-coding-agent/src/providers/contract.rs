@@ -1802,6 +1802,25 @@ mod tests {
             .unwrap_or_else(|| panic!("missing declaration for fixture provider {provider_id}"))
     }
 
+    // Keep pi-0.84.4.json as historical evidence. Apply only named changes
+    // justified by the newer pinned reference when exercising current octet.
+    // xAI: Pi 8a7b0c03dfb702663acafb6dc29f8acaa4ffe391,
+    // packages/ai/src/providers/xai.ts, declares openai-responses.
+    fn current_fixture_with_named_differences(
+        pi_provider_id: &str,
+        historical: &PiRouteFixture,
+    ) -> PiRouteFixture {
+        let mut current = historical.clone();
+        if pi_provider_id == "xai" {
+            assert_eq!(
+                historical.protocol, "openai_chat",
+                "historical xAI Chat fixture must not be rewritten as a current-reference fact"
+            );
+            current.protocol = "openai_responses".to_owned();
+        }
+        current
+    }
+
     fn assert_declared_fixture(
         pi_provider_id: &str,
         fixture_id: &str,
@@ -1833,8 +1852,10 @@ mod tests {
             });
         assert_eq!(
             route.protocol,
-            fixture_protocol(&fixture.protocol),
-            "{fixture_id}: {pi_provider_id} protocol drifted"
+            fixture_protocol(
+                &current_fixture_with_named_differences(pi_provider_id, fixture).protocol,
+            ),
+            "{fixture_id}: {pi_provider_id} protocol drifted beyond the named reference update"
         );
         assert_eq!(
             route.endpoint_id, fixture.endpoint_id,
@@ -2048,6 +2069,9 @@ mod tests {
                 | PiProviderDecision::DeclaredSubset { .. }
                 | PiProviderDecision::Unsupported { .. } => continue,
             };
+            // Exercise the current route without mutating the historical inventory.
+            let current_fixture = current_fixture_with_named_differences(&provider.id, fixture);
+            let fixture = &current_fixture;
             let declaration = declaration_for_fixture(provider_id);
             let fixture_base_url = fixture_resolved_base_url(declaration, fixture_id, fixture);
             let base_url = fixture_base_at_server(&server, &fixture_base_url);
@@ -2110,6 +2134,61 @@ mod tests {
             assert_fixture_authentication(request, &expected.fixture_id, &expected.fixture);
             assert_fixture_request_body(request, &expected.fixture_id, &expected.fixture);
         }
+    }
+
+    // Current additive Pi reference 8a7b0c03 providers/xai.ts, independent of
+    // the historical inventory/package admission baseline above.
+    #[tokio::test]
+    async fn current_xai_route_uses_responses_and_replays_encrypted_reasoning() {
+        let server = MockServer::start().await;
+        let fixture = PiRouteFixture {
+            registration: "discovered".into(), model_id: "grok-fixture".into(),
+            protocol: "openai_responses".into(), endpoint_id: "xai".into(),
+            auth_presentation: "bearer".into(), auth_header: None,
+            base_url: "https://api.x.ai/v1/".into(), configured_base_url: None,
+            environment_variable: "XAI_API_KEY".into(),
+        };
+        let base = fixture_base_at_server(&server, &fixture.base_url.parse().unwrap());
+        let mut model = register_fixture_model(&XAI, "current-xai", &fixture, &base);
+        assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+        Arc::make_mut(&mut model.endpoint).auth = fixture_auth(&fixture);
+        Arc::make_mut(&mut model.spec).capabilities.reasoning = Some(serde_json::from_value(serde_json::json!({
+            "control":"effort", "exposes_text":true, "preserves_state":true,
+            "min_effort":"low", "max_effort":"high"
+        })).unwrap());
+        let events = [
+            serde_json::json!({"type":"response.created","response":{"id":"resp_xai"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"ri_xai"}}),
+            serde_json::json!({"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"summary"}),
+            serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"ri_xai","encrypted_content":"encrypted-xai-state"}}),
+            serde_json::json!({"type":"response.completed","response":{"output":[{"type":"reasoning","id":"ri_xai","summary":[{"type":"summary_text","text":"summary"}],"encrypted_content":"encrypted-xai-state"}],"usage":{"input_tokens":4,"output_tokens":2}}})
+        ];
+        let wire: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+        Mock::given(method("POST")).and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type","text/event-stream").set_body_string(wire))
+            .mount(&server).await;
+        let client = AiClient::try_with_proxy_environment(Default::default()).unwrap();
+        let mut request = fixture_request(); request.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+        let response = client.complete(&model, request.clone()).await.unwrap();
+        assert!(response.message.content.iter().any(|part| matches!(part,
+            octet_ai::AssistantPart::Reasoning(reasoning) if reasoning.state.is_some())));
+        request.responses = Some(octet_ai::ResponsesOptions::full_replay(
+            octet_ai::responses::encode_responses_replay(&model, None, &[
+                octet_ai::ResponsesReplayItem::Output(response.responses_output.unwrap()),
+                octet_ai::ResponsesReplayItem::User(UserMessage {content:vec![UserPart::Text("continue".into())]}),
+            ])));
+        client.complete(&model, request).await.unwrap();
+        let requests = server.received_requests().await.unwrap(); assert_eq!(requests.len(),2);
+        for request in &requests {
+            assert_eq!(request.url.path(), "/v1/responses");
+            assert_fixture_authentication(request, "current-xai", &fixture);
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["model"], "grok-fixture");
+            assert!(body["include"].as_array().unwrap().contains(&serde_json::json!("reasoning.encrypted_content")));
+            assert_eq!(body["store"], false);
+        }
+        let replay: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(replay["input"][0]["encrypted_content"], "encrypted-xai-state");
     }
 
     #[test]

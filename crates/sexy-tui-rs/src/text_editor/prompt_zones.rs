@@ -123,6 +123,29 @@ impl PromptZones {
         Self { zones, prompt_rows }
     }
 
+    /// Build an index from trusted semantic row boundaries without putting OSC
+    /// bytes in rendered text. Out-of-range boundaries are ignored.
+    #[must_use]
+    pub fn from_boundaries(
+        row_count: usize,
+        boundaries: impl IntoIterator<Item = (usize, PromptZone)>,
+    ) -> Self {
+        let mut zones = vec![Vec::new(); row_count];
+        for (row, zone) in boundaries {
+            if let Some(markers) = zones.get_mut(row) {
+                if !markers.contains(&zone) {
+                    markers.push(zone);
+                }
+            }
+        }
+        let prompt_rows = zones
+            .iter()
+            .enumerate()
+            .filter_map(|(row, markers)| markers.contains(&PromptZone::PromptStart).then_some(row))
+            .collect();
+        Self { zones, prompt_rows }
+    }
+
     /// Rows that begin a prompt (`A` zones), in ascending order.
     #[must_use]
     pub fn prompt_rows(&self) -> &[usize] {
@@ -194,12 +217,15 @@ mod tests {
 
     #[test]
     fn markers_are_parsed_at_line_start_only() {
-        assert_eq!(zone_markers(&format!("{A_BEL}$ ls")), vec![PromptZone::PromptStart]);
+        assert_eq!(
+            zone_markers(&format!("{A_BEL}$ ls")),
+            vec![PromptZone::PromptStart]
+        );
         assert_eq!(zone_markers(B_ST), vec![PromptZone::CommandStart]);
-        assert_eq!(zone_markers(&format!("{A_BEL}{B_ST}ready")), vec![
-            PromptZone::PromptStart,
-            PromptZone::CommandStart
-        ]);
+        assert_eq!(
+            zone_markers(&format!("{A_BEL}{B_ST}ready")),
+            vec![PromptZone::PromptStart, PromptZone::CommandStart]
+        );
         // Mid-line and malformed sequences are literal content.
         assert!(zone_markers("text \x1b]133;A\x07").is_empty());
         assert!(zone_markers("\x1b]133;D\x07").is_empty());

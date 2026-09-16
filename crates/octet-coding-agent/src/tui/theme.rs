@@ -618,6 +618,15 @@ impl OctetTheme {
         )
     }
 
+    /// Search decoration uses the active theme accent and capability downgrade.
+    /// Current and ordinary matches differ in attributes, not raw ANSI colours.
+    pub(crate) fn transcript_search_match(&self, text: &str, current: bool) -> String {
+        let mut style = self.semantic_style("accent").underline();
+        style.attributes.bold = current;
+        style.attributes.inverse = current;
+        self.inner.apply_style(style, text)
+    }
+
     fn apply_style_layered(&self, style: TextStyle, text: &str) -> String {
         let wrapped_empty = self.inner.apply_style(style, "");
         let Some(opening) = wrapped_empty.strip_suffix("\x1b[0m") else {

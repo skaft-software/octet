@@ -45,7 +45,6 @@ use crate::provider_setup::{
     SetupAuthentication, SetupAuthority, SetupDraft,
 };
 use crate::resources::{compose_instructions, expand_skill_command};
-use crate::session_tree::render_session_tree;
 use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
@@ -178,6 +177,7 @@ pub enum PendingIdleAction {
     Login(Option<String>),
     Logout(Option<String>),
     ChangeModel(ModelId),
+    Fast(bool),
     ChangeThinking(ReasoningConfig),
     ChangeThinkingLevel(ThinkingLevel),
     CycleThinking,
@@ -188,11 +188,10 @@ pub enum PendingIdleAction {
     Fork,
     Clone,
     Compact,
+    CompactWithInstructions(String),
     AutoCompact(Option<commands::AutoCompactSetting>),
     ShowContext,
     ReloadResources,
-    ShowTree,
-    CheckoutEntry(String),
     Skills(commands::SkillsSubcommand),
     // `/goal` deliberately has no queued form: it is applied the instant it is
     // submitted, mid-run or idle. Deferring it to the next idle boundary was
@@ -210,6 +209,9 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
         (
             Some(PendingIdleAction::ChangeModel(_)),
             PendingIdleAction::ChangeModel(_)
+        ) | (
+            Some(PendingIdleAction::Fast(_)),
+            PendingIdleAction::Fast(_)
         ) | (
             Some(PendingIdleAction::ChangeThinking(_)),
             PendingIdleAction::ChangeThinking(_)
@@ -273,6 +275,11 @@ where
                     Some(Err(error)) => return Err(error.into()),
                     None => return Ok(Idle::Quit),
                 };
+                // Search owns its query before any extension or clipboard
+                // admission; pasted paths/text must not become composer input.
+                if shell.intercept_transcript_input(&event) {
+                    continue;
+                }
                 observe_extension_terminal_event(executable_extensions, &event);
                 if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
                     shell.request_close();
@@ -339,17 +346,7 @@ where
                 if paste_clipboard_text(shell, &event).await {
                     continue;
                 }
-                let pending = if shell.pending_is_empty() {
-                    String::new()
-                } else {
-                    shell.pending()
-                };
-                match keymap::translate_with_popup(
-                    Some(event),
-                    false,
-                    &pending,
-                    shell.slash_popup_open(),
-                ) {
+                match shell.translate_input(Some(event), false) {
                     InputAction::SlashMenu(action) => {
                         if shell.slash_menu(action) {
                             return Ok(Idle::Command(shell.drain_editor()));
@@ -436,7 +433,7 @@ where
                         shell.render();
                     }
                     InputAction::Submit(_) => return Ok(Idle::Submit(shell.drain_composed())),
-                    InputAction::Command(_) => return Ok(Idle::Command(shell.drain_editor())),
+                    InputAction::Command(text) => return Ok(Idle::Command(shell.consume_command_text(text))),
                     InputAction::Closed => return Ok(Idle::Quit),
                     InputAction::FocusGained => apply_focus_transition(shell, true),
                     InputAction::FocusLost => apply_focus_transition(shell, false),
@@ -751,11 +748,12 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
         Command::Fork => PendingIdleAction::Fork,
         Command::Clone => PendingIdleAction::Clone,
         Command::Compact => PendingIdleAction::Compact,
+        Command::CompactWithInstructions(instructions) => {
+            PendingIdleAction::CompactWithInstructions(instructions)
+        }
         Command::AutoCompact(setting) => PendingIdleAction::AutoCompact(setting),
         Command::Context => PendingIdleAction::ShowContext,
         Command::Reload => PendingIdleAction::ReloadResources,
-        Command::Tree => PendingIdleAction::ShowTree,
-        Command::Checkout(id) => PendingIdleAction::CheckoutEntry(id),
         Command::Skills(sub) => PendingIdleAction::Skills(sub),
         // `/goal` is applied the instant it is submitted, mid-run or idle. It
         // has no queued form: queueing it is exactly the reported defect, so an
@@ -793,6 +791,9 @@ where
             }
             event = input.next(), if input_open => match event {
                 Some(Ok(event)) => {
+                    if shell.intercept_transcript_input(&event) {
+                        continue;
+                    }
                     // A clipboard paste is still admitted while a cancellable
                     // operation runs; a failed read keeps the event unchanged.
                     if paste_clipboard_text(shell, &event).await {
@@ -833,8 +834,7 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         shell.render();
         return false;
     }
-    let pending = shell.pending();
-    match keymap::translate_with_popup(Some(event), true, &pending, shell.slash_popup_open()) {
+    match shell.translate_input(Some(event), true) {
         InputAction::Abort | InputAction::DispatchQueued => return true,
         InputAction::Closed => {
             shell.request_close();
@@ -873,6 +873,7 @@ async fn compact_interactively<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     force: bool,
+    instructions: Option<&str>,
 ) where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
@@ -886,7 +887,12 @@ async fn compact_interactively<S>(
     if force {
         app.config.compaction.keep_recent_tokens = 1;
     }
-    let result = await_with_ctrl_c(attempt_compaction(app), shell, input).await;
+    let result = await_with_ctrl_c(
+        crate::compaction::attempt_compaction_with_instructions(app, instructions),
+        shell,
+        input,
+    )
+    .await;
     app.config.compaction.keep_recent_tokens = original_keep;
     // Clear the transient activity on every result before publishing the one
     // settled frame, including errors and cancellation of a held-open response.
@@ -920,7 +926,7 @@ fn is_ctrl_c(key: &crossterm::event::KeyEvent) -> bool {
 ///
 /// Required keymap change (recorded, not made — another worker owns
 /// `keymap.rs`): add `InputAction::PasteImage`, return it from
-/// `translate_with_popup` for this same key, and reserve the key in
+/// `translate_input` for this same key, and reserve the key in
 /// `is_reserved_extension_shortcut`; then this predicate can be deleted.
 fn is_clipboard_paste_key(key: &crossterm::event::KeyEvent) -> bool {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -1379,6 +1385,9 @@ where
                     shell.render();
                 }
                 Some(Ok(event)) => {
+                    if shell.intercept_transcript_input(&event) {
+                        continue;
+                    }
                     // Submission is not admitted during lifecycle work, but
                     // ordinary editing must not lose the probe's saved input.
                     // The same holds for a native clipboard paste.
@@ -1650,39 +1659,68 @@ async fn logout_custom(
     Ok(app)
 }
 
-/// Apply `/fast` to the active model's declared endpoint route.
-///
-/// The fast service tier is a Codex-route capability, so the command is gated
-/// on the declared protocol and endpoint runtime profile rather than a provider
-/// name, and it fails closed. The codec side is now landed — `octet-ai` carries
-/// a typed `ServiceTier` field that is emitted when a caller sets
-/// `ResponsesOptions::service_tier` on a profile whose
-/// `ResponsesRuntimeProfile::accepts_service_tier()` is true. The remaining
-/// missing primitive is the caller: every live run's `ResponsesOptions` is built
-/// in `crates/octet-agent/src/agent.rs` (`durable_responses_options` /
-/// `native_responses_options`) without a tier, so the switch still changes
-/// nothing on the wire and must not claim otherwise.
-fn apply_fast_command(shell: &mut InteractiveShell, model: &Model, requested: Option<bool>) {
-    if !commands::codex_fast_tier_endpoint(model) {
-        // Plain user language: the declared protocol and endpoint profile are
-        // engineering detail recorded in this function's doc comment, never
-        // rendered as internal enum names or module paths in the message.
+fn show_hotkeys(shell: &mut InteractiveShell) {
+    let text = shell.hotkeys_text();
+    shell.show_report_text("Hotkeys", "Resolved user keybindings", text);
+}
+
+fn copy_last_assistant(shell: &mut InteractiveShell) {
+    if shell.copy_last_assistant().is_some() {
+        shell.notice("Copied the last assistant message");
+    } else {
+        shell.error("There is no assistant message to copy yet".into());
+    }
+}
+
+/// Refuse unsupported routes before either applying or queueing a tier change.
+fn fast_route_available(shell: &mut InteractiveShell, model: &Model) -> bool {
+    if commands::codex_fast_tier_endpoint(model) {
+        true
+    } else {
         shell.error(format!(
-            "`/fast` is only available on Codex Responses routes; {} is not one, so the switch is not offered and nothing changed",
+            "`/fast` is only available on Codex Responses routes; {} is not one, so nothing changed",
             commands::model_route_label(model),
         ));
+        false
+    }
+}
+
+/// Apply only while the App owns the idle Agent; never mutate an active Run.
+fn apply_fast_command(app: &mut App, shell: &mut InteractiveShell, requested: Option<bool>) {
+    if !fast_route_available(shell, &app.model) {
         return;
     }
-    let detail = concat!(
-        "this build's Codex request path does not send a service tier yet, so ",
-        "nothing changed on the wire; `/fast` stays inert until the request ",
-        "builder supports it"
-    );
-    match requested {
-        Some(true) => shell.error(format!("`/fast on` not applied: {detail}")),
-        Some(false) => shell.error(format!("`/fast off` not applied: {detail}")),
-        None => shell.error(format!("`/fast` is inert: {detail}")),
+    if let Some(enabled) = requested {
+        if let Err(error) = app.set_fast_mode(enabled) {
+            shell.error(format!("`/fast` not applied: {error}"));
+            return;
+        }
+        update_status(shell, app);
     }
+    shell.notice(format!(
+        "{}; current live session only (restart or a different session resets it). Priority billing is not fully qualified across requests and reservations; enabling it marks session cost uncertain.",
+        commands::fast_status_text(&app.model, app.agent.service_tier()),
+    ));
+}
+
+fn active_fast_status(
+    inspection: &ActiveRunInspection,
+    queue: &VecDeque<PendingIdleAction>,
+) -> String {
+    let mut status =
+        commands::fast_status_text(&inspection.model, inspection.service_tier).to_owned();
+    // Queue order matters: a model/session change between toggles is a barrier,
+    // so report all queued switches without pretending any has been applied.
+    for action in queue {
+        if let PendingIdleAction::Fast(enabled) = action {
+            status.push_str(if *enabled {
+                "\nFast mode on queued for the next idle boundary (route rechecked then)"
+            } else {
+                "\nFast mode off queued for the next idle boundary (route rechecked then)"
+            });
+        }
+    }
+    status
 }
 
 /// Apply a terminal keyboard-focus transition (`?1004` reporting).
@@ -1717,15 +1755,27 @@ pub struct ActiveRunInspection {
     catalog: octet_ai::ModelCatalog,
     sessions: crate::session_store::SessionStore,
     subagents_available: bool,
+    service_tier: Option<octet_ai::ServiceTier>,
     /// Durable goal state, or the typed reason the run cannot address it.
     ///
     /// Captured like every other fact here; the goal store and the driver hold
     /// no borrow of the application, so `/goal` mutates durable state mid-run
     /// instead of being deferred to the next idle boundary.
     goal: Result<GoalAccess, ActiveGoalError>,
+    /// Whether the catalog holds only the routes this launch proved it needs.
+    ///
+    /// A surface that enumerates every provider must complete the plan first
+    /// (`App::enrich_catalog_for_surface`); an active run cannot borrow the app
+    /// mutably, so it defers that surface to the idle boundary.
+    catalog_is_narrowed: bool,
 }
 
 impl ActiveRunInspection {
+    /// Whether this run's catalog is missing providers the launch deferred.
+    fn is_narrowed(&self) -> bool {
+        self.catalog_is_narrowed
+    }
+
     /// Snapshot the application facts a run cannot borrow without cancelling it.
     pub fn capture(app: &App) -> Self {
         Self {
@@ -1734,8 +1784,10 @@ impl ActiveRunInspection {
             session_path: app.agent.session().path().to_path_buf(),
             model: app.model.clone(),
             catalog: app.catalog.clone(),
+            catalog_is_narrowed: !app.readiness.is_fleet(),
             sessions: app.sessions.clone(),
             subagents_available: app.subagents_available(),
+            service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
         }
     }
@@ -1875,10 +1927,26 @@ where
             let mut status = shell.status_detail();
             if !queue.is_empty() {
                 status.push_str(&format!("\nQueued idle actions: {}", queue.len()));
+                if queue
+                    .iter()
+                    .any(|action| matches!(action, PendingIdleAction::Fast(_)))
+                {
+                    status.push_str(&format!("\n{}", active_fast_status(inspection, queue)));
+                }
             }
             shell.show_status_text_with_telemetry(status);
         }
         Command::Changelog => shell.show_changelog(),
+        Command::Hotkeys => show_hotkeys(shell),
+        Command::Copy => copy_last_assistant(shell),
+        Command::Session => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Session",
+                "Durable session facts",
+                commands::session_text(&session),
+            ),
+            Err(error) => shell.error(format!("session report unavailable: {error}")),
+        },
         Command::Help(topic) => shell.show_report_text(
             "Help",
             "Browse commands and keyboard shortcuts",
@@ -1899,10 +1967,6 @@ where
                 commands::cache_text(&session),
             ),
             Err(error) => shell.error(format!("cache report unavailable: {error}")),
-        },
-        Command::Tree => match inspection.read_only_session() {
-            Ok(session) => shell.show_overlay_text(session_tree_text(&session)),
-            Err(error) => shell.error(format!("session tree unavailable: {error}")),
         },
         Command::Context => shell.show_report_text(
             "Context",
@@ -2025,7 +2089,14 @@ where
             shell.show_overlay_text(extensions.inspect_text());
             push_pending_action(queue, PendingIdleAction::Extensions(sub));
         }
-        Command::Fast(requested) => apply_fast_command(shell, &inspection.model, requested),
+        Command::Fast(requested) => {
+            if fast_route_available(shell, &inspection.model) {
+                if let Some(enabled) = requested {
+                    push_pending_action(queue, PendingIdleAction::Fast(enabled));
+                }
+                shell.notice(active_fast_status(inspection, queue));
+            }
+        }
         Command::Goal(goal) => match inspection.goal_access() {
             // Applied now, against the same durable store and driver the idle
             // dispatcher uses. The run in progress is untouched: it is not
@@ -2044,6 +2115,16 @@ where
             // The picker owns input while it is open, so it runs inline and the
             // chosen model is applied by the idle transition that already owns
             // reconfiguration. Cancelling infers no change.
+            //
+            // A narrowed launch deferred configured providers, and only the idle
+            // boundary owns the mutable app that can complete the plan. Showing
+            // the partial list here would silently hide every other provider, so
+            // hand the picker to that boundary instead.
+            if inspection.is_narrowed() {
+                push_pending_action(queue, PendingIdleAction::PickModel);
+                shell.notice("model picker opens at the next idle boundary");
+                return Ok(());
+            }
             if let Some(id) = optional_model_picker(shell, input, &inspection.catalog).await? {
                 push_pending_action(queue, PendingIdleAction::ChangeModel(id));
                 shell.notice("model change queued for the next idle boundary");
@@ -2065,7 +2146,7 @@ where
                 shell.notice("thinking change queued for the next idle boundary");
             }
         }
-        Command::Quit => *quit_requested = true,
+        Command::Exit => *quit_requested = true,
         Command::Unknown(text) => shell.error(format!("unknown command: {text}")),
         command => match queue_command(command, queue) {
             Ok(()) => shell.notice("command queued for the next idle boundary"),
@@ -2229,6 +2310,11 @@ where
                         continue;
                     }
                 };
+                // Search owns its query before any extension or clipboard
+                // admission; pasted paths/text must not become composer input.
+                if shell.intercept_transcript_input(&event) {
+                    continue;
+                }
                 observe_extension_terminal_event(executable_extensions, &event);
                 if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
                     request_active_close(
@@ -2304,17 +2390,7 @@ where
                 if paste_clipboard_text(shell, &event).await {
                     continue;
                 }
-                let pending = if shell.pending_is_empty() {
-                    String::new()
-                } else {
-                    shell.pending()
-                };
-                let action = match keymap::translate_with_popup(
-                    Some(event),
-                    true,
-                    &pending,
-                    shell.slash_popup_open(),
-                ) {
+                let action = match shell.translate_input(Some(event), true) {
                     InputAction::SlashMenu(action) => {
                         if shell.slash_menu(action) {
                             InputAction::Command(shell.pending())
@@ -2385,8 +2461,8 @@ where
                             shell.render();
                             continue;
                         }
-                        let command = commands::parse(&shell.drain_editor());
-                        let was_quit = matches!(command, Command::Quit);
+                        let command = commands::parse(&shell.consume_command_text(text));
+                        let was_quit = matches!(command, Command::Exit);
                         if let Command::Answer(instruction) = &command {
                             if !aborting {
                                 let composed = answer_now_input(instruction.clone());
@@ -2748,6 +2824,7 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
     // Registry/configured metadata overrides the conservative canonical-ID
     // fallback installed by `set_identity` and is cached until model switch.
     shell.set_model_theme(&app.model);
+    shell.set_model_cycle(app.model_cycle());
     shell.set_status_detail(commands::status_text_with_metrics(
         app,
         None,
@@ -2793,6 +2870,10 @@ fn apply_extension_background(
 ) -> bool {
     let updates = executable_extensions.drain_background_updates();
     let mut changed = false;
+    for message in executable_extensions.drain_post_mutation_rescans() {
+        shell.notice(message);
+        changed = true;
+    }
     for update in updates.rendered_tools {
         shell.apply_extension_tool_renderer(&update.id, &update.segments);
         changed = true;
@@ -2841,7 +2922,14 @@ fn report_compaction(shell: &mut InteractiveShell, outcome: &CompactionOutcome, 
                         .input_tokens
                         .saturating_add(record.usage.cache_read_tokens)
                         .saturating_add(record.usage.cache_write_tokens);
-                    format!("{prompt_tokens} input tokens summarized · {cost} compaction cost")
+                    format!(
+                        "{prompt_tokens} input tokens summarized · {cost} compaction cost{}",
+                        if session.has_uncertain_usage() || session.has_unpriced_usage() {
+                            " (session usage or pricing uncertain)"
+                        } else {
+                            ""
+                        }
+                    )
                 },
             );
             let summary = session
@@ -2875,7 +2963,14 @@ fn report_compaction(shell: &mut InteractiveShell, outcome: &CompactionOutcome, 
                         .input_tokens
                         .saturating_add(record.usage.cache_read_tokens)
                         .saturating_add(record.usage.cache_write_tokens);
-                    format!("{prompt_tokens} input tokens compacted · {cost} compaction cost")
+                    format!(
+                        "{prompt_tokens} input tokens compacted · {cost} compaction cost{}",
+                        if session.has_uncertain_usage() || session.has_unpriced_usage() {
+                            " (session usage or pricing uncertain)"
+                        } else {
+                            ""
+                        }
+                    )
                 },
             );
             shell.native_compaction_marker(format!("Context compacted natively · {detail}"));
@@ -2965,6 +3060,63 @@ fn configure_auto_compaction(
     Ok(())
 }
 
+/// Bounded, descriptor-bound observation; unknown files never produce a claim
+/// that a config mutation committed. Raw bytes remain inside the host.
+fn configuration_snapshot(path: &Path) -> Option<Option<Vec<u8>>> {
+    match octet_agent::secure_fs::read_regular_file_bounded(path, 1024 * 1024) {
+        Ok(bytes) => Some(Some(bytes)),
+        Err(octet_agent::secure_fs::SecureFileError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Some(None)
+        }
+        Err(_) => None,
+    }
+}
+
+async fn observe_configuration_commit(
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    before: Option<Option<Vec<u8>>>,
+    path: Option<&Path>,
+) -> bool {
+    let (Some(before), Some(path)) = (before, path) else {
+        return false;
+    };
+    let Some(after) = configuration_snapshot(path) else {
+        return false;
+    };
+    if before == after {
+        return false;
+    }
+    // An observation owner lives inside this process. No contents, paths,
+    // credentials, or user identities appear in its stable notification ID.
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    extensions
+        .notify_configuration_changed(
+            format!("configuration:{generation}"),
+            generation,
+            octet_agent::PostMutationState::Committed,
+        )
+        .await;
+    true
+}
+
+async fn persist_configuration<T>(
+    extensions: Option<&mut crate::extensions::ExecutableExtensions>,
+    persist: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let path = extensions
+        .as_ref()
+        .and_then(|_| crate::cli::global_config_path());
+    let before = path.as_deref().and_then(configuration_snapshot);
+    let result = persist()?;
+    if let Some(extensions) = extensions {
+        observe_configuration_commit(extensions, before, path.as_deref()).await;
+    }
+    Ok(result)
+}
+
 async fn reload_resources(
     app: App,
     shell: &mut InteractiveShell,
@@ -2983,6 +3135,7 @@ async fn reload_resources(
     .await?;
     shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
+    shell.reload_keybindings();
     shell.hydrate(app.agent.session())?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
@@ -3312,6 +3465,8 @@ async fn extension_management_menu(
         }
 
         let enabled = !choice.enabled;
+        let config_path = crate::cli::global_config_path();
+        let before_config = config_path.as_deref().and_then(configuration_snapshot);
         let persisted = match crate::cli::persist_extension_enabled(&choice.name, enabled) {
             Ok(persisted) => persisted,
             Err(error) => {
@@ -3339,6 +3494,12 @@ async fn extension_management_menu(
                 };
             }
         };
+        observe_configuration_commit(
+            &mut app.executable_extensions,
+            before_config,
+            config_path.as_deref(),
+        )
+        .await;
         request_extension_ui(shell, &mut app);
         let summary = app
             .executable_extensions
@@ -3971,69 +4132,10 @@ async fn subagents_view(
     }
 }
 
-fn session_tree_text(session: &Session) -> String {
-    render_session_tree(session)
-}
-
 fn restore_session_head(path: &std::path::Path, head: EntryId) -> anyhow::Result<()> {
     let mut session = Session::open(path)?;
     session.checkout(head)?;
     Ok(())
-}
-
-async fn checkout_entry(
-    mut app: App,
-    shell: &mut InteractiveShell,
-    input: &mut EventStream,
-    id: String,
-) -> anyhow::Result<App> {
-    let _diagnostics = crate::output::defer_tui_diagnostics();
-    let display_id = id.clone();
-    let (app, path, previous_head) =
-        run_blocking_lifecycle(shell, input, "checking out session…", move || {
-        let path = app.agent.session().path().to_owned();
-        let previous_head = app
-            .agent
-            .session()
-            .head()
-            .ok_or_else(|| anyhow::anyhow!("cannot checkout from an empty session"))?;
-        app.agent.session_mut().checkout(EntryId(id.clone()))?;
-        match rebuild_app(
-            app,
-            None,
-            None,
-            None,
-            Some(crate::app::bootstrap::SessionSelection::OpenExisting(
-                path.clone(),
-            )),
-        ) {
-            Ok(app) => Ok((app, path, previous_head)),
-            Err(error) => {
-                if let Err(rollback) = restore_session_head(&path, previous_head) {
-                    anyhow::bail!(
-                        "checkout failed: {error}; restoring the previous head also failed: {rollback}"
-                    );
-                }
-                Err(error)
-            }
-        }
-        })
-        .await?;
-    if let Err(error) = shell.hydrate(app.agent.session()) {
-        if let Err(rollback) = restore_session_head(&path, previous_head) {
-            anyhow::bail!(
-                "checkout hydration failed: {error}; restoring the previous head also failed: {rollback}"
-            );
-        }
-        return Err(error);
-    }
-    update_status(shell, &app);
-    app.executable_extensions
-        .activate_session_lifecycle_driver();
-    shell.notice(format!(
-        "checked out entry {display_id}; future messages will create a branch"
-    ));
-    Ok(app)
 }
 
 async fn transition<S>(
@@ -4046,6 +4148,7 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let _diagnostics = crate::output::defer_tui_diagnostics();
+    let had_fast = app.agent.service_tier().is_some();
     let app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
         apply_reconfig(app, reconfig)
     })
@@ -4054,6 +4157,9 @@ where
     // Model and thinking changes are acknowledged by stable chrome, not a
     // duplicate transcript notice. Session-operation notices remain caller-owned.
     update_status(shell, &app);
+    if had_fast && app.agent.service_tier().is_none() {
+        shell.notice("Fast mode: off after the model/session change; use /fast on on a supported route to enable it again");
+    }
     app.executable_extensions
         .activate_session_lifecycle_driver();
     Ok(app)
@@ -4405,11 +4511,18 @@ async fn apply_pending_actions(
                 Ok(_) => unreachable!(),
                 Err(e) => shell.error(e.to_string()),
             },
+            PendingIdleAction::Fast(enabled) => {
+                apply_fast_command(&mut app, shell, Some(enabled));
+            }
             PendingIdleAction::ChangeModel(id) => {
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
             }
             PendingIdleAction::ChangeThinking(reasoning) => {
-                if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
+                if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
+                    crate::cli::persist_reasoning(&reasoning_label(&reasoning))
+                })
+                .await
+                {
                     shell.error(format!("failed to save thinking preference: {e}"));
                 }
                 app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
@@ -4420,7 +4533,11 @@ async fn apply_pending_actions(
                     &app.model,
                     app.subagents_available(),
                 )?;
-                if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
+                if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
+                    crate::cli::persist_reasoning(&reasoning_label(&reasoning))
+                })
+                .await
+                {
                     shell.error(format!("failed to save thinking preference: {e}"));
                 }
                 app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
@@ -4432,7 +4549,11 @@ async fn apply_pending_actions(
                     &app.model,
                     app.subagents_available(),
                 )?;
-                if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
+                if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
+                    crate::cli::persist_reasoning(&reasoning_label(&reasoning))
+                })
+                .await
+                {
                     shell.error(format!("failed to save thinking preference: {e}"));
                 }
                 app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
@@ -4466,7 +4587,10 @@ async fn apply_pending_actions(
                 app = clone_session(app, shell, input).await?;
             }
             PendingIdleAction::Compact => {
-                compact_interactively(&mut app, shell, input, false).await;
+                compact_interactively(&mut app, shell, input, false, None).await;
+            }
+            PendingIdleAction::CompactWithInstructions(instructions) => {
+                compact_interactively(&mut app, shell, input, false, Some(&instructions)).await;
             }
             PendingIdleAction::AutoCompact(setting) => {
                 configure_auto_compaction(&mut app, shell, setting)?;
@@ -4477,15 +4601,10 @@ async fn apply_pending_actions(
             }
             PendingIdleAction::ReloadResources => {
                 app = reload_resources(app, shell, input).await?;
-                shell.notice("instructions, prompts, skills, and extensions reloaded");
-            }
-            PendingIdleAction::ShowTree => {
-                shell.show_overlay_text(session_tree_text(app.agent.session()));
-            }
-            PendingIdleAction::CheckoutEntry(id) => {
-                app = checkout_entry(app, shell, input, id).await?;
+                shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
             }
             PendingIdleAction::PickModel => {
+                prepare_model_picker_surface(&mut app, shell);
                 if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
                     app = transition(app, shell, input, Reconfig::Model(model)).await?;
                 }
@@ -4494,7 +4613,12 @@ async fn apply_pending_actions(
                 if let Some((mode, level)) =
                     thinking_configuration_picker(&app, shell, input).await?
                 {
-                    if let Err(error) = crate::cli::persist_reasoning_mode(mode) {
+                    if let Err(error) =
+                        persist_configuration(Some(&mut app.executable_extensions), || {
+                            crate::cli::persist_reasoning_mode(mode)
+                        })
+                        .await
+                    {
                         shell.error(format!("failed to save reasoning mode preference: {error}"));
                     }
                     let reasoning = thinking_to_reasoning_with_subagents(
@@ -4759,6 +4883,22 @@ fn expand_prompt_invocation(
     .map_err(Into::into)
 }
 
+/// Prepare the model-picker surface for a launch whose readiness plan was
+/// narrowed to the selected route.
+///
+/// Startup latency defers the other configured providers, so a surface that
+/// enumerates every route must complete the catalog first: the `/model` picker
+/// would otherwise list only the launch's own provider even though other
+/// credentials are present. Completion is idempotent, and a failure keeps the
+/// narrowed catalog and reports it instead of hiding the missing providers.
+fn prepare_model_picker_surface(app: &mut App, shell: &mut InteractiveShell) {
+    if let Some(notice) = app.enrich_catalog_for_surface() {
+        shell.notice(notice);
+    }
+    // Keep scoped-model cycling aligned with the completed catalog.
+    shell.set_model_cycle(app.model_cycle());
+}
+
 async fn run_idle_command(
     mut app: App,
     shell: &mut InteractiveShell,
@@ -4768,6 +4908,13 @@ async fn run_idle_command(
 ) -> anyhow::Result<IdleCommandOutcome> {
     match command {
         Command::Changelog => shell.show_changelog(),
+        Command::Hotkeys => show_hotkeys(shell),
+        Command::Copy => copy_last_assistant(shell),
+        Command::Session => shell.show_report_text(
+            "Session",
+            "Durable session facts",
+            commands::session_text(app.agent.session()),
+        ),
         Command::Help(topic) => {
             shell.show_report_text(
                 "Help",
@@ -4963,7 +5110,7 @@ async fn run_idle_command(
             }
             request_extension_ui(shell, &mut app);
         }
-        Command::Quit => return Ok(IdleCommandOutcome::Quit(Box::new(app))),
+        Command::Exit => return Ok(IdleCommandOutcome::Quit(Box::new(app))),
         Command::Login(provider) => match validate_provider(provider.as_deref()) {
             Ok("codex") => login_codex(&mut app, shell).await?,
             Ok("custom") => login_custom(shell)?,
@@ -5008,30 +5155,51 @@ async fn run_idle_command(
         Command::Clone => {
             app = clone_session(app, shell, input).await?;
         }
-        Command::Fast(requested) => apply_fast_command(shell, &app.model, requested),
+        Command::Fast(requested) => apply_fast_command(&mut app, shell, requested),
         Command::Model(Some(id)) => {
             app = transition(app, shell, input, Reconfig::Model(ModelId(id))).await?;
         }
         Command::Theme(requested) => {
-            configure_terminal_theme(shell, input, &mut app.config, requested, false).await?;
+            configure_terminal_theme(
+                shell,
+                input,
+                &mut app.config,
+                requested,
+                false,
+                Some(&mut app.executable_extensions),
+            )
+            .await?;
         }
         Command::Thinking(Some(level)) => {
             let level = ThinkingLevel::parse(&level)?;
             let reasoning =
                 thinking_to_reasoning_with_subagents(level, &app.model, app.subagents_available())?;
-            if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
+            if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
+                crate::cli::persist_reasoning(&reasoning_label(&reasoning))
+            })
+            .await
+            {
                 shell.error(format!("failed to save thinking preference: {e}"));
             }
             app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
         }
         Command::Model(None) => {
+            // The picker enumerates every provider. A narrowed launch deferred
+            // configured providers at startup for latency, so complete the plan
+            // here, where the user has actually asked to see them.
+            prepare_model_picker_surface(&mut app, shell);
             if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
                 app = transition(app, shell, input, Reconfig::Model(model)).await?;
             }
         }
         Command::Thinking(None) => {
             if let Some((mode, level)) = thinking_configuration_picker(&app, shell, input).await? {
-                if let Err(error) = crate::cli::persist_reasoning_mode(mode) {
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_reasoning_mode(mode)
+                    })
+                    .await
+                {
                     shell.error(format!("failed to save reasoning mode preference: {error}"));
                 }
                 let reasoning = thinking_to_reasoning_with_subagents(
@@ -5057,7 +5225,10 @@ async fn run_idle_command(
             ));
         }
         Command::Compact => {
-            compact_interactively(&mut app, shell, input, true).await;
+            compact_interactively(&mut app, shell, input, true, None).await;
+        }
+        Command::CompactWithInstructions(instructions) => {
+            compact_interactively(&mut app, shell, input, true, Some(&instructions)).await;
         }
         Command::AutoCompact(setting) => {
             configure_auto_compaction(&mut app, shell, setting)?;
@@ -5066,11 +5237,7 @@ async fn run_idle_command(
         Command::Reload => {
             app = reload_resources(app, shell, input).await?;
             request_extension_ui(shell, &mut app);
-            shell.notice("instructions, prompts, skills, and extensions reloaded");
-        }
-        Command::Tree => shell.show_overlay_text(session_tree_text(app.agent.session())),
-        Command::Checkout(id) => {
-            app = checkout_entry(app, shell, input, id).await?;
+            shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
         }
         Command::Skills(commands::SkillsSubcommand::Load(id)) => {
             if let Err(error) = app.skills.load(&id) {
@@ -5585,6 +5752,7 @@ async fn configure_terminal_theme<S>(
     config: &mut Config,
     requested: Option<String>,
     onboarding: bool,
+    extensions: Option<&mut crate::extensions::ExecutableExtensions>,
 ) -> anyhow::Result<Option<TerminalThemeChoice>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -5620,7 +5788,11 @@ where
     if matches!(choice, TerminalThemeChoice::Auto) {
         apply_detected_terminal_background(shell, input, config).await;
     }
-    if let Err(error) = crate::cli::persist_theme_choice(choice.key()) {
+    if let Err(error) = persist_configuration(extensions, || {
+        crate::cli::persist_theme_choice(choice.key())
+    })
+    .await
+    {
         shell.error(format!("failed to save terminal appearance: {error}"));
     } else if !onboarding {
         shell.notice(format!("terminal appearance: {}", choice.label()));
@@ -5720,7 +5892,23 @@ async fn run_interactive_without_model(
                 shell.render();
             }
             Idle::Command(raw) => match commands::parse(&raw) {
-                Command::Quit => return Ok(resume_command),
+                Command::Exit => return Ok(resume_command),
+                Command::Hotkeys => {
+                    show_hotkeys(shell);
+                    shell.render();
+                }
+                Command::Copy => {
+                    copy_last_assistant(shell);
+                    shell.render();
+                }
+                Command::Session => {
+                    shell.show_report_text(
+                        "Session",
+                        "Durable session facts",
+                        commands::session_text(&session),
+                    );
+                    shell.render();
+                }
                 Command::Changelog => {
                     shell.show_changelog();
                     shell.render();
@@ -5743,7 +5931,7 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Theme(requested) => {
-                    configure_terminal_theme(shell, input, &mut boot.config, requested, false)
+                    configure_terminal_theme(shell, input, &mut boot.config, requested, false, None)
                         .await?;
                 }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
@@ -5848,7 +6036,12 @@ fn prepare_startup_input(
 }
 
 fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
-    if !matches!(command, Command::Changelog) {
+    // Local fast controls/status must not submit provider requests. The next
+    // normal request (including any later prewarm) reads the selected tier.
+    if !matches!(
+        command,
+        Command::Changelog | Command::Fast(_) | Command::Hotkeys | Command::Copy | Command::Session
+    ) {
         schedule_responses_prewarm(app);
     }
 }
@@ -6325,7 +6518,16 @@ fn startup_update_task(
 }
 
 /// Run the interactive frontend with explicit idle and active borrow phases.
-pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
+pub async fn run_interactive(config: Config) -> anyhow::Result<()> {
+    run_interactive_with_model_scope(config, None).await
+}
+
+/// Interactive launch retaining the ordered `--models` patterns, including
+/// reasoning suffixes that cannot be recovered from a list of bare ModelIds.
+pub async fn run_interactive_with_model_scope(
+    mut config: Config,
+    model_scope_patterns: Option<String>,
+) -> anyhow::Result<()> {
     let initial_prompt = config.initial_prompt.clone();
     let theme = load_theme(&config);
     let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
@@ -6343,7 +6545,7 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
         && shell.theme().capabilities().interactive
         && !config.plain
     {
-        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true).await?;
+        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None).await?;
         if shell.close_requested() {
             shell.leave();
             return Ok(());
@@ -6415,6 +6617,7 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
         },
     )
     .await?;
+    app.set_model_scope_patterns(model_scope_patterns.as_deref())?;
     let mut startup_prompt = initial_prompt;
     if let Some(name) = app.config.prompt_template.clone() {
         let arguments = startup_prompt.take().unwrap_or_default();
@@ -6509,7 +6712,12 @@ pub async fn run_interactive(mut config: Config) -> anyhow::Result<()> {
                     &app.model,
                     app.subagents_available(),
                 )?;
-                if let Err(error) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_reasoning(&reasoning_label(&reasoning))
+                    })
+                    .await
+                {
                     shell.error(format!("failed to save thinking preference: {error}"));
                 }
                 app =
@@ -7230,7 +7438,8 @@ mod tests {
             // Exercise the configuration boundary too: none of these /theme
             // outcomes may reach its persistence branch or mutate the config.
             let result =
-                configure_terminal_theme(&mut shell, &mut input, &mut config, None, false).await;
+                configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None)
+                    .await;
             if exit == "error" {
                 assert_eq!(result.unwrap_err().to_string(), "preview input failed");
             } else {
@@ -7868,32 +8077,7 @@ mod tests {
     }
 
     #[test]
-    fn session_tree_marks_the_durable_head_and_parent_links() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = Session::create(directory.path().join("tree.jsonl")).unwrap();
-        let root = session
-            .append(EntryValue::Config {
-                model: Some("model".to_string()),
-                reasoning: Some("off".to_string()),
-                reasoning_mode: None,
-            })
-            .unwrap();
-        let child = session
-            .append(EntryValue::Config {
-                model: None,
-                reasoning: Some("high".to_string()),
-                reasoning_mode: None,
-            })
-            .unwrap();
-        session.checkout(root.clone()).unwrap();
-
-        let tree = session_tree_text(&session);
-        assert!(tree.contains(&format!("└─* {}  config", root.0)), "{tree}");
-        assert!(tree.contains(&format!("└─  {}  config", child.0)), "{tree}");
-    }
-
-    #[test]
-    fn failed_checkout_can_restore_the_previous_durable_head() {
+    fn a_failed_checkout_can_restore_the_previous_durable_head() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rollback.jsonl");
         let mut session = Session::create(&path).unwrap();
@@ -8131,39 +8315,861 @@ mod tests {
         clipboard_read::clear_test_text();
     }
 
-    /// `/fast` is gated on the declared endpoint capability and, while the
-    /// caller side is missing, reports the exact dependency instead of claiming
-    /// a wire change that did not happen.
-    #[test]
-    fn fast_reports_its_activation_dependency_and_rejects_other_routes() {
+    fn transcript_search_open_key() -> Event {
+        let bindings = keymap::keybindings::KeybindingsManager::current_platform();
+        let mut key = crossterm::event::KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        // Windows/WSL use Ctrl-F; other platforms use Ctrl-Shift-F.
+        if !bindings.matches(&key, "tui.altScreen.search") {
+            key.modifiers |= KeyModifiers::SHIFT;
+        }
+        assert!(bindings.matches(&key, "tui.altScreen.search"));
+        Event::Key(key)
+    }
+
+    #[tokio::test]
+    async fn transcript_search_idle_owner_intercepts_paste_before_composer_admission() {
+        clipboard_read::set_test_text(Some("native clipboard must stay out of the draft".into()));
+        let (mut shell, idle) = idle_shell_after(vec![
+            Event::Paste("preserved draft".into()),
+            transcript_search_open_key(),
+            Event::Paste("search query /tmp/image.png".into()),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            )),
+            ctrl_key('d'),
+        ])
+        .await;
+        clipboard_read::clear_test_text();
+        assert!(matches!(idle, Idle::Quit));
+        assert!(shell.transcript_search_active());
+        assert_eq!(shell.pending(), "preserved draft");
+        assert!(shell.drain_composed().attachments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transcript_search_active_owner_consumes_query_and_escape_without_interrupting_run() {
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_millis(100)).await;
         let mut shell = InteractiveShell::test_shell();
-        let codex = scripted_codex_model("http://127.0.0.1:1");
-        assert!(commands::codex_fast_tier_endpoint(&codex));
+        shell.extension_set_editor("preserved active draft".into());
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for event in [
+            transcript_search_open_key(),
+            Event::Paste("search query /tmp/image.png".into()),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            )),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )),
+        ] {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut deadline = None;
+        clipboard_read::set_test_text(Some("native clipboard must stay out of the draft".into()));
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut deadline,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        clipboard_read::clear_test_text();
+        drop(run);
+        assert_eq!(ended, HostRunOutcome::Completed);
+        assert!(!quit);
+        assert!(pending.is_empty());
+        assert!(!shell.transcript_search_active());
+        assert_eq!(shell.pending(), "preserved active draft");
+        assert!(shell.drain_composed().attachments.is_empty());
+        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("search query"));
+    }
 
-        apply_fast_command(&mut shell, &codex, Some(true));
-        let on = shell.debug_error().expect("`/fast on` must report a state");
-        assert!(on.contains("not applied"), "{on}");
-        assert!(on.contains("nothing changed on the wire"), "{on}");
-        // User-facing prose never names internal APIs, modules, or enum
-        // variants. The engineering detail lives in the doc comment above.
-        for leak in ["::", "service_tier", "octet-agent", "agent.rs", "Response"] {
-            assert!(!on.contains(leak), "internal name {leak:?} leaked: {on}");
+    #[tokio::test]
+    async fn configuration_commit_observer_skips_noops_and_unknown_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("config.toml");
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let missing = configuration_snapshot(&path);
+        assert_eq!(missing, Some(None));
+        assert!(!observe_configuration_commit(&mut extensions, missing.clone(), Some(&path)).await);
+        std::fs::write(&path, b"theme = \"dark\"\n").unwrap();
+        assert!(observe_configuration_commit(&mut extensions, missing, Some(&path)).await);
+        let unchanged = configuration_snapshot(&path);
+        assert!(!observe_configuration_commit(&mut extensions, unchanged, Some(&path)).await);
+        assert!(!observe_configuration_commit(&mut extensions, None, Some(&path)).await);
+        assert!(!observe_configuration_commit(&mut extensions, Some(None), None).await);
+        std::fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(configuration_snapshot(&path).is_none());
+        #[cfg(unix)]
+        {
+            let link = path.with_file_name("link.toml");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(configuration_snapshot(&link).is_none());
+        }
+        let failed: anyhow::Result<()> = persist_configuration(Some(&mut extensions), || {
+            anyhow::bail!("failed before commit")
+        })
+        .await;
+        assert!(failed.is_err());
+    }
+
+    #[tokio::test]
+    async fn scoped_model_cycle_reaches_idle_owner_without_draining_draft() {
+        for draft in ["unfinished prompt", "/model second"] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_identity("test", "first", "off");
+            shell.set_model_cycle(vec!["first".into(), "second".into()]);
+            shell.extension_set_editor(draft.into());
+            let mut input = tokio_stream::iter([Ok(ctrl_key('p'))]);
+            let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+            let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let idle = wait_for_prompt(
+                &mut shell,
+                &mut input,
+                &mut scroll_tick,
+                &mut extension_tick,
+                &mut extensions,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(idle, Idle::Command(text) if text == "/model second"));
+            assert_eq!(shell.pending(), draft);
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_model_cycle_queues_on_active_owner_without_draining_draft() {
+        for draft in ["unfinished active prompt", "/model second"] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_millis(100)).await;
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_identity("test", "scripted", "off");
+            shell.set_model_cycle(vec!["scripted".into(), "second".into(), "third".into()]);
+            shell.extension_set_editor(draft.into());
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            sender.send(Ok(ctrl_key('p'))).await.unwrap();
+            sender.send(Ok(ctrl_key('p'))).await.unwrap();
+            let _sender = sender;
+            let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(5),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            drop(run);
+            assert_eq!(ended, HostRunOutcome::Completed);
+            assert!(!quit);
+            assert_eq!(shell.pending(), draft);
+            assert_eq!(
+                pending,
+                VecDeque::from([PendingIdleAction::ChangeModel(ModelId("third".into()))])
+            );
+            assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/model"));
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_custom_instructions_queue_and_reach_only_the_summary_wire() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for queued in [false, true] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(text_turn()),
+                )
+                .mount(&server)
+                .await;
+            let (_directory, mut app) = fast_test_app(scripted_model(&server.uri()));
+            seed_compaction_session(&mut app.agent);
+            app.config.compaction.keep_recent_tokens = 1;
+            let mut shell = InteractiveShell::test_shell();
+            let requested = commands::parse("/compact preserve the API contract");
+            let instructions = if queued {
+                let (mut queue, quit) =
+                    run_active_command(&mut shell, requested, test_run_inspection()).await;
+                assert!(!quit);
+                assert!(server.received_requests().await.unwrap().is_empty());
+                let Some(PendingIdleAction::CompactWithInstructions(value)) = queue.pop_front()
+                else {
+                    panic!("missing queued instructions")
+                };
+                assert!(queue.is_empty());
+                value
+            } else {
+                let Command::CompactWithInstructions(value) = requested else {
+                    panic!("missing instructions")
+                };
+                value
+            };
+            let mut input = futures_util::stream::pending();
+            compact_interactively(
+                &mut app,
+                &mut shell,
+                &mut input,
+                !queued,
+                Some(&instructions),
+            )
+            .await;
+            assert_eq!(shell.debug_error(), None);
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert!(body["system"].to_string().contains(&instructions));
+            assert!(!body["messages"].to_string().contains(&instructions));
+            assert_eq!(
+                app.agent.session().usage_records().len(),
+                1,
+                "summary accounted exactly once"
+            );
+            assert!(
+                !format!("{:?}", app.agent.session().context().unwrap()).contains(&instructions)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_custom_instructions_fail_closed_for_native_and_oversize() {
+        let server = wiremock::MockServer::start().await;
+        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
+        app.config.compaction.mode = CompactionMode::NativeResponses;
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        compact_interactively(
+            &mut app,
+            &mut shell,
+            &mut input,
+            true,
+            Some("preserve evidence"),
+        )
+        .await;
+        assert!(shell
+            .debug_snapshot()
+            .contains("custom instructions require local compaction mode"));
+        let oversized = "x".repeat(16 * 1024 + 1);
+        compact_interactively(&mut app, &mut shell, &mut input, true, Some(&oversized)).await;
+        assert!(shell.debug_error().unwrap().contains("at most 16 KiB"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_shell_policy_is_explicit_and_checkpoints_survive_rebuilds() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        #[cfg(any(unix, windows))]
+        assert!(app.agent.partial_output_checkpoint_stats().is_some());
+        assert!(!app.config.tool_available("powershell"));
+        app.config.tools = crate::config::ToolPolicy::only(["powershell".into()]).unwrap();
+        assert_eq!(app.config.tool_available("powershell"), cfg!(windows));
+        app.config.sandbox.allow_process = false;
+        assert!(!app.config.tool_available("powershell"));
+        app.config.sandbox.allow_process = true;
+        app.config.sandbox.allow_shell = false;
+        assert!(!app.config.tool_available("powershell"));
+        // Restore fixture policy before checking the rebuild, not an unavailable
+        // Windows-only explicit request on this platform.
+        app.config.tools = Default::default();
+        app.config.sandbox.allow_shell = true;
+        app = rebuild_app(app, None, None, None, None).unwrap();
+        #[cfg(any(unix, windows))]
+        assert!(app.agent.partial_output_checkpoint_stats().is_some());
+    }
+
+    #[test]
+    fn scoped_model_order_suffixes_and_rebuilds_preserve_launch_defaults() {
+        let mut model = scripted_codex_model("http://127.0.0.1:1");
+        Arc::make_mut(&mut model.spec).capabilities.reasoning =
+            Some(octet_ai::ReasoningCapability {
+                options: None,
+                control: octet_ai::ReasoningControl::Effort,
+                exposes_text: true,
+                preserves_state: false,
+                effort_budgets: None,
+                openai_chat_mode: Default::default(),
+                min_effort: octet_ai::ReasoningEffort::Minimal,
+                max_effort: octet_ai::ReasoningEffort::High,
+            });
+        let (_directory, mut app) = fast_test_app(model);
+        let mut second = (*app.model.spec).clone();
+        second.id = ModelId("second".into());
+        app.catalog.register_model(second).unwrap();
+        app.set_model_scope_patterns(Some("second:low,scripted:high"))
+            .unwrap();
+        assert_eq!(app.model_cycle(), vec!["second", "scripted"]);
+        assert_eq!(app.model.spec.id.0, "scripted");
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Off,
+            "scope handoff must not override launch defaults"
+        );
+        app = crate::app::apply_reconfig(app, Reconfig::Model(ModelId("second".into()))).unwrap();
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
+        );
+        app = crate::app::apply_reconfig(app, Reconfig::Model(ModelId("scripted".into()))).unwrap();
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        );
+        app = rebuild_app(app, None, None, None, None).unwrap();
+        assert_eq!(app.model_cycle(), vec!["second", "scripted"]);
+        // Removing an available route narrows, rather than widens, the scope.
+        app.catalog
+            .remove_model_if_endpoint(&ModelId("second".into()), &app.model.endpoint.id);
+        assert_eq!(app.model_cycle(), vec!["scripted"]);
+        app.set_model_scope_patterns(None).unwrap();
+        let cycle = app.model_cycle();
+        assert!(cycle.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn session_and_hotkeys_reports_remain_read_only_during_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(directory.path());
+        let before = std::fs::read(&inspection.session_path).unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        for (command, expected) in [
+            ("/session info", "Active-branch messages: 1"),
+            ("/hotkeys", "app.model.cycleForward"),
+        ] {
+            let (queue, quit) =
+                run_active_command(&mut shell, commands::parse(command), &inspection).await;
+            assert!(queue.is_empty());
+            assert!(!quit);
+            assert!(shell.has_overlay());
+            let text = if command == "/hotkeys" {
+                shell.hotkeys_text()
+            } else {
+                commands::session_text(&inspection.read_only_session().unwrap())
+            };
+            assert!(text.contains(expected), "{text}");
+            shell.close_overlay();
+        }
+        let (queue, quit) = run_active_command(&mut shell, Command::Copy, &inspection).await;
+        assert!(queue.is_empty());
+        assert!(!quit);
+        assert!(shell
+            .debug_error()
+            .unwrap()
+            .contains("no assistant message"));
+        assert_eq!(std::fs::read(&inspection.session_path).unwrap(), before);
+    }
+
+    /// Regression: a launch that narrowed its catalog to the selected route
+    /// (startup-latency readiness) must still offer every configured provider in
+    /// the `/model` picker, exactly as a model-less launch does. Before this
+    /// wiring the picker rendered the narrowed catalog, so a DeepSeek launch
+    /// listed only DeepSeek models even with other provider credentials present.
+    #[tokio::test]
+    async fn model_picker_surface_completes_a_narrowed_launch_catalog() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        let narrowed = app.catalog.models().count();
+        // The plan a proven startup selection leaves behind.
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex".into()]);
+        assert!(
+            ActiveRunInspection::capture(&app).is_narrowed(),
+            "an active run must detect the partial catalog and defer the picker"
+        );
+        let mut shell = InteractiveShell::test_shell();
+        prepare_model_picker_surface(&mut app, &mut shell);
+        assert!(
+            app.readiness.is_fleet(),
+            "opening the picker completes the deferred provider inventories"
+        );
+        assert!(
+            app.catalog.models().count() >= narrowed,
+            "completion never drops a model"
+        );
+        assert!(
+            app.catalog.resolve(&active).is_ok(),
+            "the active model stays resolvable after completion"
+        );
+        assert!(
+            !ActiveRunInspection::capture(&app).is_narrowed(),
+            "a completed catalog no longer defers the picker"
+        );
+        let before = app.catalog.models().count();
+        prepare_model_picker_surface(&mut app, &mut shell);
+        assert_eq!(
+            app.catalog.models().count(),
+            before,
+            "every picker entry point may call this freely"
+        );
+    }
+
+    fn fast_test_app(model: Model) -> (tempfile::TempDir, App) {
+        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+        app.catalog
+            .register_endpoint((*model.endpoint).clone())
+            .unwrap();
+        app.catalog.register_model((*model.spec).clone()).unwrap();
+        let app = rebuild_app(app, Some(model), None, None, None).unwrap();
+        (directory, app)
+    }
+
+    fn fast_response() -> String {
+        let output = serde_json::json!([{
+            "id": "fast-message", "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "done", "annotations": []}]
+        }]);
+        [
+            serde_json::json!({"type":"response.created", "response":{"id":"fast-response"}}),
+            serde_json::json!({"type":"response.output_item.added", "output_index":0,
+                "item":{"id":"fast-message", "type":"message"}}),
+            serde_json::json!({"type":"response.output_text.delta", "output_index":0, "delta":"done"}),
+            serde_json::json!({"type":"response.output_text.done", "output_index":0}),
+            serde_json::json!({"type":"response.completed", "response":{"output":output,
+                "usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}),
+        ].into_iter().map(|event| format!("data: {event}\n\n")).collect()
+    }
+
+    async fn fast_idle(mut app: App, shell: &mut InteractiveShell, command: &str) -> App {
+        let command = commands::parse(command);
+        let Command::Fast(requested) = command else {
+            panic!("expected fast control")
+        };
+        apply_fast_command(&mut app, shell, requested);
+        schedule_idle_responses_prewarm(&app, &command);
+        app
+    }
+
+    /// Exercise the slash handler, actual HTTP/SSE requests, status, route
+    /// transitions, and rebuilds together; a setter-only assertion is not enough.
+    #[tokio::test]
+    async fn fast_commands_reach_live_requests_and_fail_closed_on_other_routes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(fast_response()),
+            )
+            .mount(&server)
+            .await;
+        let mut model = scripted_codex_model(&server.uri());
+        Arc::make_mut(&mut model.spec).limits.context_window = 272_000;
+        let (_directory, mut app) = fast_test_app(model.clone());
+        let mut shell = InteractiveShell::test_shell();
+        let before = std::fs::read(app.agent.session().path()).unwrap();
+        app = fast_idle(app, &mut shell, "/fast").await;
+        assert!(shell.debug_snapshot().contains("Fast mode: off"));
+        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
+        assert!(!app.agent.session().has_uncertain_usage());
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        app = fast_idle(app, &mut shell, "/fast on").await;
+        assert!(shell.debug_snapshot().contains("Fast mode: on"));
+        assert!(commands::status_text(&app, None).contains("Fast mode: on"));
+        assert!(commands::status_text(&app, None).contains("known subtotal"));
+        assert!(app.agent.session().has_uncertain_usage());
+        assert_eq!(app.model.spec.limits.context_window, 272_000);
+        app.agent.complete("priority turn").await.unwrap();
+        // Rebuilds for reasoning/reload must retain the real request control.
+        app = rebuild_app(app, None, Some(ReasoningConfig::Off), None, None).unwrap();
+        app.agent.complete("priority after rebuild").await.unwrap();
+        let before = std::fs::read(app.agent.session().path()).unwrap();
+        app = fast_idle(app, &mut shell, "/fast status").await;
+        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
+        app = fast_idle(app, &mut shell, "/fast off").await;
+        app.agent.complete("ordinary turn").await.unwrap();
+        assert!(commands::status_text(&app, None).contains("Fast mode: off"));
+        assert!(
+            commands::cost_text(app.agent.session(), &app.model).contains("Known subtotal only")
+        );
+        // Clearing a request control does not erase uncertain spend.
+        assert!(app.agent.session().has_uncertain_usage());
+        assert_eq!(
+            app.agent
+                .session()
+                .usage_uncertainty_records()
+                .iter()
+                .filter(|record| record.operation == "responses-priority-tier")
+                .count(),
+            1
+        );
+
+        app = fast_idle(app, &mut shell, "/fast on").await;
+        let mut ordinary = model.clone();
+        Arc::make_mut(&mut ordinary.endpoint)
+            .runtime
+            .responses_profile = octet_ai::ResponsesRuntimeProfile::Default;
+        Arc::make_mut(&mut ordinary.endpoint).id = octet_ai::EndpointId("ordinary".into());
+        Arc::make_mut(&mut ordinary.spec).endpoint = ordinary.endpoint.id.clone();
+        Arc::make_mut(&mut ordinary.spec).id = ModelId("ordinary".into());
+        app.catalog
+            .register_endpoint((*ordinary.endpoint).clone())
+            .unwrap();
+        app.catalog
+            .register_model((*ordinary.spec).clone())
+            .unwrap();
+        app = rebuild_app(app, Some(ordinary), None, None, None).unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            None,
+            "unsupported model switches clear the tier"
+        );
+        let before = std::fs::read(app.agent.session().path()).unwrap();
+        for command in ["/fast on", "/fast off", "/fast", "/fast status"] {
+            app = fast_idle(app, &mut shell, command).await;
+            assert!(shell
+                .debug_error()
+                .unwrap()
+                .contains("only available on Codex Responses routes"));
+        }
+        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
+        app.agent
+            .complete("unsupported route stays ordinary")
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            4,
+            "status and rejected controls never invoke inference"
+        );
+        let bodies: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect();
+        assert_eq!(bodies[0]["service_tier"], "priority");
+        assert_eq!(bodies[1]["service_tier"], "priority");
+        assert!(bodies[2].get("service_tier").is_none());
+        assert!(bodies[3].get("service_tier").is_none());
+        for body in bodies {
+            let body = body.to_string();
+            assert!(
+                !body.contains("/fast"),
+                "local controls must not enter model context"
+            );
+        }
+        app.agent.set_max_session_cost_microdollars(Some(u64::MAX));
+        assert!(app
+            .agent
+            .complete("hard ceilings must fail closed")
+            .await
+            .is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn fast_compaction_preserves_selection_and_restart_keeps_uncertainty_fenced() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(fast_response()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/v1/responses/compact"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "output":[{"type":"compaction", "id":"compact-fast", "encrypted_content":"checkpoint"}],
+                "usage":{"input_tokens":5,"output_tokens":2}
+            }))).mount(&server).await;
+        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
+        let mut shell = InteractiveShell::test_shell();
+        app = fast_idle(app, &mut shell, "/fast on").await;
+        app.agent.complete("before compaction").await.unwrap();
+        app.config.compaction.mode = CompactionMode::NativeResponses;
+        assert_eq!(
+            attempt_compaction(&mut app).await.unwrap(),
+            CompactionOutcome::NativeCompacted
+        );
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        assert!(app.agent.session().has_uncertain_usage());
+        app.agent.complete("after compaction").await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if request.url.path().ends_with("/compact") {
+                // Compact has no declared tier field: never invent one or
+                // promise that this auxiliary operation used priority.
+                assert!(body.get("service_tier").is_none());
+            } else {
+                assert_eq!(body["service_tier"], "priority");
+            }
         }
 
-        apply_fast_command(&mut shell, &codex, None);
-        let status = shell.debug_error().expect("`/fast` must report a state");
-        assert!(status.contains("inert"), "{status}");
-        assert!(status.contains("nothing changed on the wire"), "{status}");
-        assert!(!status.contains("::"), "{status}");
+        // Reconstruct through startup, not a compatible idle rebuild: fast is
+        // process-scoped, whereas past uncertain spend is durable and sticky.
+        let session_path = app.agent.session().path().to_owned();
+        let model = app.model.spec.id.clone();
+        let catalog = app.catalog.clone();
+        let mut config = app.config.clone();
+        config.max_cost_microdollars = Some(u64::MAX);
+        drop(app);
+        let mut boot = crate::app::bootstrap::bootstrap(config).unwrap();
+        boot.catalog = catalog;
+        let mut app = build_app(
+            boot,
+            crate::app::bootstrap::LaunchSelection {
+                model,
+                session: SessionSelection::OpenExisting(session_path),
+                reasoning: ReasoningConfig::Off,
+                reasoning_mode: ReasoningMode::Standard,
+            },
+            "system".into(),
+        )
+        .unwrap();
+        assert_eq!(app.agent.service_tier(), None);
+        assert!(app.agent.session().has_uncertain_usage());
+        // Match the budget error itself, not a guessed word in its display:
+        // UsageUncertain reports "unsettled provider usage".
+        assert_eq!(
+            attempt_compaction(&mut app).await.unwrap(),
+            CompactionOutcome::Skipped {
+                reason: octet_agent::AgentError::UsageUncertain.to_string(),
+            },
+            "compaction must refuse the unsettled ledger before network I/O",
+        );
+        assert!(app.agent.complete("ceiling after restart").await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
 
-        // A non-Codex route is refused in plain language for the route it is.
-        let anthropic = scripted_model("http://127.0.0.1:1");
-        apply_fast_command(&mut shell, &anthropic, Some(true));
-        let rejected = shell.debug_error().expect("rejection must report a state");
-        assert!(rejected.contains("only available on Codex Responses routes"), "{rejected}");
-        for leak in ["::", "AnthropicMessages", "Default"] {
-            assert!(!rejected.contains(leak), "internal name {leak:?} leaked: {rejected}");
+    #[test]
+    fn unpriced_usage_marks_local_and_native_compaction_reports_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("compaction-report.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let first_kept = session
+            .append(EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text("retained turn".into())],
+                },
+            )))
+            .unwrap();
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("fixture".into()),
+                ModelId("fixture".into()),
+                octet_ai::Usage::default(),
+                None,
+            )
+            .unwrap();
+        // A later fully priced compaction does not repair the old missing cost.
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("fixture".into()),
+                ModelId("fixture".into()),
+                octet_ai::Usage::default(),
+                Some(octet_ai::Cost::default()),
+            )
+            .unwrap();
+        session.compact("summary", first_kept).unwrap();
+        drop(session);
+        let session = Session::open_read_only(path).unwrap();
+        assert!(session.has_unpriced_usage());
+        assert!(!session.has_uncertain_usage());
+        for outcome in [
+            CompactionOutcome::Compacted { elided: 1 },
+            CompactionOutcome::NativeCompacted,
+        ] {
+            let mut shell = InteractiveShell::test_shell();
+            report_compaction(&mut shell, &outcome, &session);
+            assert!(shell
+                .debug_snapshot()
+                .contains("session usage or pricing uncertain"));
         }
+    }
+
+    #[tokio::test]
+    async fn fast_local_summary_cost_ceiling_fails_closed_before_network_io() {
+        let server = wiremock::MockServer::start().await;
+        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
+        seed_compaction_session(&mut app.agent);
+        app.config.compaction.keep_recent_tokens = 1;
+        app.set_fast_mode(true).unwrap();
+        app.agent.set_max_session_cost_microdollars(Some(u64::MAX));
+        // Match the budget error itself, not a guessed word in its display:
+        // UsageUncertain reports "unsettled provider usage".
+        assert_eq!(
+            attempt_compaction(&mut app).await.unwrap(),
+            CompactionOutcome::Skipped {
+                reason: octet_agent::AgentError::UsageUncertain.to_string(),
+            },
+            "compaction must refuse the unsettled ledger before network I/O",
+        );
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fast_unsupported_active_controls_are_not_queued() {
+        let mut inspection = test_run_inspection().clone();
+        // A profile alone must not lend a Chat route Responses capabilities.
+        Arc::make_mut(&mut inspection.model.spec).protocol = octet_ai::Protocol::OpenAiChat;
+        Arc::make_mut(&mut inspection.model.endpoint)
+            .runtime
+            .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        for command in ["/fast", "/fast status", "/fast on", "/fast off"] {
+            let (queue, quit) =
+                run_active_command(&mut shell, commands::parse(command), &inspection).await;
+            assert!(queue.is_empty());
+            assert!(!quit);
+            assert!(shell
+                .debug_error()
+                .unwrap()
+                .contains("only available on Codex Responses routes"));
+        }
+    }
+
+    #[test]
+    fn fast_rebuild_scope_and_queue_barriers_are_explicit() {
+        let model = scripted_codex_model("http://127.0.0.1:1");
+        let (directory, mut app) = fast_test_app(model);
+        app.set_fast_mode(true).unwrap();
+        let path = app.agent.session().path().to_path_buf();
+        app = rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(SessionSelection::OpenExisting(path.clone())),
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        let mut next = app.model.clone();
+        Arc::make_mut(&mut next.spec).id = ModelId("another-scripted".into());
+        app.catalog.register_model((*next.spec).clone()).unwrap();
+        app = rebuild_app(app, Some(next), None, None, None).unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        app = rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(SessionSelection::CreateNew(
+                directory.path().join("new-fast.jsonl"),
+            )),
+        )
+        .unwrap();
+        assert_eq!(app.agent.service_tier(), None);
+        assert!(!app.agent.session().has_uncertain_usage());
+        app = rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(SessionSelection::OpenExisting(path)),
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            None,
+            "resuming a different session does not silently opt into billing"
+        );
+        assert!(
+            app.agent.session().has_uncertain_usage(),
+            "old accounting remains sticky"
+        );
+
+        let mut queue = VecDeque::new();
+        for action in [
+            PendingIdleAction::Fast(true),
+            PendingIdleAction::Fast(false),
+            PendingIdleAction::NewSession,
+            PendingIdleAction::Fast(true),
+        ] {
+            push_pending_action(&mut queue, action);
+        }
+        assert_eq!(
+            queue.into_iter().collect::<Vec<_>>(),
+            vec![
+                PendingIdleAction::Fast(false),
+                PendingIdleAction::NewSession,
+                PendingIdleAction::Fast(true)
+            ]
+        );
     }
 
     #[tokio::test]
@@ -8202,7 +9208,6 @@ mod tests {
         for command in [
             Command::Help(None),
             Command::Context,
-            Command::Tree,
             Command::Cost,
             Command::Cache,
         ] {
@@ -8382,6 +9387,7 @@ mod tests {
 
         octet_ai::Model {
             spec: Arc::new(ModelSpec {
+                preset: Default::default(),
                 id: ModelId("scripted".into()),
                 endpoint: EndpointId("test".into()),
                 api_name: "scripted".into(),
@@ -8496,7 +9502,9 @@ mod tests {
                 catalog: octet_ai::ModelCatalog::default(),
                 sessions: crate::session_store::SessionStore::new(&missing, &missing),
                 subagents_available: false,
+                service_tier: None,
                 goal: Err(ActiveGoalError::UnaddressableSession),
+                catalog_is_narrowed: false,
             }
         })
     }
@@ -8524,7 +9532,9 @@ mod tests {
             catalog: octet_ai::ModelCatalog::default(),
             sessions: crate::session_store::SessionStore::for_directory(dir, dir),
             subagents_available: false,
+            service_tier: None,
             goal: Err(ActiveGoalError::UnaddressableSession),
+            catalog_is_narrowed: false,
         }
     }
 
@@ -8648,6 +9658,7 @@ mod tests {
     struct HeldApi {
         uri: String,
         requests: Arc<std::sync::atomic::AtomicUsize>,
+        bodies: Arc<Mutex<Vec<serde_json::Value>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -8665,6 +9676,17 @@ mod tests {
             tokio::sync::oneshot::Receiver<()>,
             tokio::sync::oneshot::Sender<bool>,
         ) {
+            Self::start_with_repeat(body, false).await
+        }
+
+        async fn start_with_repeat(
+            body: String,
+            repeat: bool,
+        ) -> (
+            Self,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<bool>,
+        ) {
             use std::sync::atomic::Ordering;
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -8672,11 +9694,17 @@ mod tests {
             let uri = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let counted = requests.clone();
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            let captured = bodies.clone();
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
             let (release_tx, release_rx) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(async move {
                 let mut started_tx = Some(started_tx);
                 let mut release_rx = Some(release_rx);
+                // The held first body must not block admission of a replacement
+                // request after its client times out. This set owns that one
+                // body task, so aborting the fixture also retires the socket.
+                let mut held_responses = tokio::task::JoinSet::new();
                 loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     let mut request = Vec::new();
@@ -8706,8 +9734,14 @@ mod tests {
                         assert!(n > 0);
                         request.extend_from_slice(&bytes[..n]);
                     }
+                    if repeat {
+                        captured.lock().unwrap().push(
+                            serde_json::from_slice(&request[header_end..header_end + length])
+                                .unwrap(),
+                        );
+                    }
                     let attempt = counted.fetch_add(1, Ordering::SeqCst);
-                    if attempt != 0 {
+                    if attempt != 0 && !repeat {
                         // Bound an existing recovery policy without ever replaying
                         // the fixture's successful result on an unexpected POST.
                         socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
@@ -8715,21 +9749,30 @@ mod tests {
                     }
                     let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                     socket.write_all(headers.as_bytes()).await.unwrap();
-                    let _ = started_tx.take().unwrap().send(());
-                    if let Ok(complete) = release_rx.take().unwrap().await {
-                        let response = if complete {
-                            body.as_bytes()
-                        } else {
-                            &body.as_bytes()[..1]
-                        };
-                        let _ = socket.write_all(response).await;
+                    if attempt != 0 {
+                        socket.write_all(body.as_bytes()).await.unwrap();
+                        continue;
                     }
+                    let _ = started_tx.take().unwrap().send(());
+                    let release = release_rx.take().unwrap();
+                    let body = body.clone();
+                    held_responses.spawn(async move {
+                        if let Ok(complete) = release.await {
+                            let response = if complete {
+                                body.as_bytes()
+                            } else {
+                                &body.as_bytes()[..1]
+                            };
+                            let _ = socket.write_all(response).await;
+                        }
+                    });
                 }
             });
             (
                 Self {
                     uri,
                     requests,
+                    bodies,
                     task,
                 },
                 started_rx,
@@ -8763,6 +9806,125 @@ mod tests {
                 self.remaining = self.remaining.saturating_sub(1);
             }
             event
+        }
+    }
+
+    /// Input is acknowledged while the first response is held by a gate. The
+    /// running request keeps its tier; only a subsequent run sees the change.
+    #[tokio::test]
+    async fn fast_active_commands_wait_for_ownership_before_changing_wire_requests() {
+        use crossterm::event::KeyEvent;
+        for initially_on in [false, true] {
+            let (server, started, release) =
+                HeldApi::start_with_repeat(fast_response(), true).await;
+            let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri));
+            let mut shell = InteractiveShell::test_shell();
+            if initially_on {
+                app = fast_idle(app, &mut shell, "/fast on").await;
+            }
+            update_status(&mut shell, &app);
+            let inspection = ActiveRunInspection::capture(&app);
+            let command = if initially_on {
+                "/fast off"
+            } else {
+                "/fast on"
+            };
+            let events: Vec<_> = [command, "/fast"]
+                .into_iter()
+                .flat_map(|text| {
+                    text.chars()
+                        .map(|character| {
+                            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+                        })
+                        .chain(std::iter::once(KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        )))
+                })
+                .collect();
+            let (sender, receiver) = tokio::sync::mpsc::channel(32);
+            let (handled_tx, handled) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: events.len(),
+                handled: Some(handled_tx),
+            };
+            let mut pending = VecDeque::new();
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut quit = false;
+            let mut made_tool_call = false;
+            let mut deadline = None;
+            let run_id = shell.begin_run("test");
+            let mut run = app.agent.prompt("held first turn").await.unwrap();
+            let control = run.control();
+            shell.set_awaiting_provider(run_id);
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut app.executable_extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            let producer = async {
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(Event::Key(event))).await.unwrap();
+                }
+                handled
+                    .await
+                    .expect("slash commands handled before releasing response");
+                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+                release.send(true).unwrap();
+            };
+            let (ended, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(driver, producer)
+            })
+            .await
+            .unwrap();
+            drop(run);
+            assert_eq!(ended.unwrap(), HostRunOutcome::Completed);
+            assert!(!quit);
+            assert_eq!(
+                app.agent.service_tier(),
+                initially_on.then_some(octet_ai::ServiceTier::Priority)
+            );
+            assert_eq!(
+                pending.len(),
+                1,
+                "read-only status must not enqueue another toggle"
+            );
+            assert!(shell
+                .debug_snapshot()
+                .contains("queued for the next idle boundary"));
+            let PendingIdleAction::Fast(enabled) = pending.pop_front().unwrap() else {
+                panic!("wrong action")
+            };
+            assert_eq!(enabled, !initially_on);
+            // The production idle queue uses this same handler after Run drops.
+            apply_fast_command(&mut app, &mut shell, Some(enabled));
+            assert!(pending.is_empty());
+            app.agent
+                .complete("second turn after idle change")
+                .await
+                .unwrap();
+            let bodies = server.bodies.lock().unwrap();
+            assert_eq!(bodies.len(), 2);
+            for (body, priority) in bodies.iter().zip([initially_on, !initially_on]) {
+                if priority {
+                    assert_eq!(body["service_tier"], "priority");
+                } else {
+                    assert!(body.get("service_tier").is_none());
+                }
+                assert!(!body.to_string().contains("/fast"));
+            }
         }
     }
 
@@ -8877,6 +10039,9 @@ mod tests {
                 // compaction summary. Only this fixture changes stream limits.
                 app.client = octet_ai::AiClient::new()
                     .with_stream_timeouts(Duration::from_millis(750), Duration::from_secs(2));
+                // Summaries now use Agent's retry/accounting client. Rebuild it
+                // with the fixture's bounded stream timeouts before starting.
+                app = rebuild_app(app, None, None, None, None).unwrap();
                 app.agent
                     .set_compaction_model(Some(scripted_model(&server.uri)));
                 seed_compaction_session(&mut app.agent);
@@ -8896,12 +10061,19 @@ mod tests {
                 let stimulus =
                     held_api_input(started, sender, handled_rx, release, outcome, columns);
                 tokio::pin!(stimulus);
+                // 750ms initial body timeout + the shared summary policy's
+                // 500ms first backoff + an immediate terminal HTTP 400 on the
+                // replacement fits the original bound. Do not hide a blocked
+                // fixture accept loop by extending this deadline.
                 tokio::time::timeout(Duration::from_secs(3), async {
                     tokio::select! {
-                        result = compact_interactively(&mut app, &mut shell, &mut input, force) => result,
+                        result = compact_interactively(&mut app, &mut shell, &mut input, force, None) => result,
                         _ = &mut stimulus => unreachable!(),
                     }
-                }).await.expect("held compaction must settle");
+                }).await.unwrap_or_else(|error| panic!(
+                    "held compaction must settle: outcome={outcome:?}, columns={columns}, requests={}, error={error}",
+                    server.requests.load(std::sync::atomic::Ordering::SeqCst),
+                ));
                 let snapshot = shell.debug_snapshot();
                 match outcome {
                     HeldOutcome::Success => {
@@ -8917,8 +10089,19 @@ mod tests {
                 assert_eq!(app.config.compaction.keep_recent_tokens, original_keep);
                 assert_eq!(shell.pending(), "draft while API waits");
                 assert_ne!(shell.verbose_tools(), was_verbose);
-                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let expected_requests = match outcome {
+                    HeldOutcome::Timeout | HeldOutcome::TransportFailure => 2,
+                    HeldOutcome::Success | HeldOutcome::Cancel => 1,
+                };
+                assert_eq!(
+                    server.requests.load(std::sync::atomic::Ordering::SeqCst),
+                    expected_requests,
+                    "the first summary replacement must hit the fixture's terminal rejection: {outcome:?}",
+                );
                 if !matches!(outcome, HeldOutcome::Success) {
+                    assert!(app.agent.session().has_uncertain_usage(), "{outcome:?}");
+                    assert!(app.agent.session().usage_records().is_empty(),
+                        "failed/abandoned summaries have unknown usage, not invented successful receipts");
                     assert_eq!(
                         app.agent.session().entries().len(),
                         before,

@@ -12,6 +12,20 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Interaction
 
+- Withdraw the `/tree` and `/checkout` slash commands (maintainer decision) with
+  their keybinding: the durable connector tree stays available through
+  `octet sessions inspect`, and branch movement stays available through the
+  session surfaces that own it. `/quit` is renamed `/exit`; `/quit` is no longer
+  parsed.
+
+- Restore the full `/model` picker for a launch that pinned a built-in model.
+  Startup narrows the catalog to the selected route for latency, and the picker
+  rendered that narrowed catalog, so a DeepSeek launch listed only DeepSeek
+  models even with other provider credentials in the environment. The picker now
+  completes the deferred provider inventories (and refreshes the scoped-model
+  cycle) before it lists, and an active run defers the picker to the next idle
+  boundary instead of showing a partial provider list.
+
 - Slash commands now work while a run is active. `/help`, `/cost`, `/cache`,
   `/tree`, `/context`, `/update`, `/name`, `/export`, `/extensions status`,
   `/extensions inspect` and `/thinking` render or open their real surface
@@ -74,6 +88,26 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Providers, codecs and tools
 
+- Decode the reasoning a provider advertises through accepted request parameters
+  (`supported_parameters` containing `reasoning`, `reasoning_effort` or
+  `reasoning.effort`). It was read as an undecodable assertion, so a newly
+  released gateway model had thinking permanently Off until the pinned metadata
+  snapshot was refreshed and the binary rebuilt. An explicit negative assertion
+  still wins.
+- Name the reasoning-only failure separately: a turn that finishes normally with
+  thinking but no answer text now reports "provider returned reasoning but no
+  answer text" instead of the generic empty-content message.
+
+- Reserve bounded headroom (1% of the window, 256–4096 tokens) between octet's
+  input-token estimate and the provider's own count when deriving a request's
+  output cap. Sizing the request as exactly `window − estimate` put real local
+  servers one token over the limit, which they reject outright.
+- Recover a size rejection instead of failing the turn: local compaction now runs
+  and the request is retried for HTTP 400/413/422 responses that carry a numeric
+  provider code, which previously took the permanent-failure branch. Named
+  policy, auth, quota and rate-limit rejections still fail closed without
+  compacting, and a session with nothing reducible reports the limit.
+
 - Add strict JSON-schema and grammar/regex request declarations, and remove a
   declared-but-unimplemented deferred-tool capability claim. Grammar custom-call
   decoding and history/result replay remain incomplete; declarations alone do
@@ -82,8 +116,22 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   Conversations finish/base-URL classification fixes that previously failed
   assertions.
 - Wire the agent's optional service tier into live `ResponsesOptions`, gated by
-  the declared route capability. The `/fast` UI consumer remains unavailable;
-  the command does not enable a tier.
+  the declared route capability, and select it through `/fast`. Tier-aware
+  settlement applies the declared Codex tariffs to the provider's echoed tier,
+  and the conservative reservation prices the same worst case; the command
+  retains its durable priority-uncertainty marker and does not clear historical
+  exposure.
+- Let sparse built-in inventories inherit the pinned models.dev **input
+  modalities and context/output limits** — but only where the endpoint asserts
+  nothing. Direct DeepSeek publishes identifiers only, so `deepseek-flash`
+  (V4.1 Flash) previously registered without image input (attachments failed
+  closed with "Image input is unsupported") and with the generic 128K/64K
+  placeholder instead of its documented 1M context / 384K output, silently
+  capping the usable window. An endpoint that asserts any modality or limit —
+  including an explicit text-only list or a smaller window — still wins, a
+  snapshot entry that declares text-only input keeps that decision
+  (`deepseek/deepseek-v4-pro` stays text-only), and a model absent from the
+  pinned record keeps the conservative fallback.
 - Add an assistant-message frame encoder/reducer and a bounded partial-message
   journal. Partial recovery observations do not replace authoritative usage or
   tool-outcome records.

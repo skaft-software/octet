@@ -185,6 +185,9 @@ fn emulated_shell_with_mode(
     tui.start();
     (
         InteractiveShell {
+            input_dispatch: input_dispatch::InputDispatch::new(
+                crate::tui::keymap::keybindings::KeybindingsManager::current_platform(),
+            ),
             tui: Some(tui),
             state,
             size,
@@ -1696,7 +1699,7 @@ fn slash_command_menu_lists_commands_and_tab_completes_a_unique_prefix() {
 
     shell.slash_menu(SlashMenuAction::Last);
     let scrolled = render_slash_suggestions(&shell.state.borrow(), 80, 7).join("\n");
-    assert!(scrolled.contains("/quit"), "{scrolled}");
+    assert!(scrolled.contains("/exit"), "{scrolled}");
     assert!(scrolled.contains('/'), "{scrolled}");
 
     shell.slash_menu(SlashMenuAction::First);
@@ -2242,6 +2245,7 @@ fn context_uses_single_turn_provider_total_not_cumulative_run_usage() {
         ..Usage::default()
     };
     shell.on_agent_event(&AgentEvent::TurnFinished {
+        turn_cost: None,
         message: octet_ai::AssistantMessage {
             content: vec![octet_ai::AssistantPart::Text("done".into())],
             model: ModelId("gpt-5".into()),
@@ -5385,6 +5389,7 @@ fn streamed_table_body_does_not_replay_native_history() {
     replay.shell.on_run_event(
         replay.run_id,
         &AgentEvent::TurnFinished {
+            turn_cost: None,
             message: AssistantMessage {
                 content: vec![AssistantPart::Text(response)],
                 model: ModelId("m".into()),
@@ -7643,6 +7648,7 @@ fn activity_lifecycle_is_working_thinking_streaming_working_then_settled() {
     shell.on_run_event(
         run_id,
         &AgentEvent::TurnFinished {
+            turn_cost: None,
             message: AssistantMessage {
                 content: vec![AssistantPart::Text("Answer".into())],
                 model: ModelId("m".into()),
@@ -9464,6 +9470,7 @@ fn scripted_agent_events_map_to_distinct_transcript_and_tool_state() {
             duration: Duration::from_millis(10),
         },
         AgentEvent::TurnFinished {
+            turn_cost: None,
             message: AssistantMessage {
                 content: vec![AssistantPart::Text("answer".into())],
                 model: ModelId("m".into()),
@@ -12768,10 +12775,10 @@ fn slash_popup_keeps_selection_visible_across_paging_filtering_and_resize() {
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert!(resized_plain.iter().any(|line| line.contains("/quit")));
+    assert!(resized_plain.iter().any(|line| line.contains("/exit")));
     assert!(resized_plain
         .iter()
-        .any(|line| line.contains('›') && line.contains("/quit")));
+        .any(|line| line.contains('›') && line.contains("/exit")));
     assert!(resized_plain.first().is_some_and(|line| line.contains('/')));
     assert!(resized.iter().all(|line| visible_width(line) <= 34));
 
@@ -13741,6 +13748,7 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
     std::fs::write(workspace.path().join("pixel.png"), png).unwrap();
     let model = Model {
         spec: Arc::new(ModelSpec {
+            preset: Default::default(),
             id: ModelId("image-fixture".into()),
             endpoint: EndpointId("local".into()),
             api_name: "image-fixture".into(),
@@ -14079,6 +14087,7 @@ fn provider_retry_preserves_accepted_turn_output() {
     shell.on_run_event(
         id,
         &AgentEvent::TurnFinished {
+            turn_cost: None,
             message: octet_ai::AssistantMessage {
                 content: vec![octet_ai::AssistantPart::Text("accepted answer".into())],
                 model: octet_ai::ModelId("test".into()),
@@ -14179,6 +14188,7 @@ fn provider_retry_network_wait_replaces_one_activity_without_rollback() {
     shell.on_run_event(
         id,
         &AgentEvent::TurnFinished {
+            turn_cost: None,
             message: octet_ai::AssistantMessage {
                 content: vec![octet_ai::AssistantPart::Text("accepted answer".into())],
                 model: octet_ai::ModelId("test".into()),
@@ -14278,6 +14288,7 @@ fn provider_retry_auxiliary_activity_preserves_answer_and_compaction_phase() {
                 ProviderOperation::LocalCompaction => "Local compaction",
                 ProviderOperation::NativeCompaction => "Native compaction",
                 ProviderOperation::TerminalGate => "Final-answer check",
+                ProviderOperation::BranchSummary => "Branch summary",
             };
             assert!(frame.contains(label), "{frame}");
             assert!(
@@ -14306,6 +14317,7 @@ fn provider_usage_uncertain_survives_success_settlement_and_resume() {
     shell.on_run_event(
         id,
         &AgentEvent::TurnFinished {
+            turn_cost: None,
             message: octet_ai::AssistantMessage {
                 content: vec![octet_ai::AssistantPart::Text("accepted answer".into())],
                 model: octet_ai::ModelId("test".into()),
@@ -14813,4 +14825,79 @@ fn queued_follow_up_heading_advertises_the_platform_edit_hint() {
         let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10);
         assert!(rows.iter().all(|row| visible_width(row) <= width as usize));
     }
+}
+
+#[test]
+fn resume_sort_hotkey_reaches_relevance_and_threaded_parent_before_child() {
+    let mut parent = picker_session("parent", "parent", 1, 1);
+    parent.workspace = None;
+    let mut child = picker_session("child", "child", 1, 2);
+    child.forked_from_session_id = Some("parent".into());
+    let mut shell = InteractiveShell::test_shell();
+    shell.open_panel(Panel::SessionPicker {
+        picker: PickerState::new(vec![child, parent], None),
+    });
+    for expected in [PickerSort::Name, PickerSort::Messages, PickerSort::Relevance, PickerSort::Threaded] {
+        shell.panel_input(&panel_key_with_modifiers(crossterm::event::KeyCode::Char('s'), crossterm::event::KeyModifiers::CONTROL));
+        let state = shell.state.borrow();
+        let Some(Panel::SessionPicker { picker }) = state.panel.as_ref() else { panic!("session picker"); };
+        assert_eq!(picker.sort, expected);
+        if expected == PickerSort::Threaded { assert_eq!(session_picker_ordering(picker), vec![1, 0]); }
+    }
+    let selected = shell.panel_input(&panel_key(crossterm::event::KeyCode::Enter));
+    assert!(matches!(selected, Some((PanelResult::Select(ref id), _)) if id == "parent"));
+}
+
+#[test]
+fn unpriced_session_usage_is_retained_by_live_telemetry_and_hydration_with_priced_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unpriced.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let usage = octet_ai::Usage {
+        input_tokens: 10,
+        total_tokens: 10,
+        ..Default::default()
+    };
+    session
+        .record_terminal_gate_usage(
+            octet_ai::EndpointId("prior-provider".into()),
+            octet_ai::ModelId("unpriced-tier".into()),
+            usage,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    session
+        .record_terminal_gate_usage(
+            octet_ai::EndpointId("known-provider".into()),
+            octet_ai::ModelId("priced-model".into()),
+            usage,
+            Some(octet_ai::Cost {
+                total: 4_200,
+                ..Default::default()
+            }),
+            Some(true),
+        )
+        .unwrap();
+    assert!(
+        !session.has_uncertain_usage(),
+        "known tokens, not interrupted usage"
+    );
+    assert!(session.has_unpriced_usage());
+    let mut shell = InteractiveShell::test_shell();
+    shell.state.borrow_mut().price_display = PriceDisplay::Priced;
+    shell.set_session_telemetry(&session, None);
+    assert!(shell.state.borrow().usage_uncertain);
+    assert_eq!(shell.state.borrow().session_cost_microdollars, Some(4_200));
+    drop(session);
+    shell.state.borrow_mut().usage_uncertain = false;
+    shell.hydrate(&Session::open(&path).unwrap()).unwrap();
+    assert_eq!(shell.state.borrow().price_display, PriceDisplay::Priced);
+    assert!(shell.state.borrow().usage_uncertain);
+    assert_eq!(shell.state.borrow().session_cost_microdollars, Some(4_200));
+    shell.begin_run("known-provider");
+    assert!(shell.state.borrow().usage_uncertain);
+    let empty = Session::create(directory.path().join("empty.jsonl")).unwrap();
+    shell.hydrate(&empty).unwrap();
+    assert!(!shell.state.borrow().usage_uncertain);
 }

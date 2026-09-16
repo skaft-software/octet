@@ -568,6 +568,7 @@ mod tests {
         };
         Model {
             spec: Arc::new(ModelSpec {
+                preset: Default::default(),
                 id: ModelId(id.to_string()),
                 endpoint: EndpointId("test".to_string()),
                 api_name: id.to_string(),

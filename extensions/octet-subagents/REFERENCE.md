@@ -1,13 +1,14 @@
 # octet-subagents reference
 
 **Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
+published assets. This source checkout targets local octet 0.8.0 via its exact runtime pin;
+published 0.7.6 assets retain their historical compatibility.
 See the [release record](../../docs/releases/v0.7.6.md) for publication and
 installation evidence.
 
 [Usage guide](README.md). This is the bundled API `0.2` runtime contract, not a
-current extension-authoring example. Distribution `0.7.6` targets exactly octet
-`0.7.6`; the API remains `0.2`.
+current extension-authoring example. This local checkout retains distribution `0.7.6` and API `0.2` but targets
+exactly octet `0.8.0`; it does not announce a new public bundle release.
 
 The executable launches named, single-purpose child conversations through the
 host-owned `agent_sessions` service. It is not an agent team, graph/recipe runtime,
@@ -89,7 +90,7 @@ use the graph/recipe spike, built-in team mailboxes, or another scheduler.
 
 ## Install, enable, and trust
 
-The source bundle requires octet 0.7.6 and has one root directory named
+The source bundle requires local octet 0.8.0 and has one root directory named
 `octet-subagents`. With [octet 0.7.6](../../docs/installation.md) and
 version-matched published assets, use the catalog command:
 
@@ -97,7 +98,7 @@ version-matched published assets, use the catalog command:
 octet extension install octet-subagents
 ```
 
-For source testing with a locally built octet 0.7.6 and reviewed local
+For source testing with a locally built octet 0.8.0 and reviewed local
 archive, use `octet extension install --path ./octet-subagents-0.7.6.tar.gz`.
 
 Installation/discovery is inert: it never enables, persists a trust grant, or

@@ -190,6 +190,14 @@ fn register_static_model(
         );
     }
     catalog.register_model(ModelSpec {
+        preset: octet_ai::ModelPreset {
+            mistral_reasoning: match model.reasoning_mode {
+                super::models::StaticReasoningMode::MistralEffort => Some(octet_ai::MistralReasoningProfile::ReasoningEffort),
+                super::models::StaticReasoningMode::MistralPrompt => Some(octet_ai::MistralReasoningProfile::PromptMode),
+                _ => None,
+            },
+            ..Default::default()
+        },
         id: ModelId(catalog_id),
         endpoint: EndpointId(route.endpoint_id.into()),
         api_name: model.id.into(),
@@ -264,6 +272,7 @@ pub(crate) fn register_discovered_model_at_route(
         return Ok(());
     }
     catalog.register_model(ModelSpec {
+        preset: Default::default(),
         id: ModelId(catalog_id),
         endpoint: EndpointId(route.endpoint_id.into()),
         api_name: api_name.to_owned(),
@@ -334,7 +343,7 @@ fn static_reasoning_capability(model: &StaticModelPreset) -> Option<ReasoningCap
         max_effort: model.max_reasoning_effort,
     };
     let (values, default): (Vec<&str>, Option<&str>) = match model.reasoning_mode {
-        Mode::Effort => return Some(cap),
+        Mode::Effort | Mode::MistralEffort | Mode::MistralPrompt => return Some(cap),
         Mode::Budget | Mode::GoogleBudget { .. } => {
             cap.control = ReasoningControl::TokenBudget;
             let maximum = model.max_output_tokens.saturating_sub(1024);

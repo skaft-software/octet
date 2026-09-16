@@ -533,6 +533,7 @@ fn scripted_model(uri: &str) -> Model {
             },
             pricing: None,
             cache: octet_ai::CacheCompatibility::default(),
+            preset: Default::default(),
         }),
         endpoint: Arc::new(Endpoint {
             id: EndpointId("delegation-test".into()),

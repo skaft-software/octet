@@ -270,9 +270,8 @@ pub(crate) fn build_request(
     let mut inference = Map::new();
     inference.insert(
         "maxTokens".to_owned(),
-        json!(request
-            .max_output_tokens
-            .unwrap_or(model.spec.limits.max_output_tokens)),
+        json!(crate::effective_output_token_cap(model, request.max_output_tokens)
+            .expect("Bedrock always emits an output cap")),
     );
     if let Some(temperature) = request.temperature {
         inference.insert("temperature".to_owned(), json!(temperature));

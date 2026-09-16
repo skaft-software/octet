@@ -7,7 +7,7 @@ import a setup first; a generated link is not proof of compatibility.
 
 ## Create a local link
 
-With [octet 0.7.6 installed](../../docs/installation.md) and a separately reviewed
+With [octet 0.8.0 installed](../../docs/installation.md) and a separately reviewed
 local Pi installation:
 
 ```console
@@ -32,12 +32,18 @@ details source order, fingerprints, integrity, link identity, and rollback.
 
 ## Pinned compatibility profile
 
-The bridge distribution remains `0.7.0`, independently of octet `0.7.6`;
+The bridge distribution remains `0.7.0`, independently of octet `0.8.0`;
 Pi `0.84.4` and the live API version are also independent contracts. It requires exactly
 `@earendil-works/pi-coding-agent@0.84.4` and Node 22.19 or newer, validated before
 importing extension code. It never silently adopts a newer Pi runtime from
 `PATH`. `octet pi plan --pi-package DIR` records a canonical nonstandard package
 location without relying on ambient extension-environment inheritance.
+
+A directory may declare multiple extension entrypoints. Pi's public package
+resolver expands them without importing source; every selected entrypoint must
+be a regular file inside that directory's pinned file domain before any factory
+loads. Escaping or excluded dependency/cache entrypoints fail closed.
+Loading checks the exact resolved entrypoint set, not one extension per directory.
 
 Source fingerprints exclude dependency, build, and cache directories. Supported
 adjacent dependency locks and the reviewed runtime installation are pinned
@@ -55,12 +61,27 @@ and its [human view](COMPATIBILITY.md) record exact support and safe divergences
 The default API `0.2` bridge supports:
 
 - Pi tools with text/image output, cancellation, bounded progress, argument
-  preparation, transformed result details/error/usage, and live tool catalogs;
+  preparation and public Pi schema validation before execution (including hook
+  mutations), transformed result details/error, and live tool catalogs;
 - initial Pi commands as native octet slash commands when `runtime_commands` is
   negotiated, with the generated multiplexed route as a compatibility fallback;
 - notifications, confirmations, text input, and a plain-text compatibility theme;
+  select/confirm/input honor Pi `signal` and `timeout` options, cancelling the
+  pending host dialog without cancelling its parent operation;
 - basic lifecycle events, prompt/context contributions, and a local Pi event bus;
 - host session-name and reasoning snapshots where supplied by octet.
+
+The validator is resolved from the selected Pi installation's public `pi-ai`
+export, not an ambient workspace package or a vendored schema implementation.
+Pi's own coercions are retained (for example number-to-string); non-coercible or
+extra arguments fail before tool execution. API `0.3` also invokes Pi tool-call
+interception inside its fixed dispatcher.
+
+**Remaining tool-result gap:** hook-created usage is retained only as opaque
+metadata, not native usage accounting. Ordinary tool `usage` and `terminate`
+still need a negotiated host result wire, durable accounting, and finalized-batch
+termination integration. Do not treat these tools as accounting/termination parity.
+A busy `waitForIdle` now fails explicitly rather than pretending to wait.
 
 Unknown Pi APIs fail closed. Session/tree mutation, compaction control, root-agent
 messaging, active-tool policy mutation, arbitrary terminal components, replacement
@@ -100,7 +121,9 @@ in place. The `0.3` link contributes only host-owned `providers` and one fixed
 aggregate Pi-tool dispatcher. It omits legacy commands, UI, context,
 notifications, confirmation, process, and network contributions. The host's
 optional `theme_selection` / `theme/select` offer is validated but never selected;
-it does not grant the bridge theme or legacy UI authority.
+it does not grant the bridge theme or legacy UI authority. The typed host
+`event_bus` offer is likewise validated but not selected: Pi's process-local,
+untyped event bus does not authorize cross-process topic declarations.
 
 Bounded secret-free `registerProvider`/`unregisterProvider` declarations synchronize
 to octet's `0.3` catalog. After the bounded initial collection window closes and
@@ -158,3 +181,11 @@ roots, uses fresh `HOME` and an allowlisted environment with Linux `unshare --ne
 and loads all 78 unchanged sources through Pi's public loader. It performs no
 download and fails rather than accepting fake fixtures, a package directory
 alone, or a smoke test as real-runtime proof.
+
+## Selected newer source reference
+
+The separately inspected Pi revision `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`
+identifies coding-agent `0.85.1`. It is **not** an admitted runtime profile: the
+bridge still requires `0.84.4`, and no integrity-verified `0.85.1` runtime campaign
+has been run. Updating the host requirement to octet `0.8.0` does not change that
+runtime identity or remove the ledger's host-primitive and real-runtime blockers.

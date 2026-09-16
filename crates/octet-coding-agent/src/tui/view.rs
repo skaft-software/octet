@@ -456,6 +456,8 @@ pub(crate) enum PickerSort {
     Recent,
     Name,
     Messages,
+    Relevance,
+    Threaded,
 }
 
 impl PickerSort {
@@ -463,7 +465,9 @@ impl PickerSort {
         match self {
             Self::Recent => Self::Name,
             Self::Name => Self::Messages,
-            Self::Messages => Self::Recent,
+            Self::Messages => Self::Relevance,
+            Self::Relevance => Self::Threaded,
+            Self::Threaded => Self::Recent,
         }
     }
 
@@ -472,6 +476,8 @@ impl PickerSort {
             Self::Recent => "Recent",
             Self::Name => "Name",
             Self::Messages => "Messages",
+            Self::Relevance => "Relevance",
+            Self::Threaded => "Threaded",
         }
     }
 }
@@ -480,6 +486,10 @@ impl PickerSort {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PanelRequest {
     LoadAll,
+    SearchEntries {
+        query: String,
+        paths: Vec<PathBuf>,
+    },
     TrashSession {
         id: String,
         path: PathBuf,
@@ -501,6 +511,8 @@ pub(crate) struct PickerState {
     pub(crate) named_only: bool,
     pub(crate) show_path: bool,
     pub(crate) filter: String,
+    /// Explicit bounded transcript search; invalidated when the query changes.
+    pub(crate) entry_search: Option<(String, HashMap<PathBuf, String>)>,
     pub(crate) selected: usize,
     pub(crate) scroll: usize,
     pub(crate) confirming_delete: bool,
@@ -522,6 +534,7 @@ impl PickerState {
             named_only: false,
             show_path: false,
             filter: String::new(),
+            entry_search: None,
             selected: 0,
             scroll: 0,
             confirming_delete: false,
@@ -1810,6 +1823,7 @@ pub(crate) struct ShellState {
     /// Cached wrapped transcript lines. Scrolling only slices this cache, and
     /// streaming updates re-render only the changed block.
     transcript_cache: RefCell<TranscriptCache>,
+    transcript_navigation: RefCell<transcript_navigation::TranscriptNavigation>,
     /// Persistent rich renderers: their syntax caches survive token updates.
     rich_renderer: RefCell<Option<RichRenderer>>,
     reasoning_renderer: RefCell<Option<RichRenderer>>,
@@ -2008,7 +2022,10 @@ fn invalidate_editor_autocomplete(state: &mut ShellState) {
 }
 
 fn normal_editor_focused(state: &ShellState) -> bool {
-    state.panel.is_none() && state.overlay.is_none() && state.tool_input_prompt.is_none()
+    state.panel.is_none()
+        && state.overlay.is_none()
+        && state.tool_input_prompt.is_none()
+        && !state.transcript_search_active()
 }
 
 const MAX_PROMPT_HISTORY_ENTRIES: usize = 100;
@@ -3408,6 +3425,7 @@ pub(crate) fn fit_line(line: &str, width: u16) -> String {
 
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
 pub struct InteractiveShell {
+    input_dispatch: input_dispatch::InputDispatch,
     // Production rendering runs on a dedicated OS thread. Tests keep an
     // inline TUI so they can inspect rendering deterministically without a
     // background thread.
@@ -3468,6 +3486,9 @@ impl InteractiveShell {
             })?;
 
         Ok(Self {
+            input_dispatch: input_dispatch::InputDispatch::new(
+                crate::tui::keymap::keybindings::KeybindingsManager::for_user(),
+            ),
             tui: None,
             state,
             size,
@@ -3496,6 +3517,9 @@ impl InteractiveShell {
         tui.add_child(Box::new(ShellComponent::new(state.clone(), false)));
         tui.start();
         Self {
+            input_dispatch: input_dispatch::InputDispatch::new(
+                crate::tui::keymap::keybindings::KeybindingsManager::current_platform(),
+            ),
             tui: Some(tui),
             state,
             size,
@@ -4217,7 +4241,7 @@ impl InteractiveShell {
             .then(|| session.total_cost_microdollars());
         let mut state = self.state.borrow_mut();
         state.session_cost_microdollars = session_cost_microdollars;
-        state.usage_uncertain |= session.has_uncertain_usage();
+        state.usage_uncertain |= session.has_uncertain_usage() || session.has_unpriced_usage();
         state.telemetry_model = telemetry_model;
         state.cache_hit_rate_basis_points = state
             .selected_model_owns_telemetry()
@@ -4384,6 +4408,10 @@ impl InteractiveShell {
     }
 
     pub fn apply_edit(&mut self, action: EditAction) {
+        if self.transcript_search_active() {
+            self.edit_transcript_search(action);
+            return;
+        }
         if matches!(&action, EditAction::Up | EditAction::Down) {
             let mut state = self.state.borrow_mut();
             // Only a visible host path menu claims arrows. An extension result
@@ -4415,6 +4443,14 @@ impl InteractiveShell {
                 | EditAction::Backspace
                 | EditAction::Delete
                 | EditAction::Newline
+                | EditAction::Undo
+                | EditAction::Redo
+                | EditAction::Yank
+                | EditAction::YankPop
+                | EditAction::DeleteWordBackward
+                | EditAction::DeleteWordForward
+                | EditAction::DeleteToLineStart
+                | EditAction::DeleteToLineEnd
         );
         let mut state = self.state.borrow_mut();
         if !matches!(&action, EditAction::Up | EditAction::Down) {
@@ -4905,6 +4941,7 @@ impl InteractiveShell {
         *self.size.lock().expect("terminal size mutex poisoned") = (columns, rows);
         let mut state = self.state.borrow_mut();
         state.size = (columns, rows);
+        state.reset_transcript_navigation_pointer();
         // Deferred session history remains semantic and lazy. Resize reflows
         // only the materialized branch tail; PageUp/select-all loads older
         // blocks if and when the user asks for them.
@@ -5080,6 +5117,9 @@ impl InteractiveShell {
     }
 
     pub fn set_tool_input_prompt(&mut self, prompt: Option<String>) {
+        if prompt.is_some() {
+            self.close_transcript_navigation();
+        }
         let mut state = self.state.borrow_mut();
         state.tool_input_prompt = prompt.map(|prompt| {
             sanitize_for_terminal(&prompt)
@@ -5161,6 +5201,7 @@ impl InteractiveShell {
     }
 
     pub fn scroll(&mut self, direction: i16) {
+        self.state.borrow().transcript_scroll_activity();
         if direction < 0 {
             let should_materialize = {
                 let state = self.state.borrow();
@@ -5203,6 +5244,7 @@ impl InteractiveShell {
 
     /// Scroll the transcript in small, trackpad-friendly increments.
     pub fn scroll_lines(&mut self, direction: i16) {
+        self.state.borrow().transcript_scroll_activity();
         if direction < 0 {
             let should_materialize = {
                 let state = self.state.borrow();
@@ -5254,6 +5296,7 @@ impl InteractiveShell {
     /// Explicit End/jump-to-live action. It preserves the draft and composer
     /// focus because it mutates only transcript viewport state.
     pub fn jump_to_tail(&mut self) {
+        self.state.borrow().transcript_scroll_activity();
         self.state.borrow_mut().jump_to_tail();
     }
 
@@ -5279,6 +5322,7 @@ impl InteractiveShell {
     /// simply clears any prior selection and does nothing else.
     /// Shift+click extends an existing selection.
     pub fn begin_transcript_selection(&mut self, row: u16, col: u16, extend: bool) {
+        self.reset_input_interaction();
         let mut state = self.state.borrow_mut();
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
             state.pending_selection_anchor = None;
@@ -5516,10 +5560,14 @@ impl InteractiveShell {
     }
 
     pub fn show_overlay_text(&mut self, text: String) {
+        self.close_transcript_navigation();
+        self.reset_input_interaction();
         self.state.borrow_mut().overlay = Some(ShellOverlay::Text(sanitize_for_terminal(&text)));
     }
 
     fn show_report(&mut self, surface: OrdinarySurfaceMetadata, body: ReportBody) {
+        self.close_transcript_navigation();
+        self.reset_input_interaction();
         self.state.borrow_mut().overlay = Some(ShellOverlay::Report(ReportOverlay {
             surface,
             body,
@@ -5573,6 +5621,7 @@ impl InteractiveShell {
     /// Extension slash-command output, framed with heading chrome. The body
     /// is sanitized; only trusted theme styling added here survives.
     pub fn show_extension_output(&mut self, command: &str, text: String) {
+        self.close_transcript_navigation();
         let mut state = self.state.borrow_mut();
         state.overlay = Some(ShellOverlay::Text(styled_extension_output(
             &state.theme,
@@ -5783,6 +5832,8 @@ impl InteractiveShell {
 
     /// Open an interactive panel.
     pub fn open_panel(&mut self, panel: Panel) {
+        self.close_transcript_navigation();
+        self.reset_input_interaction();
         self.state.borrow_mut().panel = Some(panel);
     }
 
@@ -5861,6 +5912,18 @@ impl InteractiveShell {
         picker.scroll = 0;
         if picker.surface.lifecycle.is_loading() {
             picker.surface.lifecycle = OrdinarySurfaceLifecycle::Ready;
+        }
+    }
+
+    pub(crate) fn set_picker_entry_search(&mut self, query: String, hits: HashMap<PathBuf, String>) {
+        let mut state = self.state.borrow_mut();
+        if let Some(Panel::SessionPicker { picker }) = state.panel.as_mut() {
+            if picker.filter == query {
+                picker.entry_search = Some((query, hits));
+                picker.selected = 0;
+                picker.scroll = 0;
+                picker.sort = PickerSort::Relevance;
+            }
         }
     }
 
@@ -6030,6 +6093,8 @@ impl InteractiveShell {
         &mut self,
         event: &crossterm::event::Event,
     ) -> Option<(PanelResult, PanelAction)> {
+        let normalized = self.panel_event(event);
+        let event = &normalized;
         let mut state = self.state.borrow_mut();
         let size = state.size;
         let base_page_step = usize::from(size.1).saturating_sub(8).max(1);
@@ -6374,6 +6439,14 @@ impl InteractiveShell {
                         }
 
                         match key.code {
+                            KeyCode::Char('f') if key.modifiers == KeyModifiers::CONTROL => {
+                                if !picker.filter.trim().is_empty() {
+                                    let query = picker.filter.clone();
+                                    let paths = picker.active_rows().iter().map(|row| row.path.clone()).collect();
+                                    picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("transcript search (up to 200 entry hits)");
+                                    state.pending_panel_requests.push(PanelRequest::SearchEntries { query, paths });
+                                }
+                            }
                             KeyCode::Tab if key.modifiers.is_empty() => {
                                 picker.scope = picker.scope.toggle();
                                 picker.selected = 0;
@@ -6816,6 +6889,7 @@ impl InteractiveShell {
         state.reset_terminal_images();
         state.tool_image_budget = image_budget;
         state.transcript.clear();
+        state.transcript_navigation.get_mut().reset_session();
         state.provisional_blocks.clear();
         state.active_event_blocks.clear();
         state.transcript_commit_ids.clear();
@@ -6832,7 +6906,7 @@ impl InteractiveShell {
         state.turn_generation_started_at = None;
         state.turn_streamed_output_bytes = 0;
         state.turn_output_tokens_before_generation = 0;
-        state.usage_uncertain = session.has_uncertain_usage();
+        state.usage_uncertain = session.has_uncertain_usage() || session.has_unpriced_usage();
         state.session_cost_microdollars = session
             .usage_records()
             .iter()
@@ -6982,6 +7056,7 @@ impl sexy_tui_rs::Terminal for TestTerminal {
 mod assistant_block;
 mod bash_render;
 mod input_overlays;
+mod input_dispatch;
 mod native_scrollback;
 mod ordinary_surface;
 mod outcome_render;
@@ -6997,6 +7072,8 @@ mod surface_layout;
 mod terminal_text;
 mod tool_render;
 mod transcript_cache;
+mod transcript_navigation;
+pub use transcript_navigation::TranscriptScrollbar;
 mod transcript_commit;
 mod transcript_document;
 mod transcript_history;

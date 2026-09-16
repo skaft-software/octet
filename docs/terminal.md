@@ -113,11 +113,15 @@ a label; without a heading, only the hint appears on the second row.
 
 Expanded reasoning retains its inset without an event-margin dot or synthetic
 first-line bullet. Completed reasoning disappears again when collapsed.
-Reasoning and assistant-response dots are solid; active tool/shell dots pulse
+Reasoning/activity dots keep a solid, fixed-size glyph while their foreground
+pulses with the label sweep: brighter on dark profiles, darker on light ones.
+Assistant-response dots remain steady; active tool/shell dots pulse
 foreground/muted tones without changing size. Completed success is green and
 failed tools red. Activity shimmer is foreground-only: dark profiles use a light
-baseline with a narrow darker sweep, while light profiles invert it. Reduced-motion
-and no-color paths are static. [Selecting reasoning](providers.md#reasoning).
+text baseline with a narrow darker sweep, while light profiles invert it. The
+sweep crosses the dot and the complete label before returning to rest.
+Reduced-motion and no-color paths keep both static.
+[Selecting reasoning](providers.md#reasoning).
 
 ## Tool evidence and worker activity
 

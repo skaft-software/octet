@@ -22,6 +22,49 @@ use crate::stream::{
 use crate::types::{EndpointId, Protocol, Request, Response, ToolDef};
 use crate::{ResponsesCompactRequest, ResponsesCompactResponse};
 
+fn merge_preset_headers(
+    headers: &mut http::HeaderMap,
+    values: &std::collections::BTreeMap<String, String>,
+) -> Result<(), AiError> {
+    for (name, value) in values {
+        let name = http::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| crate::ConfigError::Parse("invalid request header name".into()))?;
+        let mut value = http::HeaderValue::from_str(value)
+            .map_err(|_| crate::ConfigError::Parse("invalid request header value".into()))?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+    }
+    Ok(())
+}
+
+// A session may select new model headers, credentials or an endpoint URL.
+// Never reuse a handshake bound to an earlier authority/configuration, and
+// never place raw credentials in the connection pool's identity.
+fn responses_websocket_key(
+    model: &Model,
+    session: &str,
+    url: &url::Url,
+    headers: &http::HeaderMap,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    let mut field = |value: &[u8]| {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    };
+    for value in [model.endpoint.id.0.as_str(), model.spec.id.0.as_str(), session, url.as_str()] {
+        field(value.as_bytes());
+    }
+    let mut entries: Vec<_> = headers.iter().collect();
+    // Stable sorting preserves the ordering of repeated values of one header.
+    entries.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    for (name, value) in entries {
+        field(name.as_str().as_bytes());
+        field(value.as_bytes());
+    }
+    format!("responses:{:x}", digest.finalize())
+}
+
 /// A native compact response whose HTTP headers have actually arrived.
 ///
 /// Both successful and non-success statuses reach this boundary before body or
@@ -735,6 +778,7 @@ async fn batch_http_request(
     body: Option<bytes::Bytes>,
     operation: &'static str,
 ) -> Result<serde_json::Value, AiError> {
+    let proxy = client.request_proxy(&url)?;
     let mut headers = endpoint.default_headers.clone();
     if body.is_some() {
         headers.insert(
@@ -748,6 +792,9 @@ async fn batch_http_request(
         .map_err(AiError::Auth)?;
     let mut diagnostic_redactor = resolved_headers.redactor;
     diagnostic_redactor.include_header_values(&endpoint.default_headers);
+    if let Some(proxy) = &proxy {
+        diagnostic_redactor.include_proxy_url(proxy);
+    }
     let mut current_key = None;
     for (key, value) in resolved_headers.headers {
         if let Some(key) = key {
@@ -851,6 +898,7 @@ struct HttpStreamRequest {
     parts: crate::protocol::HttpRequestParts,
     headers: http::HeaderMap,
     requested_audio_format: Option<crate::types::AudioFormat>,
+    requested_service_tier: Option<crate::types::ServiceTier>,
     tool_definitions: Vec<ToolDef>,
     pre_send_diagnostics: Vec<crate::error::Diagnostic>,
     buffer_ambiguous_compatibility_content: bool,
@@ -1076,6 +1124,7 @@ async fn stream_http(
         parts,
         mut headers,
         requested_audio_format,
+        requested_service_tier,
         tool_definitions,
         pre_send_diagnostics,
         buffer_ambiguous_compatibility_content,
@@ -1102,8 +1151,8 @@ async fn stream_http(
         )
         .await
         .map_err(AiError::Auth)?;
-        diagnostic_redactor = resolved.redactor;
-        diagnostic_redactor.include_header_values(&model.endpoint.default_headers);
+        diagnostic_redactor.include(resolved.redactor);
+        diagnostic_redactor.include_header_values(&headers);
         let mut current_key = None;
         for (key, value) in resolved.headers {
             if let Some(key) = key {
@@ -1259,6 +1308,7 @@ async fn stream_http(
                 model_clone.spec.pricing.clone()
             );
             builder.compatibility = compatibility;
+            builder.requested_service_tier = requested_service_tier;
             builder.set_tool_definitions(&tool_definitions)?;
             builder.set_buffer_ambiguous_compatibility_content(
                 buffer_ambiguous_compatibility_content,
@@ -1779,6 +1829,7 @@ fn responses_websocket_stream(
     pool: ResponsesWsPool,
     pool_key: Option<String>,
     model: Model,
+    requested_service_tier: Option<crate::types::ServiceTier>,
     mut events: mpsc::Receiver<Result<serde_json::Value, AiError>>,
     diagnostics: Vec<crate::error::Diagnostic>,
     tool_definitions: Vec<ToolDef>,
@@ -1794,6 +1845,7 @@ fn responses_websocket_stream(
             model.spec.protocol,
             model.spec.pricing.clone(),
         );
+        builder.requested_service_tier = requested_service_tier;
         builder.set_tool_definitions(&tool_definitions)?;
         builder.set_buffer_ambiguous_compatibility_content(
             buffer_ambiguous_compatibility_content,
@@ -1922,6 +1974,7 @@ fn responses_websocket_stream(
 #[derive(Clone)]
 pub struct AiClient {
     http: reqwest::Client,
+    proxy_environment: Option<Arc<crate::declarations::proxy::ProxyEnvironment>>,
     responses_ws: ResponsesWsPool,
     host_stream_transports: Arc<StdMutex<HashMap<EndpointId, Arc<dyn HostStreamTransport>>>>,
     stream_initial_timeout: Duration,
@@ -1977,11 +2030,35 @@ impl AiClient {
     /// first body chunk before enforcing inter-chunk idle and overall body
     /// deadlines in [`Self::stream`].
     pub fn try_new() -> Result<Self, reqwest::Error> {
+        let env = crate::declarations::proxy::ProxyEnvironment::NAMES
+            .into_iter()
+            .filter_map(|name| {
+                std::env::var_os(name)
+                    .map(|value| (name.to_owned(), value.to_string_lossy().into_owned()))
+            })
+            .collect();
+        Self::try_with_proxy_environment(env)
+    }
+
+    /// Creates the ordinary no-redirect client with an explicit proxy environment
+    /// instead of process/OS proxy settings. The eight HTTP(S)/ALL/NO_PROXY names
+    /// are snapshotted; an empty map disables proxying. Malformed/unsupported
+    /// proxies fail before credentials or dispatch, never fall through to direct
+    /// egress. Preferred WebSocket routes use HTTP when a proxy is selected.
+    pub fn try_with_proxy_environment(
+        env: std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, reqwest::Error> {
+        let proxy_environment = Arc::new(crate::declarations::proxy::ProxyEnvironment::new(env));
         Ok(Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-                .redirect(reqwest::redirect::Policy::none())
+            http: proxy_environment
+                .clone()
+                .configure(
+                    reqwest::Client::builder()
+                        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+                        .redirect(reqwest::redirect::Policy::none()),
+                )
                 .build()?,
+            proxy_environment: Some(proxy_environment),
             responses_ws: ResponsesWsPool::default(),
             host_stream_transports: Arc::new(StdMutex::new(HashMap::new())),
             stream_initial_timeout: DEFAULT_STREAM_INITIAL_TIMEOUT,
@@ -1995,6 +2072,7 @@ impl AiClient {
     pub fn with_http_client(http: reqwest::Client) -> Self {
         Self {
             http,
+            proxy_environment: None,
             responses_ws: ResponsesWsPool::default(),
             host_stream_transports: Arc::new(StdMutex::new(HashMap::new())),
             stream_initial_timeout: DEFAULT_STREAM_INITIAL_TIMEOUT,
@@ -2002,6 +2080,14 @@ impl AiClient {
             stream_deadline: DEFAULT_STREAM_DEADLINE,
             request_dispatch: None,
         }
+    }
+
+    fn request_proxy(&self, target: &url::Url) -> Result<Option<url::Url>, AiError> {
+        self.proxy_environment
+            .as_ref()
+            .map(|env| env.resolve(target))
+            .transpose()
+            .map(Option::flatten)
     }
 
     /// Registers a host-owned stream transport for one catalog endpoint.
@@ -2062,7 +2148,84 @@ impl AiClient {
     /// retry count, backoff, cancellation, and idempotency policy; structured
     /// HTTP errors retain `retry_after` and `retryable` metadata for that use.
     pub async fn stream(&self, model: &Model, req: Request) -> Result<ResponseStream, AiError> {
-        self.stream_once(model, req).await
+        self.stream_with_overrides(model, req, crate::RequestOverrides::default()).await
+    }
+
+    /// Executes one inference attempt with private request-local configuration.
+    ///
+    /// Sampling overrides replace model defaults (explicit canonical stop wins).
+    /// Header precedence is endpoint < model < caller < codec < authoritative auth.
+    /// Environment values overlay only this request; process state and the
+    /// catalog remain unchanged. Nonzero retry controls are explicitly refused.
+    /// `timeout_ms` bounds opening plus body lifetime, including credential waits.
+    /// Transport-specific overrides cannot cross a host/extension transport.
+    pub async fn stream_with_overrides(
+        &self,
+        model: &Model,
+        mut req: Request,
+        overrides: crate::RequestOverrides,
+    ) -> Result<ResponseStream, AiError> {
+        overrides.validate().map_err(|error| crate::ConfigError::Parse(error.to_string()))?;
+        if overrides.max_retries.unwrap_or(0) != 0 || overrides.max_retry_delay_ms.unwrap_or(0) != 0 {
+            return Err(crate::ConfigError::Parse("client retries are host-owned; nonzero retry overrides are unsupported".into()).into());
+        }
+        crate::catalog::validate_endpoint(&model.endpoint)?;
+        crate::catalog::validate_model_spec(&model.spec)?;
+        let host_transport = self.host_stream_transports.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&model.endpoint.id);
+        if host_transport && (!overrides.headers.is_empty() || !overrides.env.is_empty()
+            || !overrides.sampling_params.is_empty() || overrides.azure.is_some()) {
+            return Err(crate::ConfigError::Parse("wire overrides are unsupported by a host stream transport".into()).into());
+        }
+        let mut model = model.clone();
+        if !overrides.sampling_params.is_empty() || !overrides.headers.is_empty() {
+            let preset = &mut Arc::make_mut(&mut model.spec).preset;
+            preset.sampling_params.extend(overrides.sampling_params.clone());
+            for (name, value) in &overrides.headers {
+                preset.headers.retain(|old, _| !old.eq_ignore_ascii_case(name));
+                preset.headers.insert(name.clone(), value.clone());
+            }
+            // Explicit sampling temperature is a per-call control, not a model
+            // default; materialize it before ordinary canonical validation.
+            if let Some(value) = overrides.sampling_params.get("temperature") {
+                req.temperature = value.as_f64().map(|value| value as f32);
+            }
+        }
+        if !host_transport {
+            crate::declarations::azure::apply(&mut model, overrides.azure.as_ref(), &overrides.env)?;
+        }
+        let mut client = self.clone();
+        if crate::declarations::proxy::ProxyEnvironment::NAMES.iter().any(|name| overrides.env.contains_key(*name)) {
+            let current = self.proxy_environment.as_ref().ok_or_else(|| crate::ConfigError::Parse("proxy overrides require the built-in HTTP transport".into()))?;
+            let proxy = Arc::new(current.overlay(&overrides.env));
+            client.http = proxy.clone().configure(reqwest::Client::builder()
+                .connect_timeout(DEFAULT_CONNECT_TIMEOUT).redirect(reqwest::redirect::Policy::none()))
+                .build().map_err(|_| crate::ConfigError::Parse("could not configure request-local HTTP transport".into()))?;
+            client.proxy_environment = Some(proxy);
+        }
+        let deadline = if let Some(timeout) = overrides.timeout_ms {
+            let timeout = Duration::from_millis(timeout);
+            let deadline = tokio::time::Instant::now().checked_add(timeout)
+                .ok_or_else(|| crate::ConfigError::Parse("request timeout is not representable".into()))?;
+            Arc::make_mut(&mut model.endpoint).timeout = timeout;
+            client.stream_initial_timeout = client.stream_initial_timeout.min(timeout);
+            client.stream_idle_timeout = client.stream_idle_timeout.min(timeout);
+            client.stream_deadline = client.stream_deadline.min(timeout);
+            Some(deadline)
+        } else { None };
+        let open = client.stream_once(&model, req, &overrides.env);
+        let Some(deadline) = deadline else { return open.await; };
+        let mut stream = tokio::time::timeout_at(deadline, open).await.map_err(|_| {
+            AiError::Transport(TransportError { phase: TransportPhase::ResponseHeaders, timeout: true, message: "request-local opening deadline exceeded".into() })
+        })??;
+        Ok(Box::pin(try_stream! {
+            loop {
+                let item = tokio::time::timeout_at(deadline, stream.next()).await.map_err(|_| {
+                    AiError::Transport(TransportError { phase: TransportPhase::Body, timeout: true, message: "request-local response deadline exceeded".into() })
+                })?;
+                let Some(item) = item else { break; };
+                yield item?;
+            }
+        }))
     }
 
     /// Best-effort prewarms a cached OpenAI Responses WebSocket.
@@ -2073,6 +2236,9 @@ impl AiClient {
     /// the result; ordinary [`Self::stream`] calls always retain HTTP/SSE
     /// fallback behavior.
     pub async fn prewarm_responses(&self, model: &Model, req: Request) -> Result<(), AiError> {
+        let mut prepared = model.clone();
+        crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
+        let model = &prepared;
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         if model.spec.endpoint != model.endpoint.id {
@@ -2093,10 +2259,14 @@ impl AiClient {
         req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
         crate::json_repair::validate_tool_definitions(&req.tools).map_err(AiError::Decode)?;
         let parts = crate::protocol::openai_responses::build_request(model, &req)?;
+        if self.request_proxy(&parts.url)?.is_some() {
+            return Ok(());
+        }
         let mut headers = http::HeaderMap::new();
         for (key, value) in &model.endpoint.default_headers {
             headers.insert(key.clone(), value.clone());
         }
+        merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
         headers.insert(
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static("application/json"),
@@ -2108,7 +2278,7 @@ impl AiClient {
             .await
             .map_err(AiError::Auth)?;
         let mut diagnostic_redactor = resolved_headers.redactor;
-        diagnostic_redactor.include_header_values(&model.endpoint.default_headers);
+        diagnostic_redactor.include_header_values(&headers);
         let mut current_key = None;
         for (key, value) in resolved_headers.headers {
             if let Some(key) = key {
@@ -2131,7 +2301,7 @@ impl AiClient {
         }
         let body = serde_json::from_slice::<serde_json::Value>(&parts.body)
             .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-        let key = format!("{}:{}:{session_id}", model.endpoint.id.0, model.spec.id.0);
+        let key = responses_websocket_key(model, &session_id, &parts.url, &headers);
         let result = self
             .responses_ws
             .prewarm(
@@ -2146,7 +2316,7 @@ impl AiClient {
         result.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))
     }
 
-    async fn stream_once(&self, model: &Model, req: Request) -> Result<ResponseStream, AiError> {
+    async fn stream_once(&self, model: &Model, req: Request, environment: &std::collections::BTreeMap<String, String>) -> Result<ResponseStream, AiError> {
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         if model.spec.endpoint != model.endpoint.id {
@@ -2221,6 +2391,8 @@ impl AiClient {
             }
         };
 
+        let proxy = self.request_proxy(&parts.url)?;
+
         // Pre-send Lossy diagnostics (capability drops computed in `build_request`)
         // must reach the terminal `Finished` response (design §7). Capture them
         // here and seed the assembly with them below.
@@ -2235,6 +2407,7 @@ impl AiClient {
         for (k, v) in &model.endpoint.default_headers {
             headers.insert(k.clone(), v.clone());
         }
+        merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
 
         headers.insert(
             http::header::CONTENT_TYPE,
@@ -2251,7 +2424,7 @@ impl AiClient {
             matches!(&model.endpoint.auth, crate::auth::Auth::RequestSigner(_));
         let mut diagnostic_redactor = CredentialRedactor::default();
         if !request_aware_signer {
-            let resolved_headers = crate::auth::resolve_headers(&model.endpoint.auth)
+            let resolved_headers = crate::auth::resolve_headers_in_environment(&model.endpoint.auth, environment)
                 .await
                 .map_err(AiError::Auth)?;
             diagnostic_redactor = resolved_headers.redactor;
@@ -2265,7 +2438,10 @@ impl AiClient {
                 }
             }
         }
-        diagnostic_redactor.include_header_values(&model.endpoint.default_headers);
+        diagnostic_redactor.include_header_values(&headers);
+        if let Some(proxy) = &proxy {
+            diagnostic_redactor.include_proxy_url(proxy);
+        }
 
         let fallback_request = HttpStreamRequest {
             model: model.clone(),
@@ -2273,6 +2449,10 @@ impl AiClient {
             parts,
             headers,
             requested_audio_format,
+            requested_service_tier: req
+                .responses
+                .as_ref()
+                .and_then(|options| options.service_tier),
             tool_definitions,
             pre_send_diagnostics,
             buffer_ambiguous_compatibility_content,
@@ -2289,11 +2469,10 @@ impl AiClient {
             crate::types::EndpointTransport::WebSocketPreferred
         ) && model.spec.protocol == Protocol::OpenAiResponses
             && !request_aware_signer
+            && proxy.is_none()
             && fallback_request.parts.streaming
         {
             let session_key = req.session_id.as_deref().filter(|id| !id.is_empty());
-            let websocket_key = session_key
-                .map(|session| format!("{}:{}:{session}", model.endpoint.id.0, model.spec.id.0));
             let mut ws_headers = fallback_request.headers.clone();
             if model
                 .endpoint
@@ -2306,6 +2485,9 @@ impl AiClient {
                     http::HeaderValue::from_static(ResponsesWsPool::beta_header_value()),
                 );
             }
+            let websocket_key = session_key.map(|session| {
+                responses_websocket_key(model, session, &fallback_request.parts.url, &ws_headers)
+            });
             if let Ok(body) =
                 serde_json::from_slice::<serde_json::Value>(&fallback_request.parts.body)
             {
@@ -2339,6 +2521,7 @@ impl AiClient {
                             self.responses_ws.clone(),
                             websocket_key.clone(),
                             model.clone(),
+                            fallback_request.requested_service_tier,
                             events,
                             fallback_request.pre_send_diagnostics.clone(),
                             fallback_request.tool_definitions.clone(),
@@ -2436,9 +2619,11 @@ impl AiClient {
             .base_url
             .join("responses/compact")
             .map_err(|error| crate::error::ConfigError::Parse(error.to_string()))?;
+        let proxy = self.request_proxy(&url)?;
         let body = serde_json::to_vec(&request)
             .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
         let mut headers = model.endpoint.default_headers.clone();
+        merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
         headers.insert(
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static("application/json"),
@@ -2459,7 +2644,7 @@ impl AiClient {
             .await
             .map_err(AiError::Auth)?;
         let mut diagnostic_redactor = resolved_headers.redactor;
-        diagnostic_redactor.include_header_values(&model.endpoint.default_headers);
+        diagnostic_redactor.include_header_values(&headers);
         let mut current_key = None;
         for (key, value) in resolved_headers.headers {
             if let Some(key) = key {
@@ -2470,6 +2655,9 @@ impl AiClient {
             }
         }
         self.mark_request_dispatch();
+        if let Some(proxy) = &proxy {
+            diagnostic_redactor.include_proxy_url(proxy);
+        }
         let response = tokio::time::timeout(
             model.endpoint.timeout,
             self.http.post(url).headers(headers).body(body).send(),
@@ -2593,7 +2781,13 @@ impl AiClient {
 
     /// Executes a request and drives the stream to completion, returning the final Response.
     pub async fn complete(&self, model: &Model, req: Request) -> Result<Response, AiError> {
-        let mut stream = self.stream(model, req).await?;
+        self.complete_with_overrides(model, req, crate::RequestOverrides::default()).await
+    }
+
+    /// Executes and collects one request using the same private overrides and
+    /// no-retry contract as [`Self::stream_with_overrides`].
+    pub async fn complete_with_overrides(&self, model: &Model, req: Request, overrides: crate::RequestOverrides) -> Result<Response, AiError> {
+        let mut stream = self.stream_with_overrides(model, req, overrides).await?;
         let mut final_response = None;
 
         while let Some(ev_res) = stream.next().await {
@@ -2637,6 +2831,7 @@ mod tests {
                 pool.clone(),
                 Some("poisoned".into()),
                 model.clone(),
+                None,
                 receiver,
                 Vec::new(),
                 Vec::new(),

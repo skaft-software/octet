@@ -50,6 +50,40 @@ for exact fixture coverage and outstanding generated-link/Rust-host/native gates
 The deferred widget/editor statements in the baseline tables and plan-mode
 journeys below retain that no-optional-UI scope, not a full parity claim.
 
+## Additional bounded bridge regressions
+
+`tests/test_bridge_ui.py` also exercises Pi select/confirm/input `signal` and
+`timeout` dismissal, pre-aborted dialogs, parent cancellation, owner settlement,
+and selection labels with numeric prefixes. Timed-out or dismissed dialogs send
+host cancellation and return Pi's false/undefined defaults, never approval. The
+host input/confirmation UI is still not a Pi selector/countdown component.
+
+`tests/test_bridge_protocol.py` verifies directory packages containing multiple
+unchanged entrypoints and refuses entrypoints outside the source fingerprint's
+file domain before import. Pi's public package resolver, not a vendored manifest
+or glob implementation, determines the selected files. Exact path-set validation
+replaces the invalid one-loaded-extension-per-directory assumption.
+
+Public Pi argument validation now runs after preparation and after interception,
+before execution on both tool wires. The API `0.3` dispatcher additionally calls
+Pi's tool-call interception. Adversarial fixtures assert zero execute effects for
+non-coercible values, additional properties, invalid preparation and invalid hook
+mutation; Pi number-to-string coercion is retained, not rejected as an invalid
+raw value. This imports the selected runtime's public `pi-ai` export.
+
+Tool-result usage/termination remain **unintegrated host consumers**, not proven
+parity: generic metadata is not durable native tool usage. Dynamic execute results
+cannot be selectively rejected before their effects without a declared result
+contract. Same-name concurrent hook/call FIFO identity, tool executionMode,
+constrainedSampling and native prompt snippet/guideline projection also still need
+host contracts. A busy `waitForIdle` now errors rather than claiming to wait.
+
+These are deterministic bridge regressions, not a new runtime qualification.
+The inspected `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391` source is Pi `0.85.1`;
+the pinned `0.84.4` profile and all baseline ledger statuses remain unchanged.
+The optional typed host `event_bus` offer is recognized but not selected or
+translated into arbitrary Pi cross-process event authority.
+
 ## Executable inventory
 
 `python3 extensions/octet-pi-compat/conformance.py --check --json` validates the 118 public-surface rows, all 78 official extension entries (69 files and 9 directories), all 33 Pi TUI audit rows, the six plan-mode journeys, fixture links, and the raw-byte profile integrity sidecar.
@@ -187,7 +221,7 @@ journeys below retain that no-optional-UI scope, not a full parity claim.
 | `compact` | safe divergence | `context:compact` | Compaction is host-owned and errors explicitly. |
 | `getSystemPrompt` | safe divergence | `context:getSystemPrompt` | Exact effective prompt disclosure is rejected explicitly. |
 | `getSystemPromptOptions` | safe divergence | `context:getSystemPromptOptions` | Returns only canonical cwd. |
-| `waitForIdle` | safe divergence | `context:waitForIdle` | Command dispatch is treated as idle and returns immediately. |
+| `waitForIdle` | safe divergence | `context:waitForIdle` | Returns at an observed idle boundary; a busy owner errors because the host idle-wait service is unavailable. |
 | `newSession` | safe divergence | `context:newSession` | Session replacement is rejected explicitly. |
 | `fork` | safe divergence | `context:fork` | Session replacement is rejected explicitly. |
 | `navigateTree` | safe divergence | `context:navigateTree` | Tree mutation is rejected explicitly. |

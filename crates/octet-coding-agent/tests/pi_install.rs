@@ -155,3 +155,29 @@ fn missing_dependencies_and_unapproved_scripts_fail_before_publication() {
     assert!(!fixture.source.join("node_modules").exists());
     assert!(!fixture.source.join("SCRIPT_RAN").exists());
 }
+
+#[test]
+fn both_api_links_pin_the_host_version_without_rewriting_activation_or_trust() {
+    if !node_available() {
+        return;
+    }
+    for api in ["0.2", "0.3"] {
+        let fixture = Fixture::new();
+        let config = fixture.root.join("home/.octet/config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let policy = b"enabled_extensions = [\"existing\"]\ntrusted_extensions = [\"existing\"]\n";
+        fs::write(&config, policy).unwrap();
+        successful(fixture.install(&["--api-version", api]));
+        let manifest = octet_agent::ExtensionManifest::parse(
+            &fs::read_to_string(fixture.extensions.join("pi-local-fixture/extension.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.api_version, api);
+        assert_eq!(
+            manifest.requires_octet.as_deref(),
+            Some(format!("={}", env!("CARGO_PKG_VERSION")).as_str())
+        );
+        assert_eq!(fs::read(&config).unwrap(), policy);
+        assert!(!fixture.source.join("SCRIPT_RAN").exists());
+    }
+}

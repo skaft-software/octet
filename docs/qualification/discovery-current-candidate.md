@@ -47,6 +47,9 @@ registration. The OpenRouter incomplete-route comment now explicitly requires an
 endpoint-supplied completion ceiling.
 
 Existing bootstrap library tests `crates/octet-coding-agent/src/app/bootstrap/tests.rs`
+> Historical note: the projection described below was later widened, for
+> sparse inventories only, to the endpoint-silent input modalities and
+> context/output limits. The rest of that contract still holds.
 reconcile all seven named failures with the display/pricing-only contract. Added
 coverage directly checks display-only merging (including explicit name blockers),
 endpoint-positive capabilities, and native budget/output boundaries: equality,

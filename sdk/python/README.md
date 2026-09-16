@@ -43,12 +43,12 @@ PII/secret/private-path values. The module holds the enforcement kernel
 (`EventBusKernel`, `TopicRegistry`, `BoundedQueue`, `validate_payload`) and the
 extension-side participant (`HostEventBus`).
 
-**The host does not expose the `event_bus` capability yet**, so real
-`bus/publish` and `bus/subscribe` calls fail closed with the host's
-`unknown_method`. The bound rules, the fail-closed matrix, and the exact
-schema/crate work that is still required are recorded in
-[docs/extensions/event-bus.md](../../docs/extensions/event-bus.md); the
-behavioral suite is `tests/test_event_bus.py`.
+API `0.3` hosts can now bind a session-isolated `event_bus`; the coding product
+binds it only to isolated current-API processes after its existing startup gates.
+`HostEventBus.declare` sends `bus/declare`; publication identity, generation and
+time are host-owned. A missing or unselected method still fails closed. This is
+not a legacy `Extension` runtime upgrade. See the [bus contract](../../docs/extensions/event-bus.md)
+for bounds, Rust process/product fixtures and verification status.
 
 ## Legacy runtime reference
 

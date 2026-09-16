@@ -6,6 +6,9 @@ branch changes, alternate target directory or live provider requests.
 ## Scope / evidence
 
 - #424: bounded endpoint self-description, never models.dev capability authority.
+> Superseded in part: sparse inventories may now inherit endpoint-silent
+> input modalities and context/output limits from the pinned record (see
+> `crates/octet-ai/models/SOURCES.md`). The original record below is preserved.
   Existing snapshot remains display/pricing only; declared routes and codecs remain
   the authority for protocol intersections and native reasoning encodings.
 - #245: reproduce and repair native Mistral URL/EOF classification at source;

@@ -252,6 +252,11 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
     // Autocomplete can claim that row below once we know it has real matches.
     let footer_visible = crate::tui::composer_surface::status_footer_visible(state, width);
     let mut composer = crate::tui::composer_surface::render_composer_surface(state, width, now);
+    if state.transcript_search_active() {
+        // The query, not a tall hidden draft/error, owns the only cursor.
+        composer.truncate(rows.saturating_sub(header.len() + 2));
+        error.truncate(rows.saturating_sub(header.len() + composer.len() + 2));
+    }
     let mut subagents = if state.panel.is_none() {
         render_subagent_activity(state, width)
     } else {
@@ -298,7 +303,11 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
             .saturating_add(extension_below.len()),
     );
 
-    let panel = render_panel_with_limit(state, width, remaining);
+    let panel = if state.transcript_search_active() {
+        state.transcript_search_panel(width, remaining)
+    } else {
+        render_panel_with_limit(state, width, remaining)
+    };
     remaining = remaining.saturating_sub(panel.len());
 
     // Let autocomplete reuse the status row, including in a short terminal

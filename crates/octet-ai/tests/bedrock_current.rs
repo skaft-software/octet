@@ -41,6 +41,7 @@ fn fixture_auth() -> Auth {
 
 fn bedrock_model(base_url: &str, api_name: &str) -> Model {
     let spec = ModelSpec {
+        preset: Default::default(),
         id: ModelId("bedrock-fixture-model".to_owned()),
         endpoint: EndpointId("bedrock-fixture-endpoint".to_owned()),
         api_name: api_name.to_owned(),

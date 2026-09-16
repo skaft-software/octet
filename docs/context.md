@@ -26,7 +26,24 @@ The generic `threshold_fraction = 1.0` uses the context window with a fixed
 16K coding-turn reserve (or the larger advertised reasoning floor), not an
 additional percentage buffer. `max_active_tokens` can impose a smaller working
 set. The advertised maximum output is still the request ceiling; it is reduced
-only when the current input leaves less space in the context window.
+only when the current input leaves less space in the context window, and that
+reduction reserves a small bounded headroom (1% of the window, clamped to
+256–4096 tokens). The input count is an estimate, while the provider counts with
+its own tokenizer and chat template; without the reserve a request sits exactly on
+the boundary, where a one-token difference is a hard rejection. A real vLLM
+server answered a 131072-token window with *"you requested 30896 output tokens and
+your prompt contains at least 100177 input tokens, for a total of at least 131073
+tokens"*.
+
+A provider that rejects the request for size is recovered rather than surfaced
+where it can be: local compaction runs at the next reducible boundary and the
+request is retried, bounded like other provider retries. That includes strict
+servers that answer HTTP 400/413/422 with a provider-shaped body carrying a
+numeric `code`, which previously selected the permanent-failure branch. Named
+policy, authorization, quota and rate-limit rejections still fail without
+compacting, and a session with no reducible history reports the limit instead of
+retrying. Recovery remains bounded: if the provider's own count exceeds the
+estimate by more than the reserve, the request fails with the provider's message.
 
 The authenticated Codex working-window policy caps most models, including Astra,
 at 272K request tokens while retaining larger provider-advertised maxima as

@@ -695,6 +695,34 @@ pub async fn session_picker(
         let requests = shell.drain_panel_requests();
         for request in requests {
             match request {
+                PanelRequest::SearchEntries { query, paths } => {
+                    let search_store = store.clone();
+                    let search_query = query.clone();
+                    let result = run_blocking_lifecycle(
+                        shell,
+                        input,
+                        "searching session transcripts…",
+                        move || search_picker_entries(&search_store, &search_query, &paths),
+                    )
+                    .await;
+                    match result {
+                        Ok(hits) => {
+                            let count = hits.len();
+                            shell.set_picker_entry_search(query, hits);
+                            shell.set_picker_lifecycle(OrdinarySurfaceLifecycle::success(
+                                format!("{count} sessions matched (up to 200 entry hits; edit query for metadata search)"),
+                                Instant::now() + Duration::from_secs(5),
+                            ));
+                        }
+                        Err(error) => {
+                            shell.set_picker_lifecycle(OrdinarySurfaceLifecycle::recoverable_error(
+                                format!("transcript search: {error}"),
+                                Instant::now() + Duration::from_secs(5),
+                            ))
+                        }
+                    }
+                    shell.render();
+                }
                 PanelRequest::LoadAll => {
                     let discovery_store = store.clone();
                     let discovered = match run_blocking_lifecycle(
@@ -866,6 +894,48 @@ pub async fn session_picker(
         }
         shell.render();
     }
+}
+
+/// Reuse the incremental, bounded session-entry index instead of reopening
+/// transcripts on the render/input thread. Only currently offered picker paths
+/// can become results. The aggregate hit and workspace budgets are explicit.
+fn search_picker_entries(
+    store: &SessionStore,
+    query: &str,
+    paths: &[PathBuf],
+) -> anyhow::Result<std::collections::HashMap<PathBuf, String>> {
+    anyhow::ensure!(query.len() <= 1024, "query exceeds 1024 bytes");
+    let mut directories = std::collections::BTreeSet::new();
+    for path in paths {
+        if let Some(parent) = path.parent() {
+            directories.insert(parent.to_path_buf());
+        }
+    }
+    anyhow::ensure!(
+        directories.len() <= 256,
+        "search is limited to 256 workspace stores"
+    );
+    let offered = paths
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut hits = std::collections::HashMap::new();
+    let mut remaining = 200;
+    for directory in directories {
+        if remaining == 0 {
+            break;
+        }
+        let scope = SessionStore::for_directory(&directory, store.root());
+        let result = scope.search_entries(query, remaining)?;
+        remaining = remaining.saturating_sub(result.hits.len());
+        for hit in result.hits {
+            let path = directory.join(format!("{}.jsonl", hit.session_id));
+            if offered.contains(&path) {
+                hits.entry(path).or_insert(hit.text);
+            }
+        }
+    }
+    Ok(hits)
 }
 
 fn session_id_from_path(path: &Path) -> Option<String> {
@@ -1046,9 +1116,7 @@ pub async fn thinking_picker(
 }
 
 /// One-line Codex context-window row for the effort menu.
-pub(crate) fn codex_context_menu_row(
-    surface: &crate::commands::CodexContextSurface,
-) -> String {
+pub(crate) fn codex_context_menu_row(surface: &crate::commands::CodexContextSurface) -> String {
     format!(
         "Codex context window… (currently {} tokens{})",
         surface.effective_window(),
@@ -1811,7 +1879,9 @@ mod tests {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let (refreshed_tx, refreshed_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            refreshed_rx.await.expect("picker refreshed before confirmation");
+            refreshed_rx
+                .await
+                .expect("picker refreshed before confirmation");
             sender
                 .send(Ok(Event::Key(KeyEvent::new(
                     KeyCode::Enter,
@@ -1822,7 +1892,10 @@ mod tests {
         });
         let mut input = ReceiverStream::new(receiver);
         let mut shell = InteractiveShell::test_shell();
-        let mut refresh = LivePickerRefresh { calls: 0, refreshed: Some(refreshed_tx) };
+        let mut refresh = LivePickerRefresh {
+            calls: 0,
+            refreshed: Some(refreshed_tx),
+        };
         let selected = subagent_picker(
             &mut shell,
             &mut input,
@@ -1852,6 +1925,7 @@ mod tests {
     #[test]
     fn model_label_uses_friendly_metadata_without_wire_id_noise() {
         let spec = octet_ai::ModelSpec {
+            preset: Default::default(),
             id: ModelId("my-custom".into()),
             endpoint: octet_ai::EndpointId("local".into()),
             api_name: "llama-3.1-8b-instruct".into(),
@@ -1901,6 +1975,7 @@ mod tests {
     #[test]
     fn custom_model_label_removes_provider_repository_and_quantization_noise() {
         let mut spec = octet_ai::ModelSpec {
+            preset: Default::default(),
             id: ModelId("custom/Intel/Qwen3.6-27B-int4-AutoRound".into()),
             endpoint: octet_ai::EndpointId("custom-openai".into()),
             api_name: "Intel/Qwen3.6-27B-int4-AutoRound".into(),
@@ -2013,5 +2088,75 @@ mod tests {
                 && !description.contains("Anthropic")
                 && !description.contains("OpenAI")
         }));
+    }
+}
+
+#[cfg(test)]
+mod parity_session_search_tests {
+    use super::*;
+    use octet_agent::{EntryValue, Session};
+    use octet_ai::{Message, UserMessage, UserPart};
+
+    #[test]
+    fn resume_transcript_search_dispatch_uses_index_and_returns_original_session() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        for id in ["one", "two"] {
+            let mut session = Session::create(store.dir().join(format!("{id}.jsonl"))).unwrap();
+            for text in [
+                "ordinary first prompt",
+                if id == "two" {
+                    "deep hidden needle"
+                } else {
+                    "other later text"
+                },
+            ] {
+                session
+                    .append(EntryValue::Message(Message::User(UserMessage {
+                        content: vec![UserPart::Text(text.into())],
+                    })))
+                    .unwrap();
+            }
+        }
+        let rows = store.list();
+        assert_eq!(rows.len(), 2);
+        let expected = store.dir().join("two.jsonl");
+        let mut shell = InteractiveShell::test_shell();
+        shell.open_panel(Panel::SessionPicker {
+            picker: PickerState::new(rows, None),
+        });
+        for character in "needle".chars() {
+            shell.panel_input(&Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            )));
+        }
+        shell.panel_input(&Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        let mut requests = shell.drain_panel_requests();
+        assert_eq!(requests.len(), 1);
+        let PanelRequest::SearchEntries { query, paths } = requests.remove(0) else {
+            panic!("search request");
+        };
+        let hits = search_picker_entries(&store, &query, &paths).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits.get(&expected).unwrap().contains("deep hidden needle"));
+        shell.set_picker_entry_search(query.clone(), hits);
+        let repeated = search_picker_entries(&store, &query, &paths).unwrap();
+        assert_eq!(repeated.len(), 1);
+        let selected = shell.panel_input(&Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(selected, Some((PanelResult::Select(ref id), _)) if id == "two"));
+        assert_eq!(
+            shell.take_picker_selection(),
+            Some(("two".into(), expected))
+        );
+        assert!(search_picker_entries(&store, &"x".repeat(1025), &paths).is_err());
     }
 }

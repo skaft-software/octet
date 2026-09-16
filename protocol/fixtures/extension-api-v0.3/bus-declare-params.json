@@ -1,0 +1,1 @@
+{"binding_id":"binding-example","fields":[{"kind":"string","max_bytes":128,"name":"summary","required":true,"values":[]}],"topic":"bus.alpha.status"}

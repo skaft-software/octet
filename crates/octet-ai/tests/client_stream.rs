@@ -20,6 +20,7 @@ use octet_ai::{
 
 fn make_test_model(base_url_str: &str, protocol: Protocol, is_audio: bool) -> Model {
     let spec = ModelSpec {
+        preset: Default::default(),
         id: ModelId("test-model".to_string()),
         endpoint: EndpointId("test-ep".to_string()),
         api_name: "gpt-4-test".to_string(),

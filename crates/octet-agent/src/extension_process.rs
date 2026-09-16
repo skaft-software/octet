@@ -77,6 +77,9 @@ use crate::tool::{
     ToolOutputContentPart, ToolProgressDecoration, ToolProgressSink,
 };
 
+mod event_bus;
+pub use event_bus::ExtensionEventBus;
+
 /// The newest executable-extension API implemented by this octet release.
 pub const EXTENSION_API_VERSION: &str = EXTENSION_API_VERSION_0_3;
 
@@ -4276,6 +4279,8 @@ pub struct ExtensionRuntimeConfig {
     /// only when configured; it remains inactive until the product binds a safe
     /// interactive idle boundary. Legacy processes never retain this service.
     pub session_lifecycle: Option<ExtensionSessionLifecycleService>,
+    /// Optional session-isolated data bus; never bind to workspace-shared processes.
+    pub event_bus: Option<Arc<ExtensionEventBus>>,
     /// Offer single-use approval redemption. A trusted frontend can issue a
     /// capability with [`ExtensionProcess::respond_to_policy_approval`].
     pub approvals: bool,
@@ -4330,6 +4335,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
                 "session_lifecycle_configured",
                 &self.session_lifecycle.is_some(),
             )
+            .field("event_bus_configured", &self.event_bus.is_some())
             .field("approvals", &self.approvals)
             .field("secret_broker_configured", &self.secret_broker.is_some())
             .field(
@@ -4363,6 +4369,7 @@ impl ExtensionRuntimeConfig {
             flag_values: BTreeMap::new(),
             agent_sessions: false,
             session_lifecycle: None,
+            event_bus: None,
             approvals: false,
             secret_broker: None,
             provider_registry: None,
@@ -8080,6 +8087,7 @@ struct ProcessConnection {
     provider_stream_idle_timeout: Duration,
     provider_stream_deadline: Duration,
     provider_owner_removed: AtomicBool,
+    event_bus: Option<Arc<ExtensionEventBus>>,
     process_group: ProcessGroupGuard,
 }
 
@@ -8264,6 +8272,7 @@ struct WriterFrame {
     line: Vec<u8>,
     state: Arc<AtomicU8>,
     completion: Option<oneshot::Sender<Result<(), PendingError>>>,
+    bus_delivery: Option<event_bus::Delivery>,
 }
 
 struct ZeroizingBytes(Vec<u8>);
@@ -8385,6 +8394,9 @@ async fn run_protocol_writer(
     frame_limit: Arc<ProtocolFrameLimit>,
 ) {
     while let Some(mut frame) = frames.recv().await {
+        if frame.bus_delivery.as_ref().is_some_and(|delivery| !delivery.is_current() && !delivery.control_expired()) {
+            continue;
+        }
         if frame
             .state
             .compare_exchange(
@@ -8426,14 +8438,17 @@ async fn run_protocol_writer(
             return;
         }
 
-        let result = async {
+        let write = async {
             stdin
                 .write_all(&frame.line)
                 .await
                 .map_err(|error| error.to_string())?;
             stdin.flush().await.map_err(|error| error.to_string())
-        }
-        .await;
+        };
+        let result = match &frame.bus_delivery {
+            Some(delivery) => delivery.guard_write(write).await,
+            None => write.await,
+        };
         match result {
             Ok(()) => {
                 frame.state.store(FRAME_WRITTEN, Ordering::Release);
@@ -8523,6 +8538,9 @@ impl ProcessConnection {
 
     fn remove_provider_owner(&self) {
         if !self.provider_owner_removed.swap(true, Ordering::AcqRel) {
+            if let Some(bus) = &self.event_bus {
+                bus.remove(&self.provider_owner.extension_instance_id, self.generation);
+            }
             if let Some(registry) = &self.provider_registry {
                 registry.remove_owner(&self.provider_owner);
             }
@@ -8799,6 +8817,7 @@ impl ProcessConnection {
                     line,
                     state: frame_state,
                     completion: None,
+                    bus_delivery: None,
                 })
                 .await
                 .map_err(|_| ExtensionRuntimeError::Closed("extension writer closed".into()))?;
@@ -8921,6 +8940,7 @@ impl ProcessConnection {
                 line,
                 state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                 completion: None,
+                bus_delivery: None,
             })
             .is_ok();
         if !queued {
@@ -9096,6 +9116,7 @@ impl ProcessConnection {
                         line: line.0.clone(),
                         state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                         completion: Some(completed),
+                        bus_delivery: None,
                     });
                     tokio::pin!(admission);
                     tokio::select! {
@@ -10091,6 +10112,7 @@ async fn spawn_connection(
         catalog_updates,
         delegation_service,
         session_lifecycle.clone(),
+        config.event_bus.clone(),
         approval_store,
         config.secret_broker.clone(),
         ExtensionIdentity {
@@ -10160,6 +10182,7 @@ async fn spawn_connection(
         provider_stream_idle_timeout: config.provider_stream_idle_timeout,
         provider_stream_deadline: config.provider_stream_deadline,
         provider_owner_removed: AtomicBool::new(false),
+        event_bus: config.event_bus.clone(),
         process_group,
     });
     artifact_guard.disarm();
@@ -10199,6 +10222,7 @@ async fn spawn_connection(
                 api_v03_max_frame_bytes,
                 config.max_pending_requests,
                 offered_host_services.session_lifecycle,
+                config.event_bus.is_some(),
             )
         })
         .transpose()
@@ -10441,6 +10465,7 @@ fn api_v03_host_offer_for_services(
     max_frame_bytes: usize,
     max_pending_requests: usize,
     session_lifecycle: bool,
+    event_bus: bool,
 ) -> Result<api_v03::ContractOffer, api_v03::ContractError> {
     let mut offer = api_v03::host_offer(max_frame_bytes, max_pending_requests)?;
     // Generated optional services are not automatically product services.
@@ -10460,6 +10485,12 @@ fn api_v03_host_offer_for_services(
         offer.optional_methods.retain(|method| {
             api_v03::method_spec(method)
                 .is_none_or(|specification| specification.capability != "session_lifecycle")
+        });
+    }
+    if !event_bus {
+        offer.optional_capabilities.retain(|capability| capability != "event_bus");
+        offer.optional_methods.retain(|method| {
+            api_v03::method_spec(method).is_none_or(|spec| spec.capability != "event_bus")
         });
     }
     api_v03::validate_offer(&offer)?;
@@ -11854,6 +11885,7 @@ struct ProtocolReadState {
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
     delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
+    event_bus: Option<Arc<ExtensionEventBus>>,
     approval_store: Arc<ExtensionApprovalStore>,
     secret_broker: Option<Arc<dyn ExtensionSecretBroker>>,
     extension_identity: ExtensionIdentity,
@@ -12138,6 +12170,7 @@ async fn queue_api_v03_child_response(
                     line: line.0.clone(),
                     state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                     completion: Some(completed),
+                    bus_delivery: None,
                 });
                 tokio::pin!(admission);
                 tokio::select! {
@@ -12498,6 +12531,7 @@ async fn read_protocol_stdout<R>(
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
     delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
+    event_bus: Option<Arc<ExtensionEventBus>>,
     approval_store: Arc<ExtensionApprovalStore>,
     secret_broker: Option<Arc<dyn ExtensionSecretBroker>>,
     extension_identity: ExtensionIdentity,
@@ -12539,6 +12573,7 @@ async fn read_protocol_stdout<R>(
         catalog_updates,
         delegation_service,
         session_lifecycle,
+        event_bus,
         approval_store,
         secret_broker,
         extension_identity,
@@ -12548,6 +12583,7 @@ async fn read_protocol_stdout<R>(
         child,
         termination,
     };
+    let mut bus_attached = false;
     let mut read_buffer = [0_u8; 8192];
     let mut line = Vec::new();
     let result = 'stream: loop {
@@ -12594,6 +12630,12 @@ async fn read_protocol_stdout<R>(
                     }
                     changed.await;
                 }
+                if !bus_attached {
+                    if let Some(bus) = &state.event_bus {
+                        if let Err(error) = bus.attach(&state) { break 'stream Err(error.to_string()); }
+                    }
+                    bus_attached = true;
+                }
             } else {
                 line.push(*byte);
                 if line.len() >= state.max_message_bytes() {
@@ -12607,6 +12649,9 @@ async fn read_protocol_stdout<R>(
     };
 
     state.closed.store(true, Ordering::Release);
+    if let Some(bus) = &state.event_bus {
+        bus.remove(&state.instance_id, state.generation);
+    }
     if let Some(registry) = &state.provider_registry {
         registry.remove_owner(&state.provider_owner);
     }
@@ -12852,6 +12897,18 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         match method {
+            "bus/declare" | "bus/subscribe" | "bus/unsubscribe" | "bus/publish" if is_api_v03 => {
+                let id = parse_child_request_id(object, method)?;
+                insert_child_request(state, id.clone(), None, None)?;
+                let result = state.event_bus.as_ref()
+                    .ok_or(ProviderHostResponseError::Unavailable)
+                    .and_then(|bus| bus.dispatch(state, method, params).map_err(|error| match error.code {
+                        -32012 => ProviderHostResponseError::ResourceExhausted,
+                        -32011 => ProviderHostResponseError::Unavailable,
+                        _ => ProviderHostResponseError::Invalid,
+                    }));
+                queue_provider_host_response(state, &id, result)?;
+            }
             methods::NOTIFICATION => {
                 require_declared(state.declared.notifications, "notifications")?;
                 let notification = serde_json::from_value(params)
@@ -14517,6 +14574,7 @@ fn queue_writer_line(
             line,
             state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
             completion: None,
+            bus_delivery: None,
         })
         .map_err(|error| format!("bounded extension writer rejected frame: {error}"))
 }
@@ -14872,7 +14930,7 @@ notifications = true
 confirmations = true
 "#;
 
-    fn protocol_read_state_for_test(
+    pub(super) fn protocol_read_state_for_test(
         declared: ManifestContributions,
         events: broadcast::Sender<ExtensionEvent>,
     ) -> (ProtocolReadState, mpsc::Receiver<WriterFrame>) {
@@ -14917,6 +14975,7 @@ confirmations = true
                 catalog_updates,
                 delegation_service: Arc::new(StdRwLock::new(None)),
                 session_lifecycle: None,
+                event_bus: None,
                 approval_store: Arc::new(ExtensionApprovalStore::new()),
                 secret_broker: None,
                 extension_identity: ExtensionIdentity {
@@ -15071,7 +15130,7 @@ confirmations = true
     #[test]
     fn api_v03_theme_selection_is_omitted_without_a_host_handler() {
         for session_lifecycle in [false, true] {
-            let offer = api_v03_host_offer_for_services(1024, 4, session_lifecycle).unwrap();
+            let offer = api_v03_host_offer_for_services(1024, 4, session_lifecycle, false).unwrap();
             assert!(!offer
                 .optional_capabilities
                 .iter()
@@ -15086,7 +15145,7 @@ confirmations = true
 
     #[test]
     fn api_v03_session_lifecycle_offer_is_conditional_on_a_bound_driver() {
-        let unavailable = api_v03_host_offer_for_services(1024, 4, false).unwrap();
+        let unavailable = api_v03_host_offer_for_services(1024, 4, false, false).unwrap();
         assert!(unavailable
             .optional_capabilities
             .iter()
@@ -15097,7 +15156,7 @@ confirmations = true
         }));
         api_v03::validate_offer(&unavailable).unwrap();
 
-        let available = api_v03_host_offer_for_services(1024, 4, true).unwrap();
+        let available = api_v03_host_offer_for_services(1024, 4, true, false).unwrap();
         assert!(available
             .optional_capabilities
             .iter()
@@ -15169,7 +15228,7 @@ confirmations = true
             protocol_read_state_for_test(ManifestContributions::default(), events);
         let (service, mut receiver) = ExtensionSessionLifecycleService::channel(1).unwrap();
         service.activate();
-        let offer = api_v03_host_offer_for_services(1024, 4, true).unwrap();
+        let offer = api_v03_host_offer_for_services(1024, 4, true, false).unwrap();
         let mut selection = api_v03::select_required(&offer).unwrap();
         selection.capabilities.push("session_lifecycle".into());
         selection.methods.extend(
@@ -17680,6 +17739,7 @@ command = "frame-limit.py"
                 line: oversized,
                 state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                 completion: Some(completion_tx),
+                bus_delivery: None,
             })
             .await
             .expect("queue oversized buffered frame");

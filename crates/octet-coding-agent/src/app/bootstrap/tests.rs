@@ -2175,6 +2175,192 @@ fn custom_registry_registers_labeled_providers_with_isolated_auth_and_models() {
         .is_err());
 }
 
+#[tokio::test]
+async fn custom_model_preset_registry_discovery_cache_and_wire_preserve_only_configured_controls() {
+    use octet_ai::{CompatibilityMode, Message, Request, UserMessage, UserPart};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let secret = "configured-model-header-canary";
+    Mock::given(method("GET")).and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "configured", "preset": {"headers": {"x-model-secret": "untrusted-replacement"}}},
+                {"id": "discovered", "preset": {
+                    "headers": {"x-remote-secret": "untrusted-inventory-header"},
+                    "sampling_params": {"top_p": 0.01}, "vllm_priority": 99
+                }}
+            ]
+        }))).expect(1).mount(&server).await;
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"id\":\"preset\",\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+                "data: {\"id\":\"preset\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+            ))).expect(1).mount(&server).await;
+    let provider: crate::auth::custom::CustomProvider = serde_json::from_value(serde_json::json!({
+        "base_url": format!("{}/v1/", server.uri()), "auth": {"kind": "none"}, "auto_discover": true,
+        "models": [{"api_name": "configured", "preset": {
+            "headers": {"x-model-secret": secret},
+            "sampling_params": {"temperature": 0.25, "top_p": 0.7}, "vllm_priority": -3
+        }}]
+    })).unwrap();
+    let expected_preset = provider.credential.models[0].preset.clone();
+    let store =
+        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
+    store
+        .save_registry(&crate::auth::custom::CustomRegistry::single(
+            "fixture", provider,
+        ))
+        .unwrap();
+    let (online, offline) = tokio::task::spawn_blocking(move || {
+        let mut online = ModelCatalog::default();
+        register_custom_openai_endpoints_from_store(&mut online, &store, false).unwrap();
+        let mut offline = ModelCatalog::default();
+        register_custom_openai_endpoints_from_store(&mut offline, &store, true).unwrap();
+        let cache =
+            String::from_utf8(store.load_model_cache_for("fixture").unwrap().unwrap()).unwrap();
+        assert!(!cache.contains("configured-model-header-canary"));
+        assert!(!cache.contains("untrusted-inventory-header"));
+        (online, offline)
+    })
+    .await
+    .unwrap();
+    let id = ModelId("custom/fixture/configured".into());
+    let model = offline.resolve(&id).unwrap();
+    assert_eq!(online.resolve(&id).unwrap().spec.preset, expected_preset);
+    assert_eq!(model.spec.preset, expected_preset);
+    assert_eq!(
+        offline
+            .resolve(&ModelId("custom/fixture/discovered".into()))
+            .unwrap()
+            .spec
+            .preset,
+        octet_ai::ModelPreset::default(),
+        "provider inventory cannot grant request overrides"
+    );
+    let public = serde_json::to_string(&*model.spec).unwrap();
+    assert!(!public.contains(secret));
+    assert!(!public.contains("x-model-secret"));
+    assert!(!format!("{model:?}").contains(secret));
+    let request = Request {
+        system: Some("fixture system".into()),
+        messages: vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("fixture prompt".into())],
+        })],
+        tools: vec![],
+        tool_choice: octet_ai::ToolChoice::None,
+        max_output_tokens: Some(128),
+        temperature: Some(0.75),
+        stop: vec![],
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ReasoningMode::Standard,
+        responses: None,
+        output_format: octet_ai::OutputFormat::Text,
+        output_modalities: octet_ai::OutputModalities::Text,
+        compatibility: CompatibilityMode::Strict,
+        cache_retention: octet_ai::CacheRetention::None,
+        session_id: None,
+    };
+    AiClient::new().complete(&model, request).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let post = requests
+        .iter()
+        .find(|request| request.method.as_str() == "POST")
+        .unwrap();
+    assert_eq!(
+        post.headers
+            .get("x-model-secret")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        secret
+    );
+    assert!(post.headers.get("x-remote-secret").is_none());
+    assert!(post.headers.get("authorization").is_none());
+    let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+    assert_eq!(
+        body["temperature"], 0.75,
+        "canonical request wins over the preset default"
+    );
+    assert_eq!(body["top_p"], 0.7);
+    assert_eq!(body["priority"], -3);
+    assert!(!body.to_string().contains(secret));
+    assert_eq!(
+        model.spec.preset, expected_preset,
+        "dispatch must not mutate the configured model"
+    );
+}
+
+#[test]
+fn custom_model_preset_cache_omits_headers_without_mutating_the_private_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
+    let secret = "cache-preset-header-canary";
+    let configured: crate::auth::custom::CustomModel = serde_json::from_value(serde_json::json!({
+        "api_name": "configured", "preset": {
+            "headers": {"x-model-secret": secret}, "sampling_params": {"top_p": 0.7}
+        }
+    }))
+    .unwrap();
+    let fingerprint = custom_model_cache_fingerprint("account", std::slice::from_ref(&configured));
+    save_custom_model_cache_for(
+        &store,
+        "fixture",
+        "http://localhost/v1/",
+        &fingerprint,
+        std::slice::from_ref(&configured),
+    )
+    .unwrap();
+    let raw = String::from_utf8(store.load_model_cache_for("fixture").unwrap().unwrap()).unwrap();
+    assert!(!raw.contains(secret));
+    assert!(!raw.contains("x-model-secret"));
+    assert_eq!(configured.preset.headers["x-model-secret"], secret);
+    let Some(CachedCustomInventory::Available(models)) =
+        load_custom_model_cache_for(&store, "fixture", "http://localhost/v1/", &fingerprint)
+            .unwrap()
+    else {
+        panic!("missing cache")
+    };
+    assert!(models[0].preset.headers.is_empty());
+    assert_eq!(
+        models[0].preset.sampling_params,
+        configured.preset.sampling_params
+    );
+    // Also reject cached header authority at the read boundary, rather than
+    // relying solely on every historical cache having used the current writer.
+    let cache = CustomModelCache {
+        version: CUSTOM_MODEL_CACHE_VERSION,
+        base_url: "http://localhost/v1/".into(),
+        credential_fingerprint: fingerprint.clone(),
+        models: vec![configured.clone()],
+    };
+    store
+        .save_model_cache_for("fixture", &serde_json::to_vec(&cache).unwrap())
+        .unwrap();
+    let Some(CachedCustomInventory::Available(models)) =
+        load_custom_model_cache_for(&store, "fixture", "http://localhost/v1/", &fingerprint)
+            .unwrap()
+    else {
+        panic!("missing cache")
+    };
+    assert!(models[0].preset.headers.is_empty());
+    let mut changed = configured.clone();
+    changed
+        .preset
+        .headers
+        .insert("x-model-secret".into(), "replacement".into());
+    assert_ne!(
+        custom_model_cache_fingerprint("account", &[changed]),
+        fingerprint
+    );
+}
+
 #[test]
 fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
     let directory = tempfile::tempdir().unwrap();
@@ -2197,6 +2383,7 @@ fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
         reasoning_default: String::new(),
         reasoning_uses_system_message: true,
         pricing: None,
+        preset: Default::default(),
     }];
     let mut first_headers = http::HeaderMap::new();
     first_headers.insert("x-organization", "tenant-one".parse().unwrap());
@@ -3073,10 +3260,26 @@ async fn unknown_api_03_last_initial_provider_model_preflights_restarts_and_relo
         .join("extensions/octet-pi-compat/tests/fixtures/provider-extension.mjs")
         .to_string_lossy()
         .into_owned();
-    let fake_pi = repository
-        .join("extensions/octet-pi-compat/tests/fixtures/fake-pi")
-        .to_string_lossy()
-        .into_owned();
+    let fixtures = repository.join("extensions/octet-pi-compat/tests/fixtures");
+    let fake_pi = directory.path().join("fake-pi");
+    // Keep authored dependency sources outside node_modules in source archives.
+    for (source, destination) in [
+        ("fake-pi/package.json", "package.json"),
+        ("fake-pi/dist/index.js", "dist/index.js"),
+        (
+            "fake-pi-ai/package.json",
+            "node_modules/@earendil-works/pi-ai/package.json",
+        ),
+        (
+            "fake-pi-ai/index.js",
+            "node_modules/@earendil-works/pi-ai/index.js",
+        ),
+    ] {
+        let destination = fake_pi.join(destination);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::copy(fixtures.join(source), destination).unwrap();
+    }
+    let fake_pi = fake_pi.to_string_lossy().into_owned();
     std::fs::write(
         provider.join("extension.toml"),
         format!(
@@ -4038,6 +4241,139 @@ fn pinned_metadata_display_merge_never_imports_functional_fields() {
     }
 }
 
+/// A vision model whose live inventory omits modality fields must still accept
+/// images when the pinned models.dev snapshot it is keyed to asserts image input.
+/// The endpoint stays authoritative: an explicit live assertion (including an
+/// explicit text-only list) always wins, and an id heuristic is never consulted
+/// once any modality is asserted.
+#[test]
+fn sparse_inventory_inherits_pinned_image_input_without_overriding_endpoint_assertions() {
+    let declaration = &crate::providers::DEEPSEEK;
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_deepseek_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[
+            {"id":"deepseek-flash"},
+            {"id":"deepseek-v4-pro"},
+            {"id":"deepseek-v4-flash-vision-exp"},
+            {"id":"deepseek-text-only-fixture","input_modalities":["text"]},
+            {"id":"deepseek-unpinned-fixture"}
+        ]}),
+    )
+    .unwrap();
+    let vision = catalog
+        .resolve(&ModelId("deepseek/deepseek-flash".into()))
+        .unwrap();
+    assert!(
+        vision
+            .spec
+            .capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Image),
+        "the pinned snapshot asserts text+image for DeepSeek V4.1 Flash"
+    );
+    // The pinned snapshot is text-only for V4 Pro, so the fix must not grant
+    // image input by id, provider or family heuristic.
+    let text_only = catalog
+        .resolve(&ModelId("deepseek/deepseek-v4-pro".into()))
+        .unwrap();
+    assert!(
+        !text_only
+            .spec
+            .capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Image),
+        "the snapshot declares text-only input for DeepSeek V4 Pro"
+    );
+    // A model whose own id says "vision" and which the snapshot also lists as
+    // multimodal still resolves to image input.
+    let declared_vision = catalog
+        .resolve(&ModelId("deepseek/deepseek-v4-flash-vision-exp".into()))
+        .unwrap();
+    assert!(declared_vision
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    // An endpoint that asserts a text-only inventory keeps that decision.
+    let endpoint_authority = catalog
+        .resolve(&ModelId("deepseek/deepseek-text-only-fixture".into()))
+        .unwrap();
+    assert!(!endpoint_authority
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    // No pinned snapshot entry means no invented capability.
+    let unpinned = catalog
+        .resolve(&ModelId("deepseek/deepseek-unpinned-fixture".into()))
+        .unwrap();
+    assert!(!unpinned
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+}
+
+/// Regression: a model released after this binary was built must still get its
+/// thinking levels from the provider's own inventory. OpenRouter advertises its
+/// reasoning primitive through `supported_parameters`; treating that list as an
+/// undecodable assertion left every new model (for example `stealth/union-alpha`)
+/// with thinking permanently Off until the pinned snapshot was refreshed and the
+/// binary rebuilt.
+#[test]
+fn newly_discovered_openrouter_model_decodes_its_advertised_reasoning_parameters() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "openrouter")
+        .unwrap();
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openrouter_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[
+            {"id":"stealth/union-alpha","supported_parameters":["tools","reasoning"],
+             "context_length":128_000,"max_completion_tokens":8_192},
+            {"id":"vendor/text-only","supported_parameters":["tools"],
+             "context_length":64_000,"max_completion_tokens":4_096},
+            {"id":"vendor/explicit-off","supported_parameters":["reasoning"],
+             "reasoning":false,"context_length":64_000,"max_completion_tokens":4_096}
+        ]}),
+    )
+    .unwrap();
+    let advertised = catalog
+        .resolve(&ModelId("openrouter/stealth/union-alpha".into()))
+        .unwrap();
+    let capability = advertised
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .unwrap_or_else(|| panic!("an advertised reasoning parameter must grant thinking levels"));
+    assert_eq!(
+        capability.openai_chat_mode,
+        OpenAiChatReasoningMode::OpenRouter
+    );
+    assert!(
+        capability.options.as_ref().is_some_and(|options| options
+            .values
+            .iter()
+            .any(|value| value == "high")),
+        "the default OpenRouter effort set remains available: {capability:?}"
+    );
+    // A model that does not advertise reasoning stays without it.
+    let text_only = catalog
+        .resolve(&ModelId("openrouter/vendor/text-only".into()))
+        .unwrap();
+    assert!(text_only.spec.capabilities.reasoning.is_none());
+    // An explicit negative assertion still wins over the parameter list.
+    let explicit_off = catalog
+        .resolve(&ModelId("openrouter/vendor/explicit-off".into()))
+        .unwrap();
+    assert!(explicit_off.spec.capabilities.reasoning.is_none());
+}
+
 #[test]
 fn pinned_metadata_enriches_discovered_display_only() {
     let declaration = &crate::providers::DEEPSEEK;
@@ -4064,13 +4400,19 @@ fn pinned_metadata_enriches_discovered_display_only() {
         model.spec.display_name.as_deref(),
         Some("DeepSeek V4.1 Flash")
     );
-    // Missing endpoint limits use the registration defaults, not models.dev.
-    assert_eq!(model.spec.limits.context_window, 128_000);
-    assert_eq!(model.spec.limits.max_output_tokens, 64_000);
-    // The existing sparse tools default is independent of the supplement.
+    // A sparse endpoint publishes no limits, so the pinned provider record
+    // supplies its documented window (DeepSeek V4.1 Flash is 1M context /
+    // 384K output) instead of the generic 128K/64K placeholder that used to
+    // truncate this model. The endpoint still wins whenever it says anything.
+    assert_eq!(model.spec.limits.context_window, 1_000_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 384_000);
+    // The existing sparse tools default is independent of the supplement, and
+    // every pinned field except the asserted input modalities and a documented
+    // limit the endpoint refused to publish stays out of the authority boundary
+    // (see the sibling image-input regression).
     assert!(model.spec.capabilities.tools);
     assert!(!model.spec.capabilities.structured_output);
-    assert!(!model
+    assert!(model
         .spec
         .capabilities
         .input_modalities
@@ -4112,6 +4454,7 @@ fn pinned_metadata_enriches_discovered_display_only() {
         .resolve(&ModelId("deepseek/deepseek-flash".into()))
         .unwrap();
     assert_eq!(model.spec.display_name.as_deref(), Some("Endpoint Flash"));
+    // Explicit endpoint limits are never replaced by the pinned record.
     assert_eq!(model.spec.limits.context_window, 96_000);
     assert_eq!(model.spec.limits.max_output_tokens, 8192);
     assert!(model.spec.capabilities.tools);
@@ -4180,9 +4523,12 @@ fn pinned_metadata_preserves_endpoint_assertions_and_unknowns() {
             &model.reasoning_metadata
         )
         .is_none());
-        assert_eq!(model.context_window, None);
-        assert_eq!(model.max_output_tokens, None);
-        assert_eq!(deepseek_discovered_limits(&model), (128_000, 64_000));
+        // Limits are independent of the reasoning assertion: the endpoint
+        // publishes none, so the documented window applies and reasoning still
+        // refuses to be invented from the snapshot.
+        assert_eq!(model.context_window, Some(1_000_000));
+        assert_eq!(model.max_output_tokens, Some(384_000));
+        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 384_000));
     }
     for reasoning in [
         serde_json::json!("yes"),
@@ -4267,10 +4613,11 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     )
     .unwrap()
     .remove(0);
-    // The scoped snapshot can name Cerebras' inventory row, but cannot supply
-    // its limits or reasoning. The default below belongs to the source contract.
-    assert_eq!(model.context_window, None);
-    assert_eq!(model.max_output_tokens, None);
+    // The scoped snapshot names Cerebras' inventory row and, because the
+    // endpoint publishes no limit at all, supplies that row's documented
+    // window. Reasoning still comes only from the source contract.
+    assert_eq!(model.context_window, Some(65_536));
+    assert_eq!(model.max_output_tokens, Some(32_768));
     assert_eq!(model.display_name.as_deref(), Some("Qwen3.8 27B"));
     assert_eq!(model.reasoning_metadata.supported, None);
     assert!(model.reasoning_metadata.options.is_none());
@@ -4304,7 +4651,10 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     let registered = catalog
         .resolve(&ModelId("cerebras/qwen-3.8-27b".into()))
         .unwrap();
-    assert_eq!(registered.spec.limits.context_window, 128_000);
+    // Registration now uses this model's documented row (65K context / 32K
+    // output) instead of the generic 128K/64K placeholder, because the endpoint
+    // publishes no limit for it.
+    assert_eq!(registered.spec.limits.context_window, 65_536);
     assert_eq!(registered.spec.limits.max_output_tokens, 32_768);
     assert_eq!(registered.spec.capabilities.reasoning.as_ref(), Some(&reasoning));
     // An effort array in an external catalog is not a universal wire contract.
@@ -4570,8 +4920,11 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         assert_eq!(legacy.spec.api_name, api_name);
         // Legacy V4 and the current Flash alias have different source defaults
         // and controls; matching display names must not conflate their contracts.
+        // Both aliases now carry the documented V4 window from the pinned row
+        // because the endpoint publishes none; their reasoning contracts still
+        // differ and must not be conflated.
         let (context, output, values, default) = if api_name == "deepseek-flash" {
-            (128_000, 64_000, vec!["none", "low", "high", "max"], None)
+            (1_000_000, 384_000, vec!["none", "low", "high", "max"], None)
         } else {
             (1_000_000, 384_000, vec!["none", "high", "xhigh"], Some("high"))
         };
@@ -4825,8 +5178,13 @@ fn pinned_metadata_native_discovery_rejects_budgets_outside_output_limit() {
     for messages in [false, true] {
         let default_context = if messages { 200_000 } else { 128_000 };
         let default_output = if messages { 64_000 } else { 32_768 };
+        // With no endpoint limit at all, the pinned row supplies this model's
+        // documented window (Claude Sonnet 4.5 is 1M context / 64K output).
+        let pinned_context = 1_000_000;
+        let pinned_output = 64_000;
         for (context, output, effective_output, fits) in [
-            (None, None, default_output, messages),
+            // The pinned output (64K) covers the declared 32K budget table.
+            (None, None, pinned_output, true),
             (None, Some(32_768), 32_768, false),
             (None, Some(32_769), 32_769, true),
             (None, Some(2048), 2048, false),
@@ -4879,7 +5237,14 @@ fn pinned_metadata_native_discovery_rejects_budgets_outside_output_limit() {
                 .resolve(&ModelId(format!("opencode/{api_name}")))
                 .unwrap();
             assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
-            assert_eq!(model.spec.limits.context_window, context.unwrap_or(default_context));
+            assert_eq!(
+                model.spec.limits.context_window,
+                context.unwrap_or(if output.is_none() {
+                    pinned_context
+                } else {
+                    default_context
+                })
+            );
             assert_eq!(model.spec.limits.max_output_tokens, effective_output);
             // Preserve the full declaration when it fits; otherwise retain the
             // inventory row without raising limits or inventing a budget table.

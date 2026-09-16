@@ -24,6 +24,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { findPackageJSON } from "node:module";
 import {
   basename,
   delimiter,
@@ -73,6 +74,7 @@ const API_0_3_OPTIONAL_CAPABILITIES = [
   "provider_stream",
   "session_lifecycle",
   "theme_selection",
+  "event_bus",
 ];
 const API_0_3_PROVIDER_CAPABILITIES = ["provider_auth", "provider_catalog", "provider_stream"];
 const API_0_3_REQUIRED_METHODS = ["$/cancelRequest", "initialize", "shutdown", "tool/call"];
@@ -94,6 +96,12 @@ const API_0_3_OPTIONAL_METHODS = [
   "session/reload",
   "session/switch",
   "theme/select",
+  "bus/declare",
+  "bus/subscribe",
+  "bus/unsubscribe",
+  "bus/publish",
+  "bus/event",
+  "bus/lifecycle",
 ];
 const API_0_3_OPTIONAL_METHOD_CAPABILITIES = new Map([
   ["hook/run", "lifecycle_events"],
@@ -114,6 +122,16 @@ const API_0_3_OPTIONAL_METHOD_CAPABILITIES = new Map([
   ["session/switch", "session_lifecycle"],
   // Recognize the host offer without selecting theme authority for the bridge.
   ["theme/select", "theme_selection"],
+  // Recognize, but do not select, the host's typed cross-process data bus.
+  // Pi's untyped process-local events cannot confer declaration authority.
+  ["bus/declare", "event_bus"],
+  ["bus/subscribe", "event_bus"],
+  ["bus/unsubscribe", "event_bus"],
+  ["bus/publish", "event_bus"],
+  ["bus/event", "event_bus"],
+  // Host-to-extension binding/topic lifecycle notification. Recognizing it in
+  // the offer is required; the bridge never selects or depends on it.
+  ["bus/lifecycle", "event_bus"],
 ]);
 // The original provider surface remains an all-or-nothing selection. Catalog
 // completion is additive so a newer bridge can still run against a host that
@@ -641,7 +659,7 @@ function makeCompatibilityTheme() {
 // resource owner on the wire; never transmit a fabricated host generation.
 function makeUiOwner() {
   const root = bridge;
-  const owner = { closed: false, queued: 0, renderTimer: null };
+  const owner = { closed: false, queued: 0, renderTimer: null, controller: new AbortController() };
   root.uiOwner = owner;
   const live = () => bridge === root && root.uiOwner === owner && !owner.closed;
   owner.live = live;
@@ -704,6 +722,7 @@ async function disposeBridgeUi() {
   if (owner.closed) return owner.disposal;
   const snapshot = owner.semantic?.snapshot();
   owner.closed = true; // fence queued sends and reentrant component disposal first
+  owner.controller.abort();
   if (owner.renderTimer) clearImmediate(owner.renderTimer);
   owner.semantic?.dispose();
   owner.editor?.dispose();
@@ -741,35 +760,53 @@ function makeUi() {
     const signal = name === "addAutocompleteProvider" ? undefined : scopes.getStore()?.signal;
     return owner.editor[name](...values, signal);
   };
+  // Pi dialog cancellation dismisses only the dialog. Parent cancellation and
+  // owner replacement still fail the host request; neither may become approval.
+  async function dialog(method, params, opts, fallback, parse) {
+    if (!owner.live()) throw new Error("Pi UI owner is stale or disposed");
+    const scope = currentScope();
+    if (scope.signal.aborted) throw new CancellationError();
+    if (opts?.signal?.aborted) return fallback;
+    const timeout = opts?.timeout;
+    if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0 || timeout > 2_147_483_647)) {
+      throw new Error("Pi dialog timeout must be between 0 and 2147483647 milliseconds");
+    }
+    const timerController = new AbortController();
+    const signals = [scope.signal, owner.controller.signal, timerController.signal];
+    if (opts?.signal) signals.push(opts.signal);
+    const signal = AbortSignal.any(signals);
+    const timer = timeout ? setTimeout(() => timerController.abort(), timeout) : undefined;
+    try {
+      const response = await requestHost(method, { parent_request_id: parentRequestId(), ...params }, { signal });
+      return parse(response);
+    } catch (error) {
+      if (error instanceof CancellationError && owner.live() && !scope.signal.aborted
+        && (timerController.signal.aborted || opts?.signal?.aborted)) return fallback;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   return {
     theme: makeCompatibilityTheme(),
-    async select(title, options) {
+    async select(title, options, opts) {
       const prompt = `${title}\n${options.map((value, i) => `${i + 1}. ${value}`).join("\n")}\nSelect an option by name or number:`;
-      const value = await this.input(prompt);
+      const value = await this.input(prompt, undefined, opts);
       if (value === undefined) return undefined;
-      const index = Number.parseInt(value, 10);
+      const index = /^\d+$/.test(value) ? Number(value) : NaN;
       return Number.isInteger(index) && index >= 1 && index <= options.length
         ? options[index - 1]
         : options.find((option) => option === value);
     },
-    async confirm(title, message) {
-      const response = await requestHost("confirmation/request", {
-        parent_request_id: parentRequestId(),
-        prompt: String(title),
-        detail: String(message),
-        destructive: false,
-        default: false,
-      });
-      return response?.confirmed === true;
+    async confirm(title, message, opts) {
+      return dialog("confirmation/request", {
+        prompt: String(title), detail: String(message), destructive: false, default: false,
+      }, opts, false, (response) => response?.confirmed === true);
     },
-    async input(title, placeholder) {
+    async input(title, placeholder, opts) {
       const prompt = placeholder ? `${String(title)} (${String(placeholder)})` : String(title);
-      const response = await requestHost("input/request", {
-        parent_request_id: parentRequestId(),
-        prompt,
-        secret: false,
-      });
-      return response?.value ?? undefined;
+      return dialog("input/request", { prompt, secret: false }, opts, undefined,
+        (response) => response?.value ?? undefined);
     },
     async editor() {
       return unsupported("ctx.ui.editor");
@@ -3231,6 +3268,62 @@ function explicitExtensionLoadPath(source) {
   return source;
 }
 
+async function loadPiArgumentValidator(runtimeRoot) {
+  // Resolve from the reviewed Pi installation, never from the bridge/workspace.
+  // Use the package's public import export, not a private dist subpath.
+  const manifestPath = findPackageJSON("@earendil-works/pi-ai", pathToFileURL(join(runtimeRoot, "dist/index.js")));
+  if (!manifestPath) throw new Error("selected Pi runtime lacks the public pi-ai argument validator");
+  const manifest = JSON.parse(readRegularUtf8Bounded(manifestPath, MAX_PI_PACKAGE_MANIFEST_BYTES));
+  const entry = manifest.exports?.["."]?.import;
+  if (manifest.name !== "@earendil-works/pi-ai" || typeof entry !== "string" || !entry.startsWith("./")
+    || entry.split("/").includes("..")) throw new Error("selected Pi runtime has no supported public pi-ai export");
+  const api = await import(new URL(entry, pathToFileURL(manifestPath)));
+  if (typeof api.validateToolArguments !== "function") throw new Error("selected Pi runtime lacks validateToolArguments");
+  return api.validateToolArguments;
+}
+
+function validatePiToolInput(definition, id, input) {
+  try {
+    return bridge.validateToolArguments(definition, { type: "toolCall", id, name: definition.name, arguments: input });
+  } catch {
+    // Pi's detailed validator errors include raw arguments. Keep those out of
+    // unsolicited diagnostics and canonical transport error envelopes.
+    if (isApiV03()) throw v03ProtocolError("invalid_params", "Pi tool arguments do not match the registered schema");
+    throw new Error("Pi tool arguments do not match the registered schema");
+  }
+}
+
+async function resolvePinnedExtensionEntries(pi) {
+  if (typeof pi.DefaultPackageManager !== "function") {
+    throw new Error("installed Pi runtime does not expose the bounded public package resolver");
+  }
+  const manager = new pi.DefaultPackageManager({
+    cwd: bridge.cwd, agentDir: bridge.agentDir, settingsManager: pi.SettingsManager.inMemory(),
+  });
+  const selected = new Map();
+  for (const [index, source] of bridge.extensionPaths.entries()) {
+    // This is exactly the source fingerprint's file domain. In particular,
+    // dependencies/cache/build trees are not authorized entrypoints by a root pin.
+    const metadata = lstatSync(source);
+    const files = metadata.isDirectory()
+      ? new Set(collectSourceEntries(source).filter((entry) => entry.tag === "f").map((entry) => entry.path))
+      : new Set([source]);
+    const resolved = await manager.resolveExtensionSources([explicitExtensionLoadPath(source)], { temporary: true });
+    const entries = resolved.extensions.filter((entry) => entry.enabled);
+    if (!entries.length) throw sourceVerificationError(index, "has no enabled extension entrypoints");
+    for (const entry of entries) {
+      const path = resolve(entry.path);
+      if (!files.has(path) || !lstatSync(path).isFile() || realpathSync(path) !== path) {
+        throw sourceVerificationError(index, "resolves an extension entrypoint outside its pinned files");
+      }
+      if (!selected.has(path)) selected.set(path, index);
+      if (selected.size > MAX_SOURCE_FILES) throw new Error("Pi aggregate extension entrypoint limit exceeded");
+    }
+  }
+  verifySourceFingerprints();
+  return selected;
+}
+
 async function loadBridge(params, v03Selection = undefined) {
   validateNodeRuntime();
   const linkManifest = args.strictIdentity ? canonicalManifestPath(args.linkManifest) : null;
@@ -3302,6 +3395,8 @@ async function loadBridge(params, v03Selection = undefined) {
   if (typeof pi.DefaultResourceLoader !== "function" || typeof pi.SettingsManager?.inMemory !== "function") {
     throw new Error("installed Pi runtime does not expose the bounded public resource loader");
   }
+  bridge.validateToolArguments = await loadPiArgumentValidator(piRuntime.root);
+  bridge.extensionEntrySources = await resolvePinnedExtensionEntries(pi);
   const eventBus = pi.createEventBus();
   // Discovery imports workspace/global extensions before returning its result,
   // so checking the aggregate count afterward cannot protect the source pins.
@@ -3311,7 +3406,7 @@ async function loadBridge(params, v03Selection = undefined) {
     agentDir: bridge.agentDir,
     settingsManager: pi.SettingsManager.inMemory(),
     eventBus,
-    additionalExtensionPaths: bridge.extensionPaths.map(explicitExtensionLoadPath),
+    additionalExtensionPaths: [...bridge.extensionEntrySources.keys()],
     noExtensions: true,
   });
   // This extension-only stage does not load context, skills, prompts or themes.
@@ -3322,10 +3417,13 @@ async function loadBridge(params, v03Selection = undefined) {
   }
   const loadErrors = loaded.errors ?? [];
   for (const error of loadErrors) {
-    const index = bridge.extensionPaths.findIndex((path) => path === resolve(error?.path ?? ""));
-    diagnostic(`Pi source ${sourceLabel(index >= 0 ? index : 0)} failed to load; review it and publish a replacement link`);
+    const index = bridge.extensionEntrySources.get(resolve(error?.path ?? "")) ?? 0;
+    diagnostic(`Pi source ${sourceLabel(index)} failed to load; review it and publish a replacement link`);
   }
-  if (loadErrors.length || loaded.extensions?.length !== bridge.extensionPaths.length) {
+  const loadedPaths = new Set((loaded.extensions ?? []).map((extension) => resolve(extension.resolvedPath ?? extension.path)));
+  if (loadErrors.length || loaded.extensions?.length !== bridge.extensionEntrySources.size
+    || loadedPaths.size !== bridge.extensionEntrySources.size
+    || [...loadedPaths].some((path) => !bridge.extensionEntrySources.has(path))) {
     throw new Error("Pi aggregate loader did not load every pinned source; review the sources and publish a replacement link");
   }
 
@@ -3338,9 +3436,9 @@ async function loadBridge(params, v03Selection = undefined) {
     makeModelRegistry(),
   );
   bridge.runner.onError((error) => {
-    const index = bridge.extensionPaths.findIndex((path) => path === resolve(error?.extensionPath ?? ""));
+    const index = bridge.extensionEntrySources.get(resolve(error?.extensionPath ?? "")) ?? 0;
     const event = error?.event ? ` during ${String(error.event).replace(/[^A-Za-z0-9_/-]/g, "?")}` : "";
-    boundedDiagnostic(`Pi source ${sourceLabel(index >= 0 ? index : 0)} handler failed${event}; review the source and publish a replacement link`);
+    boundedDiagnostic(`Pi source ${sourceLabel(index)} handler failed${event}; review the source and publish a replacement link`);
   });
   if (isApiV03()) rejectUnsupportedProviderHooks();
   bridge.runner.bindCore(makeExtensionActions(), makeExtensionContextActions(), {
@@ -3356,7 +3454,12 @@ async function loadBridge(params, v03Selection = undefined) {
   });
   if (bridge.providerRegistrationFailure) throw bridge.providerRegistrationFailure;
   bridge.runner.bindCommandContext({
-    waitForIdle: async () => {},
+    waitForIdle: async () => {
+      // Command dispatch normally arrives at an idle host boundary. A busy
+      // observed owner cannot be declared idle: this legacy wire has no host
+      // idle-wait service, and waiting inside its ordered lane would deadlock.
+      if (bridge.agentActive) unsupported("ctx.waitForIdle (host idle-wait service unavailable)");
+    },
     newSession: async () => unsupported("ctx.newSession"),
     fork: async () => unsupported("ctx.fork"),
     navigateTree: async () => unsupported("ctx.navigateTree"),
@@ -3369,8 +3472,8 @@ async function loadBridge(params, v03Selection = undefined) {
   setCurrentTools(initialTools, 0);
   bridge.commands = bridge.runner.getRegisteredCommands();
   bridge.unsupported = [];
-  for (const [index, extension] of loaded.extensions.entries()) {
-    const label = sourceLabel(index);
+  for (const extension of loaded.extensions) {
+    const label = sourceLabel(bridge.extensionEntrySources.get(resolve(extension.resolvedPath ?? extension.path)));
     const registeredEvents = extension.handlers ?? extension.eventHandlers;
     if (registeredEvents instanceof Map) {
       for (const event of registeredEvents.keys()) {
@@ -3521,7 +3624,16 @@ async function callPiTool(message) {
     input = definition.prepareArguments(input);
   }
   const toolCallId = started?.id ?? `pi-octet-${String(message.id)}`;
+  input = validatePiToolInput(definition, toolCallId, input);
   const callEvent = { type: "tool_call", toolCallId, toolName: name, input };
+  if (isApiV03()) {
+    // The fixed dispatcher has no legacy host hook lane. Apply Pi interception
+    // locally, then validate its mutation again before any execute effect.
+    const interception = await bridge.runner.emitToolCall(callEvent);
+    if (interception?.terminate) unsupported("tool_call.terminate");
+    if (interception?.block) throw new Error("Pi tool call was blocked by an extension");
+    callEvent.input = validatePiToolInput(definition, toolCallId, callEvent.input);
+  }
   let result;
   try {
     result = await definition.execute(
@@ -3603,6 +3715,7 @@ async function runHook(message) {
     if (registered?.definition.prepareArguments) {
       input = registered.definition.prepareArguments(input);
     }
+    if (registered) input = validatePiToolInput(registered.definition, toolCallId, input);
     const event = {
       type: "tool_call",
       toolCallId,
@@ -3621,6 +3734,7 @@ async function runHook(message) {
       return unsupported("tool_call input mutation for octet-native tools");
     }
     if (!result?.block && bridge.toolNames.includes(payload.name)) {
+      input = validatePiToolInput(registered.definition, toolCallId, event.input);
       enqueueByName(bridge.pendingPiToolCalls, payload.name, { id: toolCallId, input });
     }
     return {

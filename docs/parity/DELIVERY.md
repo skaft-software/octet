@@ -1,5 +1,102 @@
 # Local delivery and verification handoff
 
+## Current 0.8.0 candidate — in progress
+
+**Not completed Pi parity, release approval or an all-green candidate.** The
+[88-row ledger/current overlay](README.md) preserves requested scope; the
+[current verification](VERIFICATION.md#current-candidate--qualification-in-progress)
+separates source readiness from bounded tests, missing implementation and native/
+live gates. [PR body](PR_BODY.md) remains a local draft only.
+
+### Latest bounded handoff receipts
+
+**Latest attempts failed during compilation, then in repair:** `parity-next-check-11.log`
+exited 101 solely on the in-progress kernel's missing `auxiliary_settlement_tests`
+module; `parity-next-export-tests.log` exited 101 before tests on a
+`BusEventParams` initializer missing `binding_id`. Every subsequent failure was
+diagnosed and repaired; those logs are preserved, not relabeled.
+
+All stems refer to `/tmp/octet-final/<stem>.log` and matching `.exit` files.
+Exact commands and superseded failures are in current verification; do not sum
+these overlapping runs or infer CLI/PTY coverage from a library pass.
+
+| Stem | Observed result |
+| --- | --- |
+| `f2-check` | Workspace all targets/features, locked/offline: exit 0; warnings remain. Frozen snapshot `freeze-final.sha256`, zero files changed during the run. |
+| `f2-coding` | Every coding-agent target: exit 0; **1703 passed, 0 failed** across 30 targets. |
+| `f2-agent` | Every agent target: exit 0; **819 passed, 0 failed**. |
+| `f2-ai` | Every AI target: exit 0; **500 passed, 0 failed**. |
+| `parity-next-coding-lib-04` | Exit 0; **1521 passed, 0 failed, 1 ignored**. |
+| `parity-next-agent-lib-05` | Exit 0; **570 passed, 0 failed, 1 ignored**. |
+| `parity-next-agent-int-05` | `--no-fail-fast`, exit 0; every agent target ran: **819 passed, 0 failed**. |
+| `parity-next-ai-parity-04`, `parity-next-ai-all` | Exit 0; `provider_parity` 28 passed and the whole crate/targets ran. |
+| `parity-next-renderer-04` | Exit 0; **277 passed** (fresh rerun). |
+| `parity-next-sdk-python` | Exit 0 after repair; **109 passed**. |
+| `parity-next-pi-bridge-tests-02` | Exit 0 after repair; **88 run / 85 passed / 3 real-runtime skips**. |
+| `parity-next-scripts-02` | Exit 0 after repair; **58 passed**. |
+| direct | TypeScript API 0.3 conformance **47 fixtures**; generator `--check` clean after regenerating a stale runtime artifact. |
+| `parity-next-extension-bundle-02` | Exit 0; seven tests passed after directory-link/member repair. API 0.2/0.3 source-override packaging, not a public release. |
+| `parity-next-coding-all` (preserved failure) | Whole coding target set exit 101: embedded-documentation mismatch from an archive built before same-run edits, plus the adapter's published host pin. Both repaired; `parity-next-coding-lib-06` passes the documentation assertion on a fresh build, and `migration_import` now stages a private copy while asserting the tracked pin. |
+
+Superseded failures kept verbatim: coding 1503/9/1 and 1519/2/1; agent library 564
+and 559 with `agent_run` 148/4 then 154/1; AI `provider_parity` 26/2; Pi bridge 36
+failures; initial compile and check09/11/export-test failures; one `eval_harness`
+load-sensitive failure that passed four later standalone runs. Snapshot manifests
+`parity-next-wave3-source.sha256` (1635 files) and `parity-next-wave5-source.sha256`
+bound what those reruns actually covered. SDK distribution metadata stays 0.7.6,
+and the four tracked official bundles keep their published `=0.7.6` host pins.
+
+### Handoff still required
+
+- **Qualified in the wave-3 rerun:** kernel audit F3 (completed invocation
+  identity cannot reopen as pending), F4 (wave-scoped invocation admission for
+  ≥65-call turns), F6 (accepted auxiliary result settles before the guard is
+  disarmed), F5 kernel side (`AgentError::OutputLimitUnavailable` fails closed
+  for cap-omitting routes under either hard ceiling), AI F7 sampling allowlist
+  plus explicit `stop` precedence, immutable RPC turn cost, `TurnFinished.turn_cost`,
+  extension-bus SDK lifecycle repairs, and the F8 export/typed-media repairs.
+  Each is covered by the receipts above, including tests added for the specific
+  defect. Not qualified by earlier passes merely because older consumers compiled.
+- **F2 — protocol ACKed, SDK/Rust repaired, product evidence incomplete:** the
+  binding-scoped `bus/lifecycle` contract, pending-vs-active subscribe results and
+  SDK rebinding now work in the real two-process fixtures, and the SDK's
+  tagged-union parsing defect is fixed. Surviving-peer product recovery evidence
+  (a real active-session switch A→B→A with both processes surviving) is still
+  outstanding, so no full F2 closure is claimed.
+- **Current CLI/process tests:** `parity_cli`, `eval_harness`,
+  `slash_command_pty`, `activity_wait_pty`, `setup_cli_acceptance`, `pi_install`
+  and `migration_import` still need candidate receipts. Source now has ordered
+  scope/command consumers, rich HTML and real local-loopback opt-in model eval;
+  neither earlier scripted eval nor coding-library passes qualify these targets.
+- **Missing implementation:** PiMessages/radius, exact current catalogs and
+  remaining codec/deferred/image/metadata depth; `/settings`, `/scoped-models`,
+  `/debug`, bookmark tree and generic terminal layout/mouse/alternate-screen
+  parity; scoped extension theme/render identity, full Pi host control/UI and
+  tool-result usage/termination; all-writer ownership; native Firefox/Safari.
+  These are not hardware-only gates. Ownerless migration notifications and
+  extension-owner custom compact instructions remain integration limitations.
+- **Safety boundaries unchanged:** `open-all` refuses all product pane effects;
+  `/fast` now has consumers but retains durable uncertainty and the 272K Codex
+  policy. Host bus delivery exists but F2 rebinding/ingress fencing is open.
+  Trust/OAuth, clipboard-image, auto-download and transport exclusions remain.
+- **Independent acceptance:** physical terminal/native clipboard/Windows/Apple,
+  live providers/MCP/billing, actual Pi runtime/SRI, real multiplexer ownership,
+  exhaustive Serve/companion security and signed/public release qualification.
+  Earlier receipts below do not newly qualify those gates.
+
+Exact implementation reports and audit findings:
+`/tmp/octet-final/{ai-parity,kernel-parity,editor-parity,fast-consumer,ext-host,pi-bridge,model-eval,parity-audit}.md`.
+`release-v0.8.0-confirmed` remains an **older preserved binary**, not evidence for
+newer source. No installed-binary replacement, publication, SDK version bump,
+Cargo execution or global formatting was performed in this documentation refresh.
+
+## Historical frozen handoff
+
+The original handoff below is retained verbatim, including its bounded passes,
+failed formatting receipt, disk observations and then-missing consumers. Its
+“completed”, “final” and “ready” wording is historical, not current qualification.
+Use the current section above where later source/receipts supersede it.
+
 Review candidate against `df5a7e809715961b9344af6b52e43a6ca48f56b3` (v0.7.6),
 on `vibe/pi-parity-roadmap-df5a7e80`. Pi reference remains read-only at
 `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`.

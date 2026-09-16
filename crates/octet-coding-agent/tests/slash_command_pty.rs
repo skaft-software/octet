@@ -468,6 +468,20 @@ fn real_octet_slash_goal_mutates_and_reports_while_a_response_is_streaming() {
 }
 
 #[test]
+fn real_octet_fast_rejects_unsupported_route_without_interrupting_the_run() {
+    let (api, mut octet) = streaming_octet();
+    octet.pty.write_input(b"/fast on\r");
+    octet
+        .pty
+        .wait_for(b"only available on Codex Responses routes");
+    assert!(!contains_bytes(&octet.pty.output, TAIL_MARKER));
+    assert!(!api.completed.load(Ordering::SeqCst));
+    api.release();
+    octet.pty.wait_for(TAIL_MARKER);
+    octet.shutdown();
+}
+
+#[test]
 fn real_octet_slash_cost_renders_while_a_response_is_streaming() {
     let (api, mut octet) = streaming_octet();
     octet.pty.write_input(b"/cost\r");

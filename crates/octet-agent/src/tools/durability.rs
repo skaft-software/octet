@@ -10,41 +10,26 @@
 //! * `pi.op.tool_memo` — a named replay memo for one invocation
 //!   (`operationToolMemo(operationId, invocationId, name)`, row 4.11).
 //!
-//! Pi stores both in the session's bound-value family, which supports keyed
-//! replace, prefix scan, and deletion fenced on the call still being
-//! `effect_pending`. octet's session is an append-only JSONL log with no keyed
-//! replace/scan API, and `session.rs` is not an owned path for this work, so this
-//! module implements the same *contract* behind one store type that the tool
-//! layer can use today and the session can back later:
+//! `DurableInvocationStore::new()` is an in-memory decision fixture. Agent
+//! dispatch instead obtains handles from `Session::tool_invocation`, backed by
+//! the session's authorized descriptor, serialized append line and `sync_data`.
+//! Tool invocation records never enter model context, cost or token accounting.
+//! The immutable paired result is the cleanup/tombstone transaction: memo and
+//! snapshot writes are fenced across that append and replay clears both values.
+//! Session close expires retained callbacks without claiming the effect settled.
 //!
-//! 1. **Fencing.** Every value is written through an [`InvocationHandle`] that
-//!    carries the generation it was opened with. Settlement bumps the
-//!    generation and deletes every value, so a late checkpoint from a settled
-//!    invocation is refused instead of reviving state (Pi's "A late checkpoint
-//!    after settlement returns without committing").
-//! 2. **Bounded by default.** Values, names, per-invocation value counts, live
-//!    invocations, and retained settled invocations all have hard caps. An
-//!    over-limit write fails closed rather than growing the store; nothing here
-//!    silently truncates a memo.
-//! 3. **Fail closed on uncertainty.** A memo read on a settled invocation is an
-//!    error, never `None`: "no value" means *run the effect*, so conflating an
-//!    expired capability with an absent memo would silently re-execute a
-//!    recorded step. [`InvocationHandle::replay_step`] therefore runs its effect
-//!    only when the capability is live *and* the memo is genuinely absent.
-//!
-//! Unsettled state is process-local until a host wires the store to the session
-//! log; `docs/parity/tools.md` records that gap together with the exact session
-//! primitive (`setValue` with an `effect_pending` check, `scanValues` cleanup)
-//! that would make it cross-process durable.
-//!
-//! The store is deliberately not a general key/value database: it accepts only
-//! the two owner-defined address families, each with its own namespace prefix,
-//! so no caller can claim a reserved key that a later operation would receive.
+//! Values, names and live state are bounded. A missing memo authorizes repeating
+//! a step only while the handle remains live; errors never mean "absent". Step
+//! effects are at-least-once across a crash before memo commit, not exactly-once.
+//! Parallel finalized outcomes awaiting ordered placement are still not staged
+//! durably; this module does not claim Pi's `outcome_ready` lifecycle.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::session_writer::SessionWriter;
 use crate::tool::{PartialOutputCheckpointSink, ToolError};
+use serde::{Deserialize, Serialize};
 
 /// Namespace prefix for invocation memos (Pi's `pi.op.tool_memo`).
 pub const MEMO_NAMESPACE: &str = "pi.op.tool_memo";
@@ -88,6 +73,8 @@ pub enum InvocationError {
     BoundExceeded(String),
     /// A stored value could not be interpreted as its namespace's value type.
     Corrupt(String),
+    /// The session mutation could not be synced; the value is not acknowledged.
+    Persistence(String),
 }
 
 impl std::fmt::Display for InvocationError {
@@ -107,6 +94,7 @@ impl std::fmt::Display for InvocationError {
                 "invocation {scope} moved from generation {expected} to {actual}; the handle is fenced"
             ),
             Self::BoundExceeded(detail) => write!(f, "invocation store bound exceeded: {detail}"),
+            Self::Persistence(detail) => write!(f, "invocation persistence failed: {detail}"),
             Self::Corrupt(detail) => write!(f, "invocation store value is corrupt: {detail}"),
         }
     }
@@ -121,7 +109,7 @@ impl From<InvocationError> for ToolError {
 }
 
 /// Whether the durable store still considers an invocation in flight.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationState {
     /// The effect may still be running: memos and partial output may be written.
     EffectPending,
@@ -171,7 +159,7 @@ impl Default for StoreLimits {
 /// A memo or checkpoint is addressed by `namespace:operation:invocation[:name]`.
 /// Ids and names may not contain `:` so the grammar stays unambiguous, exactly
 /// like Pi's owner-defined address constructors.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InvocationScope {
     operation_id: String,
     invocation_id: String,
@@ -320,8 +308,9 @@ pub fn synthesize_interruption(partial_output: Option<&str>) -> InterruptedInvoc
     }
 }
 
-#[derive(Clone, Debug)]
-struct InvocationRecord {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Internal serialized invocation projection; values are never model context.
+pub struct InvocationRecord {
     generation: u64,
     state: InvocationState,
     values: BTreeMap<String, String>,
@@ -330,15 +319,24 @@ struct InvocationRecord {
 #[derive(Debug, Default)]
 struct StoreState {
     invocations: HashMap<InvocationScope, InvocationRecord>,
-    /// Settlement order for bounded retention of replay verdicts.
+    closed: bool,
+    next_generation: u64,
+    /// Settlement order for bounded standalone-store replay verdicts.
     settled: VecDeque<InvocationScope>,
+    /// Journal-wide result identities, independent of the selected branch.
+    /// These contain no memo payload and are bounded by the session ledger,
+    /// not the live-state/standalone retention limits. Never evict a result's
+    /// identity while its immutable transcript entry remains in the session.
+    completed_results: HashSet<InvocationScope>,
 }
 
-/// Process-durable store for invocation-scoped memos and partial output.
+/// Invocation-scoped memos and partial output. `new` is in-memory only;
+/// the agent obtains session-backed handles through `Session::tool_invocation`.
 #[derive(Debug)]
 pub struct DurableInvocationStore {
     limits: StoreLimits,
     state: Mutex<StoreState>,
+    journal: Option<Arc<SessionWriter>>,
 }
 
 impl Default for DurableInvocationStore {
@@ -359,6 +357,151 @@ impl DurableInvocationStore {
         Self {
             limits,
             state: Mutex::new(StoreState::default()),
+            journal: None,
+        }
+    }
+
+    pub(crate) fn with_journal(journal: Arc<SessionWriter>) -> Self {
+        Self {
+            journal: Some(journal),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn attach_journal(mut self, journal: Arc<SessionWriter>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    fn persist_record(
+        &self,
+        scope: &InvocationScope,
+        record: &InvocationRecord,
+    ) -> Result<(), InvocationError> {
+        if let Some(journal) = &self.journal {
+            let value = crate::session::SessionRecord::ToolInvocation {
+                scope: scope.clone(),
+                record: record.clone(),
+            };
+            let mut bytes =
+                serde_json::to_vec(&value).map_err(|e| InvocationError::Corrupt(e.to_string()))?;
+            bytes.push(b'\n');
+            journal
+                .persist(&bytes)
+                .map_err(|e| InvocationError::Persistence(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore(
+        &self,
+        scope: InvocationScope,
+        record: InvocationRecord,
+    ) -> Result<(), InvocationError> {
+        validate_segment(
+            "operation id",
+            scope.operation_id(),
+            self.limits.max_name_bytes,
+        )?;
+        validate_segment(
+            "invocation id",
+            scope.invocation_id(),
+            self.limits.max_name_bytes,
+        )?;
+        if record.values.len() > self.limits.max_values_per_invocation
+            || record
+                .values
+                .values()
+                .any(|v| v.len() > self.limits.max_value_bytes)
+        {
+            return Err(InvocationError::BoundExceeded(
+                "replayed invocation values".into(),
+            ));
+        }
+        let memo_prefix = format!(
+            "{MEMO_NAMESPACE}:{}:{}:",
+            scope.operation_id(),
+            scope.invocation_id()
+        );
+        for address in record.values.keys() {
+            if address != &scope.partial_output_address() {
+                let name = address.strip_prefix(&memo_prefix).ok_or_else(|| {
+                    InvocationError::InvalidAddress("foreign invocation value".into())
+                })?;
+                validate_segment("memo name", name, self.limits.max_name_bytes)?;
+            }
+        }
+        let mut state = self.lock_state();
+        if state.completed_results.contains(&scope) {
+            return Err(InvocationError::Corrupt(
+                "invocation state follows its immutable result".into(),
+            ));
+        }
+        if !state.invocations.contains_key(&scope)
+            && state.invocations.len()
+                >= self.limits.max_live_invocations + self.limits.max_settled_invocations
+        {
+            return Err(InvocationError::BoundExceeded(
+                "replayed invocations".into(),
+            ));
+        }
+        state.next_generation = state
+            .next_generation
+            .max(record.generation.saturating_add(1));
+        state.invocations.insert(scope, record);
+        Ok(())
+    }
+
+    /// The transcript result is the settlement record. Holding this lock over
+    /// its synced append makes cleanup and late-write fencing one mutation.
+    pub(crate) fn commit_results<T>(
+        &self,
+        scopes: &[InvocationScope],
+        commit: impl FnOnce() -> Result<T, crate::session::SessionError>,
+    ) -> Result<T, crate::session::SessionError> {
+        let mut state = self.lock_state();
+        let result = commit()?;
+        for scope in scopes {
+            state.completed_results.insert(scope.clone());
+            if let Some(record) = state.invocations.get_mut(scope) {
+                record.state = InvocationState::OutcomeReady;
+                record.values.clear();
+            }
+            if self.journal.is_some() {
+                state.invocations.remove(scope);
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn close(&self) {
+        self.lock_state().closed = true;
+    }
+
+    pub(crate) fn restore_result(&self, scope: &InvocationScope) {
+        // Replay every branch's result, not only the selected ancestry. The
+        // transcript is the tombstone; this lightweight index prevents issuing
+        // a fresh handle after checkout to its already-completed assistant.
+        let mut state = self.lock_state();
+        state.completed_results.insert(scope.clone());
+        state.invocations.remove(scope);
+    }
+
+    /// Observe an existing checkpoint without minting an execution capability.
+    pub(crate) fn partial_output_for_scope(
+        &self,
+        scope: &InvocationScope,
+    ) -> Result<Option<String>, InvocationError> {
+        let state = self.lock_state();
+        if state.closed || state.completed_results.contains(scope) {
+            return Err(InvocationError::OutcomeKnown(scope.display()));
+        }
+        match state.invocations.get(scope) {
+            Some(record) if record.state != InvocationState::EffectPending => {
+                Err(InvocationError::OutcomeKnown(scope.display()))
+            }
+            Some(record) => Ok(record.values.get(&scope.partial_output_address()).cloned()),
+            None => Ok(None),
         }
     }
 
@@ -377,6 +520,9 @@ impl DurableInvocationStore {
         scope: InvocationScope,
     ) -> Result<InvocationHandle, InvocationError> {
         let mut state = self.lock_state();
+        if state.closed || state.completed_results.contains(&scope) {
+            return Err(InvocationError::OutcomeKnown(scope.display()));
+        }
         if let Some(record) = state.invocations.get(&scope) {
             if record.state != InvocationState::EffectPending {
                 return Err(InvocationError::OutcomeKnown(scope.display()));
@@ -398,18 +544,22 @@ impl DurableInvocationStore {
                 live, self.limits.max_live_invocations
             )));
         }
-        state.invocations.insert(
-            scope.clone(),
-            InvocationRecord {
-                generation: 0,
-                state: InvocationState::EffectPending,
-                values: BTreeMap::new(),
-            },
-        );
+        let generation = state.next_generation;
+        state.next_generation = state
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| InvocationError::BoundExceeded("invocation generations".into()))?;
+        let record = InvocationRecord {
+            generation,
+            state: InvocationState::EffectPending,
+            values: BTreeMap::new(),
+        };
+        self.persist_record(&scope, &record)?;
+        state.invocations.insert(scope.clone(), record);
         Ok(InvocationHandle {
             store: Arc::clone(self),
             scope,
-            generation: 0,
+            generation,
         })
     }
 
@@ -473,8 +623,15 @@ impl DurableInvocationStore {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    fn settle(&self, scope: &InvocationScope) -> Result<Settlement, InvocationError> {
+    fn settle(
+        &self,
+        scope: &InvocationScope,
+        generation: u64,
+    ) -> Result<Settlement, InvocationError> {
         let mut state = self.lock_state();
+        if state.closed {
+            return Err(InvocationError::OutcomeKnown(scope.display()));
+        }
         let record = state
             .invocations
             .get_mut(scope)
@@ -482,7 +639,19 @@ impl DurableInvocationStore {
         if record.state != InvocationState::EffectPending {
             return Err(InvocationError::OutcomeKnown(scope.display()));
         }
+        if record.generation != generation {
+            return Err(InvocationError::Fenced {
+                scope: scope.display(),
+                expected: generation,
+                actual: record.generation,
+            });
+        }
         let deleted_values: Vec<String> = record.values.keys().cloned().collect();
+        let mut settled_record = record.clone();
+        settled_record.values.clear();
+        settled_record.state = InvocationState::OutcomeReady;
+        settled_record.generation = settled_record.generation.saturating_add(1);
+        self.persist_record(scope, &settled_record)?;
         record.values.clear();
         record.state = InvocationState::OutcomeReady;
         record.generation = record.generation.saturating_add(1);
@@ -555,7 +724,9 @@ impl InvocationHandle {
         }
     }
 
-    /// Runs `effect` at most once per invocation and records its value.
+    /// Reuses a committed step memo, otherwise runs `effect` and records it.
+    /// Effects are at-least-once across a crash before memo commit; callers must
+    /// serialize duplicate step names within a live invocation.
     ///
     /// Mirrors Pi's `step.do`: a recorded step returns its memo, an unrecorded
     /// step runs now and commits the memo. On a settled invocation this fails
@@ -597,6 +768,11 @@ impl InvocationHandle {
         self.replace_value(&self.scope.partial_output_address(), snapshot.to_owned())
     }
 
+    /// Clears old progress before safe replay; memos remain available.
+    pub fn clear_partial_output(&self) -> Result<(), InvocationError> {
+        self.delete_value(&self.scope.partial_output_address())
+    }
+
     /// The durable partial-output snapshot, if the tool ever requested one.
     pub fn partial_output(&self) -> Result<Option<String>, InvocationError> {
         self.read_value(&self.scope.partial_output_address())
@@ -604,23 +780,7 @@ impl InvocationHandle {
 
     /// Settles the invocation: fences every handle and deletes all values.
     pub fn settle(&self) -> Result<Settlement, InvocationError> {
-        // Fence on the caller's own generation before mutating, so a handle
-        // from a previous generation cannot settle a replayed invocation.
-        {
-            let state = self.store.lock_state();
-            let record = state
-                .invocations
-                .get(&self.scope)
-                .ok_or_else(|| InvocationError::OutcomeKnown(self.scope.display()))?;
-            if record.generation != self.generation {
-                return Err(InvocationError::Fenced {
-                    scope: self.scope.display(),
-                    expected: self.generation,
-                    actual: record.generation,
-                });
-            }
-        }
-        self.store.settle(&self.scope)
+        self.store.settle(&self.scope, self.generation)
     }
 
     fn replace_value(&self, address: &str, value: String) -> Result<(), InvocationError> {
@@ -662,6 +822,9 @@ impl InvocationHandle {
         apply: impl FnOnce(&mut InvocationRecord) -> Result<T, InvocationError>,
     ) -> Result<T, InvocationError> {
         let mut state = self.store.lock_state();
+        if state.closed {
+            return Err(InvocationError::OutcomeKnown(self.scope.display()));
+        }
         let record =
             state
                 .invocations
@@ -684,7 +847,13 @@ impl InvocationHandle {
                 actual: record.generation,
             });
         }
-        apply(record)
+        let mut updated = record.clone();
+        let result = apply(&mut updated)?;
+        if updated.values != record.values {
+            self.store.persist_record(&self.scope, &updated)?;
+        }
+        *record = updated;
+        Ok(result)
     }
 }
 

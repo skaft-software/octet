@@ -1,0 +1,1 @@
+{"binding_id":"binding-example","payload":{"summary":"ready"},"process_generation":1,"published_at_ms":1700000000000,"publisher":"alpha","publisher_instance_id":"instance-alpha","sequence":1,"topic":"bus.alpha.status"}

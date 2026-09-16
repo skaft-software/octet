@@ -40,3 +40,40 @@ Included:
 
 See the [agent design](https://github.com/skaft-software/octet/blob/main/docs/design/octet-agent.md)
 and the crate-level Rust documentation for the public API.
+
+Tools dispatched by `Agent` receive `ToolContext::invocation()` for durable named
+replay memos and bounded partial-output checkpoints. These auxiliary records use
+the same private JSONL descriptor and synced mutation line as the transcript;
+paired-result persistence fences and removes their live state. A journal-wide
+settled-identity index prevents checkout or reopen from reissuing the same
+assistant/source-index invocation; a new assistant entry is a new identity.
+Only executable calls/current read waves allocate live slots, never static
+per-turn-cap refusals. Hosts opt in with
+`Agent::enable_session_partial_output_checkpoints("bash", interval)`; snapshots
+are interval-bounded. Progress never proves completion, and interrupted
+unsafe calls retain the last snapshot with an explicit unknown-outcome marker.
+The standalone `DurableInvocationStore::new()` remains in-memory only. Parallel
+outcomes waiting for ordered placement are not yet independently durable.
+
+Tool-free local summaries retry transient interruptions on ordinary routes with
+bounded summary backoff; retries remain distinct from a failed compaction and
+preserve usage uncertainty. Qualified Codex recovery keeps its existing envelope.
+Manual compaction and branch-summary inference share the public
+`summarize_with_retry` / `summarize_branch_with_retry` APIs. Hosts commit returned
+text once and forward their retry events; these APIs already persist billable
+usage. Accepted auxiliary work stays guarded until durable billing settlement,
+including cancellation during the successful response poll. An append failure
+falls back to uncertainty; if storage remains unavailable, the live owner stays
+budget-closed but cannot promise recovery after process exit.
+Deferred-provider polling still lacks an AI transport consumer.
+
+Hard token/cost ceilings require the actual codec-enforced output cap. Codex,
+cap-omitting model presets and native Responses compact fail before dispatch
+with `AgentError::OutputLimitUnavailable` under either ceiling. Declared model
+limits alone are not enforceable wire bounds. Existing unknown/unpriced exposure
+retains its more specific refusal. Unbounded operation remains available when
+no hard ceiling is configured.
+
+`TurnFinished.turn_cost` is the exact optional cost of the persisted assistant
+response, including its total picodollar remainder. It excludes gate/summary,
+child and earlier-turn charges; `None` stays unknown, never catalog-repriced zero.

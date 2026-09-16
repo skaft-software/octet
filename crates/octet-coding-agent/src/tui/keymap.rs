@@ -79,11 +79,6 @@ pub enum PointerGesture {
     End { row: u16, col: u16 },
 }
 
-fn is_command_submission(key: &KeyEvent) -> bool {
-    (key.code == KeyCode::Enter && key.modifiers.is_empty())
-        || (key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL)
-}
-
 /// Key repeats are useful for text editing and navigation, but must never
 /// replay one-shot actions such as submit, close, abort, confirm, or toggle.
 pub(crate) fn accepts_key_event(key: &KeyEvent) -> bool {
@@ -255,6 +250,24 @@ pub fn translate_with_popup(
     editor_text: &str,
     slash_popup_open: bool,
 ) -> InputAction {
+    translate_with_bindings(
+        event,
+        active,
+        editor_text,
+        slash_popup_open,
+        &keybindings::KeybindingsManager::current_platform(),
+    )
+}
+
+/// Product dispatch with the already-loaded user map. The shell handles stateful
+/// prompt jumps, character-search prefixes and model cycling before this layer.
+pub fn translate_with_bindings(
+    event: Option<Event>,
+    active: bool,
+    editor_text: &str,
+    slash_popup_open: bool,
+    bindings: &keybindings::KeybindingsManager,
+) -> InputAction {
     let Some(event) = event else {
         return InputAction::Closed;
     };
@@ -266,8 +279,20 @@ pub fn translate_with_popup(
         Event::FocusGained => InputAction::FocusGained,
         Event::FocusLost => InputAction::FocusLost,
         Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => InputAction::ScrollLines(-3),
-            MouseEventKind::ScrollDown => InputAction::ScrollLines(3),
+            MouseEventKind::ScrollUp => {
+                InputAction::ScrollLines(if mouse.modifiers.contains(KeyModifiers::ALT) {
+                    -15
+                } else {
+                    -3
+                })
+            }
+            MouseEventKind::ScrollDown => {
+                InputAction::ScrollLines(if mouse.modifiers.contains(KeyModifiers::ALT) {
+                    15
+                } else {
+                    3
+                })
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 InputAction::TranscriptPointer(PointerGesture::Begin {
                     row: mouse.row,
@@ -295,17 +320,50 @@ pub fn translate_with_popup(
         },
         Event::Paste(text) => InputAction::Edit(EditAction::Paste(text)),
         Event::Key(key) => {
-            if !accepts_key_event(&key) {
+            if key.kind == KeyEventKind::Release {
                 return InputAction::Ignore;
             }
-
-            if is_close_key(&key) {
+            let press = key.kind == KeyEventKind::Press;
+            let matches = |id| bindings.matches(&key, id);
+            if !press
+                && [
+                    "app.exit",
+                    "app.clear",
+                    "app.interrupt",
+                    "app.message.dequeue",
+                    "tui.input.submit",
+                    "tui.input.tab",
+                    "tui.input.newLine",
+                    "app.message.followUp",
+                    "app.thinking.cycle",
+                    "app.thinking.toggle",
+                    "app.tools.expand",
+                    "app.model.select",
+                    "app.model.cycleForward",
+                    "app.model.cycleBackward",
+                    "app.message.copy",
+                    "app.session.new",
+                    "app.session.fork",
+                    "app.session.resume",
+                ]
+                .iter()
+                .any(|id| matches(id))
+            {
+                return InputAction::Ignore;
+            }
+            // Coordinated close is a safety boundary, including in exclusive
+            // prompts/pickers. A JSON override cannot steal it.
+            if key.code == KeyCode::Char('d') && key.modifiers == KeyModifiers::CONTROL {
+                return if press {
+                    InputAction::Closed
+                } else {
+                    InputAction::Ignore
+                };
+            }
+            if matches("app.exit") && press {
                 return InputAction::Closed;
             }
-
-            let control_c =
-                key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
-            if control_c {
+            if matches("app.clear") && press {
                 return if !editor_text.is_empty() {
                     InputAction::ClearEditor
                 } else if active {
@@ -315,148 +373,208 @@ pub fn translate_with_popup(
                 };
             }
 
-            let modified_enter = (key.code == KeyCode::Enter
-                || matches!(key.code, KeyCode::Char('\n' | '\r')))
-                && (key.modifiers == KeyModifiers::SHIFT
-                    || key.modifiers == KeyModifiers::ALT
-                    || key.modifiers.contains(KeyModifiers::CONTROL));
-            if modified_enter {
-                return InputAction::Edit(EditAction::Newline);
-            }
-
             let slash_command = editor_text.starts_with('/')
                 && !editor_text.chars().any(char::is_whitespace)
                 && (editor_text == "/"
                     || !crate::tui::composer::looks_like_absolute_path(editor_text));
-            let slash_menu = slash_popup_open && slash_command;
-            if slash_menu && key.modifiers.is_empty() {
-                let action = match key.code {
-                    KeyCode::Up => Some(SlashMenuAction::Previous),
-                    KeyCode::Down => Some(SlashMenuAction::Next),
-                    KeyCode::Home => Some(SlashMenuAction::First),
-                    KeyCode::End => Some(SlashMenuAction::Last),
-                    KeyCode::PageUp => Some(SlashMenuAction::PageUp),
-                    KeyCode::PageDown => Some(SlashMenuAction::PageDown),
-                    KeyCode::Enter => Some(SlashMenuAction::Select),
-                    KeyCode::Esc => Some(SlashMenuAction::Close),
-                    _ => None,
-                };
-                if let Some(action) = action {
-                    return InputAction::SlashMenu(action);
+            if slash_popup_open && slash_command {
+                for (id, action) in [
+                    ("tui.select.up", SlashMenuAction::Previous),
+                    ("tui.select.down", SlashMenuAction::Next),
+                    ("tui.select.pageUp", SlashMenuAction::PageUp),
+                    ("tui.select.pageDown", SlashMenuAction::PageDown),
+                    ("tui.select.confirm", SlashMenuAction::Select),
+                    ("tui.select.cancel", SlashMenuAction::Close),
+                ] {
+                    if matches(id) {
+                        return if press
+                            || !matches!(action, SlashMenuAction::Select | SlashMenuAction::Close)
+                        {
+                            InputAction::SlashMenu(action)
+                        } else {
+                            InputAction::Ignore
+                        };
+                    }
+                }
+                if key.modifiers.is_empty() {
+                    match key.code {
+                        KeyCode::Home => return InputAction::SlashMenu(SlashMenuAction::First),
+                        KeyCode::End => return InputAction::SlashMenu(SlashMenuAction::Last),
+                        _ => {}
+                    }
                 }
             }
 
-            if key.code == KeyCode::PageUp && key.modifiers.is_empty() {
+            // Explicit editor bindings take precedence over default application
+            // keys (e.g. Ctrl+P can be a movement key rather than model cycling).
+            if let Some(action) = editor_binding(&key, bindings, true) {
+                return InputAction::Edit(action);
+            }
+            if matches("tui.altScreen.pageUp") {
                 return InputAction::Scroll(-1);
             }
-            if key.code == KeyCode::PageDown && key.modifiers.is_empty() {
+            if matches("tui.altScreen.pageDown") {
                 return InputAction::Scroll(1);
             }
-            if key.code == KeyCode::End && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Preserve octet's established Ctrl+End return-to-live gesture unless
+            // the user explicitly rebinds either participating action.
+            if key.code == KeyCode::End
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !bindings
+                    .user_bindings()
+                    .contains_key("tui.editor.cursorLineEnd")
+                && !bindings
+                    .user_bindings()
+                    .contains_key("tui.altScreen.bottom")
+            {
                 return InputAction::JumpToTail;
             }
             if key.code == KeyCode::Char('a')
                 && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                && press
             {
                 return InputAction::SelectAllTranscript;
             }
             if key.code == KeyCode::Char('c')
                 && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                && press
             {
                 return InputAction::CopyTranscriptSelection;
             }
-            if key.code == KeyCode::Up && key.modifiers == KeyModifiers::ALT {
+            if matches("app.message.dequeue") && press {
                 return InputAction::EditQueued;
             }
-            if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            if matches("app.interrupt") && press {
                 return if active {
                     InputAction::DispatchQueued
                 } else {
                     InputAction::Close
                 };
             }
-
-            if is_command_submission(&key)
+            let steer = key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL;
+            let submit = matches("tui.input.submit");
+            if press
+                && (submit || steer)
                 && editor_text.starts_with('/')
                 && !crate::tui::composer::looks_like_absolute_path(editor_text)
             {
                 return InputAction::Command(editor_text.to_owned());
             }
-            if key.code == KeyCode::Tab && key.modifiers.is_empty() && slash_command {
-                return InputAction::CompleteSlashCommand;
+            if matches("tui.input.tab") && press {
+                if slash_command {
+                    return InputAction::CompleteSlashCommand;
+                }
+                if crate::tui::composer::active_mention(editor_text).is_some()
+                    || crate::tui::composer::active_path(editor_text).is_some()
+                {
+                    return InputAction::CompletePath;
+                }
+                return InputAction::Ignore;
             }
-            if key.code == KeyCode::Tab
-                && key.modifiers.is_empty()
-                && (crate::tui::composer::active_mention(editor_text).is_some()
-                    || crate::tui::composer::active_path(editor_text).is_some())
-            {
-                return InputAction::CompletePath;
-            }
-
-            if key.code == KeyCode::BackTab
-                || (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT)
-            {
+            if matches("app.thinking.cycle") && press {
                 return InputAction::CycleThinking;
             }
-
-            match (active, key.code, key.modifiers) {
-                (false, KeyCode::Enter, modifiers) if modifiers.is_empty() => {
-                    if editor_text.is_empty() {
-                        InputAction::Ignore
+            if (matches("app.tools.expand") || matches("app.thinking.toggle")) && press {
+                return InputAction::ToggleDisclosure;
+            }
+            for (id, command) in [
+                ("app.model.select", "/model"),
+                ("app.session.new", "/new"),
+                ("app.session.fork", "/fork"),
+                ("app.session.resume", "/resume"),
+                ("app.message.copy", "/copy"),
+            ] {
+                if press && matches(id) {
+                    return InputAction::Command(command.to_owned());
+                }
+            }
+            if press && !editor_text.is_empty() {
+                if submit || matches("app.message.followUp") {
+                    return if active {
+                        InputAction::Queue(editor_text.to_owned())
                     } else {
                         InputAction::Submit(editor_text.to_owned())
-                    }
+                    };
                 }
-                (true, KeyCode::Enter, modifiers) if modifiers.is_empty() => {
-                    if editor_text.is_empty() {
-                        InputAction::Ignore
-                    } else {
-                        InputAction::Queue(editor_text.to_owned())
-                    }
+                if active && steer {
+                    return InputAction::Steer(editor_text.to_owned());
                 }
-                (true, KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                    if editor_text.is_empty() {
-                        InputAction::Ignore
-                    } else {
-                        InputAction::Steer(editor_text.to_owned())
-                    }
-                }
-                (_, KeyCode::Char('o'), KeyModifiers::CONTROL) => InputAction::ToggleDisclosure,
-                (_, KeyCode::Backspace, modifiers)
-                    if !modifiers.intersects(
-                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                    ) =>
-                {
-                    InputAction::Edit(EditAction::Backspace)
-                }
-                (_, KeyCode::Delete, modifiers) if modifiers.is_empty() => {
-                    InputAction::Edit(EditAction::Delete)
-                }
-                (_, KeyCode::Left, modifiers) if modifiers.is_empty() => {
-                    InputAction::Edit(EditAction::Left)
-                }
-                (_, KeyCode::Right, modifiers) if modifiers.is_empty() => {
-                    InputAction::Edit(EditAction::Right)
-                }
-                (_, KeyCode::Up, modifiers) if modifiers.is_empty() => {
-                    InputAction::Edit(EditAction::Up)
-                }
-                (_, KeyCode::Down, modifiers) if modifiers.is_empty() => {
-                    InputAction::Edit(EditAction::Down)
-                }
-                (_, KeyCode::Home, modifiers) if modifiers.is_empty() => {
-                    InputAction::Edit(EditAction::Home)
-                }
-                (_, KeyCode::End, modifiers) if modifiers.is_empty() => {
-                    InputAction::Edit(EditAction::End)
-                }
-                (_, KeyCode::Char(_), _) => key_text(&key)
+            }
+            if matches("tui.input.newLine") {
+                return if press {
+                    InputAction::Edit(EditAction::Newline)
+                } else {
+                    InputAction::Ignore
+                };
+            }
+            // Keep terminal-specific modified Enter aliases, unless the user
+            // explicitly replaced the newline action. Alt+Enter is follow-up.
+            if press
+                && !bindings.user_bindings().contains_key("tui.input.newLine")
+                && (key.code == KeyCode::Enter || matches!(key.code, KeyCode::Char('\n' | '\r')))
+                && (key.modifiers == KeyModifiers::SHIFT
+                    || key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                return InputAction::Edit(EditAction::Newline);
+            }
+            if let Some(action) = editor_binding(&key, bindings, false) {
+                return InputAction::Edit(action);
+            }
+            if accepts_key_event(&key) {
+                key_text(&key)
                     .map(|character| InputAction::Edit(EditAction::Char(character)))
-                    .unwrap_or(InputAction::Ignore),
-                _ => InputAction::Ignore,
+                    .unwrap_or(InputAction::Ignore)
+            } else {
+                InputAction::Ignore
             }
         }
     }
+}
+
+pub(crate) fn editor_binding(
+    key: &KeyEvent,
+    bindings: &keybindings::KeybindingsManager,
+    explicit_only: bool,
+) -> Option<EditAction> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    for (id, action) in [
+        ("tui.editor.cursorUp", EditAction::Up),
+        ("tui.editor.cursorDown", EditAction::Down),
+        ("tui.editor.cursorLeft", EditAction::Left),
+        ("tui.editor.cursorRight", EditAction::Right),
+        ("tui.editor.cursorWordLeft", EditAction::WordLeft),
+        ("tui.editor.cursorWordRight", EditAction::WordRight),
+        ("tui.editor.cursorLineStart", EditAction::Home),
+        ("tui.editor.cursorLineEnd", EditAction::End),
+        ("tui.editor.deleteCharBackward", EditAction::Backspace),
+        ("tui.editor.deleteCharForward", EditAction::Delete),
+        (
+            "tui.editor.deleteWordBackward",
+            EditAction::DeleteWordBackward,
+        ),
+        (
+            "tui.editor.deleteWordForward",
+            EditAction::DeleteWordForward,
+        ),
+        (
+            "tui.editor.deleteToLineStart",
+            EditAction::DeleteToLineStart,
+        ),
+        ("tui.editor.deleteToLineEnd", EditAction::DeleteToLineEnd),
+        ("tui.editor.yank", EditAction::Yank),
+        ("tui.editor.yankPop", EditAction::YankPop),
+        ("tui.editor.undo", EditAction::Undo),
+        ("tui.editor.redo", EditAction::Redo),
+    ] {
+        if (!explicit_only || bindings.user_bindings().contains_key(id))
+            && bindings.matches(key, id)
+        {
+            return Some(action);
+        }
+    }
+    None
 }
 
 /// Encode a crossterm key the way sexy-tui's private terminal encoder does.
@@ -687,8 +805,14 @@ mod tests {
             );
         }
         // A focus loss is never mistaken for a coordinated close or abort.
-        assert_ne!(translate(Some(Event::FocusLost), true, ""), InputAction::Closed);
-        assert_ne!(translate(Some(Event::FocusLost), true, ""), InputAction::Abort);
+        assert_ne!(
+            translate(Some(Event::FocusLost), true, ""),
+            InputAction::Closed
+        );
+        assert_ne!(
+            translate(Some(Event::FocusLost), true, ""),
+            InputAction::Abort
+        );
     }
 
     #[test]
@@ -865,7 +989,7 @@ mod tests {
                 false,
                 ""
             ),
-            InputAction::Ignore
+            InputAction::Command("/copy".into())
         );
         assert_eq!(
             translate(
@@ -912,7 +1036,7 @@ mod tests {
         );
         assert_eq!(
             translate(Some(key(KeyCode::Enter, KeyModifiers::ALT)), false, "x"),
-            InputAction::Edit(EditAction::Newline)
+            InputAction::Submit("x".into())
         );
         assert_eq!(
             translate(Some(key(KeyCode::Enter, KeyModifiers::CONTROL)), false, "x"),

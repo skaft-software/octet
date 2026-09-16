@@ -93,7 +93,31 @@ and byte-limited manifest reader as startup. This is a real read-only rescan:
 changed or unavailable sources are diagnosed and require explicit `/reload`;
 it never activates code, grants trust, or recursively reloads a process.
 
-General configuration writes and committing migration ingestion do not yet emit
-these observations or map their resource families into the product consumer.
-The typed Rust bridge exists, but calling it is not proof of product integration.
-Dry-run migration must never emit a mutation notification.
+The host bridge now includes
+`ExecutableExtensions::notify_configuration_changed(mutation_id, generation, state)`
+and the retained `notify_migration_ingested(mutation_id, affected_resources,
+generation, state)`. Configuration observations disclose only `resource:settings`.
+Migration can disclose `resource:settings`, `resource:mcp`, and `resource:skills`.
+The shared drain maps these identities to host-bound readers: bounded/no-follow
+user TOML, bounded/private MCP JSON, and ordinary trust-gated skill metadata
+discovery. It never applies newly read configuration, credentials, provider
+catalogs, skill instructions, or trust. It reports content-free success/refusal.
+
+Resource revisions and requesting-process generations are independent fences;
+queued requests from replaced processes or superseded family revisions are
+rejected. Mutation IDs retain the existing dedup window and owner changes clear
+pending work. Unknown resource identities still do not create a filesystem path.
+
+**Integration gate:** these bridges must be called by a real durable transaction
+owner, only after commit or completed rollback. A migration CLI with no safely
+bound executable-extension owner cannot manufacture one by starting extensions
+solely to observe the write. Dry-run, no-op, preview, failed/partial writes and
+incomplete rollback must never emit. Current emitter coverage is tracked in
+[extension parity](../parity/extensions.md); a bridge/fixture is not proof that
+all configuration and migration paths emit.
+
+The process fixtures in `crates/octet-coding-agent/src/extensions/hook_tests.rs`
+include durable atomic configuration commit/restoration followed by real API
+`0.2` observation, exact-once deduplication, non-applied trust values, revision
+fencing and no-follow/private-family rescans. Rust execution for the new cases
+remains pending the parent-owned build.

@@ -58,3 +58,6 @@ docs/superpowers/
 DerivedData/
 .swiftpm/
 *.xcuserstate
+
+# Local session exports are owner-private artifacts, never committed.
+*.octet-session.json

@@ -18,6 +18,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn model(base_url: &str, protocol: Protocol) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            preset: Default::default(),
             id: ModelId("compact-test".into()),
             endpoint: EndpointId("compact-endpoint".into()),
             api_name: "gpt-compact".into(),

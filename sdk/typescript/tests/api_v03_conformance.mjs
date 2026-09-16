@@ -218,3 +218,14 @@ assert.deepEqual(api.LEGACY_ADAPTERS[0], { version: "0.1", status: "frozen", wir
 assert.deepEqual(api.LEGACY_ADAPTERS[1], { version: "0.2", status: "supported", wire: "legacy-json-rpc" });
 
 console.log(`TypeScript API 0.3 conformance: ${manifest.fixtures.length} fixtures`);
+
+// The real host assigns publisher identity and time; these are never publish arguments.
+api.parseBusDeclareParams(readFixture("bus-declare-params"));
+api.parseBusTopicParams(readFixture("bus-topic-params"));
+api.parseBusPublishParams(readFixture("bus-publish-params"));
+api.parseBusPublishResult(readFixture("bus-publish-result"));
+api.parseBusEventParams(readFixture("bus-event-params"));
+api.parseBusAck(readFixture("bus-ack"));
+for (const foreign of [{publisher: "beta"}, {published_at_ms: 1}, {process_generation: 1}]) {
+  assert.equal(errorCode(() => api.parseBusPublishParams({...readFixture("bus-publish-params"), ...foreign})), -32602);
+}

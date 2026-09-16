@@ -71,6 +71,7 @@ async fn live_openai_compatible_inline_png_reaches_the_model() {
             },
             pricing: None,
             cache: CacheCompatibility::default(),
+            preset: Default::default(),
         }),
         endpoint: Arc::new(Endpoint {
             id: EndpointId("live-openai".into()),

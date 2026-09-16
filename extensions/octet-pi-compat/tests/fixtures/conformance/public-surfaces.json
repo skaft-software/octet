@@ -888,7 +888,7 @@
       "kind": "context_probe",
       "target": "waitForIdle",
       "expected": "explicit_or_bounded",
-      "assertion": "Command dispatch is treated as idle and returns immediately."
+      "assertion": "Returns at an observed idle boundary; a busy owner errors because the host idle-wait service is unavailable."
     },
     {
       "id": "context:newSession",

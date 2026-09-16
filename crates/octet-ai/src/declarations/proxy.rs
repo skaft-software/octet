@@ -12,10 +12,8 @@
 //! disables proxying entirely. Only `http`/`https` proxies are accepted; SOCKS
 //! and PAC URLs fail closed.
 //!
-//! The streaming client wiring that would call this resolver
-//! (`crates/octet-ai/src/client.rs::reqwest::Client::builder`) is in the
-//! codec-depth-owned portion of `octet-ai`; this module lands and tests the
-//! resolution core while that wiring remains a named gap.
+//! [`crate::AiClient::try_new`] snapshots these variables and uses the resolver
+//! for both pre-dispatch validation and its no-redirect HTTP transport.
 
 use std::collections::BTreeMap;
 
@@ -83,27 +81,29 @@ fn no_proxy_excludes(hostname: &str, port: u16, no_proxy: &str) -> bool {
         return true;
     }
     let target = strip_brackets(hostname).to_ascii_lowercase();
-    no_proxy.split([',', ' ']).any(|entry| {
-        let Some((mut domain, entry_port)) = parse_no_proxy_entry(entry) else {
-            return false;
-        };
-        if entry_port != 0 && entry_port != port {
-            return false;
-        }
-        domain = strip_brackets(&domain).to_owned();
-        if let Some(stripped) = domain.strip_prefix("*.") {
-            domain = stripped.to_owned();
-        } else if let Some(stripped) = domain
-            .strip_prefix('.')
-            .or_else(|| domain.strip_prefix('*'))
-        {
-            domain = stripped.to_owned();
-        }
-        if domain.is_empty() {
-            return false;
-        }
-        target == domain || target.ends_with(&format!(".{domain}"))
-    })
+    no_proxy
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .any(|entry| {
+            let Some((mut domain, entry_port)) = parse_no_proxy_entry(entry) else {
+                return false;
+            };
+            if entry_port != 0 && entry_port != port {
+                return false;
+            }
+            domain = strip_brackets(&domain).to_owned();
+            if let Some(stripped) = domain.strip_prefix("*.") {
+                domain = stripped.to_owned();
+            } else if let Some(stripped) = domain
+                .strip_prefix('.')
+                .or_else(|| domain.strip_prefix('*'))
+            {
+                domain = stripped.to_owned();
+            }
+            if domain.is_empty() {
+                return false;
+            }
+            target == domain || target.ends_with(&format!(".{domain}"))
+        })
 }
 
 /// Resolve the proxy URL to use for `target`, or `None` for a direct connection.
@@ -162,8 +162,82 @@ pub fn resolve_http_proxy(
 /// re-implementing case handling.
 pub fn proxy_env_value<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Option<&'a str> {
     env.get(&name.to_ascii_lowercase())
-        .or_else(|| env.get(&name.to_ascii_uppercase()))
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            env.get(&name.to_ascii_uppercase())
+                .filter(|value| !value.is_empty())
+        })
         .map(String::as_str)
+}
+
+/// Immutable environment shared by HTTP dispatch preflight and reqwest's proxy
+/// callback. The callback cannot surface errors; every operation therefore
+/// validates this exact snapshot before credential resolution or dispatch.
+#[derive(Clone)]
+pub(crate) struct ProxyEnvironment(BTreeMap<String, String>);
+
+impl ProxyEnvironment {
+    pub(crate) const NAMES: [&'static str; 8] = [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ];
+
+    pub(crate) fn new(mut env: BTreeMap<String, String>) -> Self {
+        env.retain(|key, _| Self::NAMES.contains(&key.as_str()));
+        Self(env)
+    }
+
+    pub(crate) fn overlay(&self, values: &BTreeMap<String, String>) -> Self {
+        let mut env = self.0.clone();
+        for name in Self::NAMES {
+            if let Some(value) = values.get(name) { env.insert(name.into(), value.clone()); }
+        }
+        Self(env)
+    }
+
+    pub(crate) fn resolve(&self, target: &url::Url) -> Result<Option<url::Url>, crate::AiError> {
+        let invalid = || {
+            crate::ConfigError::Parse(
+            "invalid or unsupported HTTP proxy configuration (only HTTP/HTTPS proxies are supported)".to_owned(),
+        )
+        };
+        if self
+            .0
+            .values()
+            .any(|value| value.len() > crate::auth::MAX_ENV_VALUE_BYTES)
+        {
+            return Err(invalid().into());
+        }
+        let selected = resolve_http_proxy(
+            target.as_str(),
+            proxy_env_value(&self.0, &format!("{}_proxy", target.scheme())),
+            proxy_env_value(&self.0, "all_proxy"),
+            proxy_env_value(&self.0, "no_proxy"),
+        )
+        .map_err(|_| invalid())?;
+        selected
+            .map(|proxy| url::Url::parse(&proxy).map_err(|_| invalid().into()))
+            .transpose()
+    }
+
+    pub(crate) fn configure(
+        self: std::sync::Arc<Self>,
+        builder: reqwest::ClientBuilder,
+    ) -> reqwest::ClientBuilder {
+        // Disable reqwest's independent environment/OS resolver; otherwise a
+        // NO_PROXY exclusion could fall through to a second proxy policy.
+        builder
+            .no_proxy()
+            .proxy(reqwest::Proxy::custom(move |target| {
+                self.resolve(target).ok().flatten()
+            }))
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +340,57 @@ mod tests {
             resolve_http_proxy("not a url", Some("http://proxy:8080"), None, None).unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_transport_excludes_root_and_subdomain_on_loopback() {
+        use std::sync::Arc;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let direct = MockServer::start().await;
+        let proxy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&direct)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&proxy)
+            .await;
+        let address = *direct.address();
+        for exclusion in [
+            "example.invalid",
+            ".example.invalid",
+            "*.example.invalid",
+            "other.invalid\texample.invalid\nmore.invalid",
+        ] {
+            let env = Arc::new(ProxyEnvironment::new(BTreeMap::from([
+                ("HTTP_PROXY".to_owned(), proxy.uri()),
+                ("NO_PROXY".to_owned(), exclusion.to_owned()),
+            ])));
+            let http = env
+                .configure(
+                    reqwest::Client::builder()
+                        .resolve("example.invalid", address)
+                        .resolve("api.example.invalid", address),
+                )
+                .build()
+                .unwrap();
+            for host in [
+                "example.invalid",
+                "api.example.invalid",
+                "notexample.invalid",
+            ] {
+                http.get(format!("http://{host}:{}/", address.port()))
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+            }
+        }
+        assert_eq!(direct.received_requests().await.unwrap().len(), 8);
+        assert_eq!(proxy.received_requests().await.unwrap().len(), 4);
     }
 
     #[test]
