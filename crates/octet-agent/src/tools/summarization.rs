@@ -20,10 +20,12 @@
 //!    succeeded, so the number of durable summary records is `0` or `1` no
 //!    matter how many provider attempts ran.
 //!
-//! This is the policy half of the row: it is host-runtime independent and does
-//! not own the session, so `crates/octet-agent/src/compaction.rs` and `agent.rs`
-//! call it once they are owned by the same change (recorded in
-//! `docs/parity/tools.md`).
+//! The live agent's auxiliary recovery consumer uses this bounded policy for
+//! ordinary-route compaction and branch summaries, preserving cancellation,
+//! durable unknown-usage records and hard ceilings. Qualified Codex operations
+//! retain their existing recovery envelope instead of stacking retry loops.
+//! `Agent::summarize_with_retry` and `Agent::summarize_branch_with_retry` expose
+//! that same consumer to hosts; successful text is committed once by the caller.
 
 use std::time::Duration;
 

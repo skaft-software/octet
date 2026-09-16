@@ -176,7 +176,16 @@ struct ChatAssistantAudioRef {
 struct ChatToolCall {
     id: String,
     r#type: String,
-    function: ChatFunctionCall,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function: Option<ChatFunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    custom: Option<ChatCustomCall>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChatCustomCall {
+    name: String,
+    input: String,
 }
 
 #[derive(Serialize)]
@@ -353,7 +362,10 @@ fn content_fragments(content: &ChatResponseContent) -> Vec<ChatContentFragment> 
 #[derive(Deserialize)]
 struct ChatResponseMessageToolCall {
     id: String,
-    function: ChatResponseMessageFunction,
+    #[serde(default)]
+    function: Option<ChatResponseMessageFunction>,
+    #[serde(default)]
+    custom: Option<ChatCustomCall>,
 }
 
 #[derive(Deserialize)]
@@ -442,6 +454,16 @@ struct ChatChunkToolCall {
     id: Option<String>,
     #[serde(default)]
     function: Option<ChatChunkFunction>,
+    #[serde(default)]
+    custom: Option<ChatChunkCustom>,
+}
+
+#[derive(Deserialize)]
+struct ChatChunkCustom {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -475,7 +497,8 @@ pub(crate) fn build_request(
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
     // 1. Normalize model-gated reasoning, then run validation.
-    let req = normalize_request_reasoning(req, &model.spec.capabilities);
+    let defaults = super::preset::request_defaults(model, req)?;
+    let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
     let diagnostics = validate_request(
         &req,
         &model.spec.capabilities,
@@ -509,6 +532,8 @@ pub(crate) fn build_request(
                 | OpenAiChatReasoningMode::Together { .. }
         )
     );
+    let provider_uses_system_message = provider_uses_system_message || mistral_profile
+        || model.spec.preset.thinking_format.is_some_and(|format| format != crate::ThinkingFormat::OpenAi);
     let mut messages = Vec::new();
     let cache_marker = if matches!(
         model.spec.cache.cache_control_format,
@@ -690,7 +715,7 @@ pub(crate) fn build_request(
                         // (the API ignores it), and retaining the model check
                         // prevents cross-model Chat reasoning from leaking in.
                         AssistantPart::Reasoning(reasoning)
-                            if (deepseek_thinking || cerebras_reasoning)
+                            if (deepseek_thinking || cerebras_reasoning || model.spec.preset.thinking_format == Some(crate::ThinkingFormat::StringThinking))
                                 && assistant.protocol == Protocol::OpenAiChat
                                 && assistant.model == model.spec.id =>
                         {
@@ -711,17 +736,35 @@ pub(crate) fn build_request(
                             }
                         }
                         AssistantPart::ToolCall(ref tc) => {
+                            let property = super::grammar::input_property(&req.tools, &tc.name)?;
+                            let custom = property
+                                .as_deref()
+                                .map(|property| {
+                                    super::grammar::replay_input(&tc.arguments_json, property).map(
+                                        |input| ChatCustomCall {
+                                            name: tc.name.clone(),
+                                            input,
+                                        },
+                                    )
+                                })
+                                .transpose()?;
                             tool_calls.push(ChatToolCall {
                                 id: if mistral_profile {
                                     mistral_tool_call_id(&tc.id.0)
                                 } else {
                                     crate::protocol::normalize_tool_call_id(&tc.id.0)
                                 },
-                                r#type: "function".to_string(),
-                                function: ChatFunctionCall {
+                                r#type: if custom.is_some() {
+                                    "custom"
+                                } else {
+                                    "function"
+                                }
+                                .to_owned(),
+                                function: custom.is_none().then(|| ChatFunctionCall {
                                     name: tc.name.clone(),
                                     arguments: tc.arguments_json.clone(),
-                                },
+                                }),
+                                custom,
                             });
                         }
                         AssistantPart::Media(Media::Audio(ref audio)) => {
@@ -842,10 +885,13 @@ pub(crate) fn build_request(
             ToolChoice::Auto => Some(serde_json::Value::String("auto".to_string())),
             ToolChoice::Required => Some(serde_json::Value::String("required".to_string())),
             ToolChoice::None => Some(serde_json::Value::String("none".to_string())),
-            ToolChoice::Named(name) => Some(serde_json::json!({
-                "type": "function",
-                "function": { "name": name }
-            })),
+            ToolChoice::Named(name) => Some(
+                if super::grammar::input_property(&req.tools, name)?.is_some() {
+                    serde_json::json!({"type": "custom", "custom": {"name": name}})
+                } else {
+                    serde_json::json!({"type": "function", "function": {"name": name}})
+                },
+            ),
         }
     };
 
@@ -974,10 +1020,11 @@ pub(crate) fn build_request(
     // forward a cap explicitly chosen by the caller. DeepSeek and Mistral use
     // the compatible `max_tokens` field, while current OpenAI Chat uses
     // `max_completion_tokens`.
+    let output_cap = crate::effective_output_token_cap(model, req.max_output_tokens);
     let (max_tokens, max_completion_tokens) = if deepseek_thinking || mistral_profile {
-        (req.max_output_tokens, None)
+        (output_cap, None)
     } else {
-        (None, req.max_output_tokens)
+        (None, output_cap)
     };
 
     let chat_req = ChatCompletionsRequest {
@@ -1016,7 +1063,10 @@ pub(crate) fn build_request(
         stream_options,
     };
 
-    let body_bytes = serde_json::to_vec(&chat_req)
+    let mut body = serde_json::to_value(&chat_req)
+        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    super::preset::chat(model, &req, &mut body)?;
+    let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "chat/completions")?;
@@ -1272,17 +1322,35 @@ fn decode_response_inner(
     // 3. Map tool calls
     if let Some(ref tcs) = choice.message.tool_calls {
         for tc in tcs {
-            let arguments_json = crate::json_repair::normalize_json_object(&tc.function.arguments)
-                .map_err(AiError::Decode)?;
+            let (name, arguments_json) = match (&tc.function, &tc.custom) {
+                (Some(function), None) => (
+                    &function.name,
+                    crate::json_repair::normalize_json_object(&function.arguments)
+                        .map_err(AiError::Decode)?,
+                ),
+                (None, Some(custom)) => {
+                    let property = super::grammar::input_property(
+                        tool_definitions.unwrap_or_default(),
+                        &custom.name,
+                    )?
+                    .unwrap_or_else(|| "input".to_owned());
+                    (
+                        &custom.name,
+                        serde_json::json!({property: custom.input}).to_string(),
+                    )
+                }
+                _ => {
+                    return Err(DecodeError::InvalidProviderField(
+                        "tool call must contain exactly one of function or custom".to_owned(),
+                    )
+                    .into())
+                }
+            };
             let argument_error = if let Some(tools) = tool_definitions {
                 let arguments = serde_json::from_str(&arguments_json)
                     .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-                match crate::json_repair::validate_tool_arguments(
-                    &tc.function.name,
-                    &arguments,
-                    tools,
-                )
-                .map_err(AiError::Decode)?
+                match crate::json_repair::validate_tool_arguments(name, &arguments, tools)
+                    .map_err(AiError::Decode)?
                 {
                     ToolArgumentValidation::SchemaMismatch => {
                         Some(ToolCallArgumentError::SchemaMismatch)
@@ -1295,7 +1363,7 @@ fn decode_response_inner(
 
             content.push(AssistantPart::ToolCall(ToolCall {
                 id: ToolCallId(tc.id.clone()),
-                name: tc.function.name.clone(),
+                name: name.clone(),
                 arguments_json,
                 argument_error,
             }));
@@ -1551,26 +1619,58 @@ pub(crate) fn decode_stream_event(
                 let id_key = format!("tool_id_{}", tc.index);
                 let name_key = format!("tool_name_{}", tc.index);
                 let args_key = format!("tool_args_{}", tc.index);
+                let custom_key = format!("tool_custom_{}", tc.index);
+                if tc.function.is_some() && tc.custom.is_some() {
+                    return Err(DecodeError::InvalidProviderField(
+                        "tool call has both function and custom data".to_owned(),
+                    )
+                    .into());
+                }
+                if tc.custom.is_some() {
+                    if builder.tool_call_builders.contains_key(&idx)
+                        && !super::grammar::is_open(builder, idx)
+                    {
+                        return Err(DecodeError::InvalidProviderField(
+                            "function call changed to a custom call".to_owned(),
+                        )
+                        .into());
+                    }
+                    builder.replace_temp_buffer(custom_key.clone(), String::new())?;
+                }
+                if tc.function.is_some()
+                    && (builder.temp_buffers.contains_key(&custom_key)
+                        || super::grammar::is_open(builder, idx))
+                {
+                    return Err(DecodeError::InvalidProviderField(
+                        "custom call changed to a function call".to_owned(),
+                    )
+                    .into());
+                }
+                let name = tc
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.name.as_ref())
+                    .or_else(|| tc.custom.as_ref().and_then(|custom| custom.name.as_ref()));
+                let args = tc
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.arguments.as_ref())
+                    .or_else(|| tc.custom.as_ref().and_then(|custom| custom.input.as_ref()));
                 if !builder.tool_call_builders.contains_key(&idx) {
                     if let Some(id) = &tc.id {
                         builder.replace_temp_buffer(id_key.clone(), id.clone())?;
                     }
-                    if let Some(function) = &tc.function {
-                        if let Some(name) = &function.name {
-                            builder.replace_temp_buffer(name_key.clone(), name.clone())?;
-                        }
+                    if let Some(name) = name {
+                        builder.replace_temp_buffer(name_key.clone(), name.clone())?;
                     }
                 }
-                if let Some(function) = &tc.function {
-                    if let Some(args) = &function.arguments {
-                        builder.append_temp_buffer_bounded(
-                            args_key.clone(),
-                            args,
-                            MAX_TOOL_ARGUMENT_BYTES,
-                        )?;
-                    }
+                if let Some(args) = args {
+                    builder.append_temp_buffer_bounded(
+                        args_key.clone(),
+                        args,
+                        MAX_TOOL_ARGUMENT_BYTES,
+                    )?;
                 }
-
                 if !builder.tool_call_builders.contains_key(&idx)
                     && builder.temp_buffers.contains_key(&id_key)
                     && builder.temp_buffers.contains_key(&name_key)
@@ -1590,10 +1690,16 @@ pub(crate) fn decode_stream_event(
                             name,
                         },
                     )?;
+                    if builder.take_temp_buffer(&custom_key).is_some() {
+                        super::grammar::start(builder, idx)?;
+                    }
                 }
                 if builder.tool_call_builders.contains_key(&idx) {
+                    builder.take_temp_buffer(&custom_key);
                     if let Some(args) = builder.take_temp_buffer(&args_key) {
-                        if !args.is_empty() {
+                        if super::grammar::is_open(builder, idx) {
+                            super::grammar::delta(&mut events, builder, idx, &args)?;
+                        } else if !args.is_empty() {
                             emit_event(
                                 &mut events,
                                 builder,
@@ -2461,6 +2567,8 @@ fn close_open_parts(
             emit_event(events, builder, StreamEvent::TextEnd { index: idx })?;
         } else if builder.reasoning_text_buffers.contains_key(&idx) {
             emit_event(events, builder, StreamEvent::ReasoningEnd { index: idx })?;
+        } else if super::grammar::is_open(builder, idx) {
+            super::grammar::finish(events, builder, idx, None)?;
         } else if builder.tool_call_builders.contains_key(&idx) {
             emit_event(
                 events,
@@ -2577,6 +2685,7 @@ mod tests {
         }
 
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("test-model".to_string()),
             endpoint: EndpointId("test-ep".to_string()),
             api_name: "gpt-4-test".to_string(),
@@ -2935,6 +3044,38 @@ mod tests {
             build_request(&model, &request),
             Err(AiError::Config(crate::error::ConfigError::InvalidModel(_)))
         ));
+    }
+
+    #[test]
+    fn completed_grammar_custom_call_uses_declared_property_and_schema_validation() {
+        let model = make_test_model(false, false, false, true, false, false);
+        let tool = ToolDef {
+            name: "language".to_owned(),
+            description: "grammar".to_owned(),
+            parameters: serde_json::json!({"type":"object", "properties":{"source":{"type":"string"}},
+                "required":["source"], "additionalProperties":false}),
+            constrained_sampling: Some(crate::types::ConstrainedSampling::Grammar {
+                variants: crate::types::GrammarVariants {
+                    openai_regex: Some(".+".to_owned()),
+                    ..Default::default()
+                },
+            }),
+        };
+        let body = serde_json::json!({"id":"call", "choices":[{
+            "message":{"role":"assistant","content":null,"tool_calls":[{
+                "id":"c1","type":"custom","custom":{"name":"language","input":"quote \"\n雪"}}]},
+            "finish_reason":"tool_calls"}], "usage":{"prompt_tokens":2,"completion_tokens":3}});
+        let response =
+            decode_response_with_tools(&model, &serde_json::to_vec(&body).unwrap(), None, &[tool])
+                .unwrap();
+        let AssistantPart::ToolCall(call) = &response.message.content[0] else {
+            panic!("missing custom call")
+        };
+        assert!(call.argument_error.is_none());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap(),
+            serde_json::json!({"source":"quote \"\n雪"})
+        );
     }
 
     #[test]

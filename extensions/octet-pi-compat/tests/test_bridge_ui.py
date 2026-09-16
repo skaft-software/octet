@@ -152,3 +152,60 @@ class BridgeUiLifetimeTests(unittest.TestCase):
         response = provider.request("ui/autocomplete/complete", {"text": "x", "cursor": 1, "revision": 0})
         self.assertIn("error", response)
         self.assertFalse(any(m.get("method", "").startswith("ui/") for m in provider.messages))
+
+    def test_dialog_options_dismiss_only_the_dialog_and_cancel_reverse_request(self) -> None:
+        for method in ("confirm", "input", "select"):
+            for mode in ("timeout", "abort", "pre-abort"):
+                with self.subTest(method=method, mode=mode):
+                    bridge = self.open_bridge("runtime_commands")
+                    self.command(bridge, f"ui-dialog-{method}-{mode}")
+                    self.assertEqual({"method": method, "value": False if method == "confirm" else None},
+                                     json.loads(bridge.notifications()[-1]))
+                    requests = [m for m in bridge.messages if m.get("method") in ("input/request", "confirmation/request")]
+                    if mode == "pre-abort":
+                        self.assertEqual([], requests)
+                    else:
+                        self.assertEqual(1, len(requests))
+                        child_id = requests[0]["id"]
+                        self.assertTrue(any(m.get("method") == "$/cancelRequest" and m["params"]["id"] == child_id
+                                            for m in bridge.messages))
+                        # A late affirmative response must not resurrect a dismissed dialog.
+                        bridge.send({"jsonrpc": "2.0", "id": child_id, "result": {"confirmed": True, "value": "late"}})
+                    bridge.close()
+
+    def test_parent_cancellation_is_not_swallowed_by_dialog_options(self) -> None:
+        for method in ("confirm", "input", "select"):
+            with self.subTest(method=method):
+                bridge = self.open_bridge("runtime_commands")
+                command_id = bridge.send_request("command/execute", {"name": f"ui-dialog-{method}-wait", "arguments": []})
+                bridge.wait_for(lambda messages: any(m.get("method") in ("input/request", "confirmation/request")
+                                                     for m in messages), description="dialog waiting")
+                bridge.send({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": command_id}})
+                self.assertEqual(-32800, bridge.wait_response(command_id)["error"]["code"])
+                self.assertEqual([], bridge.notifications())
+                bridge.close()
+
+    def test_select_does_not_parse_an_option_name_as_a_numeric_prefix(self) -> None:
+        bridge = self.open_bridge("runtime_commands")
+        bridge.handlers["input/request"] = lambda _message: {"value": "1st"}
+        self.command(bridge, "ui-dialog-select-reply")
+        self.assertEqual("1st", json.loads(bridge.notifications()[-1])["value"])
+
+    def test_owner_settlement_cancels_a_dialog_before_joining_the_command_lane(self) -> None:
+        bridge = self.open_bridge("runtime_commands", "lifecycle_events")
+        command_id = bridge.send_request("command/execute", {"name": "ui-dialog-confirm-wait", "arguments": []})
+        bridge.wait_for(lambda messages: any(m.get("method") == "confirmation/request" for m in messages),
+                        description="confirmation waiting")
+        settle_id = bridge.send_request("session/settled", {})
+        self.assertIn("error", bridge.wait_response(command_id))
+        self.assertNotIn("error", bridge.wait_response(settle_id))
+        self.assertFalse(any(message.startswith('{"method":') for message in bridge.notifications()))
+
+    def test_busy_wait_for_idle_fails_explicitly_instead_of_claiming_idle(self) -> None:
+        bridge = self.open_bridge("runtime_commands", "lifecycle_events")
+        self.command(bridge, "ui-wait-idle")
+        self.assertIn("idle-confirmed", bridge.notifications())
+        self.assertNotIn("error", bridge.request("turn/started", {}))
+        response = bridge.request("command/execute", {"name": "ui-wait-idle", "arguments": []})
+        self.assertIn("host idle-wait service unavailable", response["error"]["message"])
+        self.assertEqual(1, bridge.notifications().count("idle-confirmed"))

@@ -184,6 +184,8 @@ pub enum ResponsesRuntimeProfile {
     Default,
     /// ChatGPT Codex subscription behavior over the existing Responses codec.
     Codex,
+    /// Azure Responses deployment routing and API-version configuration.
+    Azure,
 }
 
 impl ResponsesRuntimeProfile {
@@ -745,6 +747,10 @@ pub struct ModelSpec {
     /// Prompt-cache compatibility settings for this model/endpoint.
     #[serde(default)]
     pub cache: CacheCompatibility,
+    /// Validated model defaults and explicit provider wire compatibility.
+    /// Header secrets are excluded from public model serialization.
+    #[serde(default, serialize_with = "crate::declarations::serialize_public_preset")]
+    pub preset: crate::declarations::ModelPreset,
 }
 
 /// Multimodal data structure.
@@ -1743,6 +1749,7 @@ mod tests {
     #[test]
     fn test_model_spec_serde_round_trip() {
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("test-model".to_string()),
             endpoint: EndpointId("test-endpoint".to_string()),
             api_name: "gpt-4o-mini".to_string(),

@@ -260,6 +260,7 @@ fn extension_provider_bootstrap_model(catalog: &ModelCatalog) -> Model {
     });
     Model {
         spec: Arc::new(ModelSpec {
+            preset: Default::default(),
             id: ModelId("extension-provider-bootstrap".to_owned()),
             endpoint: endpoint.id.clone(),
             api_name: "extension-provider-bootstrap".to_owned(),
@@ -1329,6 +1330,17 @@ const TOOL_FIELDS: &[&str] = &[
     "function_calling",
     "supported_parameters",
 ];
+/// Fields an endpoint may publish instead of, or in addition to, `limit`.
+const LIMIT_FIELDS: &[&str] = &[
+    "limit",
+    "top_provider",
+    "context_window",
+    "context_length",
+    "max_model_len",
+    "max_context_tokens",
+    "max_output_tokens",
+    "max_completion_tokens",
+];
 const REASONING_FIELDS: &[&str] = &[
     "reasoning",
     "supports_reasoning",
@@ -1341,9 +1353,20 @@ const REASONING_FIELDS: &[&str] = &[
     "interleaved",
 ];
 
-/// The pinned catalog is supplemental display/pricing data only. Functional
-/// limits and capability flags must come from the discovered endpoint (or a
-/// declaration-owned standardized surface), never from a snapshot record.
+/// One documented limit from the pinned provider record, if it publishes one.
+fn pinned_limit(snapshot: Option<&serde_json::Value>, field: &str) -> Option<u64> {
+    snapshot
+        .and_then(|snapshot| snapshot.get("limit"))
+        .and_then(|limit| positive_u64(limit, &[field]))
+}
+
+/// `builtin_display_entry` itself stays name-only. Its caller additionally uses
+/// the pinned record for input modalities and, when the endpoint asserts none,
+/// documented limits: a sparse inventory that says nothing must not silently
+/// downgrade a 1M-token model to a generic placeholder. Operational limits,
+/// capability flags and reasoning controls declared by the endpoint (or by a
+/// declaration-owned standardized surface) always take precedence, and a model
+/// absent from the pinned record gains nothing.
 fn builtin_display_entry(
     entry: &serde_json::Value,
     snapshot: &serde_json::Value,
@@ -1475,14 +1498,52 @@ fn has_reasoning_assertion(entry: &serde_json::Value) -> bool {
 /// Decode endpoint reasoning metadata without importing semantic controls from
 /// the pinned catalog. Declaration-owned profiles are applied later, only when
 /// the endpoint did not assert an unknown or malformed reasoning surface.
-fn builtin_discovery_reasoning(entry: &serde_json::Value) -> anyhow::Result<DiscoveredReasoning> {
+fn builtin_discovery_reasoning(
+    entry: &serde_json::Value,
+    declaration: Option<&ProviderDeclaration>,
+) -> anyhow::Result<DiscoveredReasoning> {
     let mut metadata = decode_reasoning_metadata(entry)?;
-    if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent
-        && has_reasoning_assertion(entry)
-    {
-        metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
+    if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent {
+        if advertised_reasoning_parameter(entry)
+            && declaration.is_some_and(|declaration| declaration.id == "openrouter")
+        {
+            // OpenRouter publishes its reasoning primitive through the accepted
+            // parameter list rather than a `reasoning` field. Treating that as
+            // an undecodable assertion is what left a newly released model with
+            // thinking permanently Off until the pinned snapshot was refreshed
+            // and the binary rebuilt; the parameter list is the endpoint
+            // asserting the capability, so decode it.
+            metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
+            metadata.supported = Some(true);
+        } else if has_reasoning_assertion(entry) {
+            metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
+        }
     }
     Ok(metadata)
+}
+
+/// Whether an inventory advertises a reasoning request parameter.
+fn advertised_reasoning_parameter(entry: &serde_json::Value) -> bool {
+    [
+        Some(entry),
+        entry.get("top_provider"),
+        entry.get("provider"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|metadata| {
+        metadata
+            .get("supported_parameters")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|parameters| {
+                parameters.iter().any(|parameter| {
+                    matches!(
+                        parameter.as_str(),
+                        Some("reasoning" | "reasoning_effort" | "reasoning.effort")
+                    )
+                })
+            })
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1710,13 +1771,34 @@ fn api_models_from_response_for(
             d.route_for_model(id)?;
             octet_ai::model_metadata::model_capability_metadata(d.id, id)
         });
-        let reasoning_metadata = builtin_discovery_reasoning(entry)?;
+        let reasoning_metadata = builtin_discovery_reasoning(entry, declaration)?;
         let enriched = snapshot
             .as_ref()
             .map(|snapshot| builtin_display_entry(entry, snapshot));
         let entry = enriched.as_ref().unwrap_or(entry);
-        let input_modalities = input_modalities_from_entry(entry);
+        // Input modalities are resolved before the enrichment swap so a live
+        // assertion always wins. Sparse inventories (for example DeepSeek's
+        // model list) assert nothing, so the pinned snapshot may then supply the
+        // documented image/audio input; every other pinned field stays out of
+        // this authority boundary.
         let modalities_asserted = has_metadata_assertion(entry, MODALITY_FIELDS);
+        let input_modalities = if modalities_asserted {
+            input_modalities_from_entry(entry)
+        } else {
+            let asserted = input_modalities_from_entry(entry);
+            let pinned = snapshot
+                .as_ref()
+                .map(input_modalities_from_entry)
+                .unwrap_or_else(octet_ai::ModalitySet::none);
+            let mut modalities = asserted;
+            for candidate in [octet_ai::Modality::Image, octet_ai::Modality::Audio] {
+                if pinned.contains(candidate) {
+                    modalities = modalities.with(candidate);
+                }
+            }
+            modalities
+        };
+        let limits_asserted = has_metadata_assertion(entry, LIMIT_FIELDS);
         let vision = asserted_capability(entry, &["vision"]).unwrap_or_else(|| {
             input_modalities.contains(octet_ai::Modality::Image)
                 || (!modalities_asserted && model_id_implies_vision(id))
@@ -1738,7 +1820,13 @@ fn api_models_from_response_for(
                 entry
                     .get("limit")
                     .and_then(|limit| positive_u64(limit, &["context"]))
-            }),
+            })
+            // Sparse inventories publish identifiers only. When the endpoint
+            // asserts no limit field at all, the pinned provider-scoped snapshot
+            // supplies its documented window instead of a generic placeholder.
+            // A partially asserting endpoint keeps independent leaves and is
+            // never mixed with snapshot values.
+            .or_else(|| (!limits_asserted).then(|| pinned_limit(snapshot.as_ref(), "context")).flatten()),
             max_output_tokens: positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
                 .or_else(|| {
                     entry
@@ -1749,7 +1837,8 @@ fn api_models_from_response_for(
                     entry
                         .get("top_provider")
                         .and_then(|provider| positive_u64(provider, &["max_completion_tokens"]))
-                }),
+                })
+                .or_else(|| (!limits_asserted).then(|| pinned_limit(snapshot.as_ref(), "output")).flatten()),
             tools: custom_model_metadata_supports_tools(entry),
             parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"]),
             #[cfg(test)]
@@ -2401,6 +2490,7 @@ fn register_deepseek_legacy_alias(
         crate::providers::cache_compatibility(declaration.compatibility, api_name, route.protocol);
     let pricing = crate::providers::pricing_for(declaration, api_name);
     catalog.register_model(ModelSpec {
+        preset: Default::default(),
         id: ModelId(DEEPSEEK_MODEL_ID.into()),
         endpoint: endpoint_id,
         api_name: api_name.to_owned(),
@@ -2708,7 +2798,7 @@ fn openrouter_models_from_response(
         let entry = described.as_ref().unwrap_or(entry);
         let snapshot =
             octet_ai::model_metadata::model_capability_metadata(declaration.id, api_name);
-        let reasoning_metadata = builtin_discovery_reasoning(entry)?;
+        let reasoning_metadata = builtin_discovery_reasoning(entry, Some(declaration))?;
         let enriched = snapshot
             .as_ref()
             .map(|snapshot| builtin_display_entry(entry, snapshot));
@@ -2742,6 +2832,7 @@ fn openrouter_models_from_response(
         let supports_tools = model_metadata_supports_tools(entry);
 
         models.push(ModelSpec {
+            preset: Default::default(),
             id: ModelId(format!("{}/{api_name}", declaration.id)),
             endpoint: EndpointId(route.endpoint_id.into()),
             api_name: api_name.into(),
@@ -3312,13 +3403,18 @@ fn load_custom_model_cache_for(
     let Some(bytes) = store.load_model_cache_for(provider_id)? else {
         return Ok(None);
     };
-    let cache: CustomModelCache =
+    let mut cache: CustomModelCache =
         serde_json::from_slice(&bytes).context("invalid custom model cache")?;
     if cache.version != CUSTOM_MODEL_CACHE_VERSION
         || cache.base_url != base_url
         || cache.credential_fingerprint != credential_fingerprint
     {
         return Ok(None);
+    }
+    // Only the private configured registry can supply credential-bearing model
+    // headers, even if an older or edited inventory cache contains that field.
+    for model in &mut cache.models {
+        model.preset.headers.clear();
     }
     Ok(Some(if cache.models.is_empty() {
         CachedCustomInventory::Unavailable
@@ -3348,11 +3444,17 @@ fn save_custom_model_cache_for(
     credential_fingerprint: &str,
     models: &[crate::auth::custom::CustomModel],
 ) -> anyhow::Result<()> {
+    // Cache a redacted copy, never mutate the credential registry's configured
+    // model: those private headers must remain available to actual requests.
+    let mut models = models.to_vec();
+    for model in &mut models {
+        model.preset.headers.clear();
+    }
     let cache = CustomModelCache {
         version: CUSTOM_MODEL_CACHE_VERSION,
         base_url: base_url.to_owned(),
         credential_fingerprint: credential_fingerprint.to_owned(),
-        models: models.to_vec(),
+        models,
     };
     store.save_model_cache_for(provider_id, &serde_json::to_vec_pretty(&cache)?)
 }
@@ -3832,6 +3934,7 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
         reasoning_default,
         reasoning_uses_system_message: true,
         pricing: None,
+        preset: Default::default(),
     })
 }
 
@@ -4235,6 +4338,7 @@ fn register_custom_openai_provider(
         };
 
         catalog.register_model(ModelSpec {
+            preset: model.preset.clone(),
             id: ModelId(custom_model_id(provider_id, legacy_single_endpoint, model)),
             endpoint: endpoint_id.clone(),
             api_name: model.api_name.clone(),
@@ -4452,6 +4556,8 @@ fn discover_models_blocking(
             // particular, reject it while still accepting `system`.
             reasoning_uses_system_message: true,
             pricing: None,
+            // Inventory is not authority for request headers or wire overrides.
+            preset: Default::default(),
         };
         if apply_discovered_reasoning(entry, &mut model).is_err() {
             if report_errors {
@@ -5385,6 +5491,8 @@ fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> any
     let Some(operation) = codex_context_uncertainty_operation(model) else {
         return Ok(());
     };
+    // This deduplicates durable exposure markers, not a cost-exactness report.
+    // Unpriced completed receipts alone must not suppress this route exposure.
     if session.has_uncertain_usage() {
         return Ok(());
     }
@@ -5501,6 +5609,7 @@ fn register_openai_codex_with_notes(
             route.protocol,
         );
         catalog.register_model(ModelSpec {
+            preset: Default::default(),
             id: catalog_id,
             endpoint: EndpointId(route.endpoint_id.into()),
             api_name: model.id,
@@ -5580,6 +5689,7 @@ pub(crate) fn register_offline_openrouter_model(
     // when an explicit offline batch model cannot be found in the inventory
     // cache, where the provider remains the authority on actual availability.
     catalog.register_model(ModelSpec {
+        preset: Default::default(),
         id: catalog_id,
         endpoint: endpoint_id,
         api_name: api_name.to_owned(),
@@ -6916,6 +7026,11 @@ pub(crate) fn build_app_with_runtime_manager(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    #[cfg(any(unix, windows))]
+    agent.enable_session_partial_output_checkpoints(
+        "bash",
+        octet_agent::tools::BASH_CHECKPOINT_INTERVAL,
+    );
     agent.set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));
     agent.set_prompt_color(Some(crate::tui::theme::prompt_color_for_model(&model)));
     agent.set_compaction_model(compact_model);
@@ -6936,6 +7051,7 @@ pub(crate) fn build_app_with_runtime_manager(
         client,
         config,
         catalog,
+        model_scope: None,
         sessions,
         reasoning,
         reasoning_mode,
@@ -6994,6 +7110,7 @@ pub fn rebuild_app(
     app.synchronize_extension_provider_catalog();
     let mut config = app.config.clone();
     let mut catalog = app.catalog.clone();
+    let model_scope = app.model_scope.clone();
     let sessions = app.sessions.clone();
     let client = app.client.clone();
     let model = app.model.clone();
@@ -7023,6 +7140,11 @@ pub fn rebuild_app(
         .transpose()
         .with_context(|| "configured compaction model could not be resolved")?;
     let current_path = app.agent.session().path().to_owned();
+    let same_session = selection.as_ref().is_none_or(|selection| match selection {
+        SessionSelection::CreateNew(_) => false,
+        SessionSelection::OpenExisting(path) => path == &current_path,
+    });
+    let service_tier = same_session.then(|| app.agent.service_tier()).flatten();
     let old_skill_metadata = format_skills_for_prompt(&old_skills.descriptors());
     let mut system = system;
     if !old_skill_metadata.is_empty() && system.ends_with(&old_skill_metadata) {
@@ -7050,6 +7172,18 @@ pub fn rebuild_app(
     let model = new_model
         .or(restored_model)
         .unwrap_or_else(|| old_model.clone());
+    // A tier cannot leak across routes. A compatible same-session rebuild
+    // retains it; changing to an unsupported route clears it explicitly.
+    let service_tier = if crate::commands::codex_fast_tier_endpoint(&model) {
+        service_tier
+    } else {
+        if service_tier.is_some() {
+            crate::output::stderr!(
+                "warning: fast mode disabled: the selected model route does not support it"
+            );
+        }
+        None
+    };
     validate_compaction_route(config.compaction.mode, &model, compact_model.as_ref())?;
     let requested_reasoning = match (new_reasoning, persisted.reasoning) {
         (Some(reasoning), _) => normalize_reasoning_for_model(&reasoning, &model)?,
@@ -7178,6 +7312,12 @@ pub fn rebuild_app(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    agent.set_service_tier(service_tier)?;
+    #[cfg(any(unix, windows))]
+    agent.enable_session_partial_output_checkpoints(
+        "bash",
+        octet_agent::tools::BASH_CHECKPOINT_INTERVAL,
+    );
     agent.set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));
     agent.set_prompt_color(Some(crate::tui::theme::prompt_color_for_model(&model)));
     agent.set_compaction_model(compact_model);
@@ -7199,6 +7339,7 @@ pub fn rebuild_app(
         client,
         config,
         catalog,
+        model_scope,
         sessions,
         reasoning,
         reasoning_mode,

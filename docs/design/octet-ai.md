@@ -46,7 +46,11 @@ models and legacy endpoint assertions ahead of self-description leaves. Sparse
 family defaults cannot override a self-description's disabled capabilities.
 
 Only selected-endpoint inventory or its URL/account-isolated raw cache may be
-passed as authority; models.dev remains display/pricing-only. Public API
+passed as authority. The pinned models.dev record contributes a display name,
+provider-scoped pricing, and — solely where the endpoint asserts nothing —
+input modalities and context/output limits; it never supplies reasoning
+controls or tool/structured-output flags, and it never overrides an endpoint
+assertion. Public API
 provenance is not a new persisted `ModelSpec`/native-host protocol field. See the
 [provider schema and integration limits](../providers.md#endpoint-capability-self-description-unreleased).
 

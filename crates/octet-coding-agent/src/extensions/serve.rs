@@ -17811,6 +17811,38 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
     }
 
     #[test]
+    fn graphical_model_catalog_omits_private_model_preset_headers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = serve_test_config(directory.path());
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let mut spec = (*catalog
+            .resolve(&ModelId("gpt-4o-mini".into()))
+            .unwrap()
+            .spec)
+            .clone();
+        spec.id = ModelId("private-header-projection-fixture".into());
+        spec.preset.headers.insert(
+            "x-private-model-header".into(),
+            "model-header-value-must-not-be-public".into(),
+        );
+        config.model = Some(spec.id.clone());
+        catalog.register_model(spec).unwrap();
+        let models = graphical_model_catalog(&catalog, &config);
+        assert!(models
+            .iter()
+            .any(|model| model.id == "private-header-projection-fixture"));
+        let encoded = serde_json::to_string(&models).unwrap();
+        for forbidden in [
+            "preset",
+            "headers",
+            "x-private-model-header",
+            "model-header-value-must-not-be-public",
+        ] {
+            assert!(!encoded.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
     fn graphical_reasoning_defaults_distinguish_unset_config_and_persisted_off() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = serve_test_config(directory.path());

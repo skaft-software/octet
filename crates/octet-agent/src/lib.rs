@@ -89,6 +89,7 @@ pub mod input;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod session;
+mod session_writer;
 mod shell_safety;
 /// The generic skill substrate containing descriptors, load errors, trust levels, and the registry trait.
 pub mod skills;
@@ -233,11 +234,13 @@ pub use skills::{
 };
 pub use telemetry::{TelemetryObserver, TELEMETRY_SCHEMA};
 pub use tool::{
-    content_hash, CancellationToken, ErasedTool, ErasedToolAdapter, OutputStream, ReplaySafety,
-    Tool, ToolConcurrency, ToolContext, ToolDefinition, ToolDescriptor, ToolError,
-    ToolInputRequest, ToolInputResponse, ToolOutput, ToolOutputContentPart, ToolOutputDetails,
-    ToolOutputMediaKind, ToolOutputValidationError, ToolProgress, ToolProgressDecoration,
-    ToolProgressSink, MAX_PROGRESS_CHUNK_BYTES, MAX_TOOL_METADATA_BYTES,
+    batch_requests_termination, collect_tool_prompt_contributions, content_hash,
+    AdaptivePreviewCoalescer, CancellationToken, ErasedTool, ErasedToolAdapter, OutputStream,
+    PartialOutputCheckpointSink, PreviewPublication, ReplaySafety, Tool, ToolConcurrency,
+    ToolContext, ToolDefinition, ToolDescriptor, ToolError, ToolInputRequest, ToolInputResponse,
+    ToolOutput, ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind,
+    ToolOutputValidationError, ToolProgress, ToolProgressDecoration, ToolProgressSink,
+    ToolPromptContribution, MAX_PROGRESS_CHUNK_BYTES, MAX_TOOL_METADATA_BYTES,
     MAX_TOOL_STRUCTURED_CONTENT_BYTES,
 };
 pub use tools::{BashTool, CoreTools, EditTool, ReadTool, SearchTool, WriteTool};

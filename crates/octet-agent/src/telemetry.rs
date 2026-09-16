@@ -1171,6 +1171,7 @@ mod tests {
                 },
                 pricing: None,
                 cache: Default::default(),
+                preset: Default::default(),
             }),
             endpoint: Arc::new(Endpoint {
                 id: EndpointId("local".into()),
@@ -1327,6 +1328,7 @@ mod tests {
                     total_tokens: 9,
                     ..Usage::default()
                 },
+                turn_cost: None,
                 usage: Usage {
                     input_tokens: 3,
                     cache_read_tokens: 4,

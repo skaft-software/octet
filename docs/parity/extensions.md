@@ -27,20 +27,38 @@ Reference (read-only): `earendil-works/pi` at
 
 | Capability | State | Authoritative anchors |
 | --- | --- | --- |
-| `event_bus` / `bus/*` | **Partial**: bounded SDK primitive + host contract landed; host mediation NOT implemented | `docs/extensions/event-bus.md` (bounds, fail-closed matrix, remaining host work); `sdk/python/octet_extension/event_bus.py` (`EventBusKernel`, `TopicRegistry`, `BoundedQueue`, `HostEventBus`); `sdk/python/tests/test_event_bus.py` (28 tests, `Ran 28 tests ... OK`); host anchors still required: `protocol/extension-api-v0.3.schema.json:280`, `crates/octet-agent/src/extension_api_v03.rs:80` (`CAPABILITY_SPECS`) and `:106` (`METHOD_SPECS`) |
-| `theme_selection` / `theme/select` | Landed (host-mediated, extension-namespaced) | `protocol/extension-api-v0.3.schema.json:280` (capability), `:541` (method), `:625` (`theme_selection` scope); `crates/octet-agent/src/extension_api_v03.rs`; `crates/octet-agent/tests/extension_theme_selection.rs` (Rust 13 + 5 tests); `sdk/python/octet_extension/api_v03.py`, `sdk/python/tests/test_theme_selection_api_v03.py` (14 tests); `sdk/typescript/src/api_v03.mjs` |
+| `event_bus` / `bus/*` | Implemented in Rust/process/product; binding/lifecycle fences and Rust/product fixtures now execute; surviving-peer session-switch evidence still missing | `crates/octet-agent/src/extension_process/event_bus.rs`; `crates/octet-agent/tests/extension_event_bus.rs`; `crates/octet-coding-agent/src/extensions/bus_tests.rs`; [bus contract](../extensions/event-bus.md) |
+| `theme_selection` / `theme/select` | **Unavailable in product**; generated policy helper only | Product offer deliberately removes the capability and method in `extension_process.rs::api_v03_host_offer_for_services`; `tests/api_v03_runnable.rs::unimplemented_theme_selection_is_not_offered_and_returns_a_canonical_refusal` is refusal evidence, not implementation |
+| Configuration / migration PostMutation | Typed notifications + real read-only family consumers; emitter coverage remains owner-dependent | `ExecutableExtensions::notify_configuration_changed`, `notify_migration_ingested`, `rescan_post_mutation_resources`; `extensions/mutation_resources.rs`; `extensions/hook_tests.rs`; [hook contract](../extensions/HOOK-ENRICHMENT.md) |
 
-The `theme_selection` capability is granted by the host, keyed by the requesting
-extension and scoped to a host-owned selection; it cannot address another
-extension's namespace or persisted project trust. The authoring contract is
-documented in [docs/extensions/API-0.3-REFERENCE.md](../extensions/API-0.3-REFERENCE.md)
-and [docs/extensions.md](../extensions.md).
+The bus derives publisher identity and generation from the registered process,
+uses only typed scalar payloads, reserves every subscriber's bounded writer
+before committing a publication, and invalidates pending frames on generation,
+subscription, binding or session changes. Every request and event is scoped to
+the host-issued `binding_id`, and peers that select `event_bus` must also select
+the host-to-extension `bus/lifecycle` notification; a peer that cannot record a
+lifecycle change is retired rather than left on an apparently current stale
+binding. Subscribes distinguish an `active` subscription from a bounded `pending`
+interest. Product discovery binds one bus to isolated API `0.3` processes;
+legacy/shared runtimes do not acquire it. Host bus unit tests, two-process
+fixtures and product-discovery fixtures execute in the current receipts
+(`parity-next-agent-int-05`, `parity-next-coding-lib-04`), but no real
+active-session A→B→A switch with both processes surviving has been captured, so
+surviving-client recovery is not qualified.
 
-The `event_bus` row is honest about its state: publisher-only-owns-topic,
-per-extension bounded queues, unknown-topic/forbidden-field/PII fail-closed
-validation, and queue-pressure errors are implemented and tested in the SDK
-kernel, while the host capability, Rust service, and two-extension end-to-end
-fixture do not exist yet. Nothing in that row is claimed as usable end-to-end.
+Theme selection still needs a real extension-scoped presentation-role consumer
+and host-resolved non-widening catalog. Do not turn on the offer merely because
+the generated resolver passes tests, or reinterpret it as a global theme change.
+Neither a bus declaration nor a theme request changes persisted project trust.
+
+Configuration and migration rescans now understand opaque settings/MCP/skills
+resource families, with distinct process and resource-revision fences. General
+notification helpers are not proof of every product emitter. Configuration
+commit call sites are owned by the product integration worker; the standalone
+migration CLI still needs an already-authorized executable-extension observation
+owner and completed-transaction result plumbing. Dry-run/no-op/partial rollback
+must never emit, and no process may be started merely to manufacture notification
+coverage. See the current final verification record before claiming completion.
 
 ## MCP
 
@@ -142,10 +160,16 @@ capabilities here; neither is claimed.
   `extensions/octet-computer-use` -> `Ran 93 tests ... OK` (includes the unknown/replaced
   scope, stopped-binding and trusted stop/takeover regressions).
 - `python3 scripts/generate-extension-api-v03.py --check` -> exit `0`, no drift.
-- `PYTHONPATH=sdk/python python3 -m unittest discover -s sdk/python/tests` -> `Ran 101 tests ... OK`
-  (28 of them the new `tests/test_event_bus.py` bounded-bus cases).
-- **Not run here:** any host-mediated `bus/*` request (the host capability does not exist), any
-  two-extension end-to-end bus delivery, and any cross-process queue measurement.
+- `PYTHONPATH=sdk/python python3 -m unittest discover -s sdk/python/tests` -> ext-host
+  reported `Ran 107 tests ... OK` with 34 bounded-bus cases; the parent later reran
+  the same suite after the binding-scoped SDK repair -> **109 passed**
+  (`parity-next-sdk-python`).
+- Rust execution is parent-owned. The parent reran the agent and coding suites on a
+  stable snapshot: every agent target **819 passed, 0 failed**
+  (`parity-next-agent-int-05`) and the coding library **1521 passed, 1 ignored**
+  (`parity-next-coding-lib-04`), which include the real two-process bus, product
+  discovery and durable-write notification fixtures. TypeScript conformance passed
+  **47 fixtures** after the stale runtime artifact was regenerated.
 - **Not run here:** any live MCP remote, OAuth server or real credential; any native
   macOS/Windows automation on real hardware; any browser-window focus measurement.
   These remain the gates recorded above and are not compatibility claims.

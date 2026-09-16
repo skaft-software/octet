@@ -373,6 +373,7 @@ fn native_long_markdown_finish_retains_source_and_exactly_once_rows() {
     replay.shell.on_run_event(
         run,
         &AgentEvent::TurnFinished {
+            turn_cost: None,
             message: AssistantMessage {
                 content: vec![AssistantPart::Text(source.clone())],
                 model: ModelId("fixture".into()),
@@ -516,6 +517,7 @@ fn native_late_reference_finalization_repairs_history_once_then_stays_quiet() {
     replay.shell.on_run_event(
         run,
         &AgentEvent::TurnFinished {
+            turn_cost: None,
             message: AssistantMessage {
                 content: vec![AssistantPart::Text(source.clone())],
                 model: ModelId("fixture".into()),

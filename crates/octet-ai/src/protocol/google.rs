@@ -449,7 +449,7 @@ fn google_tool_config(choice: &ToolChoice, use_strict_mode: bool) -> Option<Valu
 
 fn google_generation_config(model: &crate::catalog::Model, req: &Request) -> Map<String, Value> {
     let mut config = Map::new();
-    if let Some(max_tokens) = req.max_output_tokens {
+    if let Some(max_tokens) = crate::effective_output_token_cap(model, req.max_output_tokens) {
         config.insert("maxOutputTokens".to_owned(), Value::from(max_tokens));
     }
     if let Some(temperature) = req.temperature {
@@ -1009,6 +1009,7 @@ mod tests {
     fn model_with_api_name(api_name: &str) -> Model {
         Model {
             spec: std::sync::Arc::new(ModelSpec {
+                preset: Default::default(),
                 id: ModelId("gemini-test".to_owned()),
                 api_name: api_name.to_owned(),
                 display_name: None,

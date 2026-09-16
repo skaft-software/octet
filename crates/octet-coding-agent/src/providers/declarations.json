@@ -272,7 +272,7 @@
       "routes": [
         {
           "endpoint_id": "xai",
-          "protocol": "openai_chat",
+          "protocol": "openai_responses",
           "transport": "http",
           "body_encoding": "identity",
           "auth_presentation": "bearer",
@@ -1019,7 +1019,7 @@
           "body_encoding": "identity",
           "auth_presentation": "header",
           "auth_header": "api-key",
-          "responses_profile": "default"
+          "responses_profile": "azure"
         }
       ],
       "route_rules": [

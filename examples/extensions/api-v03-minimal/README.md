@@ -85,5 +85,16 @@ generated API and cross-language fixture check remains:
 python3 scripts/generate-extension-api-v03.py --check
 ```
 
-For the host-side qualification, run the Rust `api_v03_runnable` integration
-test from the repository's permitted build/test slot.
+For host-side qualification, run the Rust `api_v03_runnable` integration test
+from the repository's permitted build/test slot. It first verifies that this
+published manifest retains its exact `=0.7.6` runtime pin and rejects a
+nonmatching host. It then stages a **private temporary copy**, preserves the
+executable source bytes, extension version `0.1.0`, and API `0.3`, and changes
+only that copy's runtime requirement to the current crate's exact Cargo version.
+The ordinary host runs negotiation, tool, cancellation, and shutdown checks
+against the staged copy.
+
+A passing staged test on a newer development host is source/wire qualification,
+**not** evidence that the unchanged `0.7.6` release example installs or runs on
+that host. The published manifest, SDK distribution versions, and runtime-pin
+validation are not changed by the test.

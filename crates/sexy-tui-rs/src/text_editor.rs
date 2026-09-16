@@ -483,6 +483,10 @@ impl TextEditor {
         let changed = self.cursor != cursor;
         self.cursor = cursor;
         self.preferred_column = None;
+        // Embeddings use this setter for mapped visual motion. It must end a
+        // typing/kill/yank run exactly like the model's own movement actions.
+        self.last_action = None;
+        self.last_yank = None;
         if changed {
             self.touch_cursor();
         }

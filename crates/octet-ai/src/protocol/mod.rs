@@ -59,6 +59,8 @@ pub(crate) fn cache_control(
 pub(crate) mod anthropic;
 pub(crate) mod bedrock;
 pub(crate) mod google;
+pub(crate) mod grammar;
+pub(crate) mod preset;
 pub(crate) mod mistral_conversations;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;
@@ -359,6 +361,7 @@ pub(crate) mod harness {
             .with(Modality::Audio);
         let output = ModalitySet::none().with(Modality::Audio);
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("fixture-model".to_string()),
             endpoint: EndpointId("fixture-ep".to_string()),
             api_name: "fixture-api-name".to_string(),

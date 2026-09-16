@@ -113,6 +113,9 @@ impl RetryActivity {
             Some(octet_agent::ProviderOperation::TerminalGate) => {
                 format!("Final-answer check · {activity}")
             }
+            Some(octet_agent::ProviderOperation::BranchSummary) => {
+                format!("Branch summary · {activity}")
+            }
             None => activity,
         };
         if remaining.is_zero() {
@@ -369,5 +372,30 @@ impl AssistantBlock {
         self.layout
             .borrow_mut()
             .render_lines(&self.markdown, renderer, width, !use_plain)
+    }
+}
+
+#[cfg(test)]
+mod retry_activity_tests {
+    use super::*;
+
+    #[test]
+    fn branch_summary_retry_is_named_separately_from_compaction() {
+        let now = Instant::now();
+        let activity = RetryActivity {
+            operation: Some(octet_agent::ProviderOperation::BranchSummary),
+            attempt: 2,
+            max_attempts: Some(3),
+            delay: Duration::from_secs(1),
+            observed_at: now,
+        };
+        assert_eq!(
+            activity.label_at(now),
+            "Branch summary · Retrying 2/3 in 1s"
+        );
+        assert_eq!(
+            activity.label_at(now + Duration::from_secs(2)),
+            "Branch summary · Retrying 2/3"
+        );
     }
 }

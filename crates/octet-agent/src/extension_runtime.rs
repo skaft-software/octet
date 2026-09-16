@@ -2039,6 +2039,7 @@ impl ExtensionSessionBinding {
             }
             if config.agent_sessions
                 || config.session_lifecycle.is_some()
+                || config.event_bus.is_some()
                 || config.approvals
                 || config.secret_broker.is_some()
             {

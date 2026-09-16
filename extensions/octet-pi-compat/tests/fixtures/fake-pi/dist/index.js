@@ -262,6 +262,25 @@ export class SettingsManager {
   }
 }
 
+// Deliberately limited fixture model of Pi's public inert package resolver.
+// Production delegates manifest/glob semantics to the installed Pi runtime.
+export class DefaultPackageManager {
+  constructor(options) {
+    if (options.settingsManager?.fixtureInMemory !== true) throw new Error("resolver requires in-memory settings");
+  }
+  async resolveExtensionSources(paths, options) {
+    if (options?.temporary !== true) throw new Error("resolver requires explicit temporary sources");
+    const extensions = paths.flatMap((path) => {
+      if (!lstatSync(path).isDirectory()) return [{ path, enabled: true }];
+      const manifestPath = join(path, "package.json");
+      const manifest = existsSync(manifestPath)
+        ? JSON.parse(readFileSync(manifestPath, "utf8").replace(/^\uFEFF/, "")) : null;
+      return (manifest?.pi?.extensions ?? []).map((entry) => ({ path: resolve(path, entry), enabled: true }));
+    });
+    return { extensions };
+  }
+}
+
 export class DefaultResourceLoader {
   constructor(options) {
     if (options.settingsManager?.fixtureInMemory !== true) {
@@ -311,6 +330,7 @@ export class ExtensionRunner {
     this.tools = [
       makeTool("fixture_echo", async (_id, input) => {
         console.log("fixture tool console output", input.value ?? "");
+        if (fixtureMode === "validation") console.error(`fixture execution input type: ${typeof input.value}`);
         return {
           content: [
             { type: "text", text: input.value ?? "echo" },
@@ -329,6 +349,10 @@ export class ExtensionRunner {
         return { content: [{ type: "text", text: "complete" }] };
       }),
     ];
+    if (fixtureMode === "prepared-input") {
+      this.tools[0].definition.prepareArguments = (args) => args.raw === "invalid"
+        ? { value: { invalid: true } } : { value: String(args.raw) };
+    }
     if (fixtureApiVersion === "0.3") {
       this.tools.push(makeTool("fixture_hold", async (_id, _input, signal) => {
         await new Promise((resolve) => {
@@ -700,13 +724,14 @@ export class ExtensionRunner {
   }
 
   async emitToolCall(event) {
-    this.ui?.notify("event:tool_call:start");
+    if (fixtureApiVersion === "0.2") this.ui?.notify("event:tool_call:start");
+    if (fixtureMode === "invalid-hook-input") event.input.value = { invalid: true };
     if (event.input?.mutateNative) event.input.value = "mutated";
     const result = {
       block: false,
       ...(event.input?.terminate ? { terminate: true } : {}),
     };
-    this.ui?.notify("event:tool_call:end");
+    if (fixtureApiVersion === "0.2") this.ui?.notify("event:tool_call:end");
     return result;
   }
 

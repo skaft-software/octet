@@ -395,7 +395,14 @@ pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
     match reconfig {
         Reconfig::Model(id) => {
             let model = app.catalog.resolve(&id)?;
-            bootstrap::rebuild_app(app, Some(model), None, None, None)
+            let reasoning = app
+                .model_scope
+                .as_ref()
+                .and_then(|scope| scope.iter().find(|entry| entry.id == id))
+                .and_then(|entry| entry.reasoning.as_deref())
+                .map(crate::config::parse_reasoning)
+                .transpose()?;
+            bootstrap::rebuild_app(app, Some(model), reasoning, None, None)
         }
         Reconfig::Thinking(reasoning) => {
             bootstrap::rebuild_app(app, None, Some(reasoning), None, None)
@@ -430,6 +437,9 @@ pub struct App {
     pub client: AiClient,
     pub config: Config,
     pub catalog: ModelCatalog,
+    /// Ordered invocation scope; None means the whole available catalog.
+    /// Retained through rebuilds, never written as a project trust/default.
+    pub model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
     pub sessions: SessionStore,
     pub reasoning: ReasoningConfig,
     pub reasoning_mode: ReasoningMode,
@@ -475,6 +485,72 @@ fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) ->
 }
 
 impl App {
+    /// Resolve an invocation's ordered patterns against this effective catalog.
+    /// This only controls cycling; explicit model selection remains available.
+    pub fn set_model_scope_patterns(&mut self, patterns: Option<&str>) -> anyhow::Result<()> {
+        self.model_scope = patterns
+            .map(|patterns| {
+                let patterns = crate::cli::parity::model_patterns(patterns)?;
+                let available = self
+                    .catalog
+                    .models()
+                    .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+                    .collect::<Vec<_>>();
+                crate::cli::parity::select_scoped_models(&patterns, &available)
+            })
+            .transpose()?;
+        Ok(())
+    }
+
+    /// Available cycling targets in scope order, or stable catalog order.
+    pub fn model_cycle(&self) -> Vec<String> {
+        match &self.model_scope {
+            Some(scope) => scope
+                .iter()
+                .filter(|entry| self.catalog.resolve(&entry.id).is_ok())
+                .map(|entry| entry.id.0.clone())
+                .collect(),
+            None => {
+                let mut models = self
+                    .catalog
+                    .models()
+                    .map(|spec| spec.id.0.clone())
+                    .collect::<Vec<_>>();
+                models.sort();
+                models
+            }
+        }
+    }
+
+    /// Select priority service for this live session. This is an idle-boundary
+    /// control: the running Agent cannot be mutably borrowed at the same time.
+    /// It survives compatible rebuilds, not a restart or a different session.
+    pub fn set_fast_mode(&mut self, enabled: bool) -> anyhow::Result<()> {
+        if !crate::commands::codex_fast_tier_endpoint(&self.model) {
+            anyhow::bail!("fast mode is unavailable on this model route");
+        }
+        // Priority billing is not fully qualified across requests and hard
+        // reservations. Persist uncertainty before selecting a billing-changing
+        // tier; disabling it must not erase that sticky exposure.
+        if enabled
+            && !self
+                .agent
+                .session()
+                .usage_uncertainty_records()
+                .iter()
+                .any(|record| record.operation == "responses-priority-tier")
+        {
+            self.agent.session_mut().record_usage_uncertainty(
+                self.model.endpoint.id.clone(),
+                self.model.spec.id.clone(),
+                "responses-priority-tier",
+            )?;
+        }
+        self.agent
+            .set_service_tier(enabled.then_some(octet_ai::ServiceTier::Priority))?;
+        Ok(())
+    }
+
     /// Whether this application has the owner-bound subagent observer needed
     /// before Ultra may be selected or submitted.
     pub fn subagents_available(&self) -> bool {
@@ -520,6 +596,20 @@ impl App {
     /// The live extension-provided routes are re-projected onto the fresh fleet
     /// catalog, so enrichment cannot drop them. The agent, the session, and the
     /// active model are untouched.
+    /// Complete the catalog for one surface that is about to enumerate routes,
+    /// reporting a failure instead of hiding a partial provider list.
+    ///
+    /// Surfaces call this immediately before they build their list, so the
+    /// deferred discovery happens only when someone asks to see every provider.
+    pub fn enrich_catalog_for_surface(&mut self) -> Option<String> {
+        match self.enrich_catalog() {
+            Ok(()) => None,
+            Err(error) => Some(format!(
+                "could not load every provider: {error}; showing the current launch's routes"
+            )),
+        }
+    }
+
     pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
         use crate::app::bootstrap::{model_catalog_for_readiness, CatalogReadiness};
         if self.readiness.is_fleet() {

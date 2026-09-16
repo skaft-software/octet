@@ -3312,14 +3312,40 @@ mod tests {
             return;
         }
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let fake_pi = workspace_root.join("extensions/octet-pi-compat/tests/fixtures/fake-pi");
-        if !fake_pi.exists() {
+        let fixtures = workspace_root.join("extensions/octet-pi-compat/tests/fixtures");
+        if !fixtures.join("fake-pi").exists() {
             return;
         }
         let temp = canonical_tempdir();
+        let fake_pi = temp.path().join("fake-pi");
+        // Source archives reject node_modules; assemble the authored fake only
+        // inside this test's disposable runtime, never in the fixture tree.
+        for (source, destination) in [
+            ("fake-pi/package.json", "package.json"),
+            ("fake-pi/dist/index.js", "dist/index.js"),
+            (
+                "fake-pi-ai/package.json",
+                "node_modules/@earendil-works/pi-ai/package.json",
+            ),
+            (
+                "fake-pi-ai/index.js",
+                "node_modules/@earendil-works/pi-ai/index.js",
+            ),
+        ] {
+            let destination = fake_pi.join(destination);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(fixtures.join(source), destination).unwrap();
+        }
         let fixture_extension = temp.path().join("pi-source");
         fs::create_dir_all(fixture_extension.join("nested")).unwrap();
         fs::create_dir_all(fixture_extension.join("node_modules/ignored")).unwrap();
+        // Pi's implicit directory entrypoints are index.ts/index.js. This
+        // authored .mjs fixture must declare its exact entrypoint explicitly.
+        fs::write(
+            fixture_extension.join("package.json"),
+            br#"{"name":"pi-host-integration-fixture","version":"1.0.0","type":"module","pi":{"extensions":["./index.mjs"]}}"#,
+        )
+        .unwrap();
         fs::write(
             fixture_extension.join("index.mjs"),
             b"export default function fixtureExtension() {}\n",

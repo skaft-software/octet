@@ -24,6 +24,17 @@ class ExtensionApiV03ConformanceTests(unittest.TestCase):
             callback()  # type: ignore[operator]
         return caught.exception.code
 
+    def test_provider_model_wire_does_not_accept_presets_or_headers(self) -> None:
+        for field, value in (("headers", {"authorization": "private-value"}),
+                             ("preset", {"headers": {"authorization": "private-value"}})):
+            with self.subTest(field=field):
+                request = self.fixture("provider-register-params")
+                request["models"][0][field] = value
+                self.assertEqual(
+                    self.error_code(lambda: api.parse_provider_register_params(request)),
+                    -32602,
+                )
+
     def test_previous_first_party_wire_identity_is_not_an_alias(self) -> None:
         current = dict(self.fixture("initialize-request"))
         self.assertEqual(current["octet_version"], "0.7.0")

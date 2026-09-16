@@ -4,8 +4,8 @@ The bus is fail-closed and bounded by construction: unknown or foreign topics,
 payloads that do not match the declared topic spec, credential/PII/path-shaped
 data, and queue pressure are all refused instead of silently degraded. These
 tests exercise the SDK enforcement kernel plus the extension-side participant
-with an injected host-request callable (the host does not implement ``bus/*``
-yet, so the end-to-end path stays UNRUN and is documented).
+with an injected host-request callable. Real Rust process/product fixtures are
+separate; their execution is parent-owned and is not implied by SDK checks.
 """
 
 from __future__ import annotations
@@ -34,6 +34,17 @@ from octet_extension.event_bus import (  # noqa: E402
     validate_topic,
 )
 from octet_extension.protocol import RpcError  # noqa: E402
+
+
+BINDING_ID = "host-binding-1"
+
+
+def bind(bus: HostEventBus, binding_id: str = BINDING_ID, revision: int = 1) -> HostEventBus:
+    """Deliver the host's binding notice, which every operation now requires."""
+    assert bus.accept_lifecycle(
+        {"kind": "binding", "binding_id": binding_id, "binding_revision": revision}
+    )
+    return bus
 
 
 def status_topic(owner: str = "alpha") -> TopicSpec:
@@ -292,7 +303,9 @@ class KernelTests(unittest.TestCase):
                 "topic": "bus.alpha.status",
                 "publisher": "alpha",
                 "sequence": 1,
-                "publishedAtMs": 1000,
+                "published_at_ms": 1000,
+                "binding_id": "",
+                "publisher_instance_id": "", "process_generation": 0,
                 "payload": {"summary": "ok", "count": 1, "phase": "ready"},
             },
             envelope.public(),
@@ -307,17 +320,29 @@ class HostEventBusClientTests(unittest.TestCase):
         self.calls = []
 
     def make_bus(self, extension_id: str, responder=None) -> HostEventBus:
-        def request(method, params):
+        def request(method, params, cancelled):
             self.calls.append((method, params))
             if responder is not None:
-                return responder(method, params)
-            return {"sequence": 7}
+                return responder(method, params, cancelled)
+            if method == "bus/publish":
+                return {"binding_id": BINDING_ID, "sequence": 7, "published_at_ms": 5000}
+            if method == "bus/subscribe":
+                return {
+                    "state": "active",
+                    "binding_id": BINDING_ID,
+                    "topic_revision": 1,
+                    "publisher_instance_id": "instance-alpha",
+                    "process_generation": 1,
+                }
+            return {"binding_id": BINDING_ID}
 
-        return HostEventBus(
-            request,
-            self.registry,
-            extension_id=extension_id,
-            now_ms=lambda: 5_000,
+        return bind(
+            HostEventBus(
+                request,
+                self.registry,
+                extension_id=extension_id,
+                now_ms=lambda: 5_000,
+            )
         )
 
     def test_subscribe_and_publish_use_the_host_methods(self) -> None:
@@ -330,13 +355,13 @@ class HostEventBusClientTests(unittest.TestCase):
         self.assertEqual(7, envelope.sequence)
         self.assertEqual(
             [
-                ("bus/subscribe", {"topic": "bus.beta.status"}),
+                ("bus/subscribe", {"topic": "bus.beta.status", "binding_id": BINDING_ID}),
                 (
                     "bus/publish",
                     {
                         "topic": "bus.alpha.status",
                         "payload": {"summary": "ok", "count": 2, "phase": "ready"},
-                        "publishedAtMs": 5000,
+                        "binding_id": BINDING_ID,
                     },
                 ),
             ],
@@ -356,7 +381,7 @@ class HostEventBusClientTests(unittest.TestCase):
         self.assertEqual([], self.calls)
 
     def test_host_failure_is_propagated_not_swallowed(self) -> None:
-        def failing(method, params):
+        def failing(method, params, cancelled):
             raise RpcError(-32601, "unknown or unnegotiated method")
 
         bus = self.make_bus("alpha", failing)
@@ -373,7 +398,9 @@ class HostEventBusClientTests(unittest.TestCase):
                 "topic": "bus.alpha.status",
                 "publisher": "alpha",
                 "sequence": 3,
-                "publishedAtMs": 4_900,
+                "published_at_ms": 4_900,
+                "binding_id": BINDING_ID,
+                "publisher_instance_id": "instance-alpha", "process_generation": 1,
                 "payload": {"summary": "ok", "count": 1, "phase": "ready"},
             }
         )
@@ -387,7 +414,9 @@ class HostEventBusClientTests(unittest.TestCase):
             "topic": "bus.alpha.status",
             "publisher": "alpha",
             "sequence": 1,
-            "publishedAtMs": 4_900,
+            "published_at_ms": 4_900,
+                "binding_id": BINDING_ID,
+                "publisher_instance_id": "instance-alpha", "process_generation": 1,
             "payload": {"summary": "ok", "count": 1, "phase": "ready"},
         }
         cases = (
@@ -412,7 +441,9 @@ class HostEventBusClientTests(unittest.TestCase):
                 "topic": "bus.alpha.status",
                 "publisher": "alpha",
                 "sequence": 2,
-                "publishedAtMs": 4_900,
+                "published_at_ms": 4_900,
+                "binding_id": BINDING_ID,
+                "publisher_instance_id": "instance-alpha", "process_generation": 1,
                 "payload": {"summary": "ok", "count": 1, "phase": "ready"},
             }
         )
@@ -422,7 +453,9 @@ class HostEventBusClientTests(unittest.TestCase):
                     "topic": "bus.alpha.status",
                     "publisher": "alpha",
                     "sequence": 1,
-                    "publishedAtMs": 4_900,
+                    "published_at_ms": 4_900,
+                    "binding_id": BINDING_ID,
+                "publisher_instance_id": "instance-alpha", "process_generation": 1,
                     "payload": {"summary": "ok", "count": 1, "phase": "ready"},
                 }
             )
@@ -446,6 +479,102 @@ class ContractStatusTests(unittest.TestCase):
     def test_errors_map_to_protocol_codes(self) -> None:
         error = BusError(RESOURCE_EXHAUSTED, "queue_full")
         self.assertEqual({"code": -32012, "reason": "queue_full"}, error.error_object())
+
+
+class HostMediationRegressions(unittest.TestCase):
+    def test_all_limits_can_only_be_lowered(self):
+        for name, field in BusLimits.__dataclass_fields__.items():
+            with self.assertRaises(BusError):
+                BusLimits(**{name: field.default + 1})
+
+    def test_registry_screens_enums_and_rejects_invalid_types_and_bounds(self):
+        fields = (
+            FieldSpec.enum("summary", ("user@example.com",)),
+            FieldSpec("summary", "object"),
+            FieldSpec.integer("count", minimum=3, maximum=1),
+            FieldSpec.string("summary", max_bytes=1025),
+        )
+        for field in fields:
+            with self.assertRaises(BusError):
+                TopicRegistry().declare(TopicSpec("alpha", "status", (field,)))
+
+    def test_queue_pressure_never_partially_fans_out(self):
+        kernel = EventBusKernel(BusLimits(max_queue_messages=1))
+        kernel.declare(status_topic())
+        for peer in ("beta", "gamma"):
+            kernel.subscribe(peer, "bus.alpha.status")
+        payload = {"summary": "safe", "count": 1, "phase": "ready"}
+        kernel.publish("alpha", "bus.alpha.status", payload, published_at_ms=1)
+        kernel.deliver("beta", "bus.alpha.status")
+        with self.assertRaises(BusError):
+            kernel.publish("alpha", "bus.alpha.status", payload, published_at_ms=2)
+        self.assertEqual([], kernel.deliver("beta", "bus.alpha.status"))
+        kernel.deliver("gamma", "bus.alpha.status")
+        self.assertEqual(2, kernel.publish("alpha", "bus.alpha.status", payload, published_at_ms=3).sequence)
+
+    def test_peer_queue_budgets_cover_all_subscribed_topics_before_fanout(self):
+        for limits, reason in ((BusLimits(max_queue_messages=1), "queue_full"),
+                               (BusLimits(max_queue_bytes=14), "queue_bytes_exceeded")):
+            with self.subTest(reason=reason):
+                kernel = EventBusKernel(limits)
+                for name in ("first", "second"):
+                    kernel.declare(TopicSpec(owner="alpha", name=name, fields=(FieldSpec.boolean("ready"),)))
+                    kernel.subscribe("beta", "bus.alpha." + name)
+                kernel.subscribe("gamma", "bus.alpha.second")
+                first = kernel.publish("alpha", "bus.alpha.first", {"ready": True}, published_at_ms=1)
+                with self.assertRaises(BusError) as caught:
+                    kernel.publish("alpha", "bus.alpha.second", {"ready": True}, published_at_ms=2)
+                self.assertEqual(reason, caught.exception.reason)
+                self.assertEqual([], kernel.deliver("gamma", "bus.alpha.second"))
+                self.assertEqual([first], kernel.deliver("beta", "bus.alpha.first"))
+                self.assertEqual(1, kernel.publish("alpha", "bus.alpha.second", {"ready": True}, published_at_ms=3).sequence)
+
+    def test_declaration_is_sent_to_host_and_failed_ack_never_installs_locally(self):
+        registry = TopicRegistry()
+        calls = []
+        bus = bind(HostEventBus(
+            lambda method, params, cancelled: (
+                calls.append((method, params)),
+                {"binding_id": BINDING_ID},
+            )[1],
+            registry,
+            extension_id="alpha",
+        ))
+        bus.declare(name="status", fields=(FieldSpec.boolean("ready"),))
+        self.assertEqual("bus/declare", calls[0][0])
+        from octet_extension.api_v03 import BusDeclareParams
+        BusDeclareParams.from_wire(calls[0][1])
+        def fail(method, params, cancelled):
+            raise RpcError(-32601, "unknown or unnegotiated method")
+        empty = TopicRegistry()
+        bus = bind(HostEventBus(fail, empty, extension_id="alpha"))
+        with self.assertRaises(RpcError):
+            bus.declare(name="status", fields=(FieldSpec.boolean("ready"),))
+        self.assertEqual((), empty.topics())
+
+    def test_generated_bus_wire_refuses_client_identity_and_time(self):
+        from octet_extension.api_v03 import BusPublishParams, ContractError
+        for key, value in (("publisher", "beta"), ("published_at_ms", 1), ("process_generation", 1)):
+            with self.assertRaises(ContractError):
+                BusPublishParams.from_wire({"topic": "bus.alpha.status", "payload": {}, key: value})
+
+    def test_false_publish_ack_is_not_reported_as_success(self):
+        registry = TopicRegistry()
+        registry.declare(status_topic())
+        for reply in (
+            {},
+            {"sequence": 0, "published_at_ms": 1},
+            {"sequence": True, "published_at_ms": 1},
+        ):
+            # A binding-scoped ack must still carry the captured incarnation and
+            # a positive integer sequence; anything else is refused.
+            bus = bind(HostEventBus(
+                lambda method, params, cancelled, reply=reply: {"binding_id": BINDING_ID, **reply},
+                registry,
+                extension_id="alpha",
+            ))
+            with self.assertRaises(BusError):
+                bus.publish("bus.alpha.status", {"summary": "safe", "count": 1, "phase": "ready"})
 
 
 if __name__ == "__main__":

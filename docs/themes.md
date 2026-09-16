@@ -38,10 +38,16 @@ onboarding.
 `Thinking` and `Working` use model-family foreground colours only; the shimmer never
 paints a character background. On a dark profile the resting label is a readable
 light foreground with a narrow darker sweep. On a light profile the foreground
-and sweep invert. Reduced-motion and no-colour profiles keep a static readable
-label. The qualification fixture checks representative dark/light composited
-surfaces; it does not measure an arbitrary terminal's real transparency or
-replace choosing the appearance profile that matches that terminal.
+and sweep invert. The margin dot has a quieter resting foreground and gains
+contrast as that same sweep crosses it: brighter on dark profiles, darker on
+light ones, without changing its glyph or size. The sweep crosses the whole
+label before both dot and label return to rest.
+
+Reduced-motion and no-colour profiles keep the label and dot static. The
+unknown-background fallback is unchanged. The qualification fixture checks
+representative dark/light composited surfaces; it does not measure an arbitrary
+terminal's real transparency or replace choosing the appearance profile that
+matches that terminal. Custom ANSI16 palettes can also change perceived contrast.
 
 ## Startup and terminal replies
 

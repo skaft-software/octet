@@ -28,17 +28,36 @@ const SSE_BODY: &str = concat!(
 struct LoopbackApi {
     url: String,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// Inventory served for any `*/models` discovery request.
+    discovery_body: Arc<Mutex<serde_json::Value>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl LoopbackApi {
     fn start() -> Self {
+        Self::with_base_path("/v1/")
+    }
+
+    /// A provider whose discovery is sparse: the inventory returns identifiers
+    /// only, exactly like DeepSeek's `GET /models`, and the request paths are
+    /// rooted at the base URL rather than `/v1/`.
+    fn start_sparse_inventory(provider_body: serde_json::Value) -> Self {
+        let server = Self::with_base_path("/");
+        *server.discovery_body.lock().unwrap() = provider_body;
+        server
+    }
+
+    fn with_base_path(base_path: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         listener.set_nonblocking(true).expect("nonblocking listener");
-        let url = format!("http://{}/v1/", listener.local_addr().unwrap());
+        let url = format!("http://{}{base_path}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let discovery_body = Arc::new(Mutex::new(serde_json::json!({
+            "data": [{"id": "probe"}, {"id": "alpha-model"}]
+        })));
+        let served_discovery = discovery_body.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let worker = thread::spawn(move || {
@@ -95,10 +114,10 @@ impl LoopbackApi {
                     }
                 }
                 let (content_type, body): (&str, String) =
-                    if headers.starts_with("GET /v1/models ") {
+                    if headers.starts_with("GET ") && headers.contains("/models ") {
                         (
                             "application/json",
-                            r#"{"data":[{"id":"probe"},{"id":"alpha-model"}]}"#.to_owned(),
+                            served_discovery.lock().unwrap().to_string(),
                         )
                     } else {
                         ("text/event-stream", SSE_BODY.to_owned())
@@ -116,6 +135,7 @@ impl LoopbackApi {
         Self {
             url,
             requests,
+            discovery_body,
             stop,
             worker: Some(worker),
         }
@@ -243,6 +263,16 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
+        self.command_inner(true)
+    }
+
+    /// The same isolated environment without `--offline`, for the cases that
+    /// must exercise a provider's live discovery against a loopback endpoint.
+    fn command_online(&self) -> Command {
+        self.command_inner(false)
+    }
+
+    fn command_inner(&self, offline: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_octet"));
         command
             .current_dir(&self.workspace)
@@ -251,8 +281,11 @@ impl Fixture {
             .env("PATH", "/usr/bin:/bin")
             .env("PWD", &self.workspace)
             .env("TERM", "dumb")
-            .env("LANG", "C.UTF-8")
-            .args(["--offline", "--no-context-files", "--no-tools"])
+            .env("LANG", "C.UTF-8");
+        if offline {
+            command.arg("--offline");
+        }
+        command.args(["--no-context-files", "--no-tools"])
             .arg("--workspace")
             .arg(&self.workspace)
             .arg("--session-dir")
@@ -738,6 +771,133 @@ fn codex_context_window_override_is_accepted_with_the_acknowledgement() {
     assert!(stdout_of(&accepted).contains(ASSISTANT_TEXT));
 }
 
+/// A documented vision model from a provider whose live inventory is sparse must
+/// accept an image in the real CLI, and a snapshot entry that declares text-only
+/// input must still refuse it. This is the process-level counterpart of
+/// `sparse_inventory_inherits_pinned_image_input_without_overriding_endpoint_assertions`.
+#[test]
+fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() {
+    let api = LoopbackApi::start_sparse_inventory(serde_json::json!({
+        "object": "list",
+        "data": [
+            {"id": "deepseek-flash", "object": "model"},
+            {"id": "deepseek-v4-pro", "object": "model"}
+        ]
+    }));
+    let fixture = Fixture::new(None);
+    std::fs::write(
+        fixture.workspace.join("pixel.png"),
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+    )
+    .unwrap();
+    let mut command = fixture.command_online();
+    command
+        .env("DEEPSEEK_API_KEY", "fixture-deepseek-key")
+        .env("OCTET_DEEPSEEK_BASE_URL", api.url.trim_end_matches('/'));
+    let output = command
+        .args([
+            "--model",
+            "deepseek/deepseek-flash",
+            "--print",
+            "@pixel.png",
+            "describe the image",
+        ])
+        .output()
+        .expect("run isolated octet against the sparse-inventory provider");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+    assert!(
+        !stderr_of(&output).contains("Image input is unsupported"),
+        "the documented vision model must admit the image: {}",
+        stderr_of(&output)
+    );
+    let requests = api.chat_requests();
+    assert_eq!(requests.len(), 1, "one bounded inference request");
+    let submitted = requests[0].to_string();
+    assert!(
+        submitted.contains("data:image/png;base64,"),
+        "the image must be submitted as bounded base64 media: {submitted}"
+    );
+    assert_eq!(requests[0]["model"], "deepseek-flash");
+
+    // The model list must report the documented window and image input, not the
+    // generic 128K/64K placeholder and no-images default.
+    let mut command = fixture.command_online();
+    command
+        .env("DEEPSEEK_API_KEY", "fixture-deepseek-key")
+        .env("OCTET_DEEPSEEK_BASE_URL", api.url.trim_end_matches('/'));
+    let listed = command
+        .args(["--list-models", "deepseek"])
+        .output()
+        .expect("list discovered models");
+    let listing = stdout_of(&listed);
+    assert!(listed.status.success(), "{listing}");
+    let flash_row = listing
+        .lines()
+        .find(|line| line.contains("deepseek/deepseek-flash"))
+        .unwrap_or_else(|| panic!("missing discovered model row: {listing}"));
+    // Columns are provider, model, context, max-out, thinking, images.
+    let fields: Vec<&str> = flash_row.split_whitespace().collect();
+    assert!(
+        fields.contains(&"1000000"),
+        "the documented 1M context must be reported, not 128K: {flash_row}"
+    );
+    assert!(
+        fields.contains(&"384000"),
+        "the documented 384K output cap must be reported: {flash_row}"
+    );
+    assert_eq!(
+        fields.last(),
+        Some(&"true"),
+        "the documented image input must be reported: {flash_row}"
+    );
+    let pro_row = listing
+        .lines()
+        .find(|line| line.contains("deepseek/deepseek-v4-pro"))
+        .unwrap_or_else(|| panic!("missing text-only row: {listing}"));
+    assert_eq!(
+        pro_row.split_whitespace().last(),
+        Some("false"),
+        "the text-only snapshot entry must not report image input: {pro_row}"
+    );
+
+    // The same sparse inventory is text-only for V4 Pro in the pinned snapshot,
+    // so the fix must not have granted the capability by provider or family.
+    let mut command = fixture.command_online();
+    command
+        .env("DEEPSEEK_API_KEY", "fixture-deepseek-key")
+        .env("OCTET_DEEPSEEK_BASE_URL", api.url.trim_end_matches('/'));
+    let text_only = command
+        .args([
+            "--model",
+            "deepseek/deepseek-v4-pro",
+            "--print",
+            "@pixel.png",
+            "describe the image",
+        ])
+        .output()
+        .expect("run isolated octet against the text-only snapshot entry");
+    assert!(
+        !text_only.status.success(),
+        "a snapshot text-only model must refuse the media: {}",
+        stdout_of(&text_only)
+    );
+    assert!(
+        stderr_of(&text_only).contains("Image input is unsupported"),
+        "diagnostic: {}",
+        stderr_of(&text_only)
+    );
+    assert_eq!(
+        api.chat_requests().len(),
+        1,
+        "the refusal happens before any provider request"
+    );
+}
+
 /// 5.10 — `catalog publish` fails closed on a checksum mismatch, publishes the
 /// exact bytes once every gate agrees, and refuses to replace the immutable
 /// destination afterwards.
@@ -947,6 +1107,203 @@ fn sessions_export_html_is_a_single_script_free_self_contained_file() {
             .count(),
         1,
         "the export is exactly one file"
+    );
+}
+
+/// Export redaction runs before both the rich rendering and raw-record fallback.
+#[test]
+fn sessions_export_preserves_metadata_visibility_and_requires_explicit_secrets_opt_in() {
+    use octet_agent::{
+        EntryMetadata, EntryValue, ExtensionEntryMetadata, ExtensionMetadataProvenance, Session,
+    };
+    use octet_ai::{
+        AssistantMessage, AssistantPart, Message, ModelId, Protocol, ToolCall, ToolCallId,
+        ToolResult, ToolResultPart, UserMessage, UserPart,
+    };
+
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let id = "html-redaction";
+    let secrets = [
+        "ghp_titlevalue12345678",
+        "xoxb-namevalue123456",
+        "hf_tagvalue123456",
+        "argument-secret-value",
+        "result-secret-value",
+        "extension-secret-value",
+    ];
+    assert_success(&fixture.run(&[
+        "--model",
+        "custom/probe",
+        "--print",
+        "--session-id",
+        id,
+        "--name",
+        secrets[1],
+        secrets[0],
+    ]));
+    assert_success(&fixture.run(&["sessions", "tag", id, secrets[2]]));
+    let transcript = session_transcript(&fixture, id).expect("created transcript");
+    let mut session = Session::open(&transcript).unwrap();
+    let call_id = ToolCallId("export-call".into());
+    session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            content: vec![AssistantPart::ToolCall(ToolCall {
+                id: call_id.clone(),
+                name: "fixture-export".into(),
+                arguments_json: serde_json::json!({"client_secret": secrets[3]}).to_string(),
+                argument_error: None,
+            })],
+            model: ModelId("fixture".into()),
+            protocol: Protocol::OpenAiChat,
+        })))
+        .unwrap();
+    session.append_with_metadata(EntryValue::Message(Message::User(UserMessage {
+        content: vec![UserPart::ToolResult(ToolResult {
+            tool_call_id: call_id,
+            content: vec![ToolResultPart::Text(format!("Authorization: Bearer {}", secrets[4]))],
+            is_error: false, added_tool_names: None,
+        })],
+    })), Some(EntryMetadata {
+        extension_metadata: std::collections::BTreeMap::from([("fixture.export".into(), ExtensionEntryMetadata {
+            public: true,
+            value: serde_json::json!({"api_key": secrets[5], "Image": "asset classification", "Audio": "description"}),
+            provenance: ExtensionMetadataProvenance { extension: "fixture.export".into(), process_generation: Some(1) },
+        })]),
+        ..EntryMetadata::default()
+    })).unwrap();
+    let selected_head = session.head().unwrap();
+    let private_values = [
+        ("fixture.private", "ORCHID-ONLY-OWNER-ANNOTATION"),
+        ("fixture.default", "VIOLET-ONLY-OWNER-ANNOTATION"),
+    ];
+    session
+        .append_with_metadata(
+            EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("Abandoned branch".into())],
+            })),
+            Some(EntryMetadata {
+                extension_metadata: private_values
+                    .iter()
+                    .map(|(namespace, text)| {
+                        (
+                            (*namespace).into(),
+                            ExtensionEntryMetadata {
+                                public: false,
+                                value: serde_json::json!({"note": text}),
+                                provenance: ExtensionMetadataProvenance {
+                                    extension: (*namespace).into(),
+                                    process_generation: Some(1),
+                                },
+                            },
+                        )
+                    })
+                    .collect(),
+                ..EntryMetadata::default()
+            }),
+        )
+        .unwrap();
+    session.checkout(selected_head).unwrap();
+    drop(session);
+    // Exercise the legacy/default-private encoding as well as explicit false.
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&transcript)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some(value) = record
+                .get_mut("metadata")
+                .and_then(|value| value.get_mut("extension_metadata"))
+                .and_then(|value| value.get_mut("fixture.default"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                value.remove("public");
+            }
+            record
+        })
+        .collect();
+    std::fs::write(
+        &transcript,
+        records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let original = std::fs::read(&transcript).unwrap();
+    for format in ["json", "html"] {
+        for include_secrets in [false, true] {
+            let destination = fixture
+                .workspace
+                .join(format!("export-{include_secrets}.{format}"));
+            let mut args = vec![
+                "sessions",
+                "export",
+                id,
+                "--format",
+                format,
+                "--output",
+                destination.to_str().unwrap(),
+            ];
+            if include_secrets {
+                args.push("--include-secrets");
+            }
+            assert_success(&fixture.run(&args));
+            let exported = std::fs::read_to_string(&destination).unwrap();
+            for secret in secrets {
+                assert_eq!(
+                    exported.contains(secret),
+                    include_secrets,
+                    "wrong redaction for {format}/{include_secrets}: {secret}"
+                );
+            }
+            for (namespace, text) in private_values {
+                assert!(
+                    !exported.contains(namespace),
+                    "private namespace in {format}/{include_secrets}"
+                );
+                assert!(
+                    !exported.contains(text),
+                    "private value in {format}/{include_secrets}"
+                );
+            }
+            assert!(
+                exported.contains("Abandoned branch"),
+                "only metadata visibility changes, not branch coverage"
+            );
+            assert!(exported.contains("asset classification"));
+            assert!(exported.contains("description"));
+            assert!(!exported.contains("<script"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                assert_eq!(
+                    std::fs::metadata(&destination)
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+    assert_eq!(std::fs::read(&transcript).unwrap(), original);
+    let reopened = Session::open_read_only(&transcript).unwrap();
+    for (namespace, text) in private_values {
+        let value = reopened
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.metadata.as_ref())
+            .find_map(|metadata| metadata.extension_metadata.get(namespace))
+            .expect("private recovery metadata remains durable");
+        assert!(!value.public);
+        assert_eq!(value.value["note"], text);
+    }
+    assert_eq!(
+        api.chat_requests().len(),
+        1,
+        "export never invokes the provider"
     );
 }
 

@@ -30,6 +30,7 @@ pub enum Command {
     /// Request an immediate final answer without exposing tools.
     Answer(Option<String>),
     Compact,
+    CompactWithInstructions(String),
     AutoCompact(Option<AutoCompactSetting>),
     Reload,
     New,
@@ -38,11 +39,12 @@ pub enum Command {
     Fork,
     /// Clone the active session at its current head.
     Clone,
-    Tree,
-    Checkout(String),
     Status,
     Context,
     Help(Option<String>),
+    Hotkeys,
+    Copy,
+    Session,
     Cost,
     Cache,
     Update,
@@ -50,7 +52,7 @@ pub enum Command {
     Changelog,
     Name(Option<String>),
     Export(Option<String>),
-    Quit,
+    Exit,
     /// List or invoke named prompt templates. The optional string preserves
     /// the template name and raw arguments for deterministic expansion.
     Prompt(Option<String>),
@@ -145,13 +147,19 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!("fork", "/fork", "fork from a previous user message", false),
     slash!("clone", "/clone", "clone the current session", false),
-    slash!("tree", "/tree", "show the conversation branch tree", false),
     slash!(
-        "checkout",
-        "/checkout <id>",
-        "switch to a different branch",
-        true
+        "session",
+        "/session [info]",
+        "inspect session file, messages, tokens and cost",
+        false
     ),
+    slash!(
+        "hotkeys",
+        "/hotkeys",
+        "show resolved user keybindings",
+        false
+    ),
+    slash!("copy", "/copy", "copy the last assistant message", false),
     slash!("model", "/model [id]", "select or change the model", true),
     slash!(
         "thinking",
@@ -171,7 +179,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         "answer now from current evidence without tools",
         true
     ),
-    slash!("compact", "/compact", "compact conversation context", false),
+    slash!(
+        "compact",
+        "/compact [instructions]",
+        "compact conversation context",
+        true
+    ),
     slash!(
         "auto-compact",
         "/auto-compact [off|local|native|85%]",
@@ -180,8 +193,8 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!(
         "fast",
-        "/fast [on|off]",
-        "toggle the Codex fast service tier",
+        "/fast [on|off|status]",
+        "inspect or set the Codex fast service tier",
         true
     ),
     slash!(
@@ -261,7 +274,7 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         "inspect or manage the durable session goal",
         true
     ),
-    slash!("quit", "/quit", "exit octet", false),
+    slash!("exit", "/exit", "exit octet", false),
 ];
 
 /// Package-local copy of docs/releases/v<CARGO_PKG_VERSION>.md. Keep the copy
@@ -333,7 +346,23 @@ pub fn help_text(workspace: &Path, topic: Option<&str>) -> String {
 /// so a route that declares the Codex profile is admitted and every other route
 /// is rejected explicitly instead of being silently ignored.
 pub fn codex_fast_tier_endpoint(model: &Model) -> bool {
-    codex_responses_endpoint(model)
+    model.spec.protocol == Protocol::OpenAiResponses
+        && model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_service_tier()
+}
+
+/// Current fast selection, independent of queued changes or provider acceptance.
+pub fn fast_status_text(model: &Model, tier: Option<octet_ai::ServiceTier>) -> &'static str {
+    if !codex_fast_tier_endpoint(model) {
+        "Fast mode: unavailable on this model route"
+    } else if tier == Some(octet_ai::ServiceTier::Priority) {
+        "Fast mode: on — priority requested; provider acceptance and speed are not guaranteed"
+    } else {
+        "Fast mode: off — no priority requested"
+    }
 }
 
 /// Whether the active endpoint declares the Codex Responses route.
@@ -649,6 +678,15 @@ pub fn parse(input: &str) -> Command {
         return Command::Prompt((!argument.is_empty()).then(|| argument.to_owned()));
     }
 
+    if full_name == "compact" {
+        let instructions = body[name.len()..].trim();
+        return if instructions.is_empty() {
+            Command::Compact
+        } else {
+            Command::CompactWithInstructions(instructions.to_owned())
+        };
+    }
+
     if full_name == "answer" {
         let argument = body[name.len()..].trim();
         return Command::Answer((!argument.is_empty()).then(|| argument.to_owned()));
@@ -713,12 +751,11 @@ pub fn parse(input: &str) -> Command {
             Some(_) => Command::Unknown(input.to_owned()),
         },
         "fast" => match argument.as_deref() {
-            None => Command::Fast(None),
+            None | Some("status") => Command::Fast(None),
             Some("on" | "true" | "yes") => Command::Fast(Some(true)),
             Some("off" | "false" | "no") => Command::Fast(Some(false)),
             Some(_) => Command::Unknown(input.to_owned()),
         },
-        "compact" if argument.is_none() => Command::Compact,
         "auto-compact" => match argument.as_deref() {
             None => Command::AutoCompact(None),
             Some("on" | "true" | "yes") => {
@@ -749,18 +786,16 @@ pub fn parse(input: &str) -> Command {
         "resume" => Command::Resume(argument),
         "fork" if argument.is_none() => Command::Fork,
         "clone" if argument.is_none() => Command::Clone,
-        "tree" if argument.is_none() => Command::Tree,
-        "checkout" => match argument {
-            Some(id) => Command::Checkout(id),
-            None => Command::Unknown(input.to_owned()),
-        },
         "status" if argument.is_none() => Command::Status,
         "context" if argument.is_none() => Command::Context,
         "cost" if argument.is_none() => Command::Cost,
         "cache" if argument.is_none() => Command::Cache,
+        "hotkeys" if argument.is_none() => Command::Hotkeys,
+        "copy" if argument.is_none() => Command::Copy,
+        "session" if matches!(argument.as_deref(), None | Some("info")) => Command::Session,
         "update" if argument.is_none() => Command::Update,
         "changelog" if argument.is_none() => Command::Changelog,
-        "quit" if argument.is_none() => Command::Quit,
+        "exit" if argument.is_none() => Command::Exit,
         _ => Command::Unknown(input.to_owned()),
     }
 }
@@ -892,6 +927,42 @@ fn add_usage(total: &mut Usage, turn: Usage) {
     total.total_tokens = total.total_tokens.saturating_add(turn.total_tokens);
 }
 
+/// Session facts from the active durable branch and the session-global ledger.
+/// Read-only and usable while a Run owns the writer through a read-only reopen.
+pub fn session_text(session: &Session) -> String {
+    let mut messages = 0usize;
+    let mut cursor = session.head();
+    while let Some(id) = cursor {
+        let Some(entry) = session.entry(&id) else {
+            break;
+        };
+        messages += usize::from(matches!(entry.value, EntryValue::Message(_)));
+        cursor = entry.parent.clone();
+    }
+    let mut usage = Usage::default();
+    for record in session.usage_records() {
+        add_usage(&mut usage, record.usage);
+    }
+    let id = session
+        .path()
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .unwrap_or("(unknown)");
+    let head = session
+        .head()
+        .map(|id| id.0)
+        .unwrap_or_else(|| "(empty)".into());
+    format!(
+        "Session: {id}\nFile: {}\nTitle: {}\nHead: {head}\nEntries: {}\nActive-branch messages: {messages}\nCheckpoints: {}\nUsage records: {}\nTokens: {} input · {} cache-read · {} cache-write · {} output\nCost: {}{}",
+        session.path().display(), active_branch_title(session), session.entries().len(),
+        session.checkpoints().len(), session.usage_records().len(),
+        usage.input_tokens, usage.cache_read_tokens,
+        usage.cache_write_tokens.saturating_add(usage.cache_write_1h_tokens), usage.output_tokens,
+        format_microdollars(session.total_cost_microdollars()),
+        if session.has_uncertain_usage() || session.has_unpriced_usage() { " (known subtotal only; usage or pricing uncertain)" } else { "" },
+    )
+}
+
 /// Detailed cumulative spend report. Usage records are durable and therefore
 /// this formatter works identically for a live or replayed session.
 pub fn cost_text(session: &Session, model: &Model) -> String {
@@ -905,6 +976,9 @@ pub fn cost_text(session: &Session, model: &Model) -> String {
         format_microdollars(session.total_cost_microdollars()),
         if turn_count == 1 { "" } else { "s" }
     )];
+    if session.has_uncertain_usage() || session.has_unpriced_usage() {
+        lines.push("Known subtotal only: usage or pricing is uncertain; this is not complete session spend.".to_owned());
+    }
     if records.is_empty() {
         lines.push("".to_owned());
         lines.push("No completed priced model calls yet.".to_owned());
@@ -1175,7 +1249,7 @@ pub(crate) fn status_text_with_metrics(
         .map(format_microdollars_cents)
         .unwrap_or_else(|| "disabled".to_owned());
     format!(
-        "Provider       {}\nModel          {}\nDisplay model  {}\nAPI model      {}\nEndpoint       {}\nProtocol       {:?}\nTransport      {:?}\nReasoning      {}\nPricing        {}\nContext        ~{} / {} (estimated)\n\
+        "Provider       {}\nModel          {}\nDisplay model  {}\nAPI model      {}\nEndpoint       {}\nProtocol       {:?}\nTransport      {:?}\nReasoning      {}\n{}\nPricing        {}\nContext        ~{} / {} (estimated)\n\
          Workspace      {}\nSession        {} — {}\nSession cost   {} ({})\nCost guardrails limit {} · turn warning {}\nCache hit rate  {}\nModel turns    {}\nTool calls     {}\nSkills         {} active / {} discovered\n\n\
          Extensions     {}\n\n\
          Security model: local agent with workspace trust gates\nEffect policy: {}\nBuilt-in file paths: {}\nFile edits: {}\nFile write: {}\n\
@@ -1189,14 +1263,22 @@ pub(crate) fn status_text_with_metrics(
         app.model.spec.protocol,
         app.model.endpoint.transport,
         reasoning,
+        fast_status_text(&app.model, app.agent.service_tier()),
         pricing,
         context,
         context_window,
         app.config.workspace.display(),
         session_id,
         active_branch_title(session),
-        format_microdollars(session.total_cost_microdollars()),
-                session.total_cost_microdollars(),
+        if session.has_uncertain_usage() || session.has_unpriced_usage() {
+            format!(
+                "{} known subtotal — usage or pricing uncertain",
+                format_microdollars(session.total_cost_microdollars())
+            )
+        } else {
+            format_microdollars(session.total_cost_microdollars())
+        },
+        session.total_cost_microdollars(),
         cost_limit,
         cost_warning,
         cache_rate,
@@ -1235,10 +1317,8 @@ mod tests {
                 .contains("interactive TUI"));
         }
         assert!(matches!(parse("/changelog extra"), Command::Unknown(_)));
-        assert!(
-            matches!(parse("/ch"), Command::Unknown(_)),
-            "checkout shares this prefix"
-        );
+        // `/checkout` was withdrawn, so this prefix is now unambiguous.
+        assert_eq!(parse("/ch"), Command::Changelog);
         assert_eq!(complete_slash_command("/chang"), Some("/changelog".into()));
         let suggestions = slash_suggestions("/chang");
         assert_eq!(suggestions.len(), 1);
@@ -1291,6 +1371,10 @@ mod tests {
             Command::Answer(Some("summarize the verified findings concisely".into()))
         );
         assert_eq!(parse("/compact"), Command::Compact);
+        assert_eq!(
+            parse("/compact preserve the API contract\nand test evidence"),
+            Command::CompactWithInstructions("preserve the API contract\nand test evidence".into())
+        );
         assert_eq!(parse("/auto-compact"), Command::AutoCompact(None));
         assert_eq!(
             parse("/auto-compact off"),
@@ -1311,13 +1395,17 @@ mod tests {
         assert_eq!(parse("/resume id"), Command::Resume(Some("id".into())));
         assert_eq!(parse("/fork"), Command::Fork);
         assert_eq!(parse("/clone"), Command::Clone);
-        assert_eq!(parse("/tree"), Command::Tree);
-        assert_eq!(parse("/checkout 001"), Command::Checkout("001".into()));
         assert_eq!(parse("/status"), Command::Status);
         assert_eq!(parse("/context"), Command::Context);
         assert_eq!(parse("/help"), Command::Help(None));
         assert_eq!(parse("/help status"), Command::Help(Some("status".into())));
         assert_eq!(parse("/cost"), Command::Cost);
+        assert_eq!(parse("/hotkeys"), Command::Hotkeys);
+        assert_eq!(parse("/copy"), Command::Copy);
+        assert_eq!(parse("/session"), Command::Session);
+        assert_eq!(parse("/session info"), Command::Session);
+        assert!(matches!(parse("/session unknown"), Command::Unknown(_)));
+        assert!(matches!(parse("/copy extra"), Command::Unknown(_)));
         assert_eq!(parse("/cache"), Command::Cache);
         assert_eq!(parse("/update"), Command::Update);
         assert_eq!(parse("/prompt"), Command::Prompt(None));
@@ -1325,7 +1413,7 @@ mod tests {
             parse("/prompt review staged changes"),
             Command::Prompt(Some("review staged changes".into()))
         );
-        assert_eq!(parse("/quit"), Command::Quit);
+        assert_eq!(parse("/exit"), Command::Exit);
         assert_eq!(parse("/skills"), Command::Skills(SkillsSubcommand::List));
         assert_eq!(
             parse("/skills list"),
@@ -1410,7 +1498,6 @@ mod tests {
     fn every_discovered_builtin_has_an_executable_parser_route() {
         for command in SLASH_COMMANDS {
             let invocation = match command.name {
-                "checkout" => "/checkout entry-id".to_owned(),
                 "name" => "/name release audit".to_owned(),
                 "export" => "/export audit.md".to_owned(),
                 name => format!("/{name}"),
@@ -1440,7 +1527,6 @@ mod tests {
     fn rejects_unknown_or_malformed_commands() {
         assert!(matches!(parse("hello"), Command::Unknown(_)));
         assert!(matches!(parse("/new extra"), Command::Unknown(_)));
-        assert!(matches!(parse("/checkout"), Command::Unknown(_)));
         assert!(matches!(parse("/auto-compact 0%"), Command::Unknown(_)));
         assert!(matches!(parse("/auto-compact 101%"), Command::Unknown(_)));
         for removed in ["/cycle-model", "/docs", "/sessions", "/tool"] {
@@ -1515,6 +1601,59 @@ mod tests {
         )
         .unwrap();
         (directory, app)
+    }
+
+    #[test]
+    fn unpriced_usage_reports_remain_uncertain_on_a_priced_model_and_reopen() {
+        let (_directory, mut app) = app_for_status();
+        assert!(app.model.spec.pricing.is_some());
+        let endpoint = app.model.endpoint.id.clone();
+        let model = app.model.spec.id.clone();
+        // Known zero is still an exact price; absent pricing is different.
+        app.agent
+            .session_mut()
+            .record_compaction_usage(
+                endpoint.clone(),
+                model.clone(),
+                Usage::default(),
+                Some(Cost::default()),
+            )
+            .unwrap();
+        assert!(!app.agent.session().has_unpriced_usage());
+        assert!(!status_text(&app, None).contains("known subtotal"));
+        app.agent
+            .session_mut()
+            .record_compaction_usage(
+                endpoint,
+                model,
+                Usage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    total_tokens: 7,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        for reopened in [false, true] {
+            if reopened {
+                app = crate::app::bootstrap::rebuild_app(app, None, None, None, None).unwrap();
+            }
+            let session = app.agent.session();
+            assert!(session.has_unpriced_usage());
+            assert!(
+                !session.has_uncertain_usage(),
+                "do not invent an unknown-token attempt"
+            );
+            assert!(
+                app.model.spec.pricing.is_some(),
+                "active catalog pricing cannot price a historical receipt"
+            );
+            assert!(status_text(&app, None).contains("known subtotal"));
+            assert!(session_text(session).contains("known subtotal"));
+            assert!(cost_text(session, &app.model).contains("Known subtotal only"));
+            assert!(session.usage_uncertainty_records().is_empty());
+        }
     }
 
     #[test]

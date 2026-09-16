@@ -751,9 +751,8 @@ pub(crate) fn build_request(
     };
 
     // 6. Max tokens
-    let max_tokens = req
-        .max_output_tokens
-        .unwrap_or(model.spec.limits.max_output_tokens);
+    let max_tokens = crate::effective_output_token_cap(model, req.max_output_tokens)
+        .expect("Anthropic always emits an output cap");
 
     let anth_req = AnthropicRequest {
         model: model.spec.api_name.clone(),
@@ -1242,6 +1241,7 @@ mod tests {
 
     fn make_test_model(reasoning: bool) -> Model {
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("test-claude".to_string()),
             endpoint: EndpointId("anthropic-ep".to_string()),
             api_name: "claude-3-5-sonnet".to_string(),

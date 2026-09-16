@@ -652,7 +652,7 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
             .iter()
             .map(|contribution| contribution.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["bash", "read", "edit", "write"]
+        vec!["bash", "read", "edit", "write", "search"]
     );
     assert_eq!(
         by_name("bash").snippet,
@@ -697,8 +697,8 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     assert!(collect_tool_prompt_contributions(Vec::<&dyn Tool>::new()).is_empty());
     assert_eq!(
         SearchTool.prompt_snippet(),
-        None,
-        "search stays unadvertised: the coding product disables it by default"
+        Some("Search file contents with ripgrep (rg)"),
+        "only a host that enables search passes it to prompt assembly"
     );
 }
 

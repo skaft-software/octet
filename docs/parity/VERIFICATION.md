@@ -1,5 +1,278 @@
 # Independent verification of the Pi-parity pass
 
+## Current candidate — qualification in progress
+
+**Local 0.8.0 candidate; Pi parity is not achieved.** This section supersedes
+historical status claims below only for the named scope and snapshot. The old
+“final”, “green” and “authoritative” language belongs to its frozen review, not
+today's moving source. Source readiness, compilation, bounded behavior, upstream
+parity and release qualification are different claims. This refresh reads parent
+receipts and owner reports; it is not a new independent runtime/security audit.
+
+### Latest bounded parent receipts
+
+**Integration failures observed while writers were mid-change, then repaired and
+rerun (all preserved, none deleted):**
+
+| Receipt under `/tmp/octet-final/` | Exact command | Observed result |
+| --- | --- | --- |
+| `parity-next-check-11.log` | `cargo check --workspace --all-targets --all-features --locked --offline` | Exit 101; sole compiler error E0583: in-progress kernel module `auxiliary_settlement_tests` missing. |
+| `parity-next-export-tests.log` | `cargo test -p octet-coding-agent --lib --locked --offline export_ -- --test-threads=2` | Exit 101 before tests; E0063: in-progress `BusEventParams` initializer lacks `binding_id`. |
+| `parity-next-coding-lib-03.log` | `cargo test -p octet-coding-agent --lib --locked --offline -- --test-threads=2` | **1519 passed, 2 failed, 1 ignored**. Failures: the API 0.3 bus contract validation in `extensions::bus_tests` and the bridge-launching provider preflight. |
+| `parity-next-agent-tests-04.log` | `cargo test -p octet-agent --no-fail-fast --locked --offline -- --test-threads=2` | **559 passed, 9 failed, 1 ignored** in the library plus `agent_run` **154 passed, 1 failed**. |
+| `parity-next-ai-tests-02.log` | `cargo test -p octet-ai --no-fail-fast --locked --offline -- --test-threads=2` | Library/targets green except `provider_parity` **26 passed, 2 failed** (fixture streams opened without a required start event). |
+| `parity-next-coding-int-01.log` | `cargo test -p octet-coding-agent --no-fail-fast --locked --offline --test parity_cli --test eval_harness -- --test-threads=2` | `eval_harness` **9 passed, 1 failed** under concurrent load; the same target then passed four consecutive standalone runs (one serial, three at `--test-threads=2`). Recorded as an environment-sensitive flake, not a pass. |
+| `parity-next-pi-bridge-tests.log` | `python3 -B -m unittest discover -s extensions/octet-pi-compat/tests -v` | **88 run, 36 failures, 3 skipped**: the bridge rejected the host's newly offered `bus/lifecycle` optional method. |
+
+Every failure above was diagnosed to a concrete cause and repaired in source:
+the bridge's optional-method/capability map omitted `bus/lifecycle`; the Python
+SDK called `from_wire` on generated tagged unions (`BusLifecycleParams`,
+`BusSubscribeResult`) instead of the generated `parse_*` selectors; the host
+bus unit fixtures predated binding-scoped `dispatch`; two AI stream fixtures and
+the kernel auxiliary-settlement fixture omitted the required `Started` event;
+`agent_run`'s gated fixture reused content-block index 64 for a 65-call turn;
+the bench harness could not resolve the authored fixture dependency it no longer
+ships; and three tests still asserted pre-`OutputLimitUnavailable` or
+pre-binding-era results. Later receipts below are the reruns.
+
+Logs and matching `.exit` files are under `/tmp/octet-final/`. Commands below
+used the parent's bounded serial runner, two build jobs and two test threads;
+no Cargo, rustc, Swift, installation or global formatting ran for this refresh.
+Counts include completed targets/doc tests within each command; overlapping
+runs are not added together. Warnings remain.
+
+| Receipt stem | Exact command | Observed result / boundary |
+| --- | --- | --- |
+| `parity-next-check-10` | `cargo check --workspace --all-targets --all-features --locked --offline` | Exit 0; Cargo 13.20s (runner 14.0s). Compilation, not all-feature runtime qualification. |
+| `parity-next-coding-lib-02` | `cargo test -p octet-coding-agent --lib --locked --offline -- --test-threads=2` | Exit 0; **1517 passed, 0 failed, 1 ignored**. Library only, not CLI integration/PTY targets. |
+| `parity-next-agent-tests-03` | `cargo test -p octet-agent --no-fail-fast --locked --offline -- --test-threads=2` | **Exit 101; 809 passed, 1 failed, 2 ignored**. Library 564 passed / 1 ignored and `agent_run` 153 passed are included, not extra totals. Sole failing target: `api_v03_runnable`, released manifest requires `=0.7.6` but candidate host is 0.8.0. |
+| `parity-next-extension-bundle-02` | `python3 -B -m unittest discover -s scripts/tests -p test_extension_bundle.py -v` | Exit 0; **7 passed**, after directory-link/command-membership repair. Deterministic source-override fixtures, not official release/install qualification. |
+| `parity-next-renderer-tests` | `cargo test -p sexy-tui-rs --locked --offline -- --test-threads=2` | Existing receipt unchanged: exit 0, **277 passed**. No physical-terminal acceptance implied. |
+| `parity-next-renderer-no-syntax` | `cargo test -p sexy-tui-rs --no-default-features --locked --offline -- --test-threads=2` | Existing receipt unchanged: exit 0, **270 passed**. Not a new rerun. |
+| `parity-next-ai-tests` | `cargo test -p octet-ai --locked --offline -- --test-threads=2` | Historical phase-1 receipt: exit 0, **480 passed**. **Not phase-2 or later AI qualification.** |
+
+**Definitive serial rerun over one frozen snapshot** (`freeze-final.sha256`, 1635
+files, **zero files changed during the run**): `f2-check` exit 0; `f2-coding`
+**1703 passed, 0 failed across 30 targets**; `f2-agent` **819 passed, 0 failed**;
+`f2-ai` **500 passed, 0 failed**. A single earlier `fv-coding` attempt failed only
+`update::progress::tests::actual_updater_progress_pty_and_plain_streams` on its
+2-second subprocess timeout, which the following full run passed; it is recorded
+as load-induced flakiness, not silently dropped.
+
+**Earlier post-repair serial rerun over one stable snapshot** (`parity-next-wave3-source.sha256`,
+1635 files; the only file edited during the wave was `crates/octet-ai/tests/provider_parity.rs`,
+which is not compiled by the agent/coding targets):
+
+| Receipt stem | Exact command | Observed result / boundary |
+| --- | --- | --- |
+| `parity-next-check-12` | `cargo check --workspace --all-targets --all-features --locked --offline` | Exit 0; 52.3s. Compilation of the whole workspace including all features, not runtime qualification. |
+| `parity-next-coding-lib-04` | `cargo test -p octet-coding-agent --lib --locked --offline -- --test-threads=2` | Exit 0; **1521 passed, 0 failed, 1 ignored**. |
+| `parity-next-agent-lib-05` | `cargo test -p octet-agent --lib --locked --offline -- --test-threads=2` | Exit 0; **570 passed, 0 failed, 1 ignored**. |
+| `parity-next-agent-int-05` | `cargo test -p octet-agent --no-fail-fast --locked --offline -- --test-threads=2` | Exit 0; every agent target ran: **819 tests passed, 0 failed**, including `agent_run` and both process-bus fixtures. |
+| `parity-next-ai-parity-04` | `cargo test -p octet-ai --locked --offline --test provider_parity -- --test-threads=2` | Exit 0; **28 passed**. |
+| `parity-next-ai-all` | `cargo test -p octet-ai --no-fail-fast --locked --offline -- --test-threads=2` | Exit 0; whole AI crate and targets. |
+| `parity-next-renderer-04` | `cargo test -p sexy-tui-rs --locked --offline -- --test-threads=2` | Exit 0; **277 passed** (fresh rerun). |
+| `parity-next-sdk-python` | `python3 -B -m unittest discover -s sdk/python/tests` | Exit 0 after repair; **109 passed**. |
+| `parity-next-pi-bridge-tests-02` | `python3 -B -m unittest discover -s extensions/octet-pi-compat/tests` | Exit 0 after repair; **88 run, 85 passed, 3 real-runtime skips**. |
+| `parity-next-scripts-02` | `python3 -B -m unittest discover -s scripts/tests` | Exit 0 after repair; **58 passed**. |
+| — (direct) | `node sdk/typescript/tests/api_v03_conformance.mjs` | Exit 0; **47 fixtures** against the regenerated runtime. |
+| — (direct) | `python3 -B scripts/generate-extension-api-v03.py --check` | Exit 0 after regenerating a stale TypeScript runtime artifact. |
+
+`parity-next-coding-all` (one earlier attempt at the whole coding-agent target
+set) is preserved as an integration failure: `embedded_documentation_preserves_current_public_source_text`
+failed because the embedded archive had been built before the same run's later
+source edits, and `migration_import` failed on the adapter's published-release
+host pin. Both were repaired/rerun: `parity-next-coding-lib-06` passes the
+documentation assertion on a fresh build, and the migration test now stages a
+private copy carrying the current host version while asserting the tracked
+manifest keeps its published pin. A fresh whole-target rerun is
+`parity-next-coding-all-07`.
+
+Parent reports all **1632 source hashes stable** for the earlier recheck snapshot
+in `parity-next-recheck-source.sha256`; `parity-next-recheck.done` records
+`coding=0 agent=101`. Later snapshots are `parity-next-wave3-source.sha256`
+(1635 files) and `parity-next-wave5-source.sha256`. Those manifests are bounded
+snapshots, not proof that still later source matches. No single uninterrupted workspace-test pass or
+all-green candidate is claimed. `release-v0.8.0-confirmed.log` describes an older
+preserved binary, not the newer candidate source; no installation/publication or
+SDK distribution version bump follows (SDK remains 0.7.6).
+
+**Preserved packaging-check failure caused by an uncommitted file:** `python3 -B
+scripts/test-packaged-docs.py` stops at its first assertion because
+`docs/releases/v0.8.0.md` is inventoried but not yet tracked by git, and this
+session is not authorized to mutate git state (no `git add`/commit). Everything
+the assertion would gate was verified read-only instead: all **454** inventoried
+files exist, every reference-style/`src=`/`href=` target resolves, the **409**
+tracked `docs/`, `examples/` and `sdk/` files are all inventoried, and the single
+untracked inventory entry is that new release-notes file. A real release adds it
+to the index; the substantive packaging assertions (deterministic archive,
+installer extras, embedded/package byte equality) remain unrun here.
+
+**Preserved non-Cargo failure caused by the local version bump (not by a feature
+edit):** `python3 -B scripts/test_repository_identity.py` now reports **10 tests,
+3 failures** — `test_first_party_manifests_locks_and_installer_match_workspace`
+(the script derives the expected version from the workspace `Cargo.toml`, now
+0.8.0, and asserts `sdk/python/pyproject.toml` and `sdk/typescript/package.json`
+carry it), `test_current_version_has_release_only_notes` (`docs/installation.md`
+still documents the *published* v0.7.6 download URLs), and the extension-manifest
+case (the four tracked bundles still declare `version`/`requires_octet` 0.7.6).
+Only `Cargo.toml` was modified among those files, so this is a release-identity
+gate that a real 0.8.0 publication would satisfy by updating the SDK, installer
+docs and bundle manifests. It is deliberately **not** satisfied here: the brief
+keeps SDK/public distribution versions at 0.7.6 and authorizes no publication.
+The historical receipt for this script passed 10/10 at 0.7.6.
+
+Preserved failures: `parity-next-coding-lib.log` (**1503 passed, 9 failed,
+1 ignored**); `parity-next-agent-tests-02.log` (library **564 passed, 1 ignored**;
+`agent_run` **148 passed, 4 failed**, then stopped); initial agent compile failure
+in `parity-next-agent-tests.log`; and failed `parity-next-check-09.log` plus earlier
+check/product-check logs. Successful later receipts supersede those failures only
+for their executed scope. The runnable-example failure above is still a failed
+command even though its owner reports a test-fixture repair.
+
+### Later changes are not qualified by those receipts
+
+The parent's post-recheck work queue and `/tmp/octet-final/parity-audit.md`
+identify these independent acceptance gates. Plans, parse checks and source
+repairs do not close them:
+
+- **Kernel F3/F4/F6:** completed invocation identity after checkout/reopen;
+  bounded admission for batches above 64 calls; accepted auxiliary usage retained
+  across same-poll cancellation and settlement-append failure. See
+  `/tmp/octet-final/kernel-parity.md` and the audit's concrete counterexamples.
+- **AI F7/F5 and new consumers:** protocol-aware sampling allowlist/caller-stop
+  precedence; enforceable wire cap shared with hard-budget reservation; real
+  RequestOverrides/Azure routing/authority/signing/timeout consumers. Phase-1
+  480 and check10 do not qualify these later changes or all phase-2 wire fixtures.
+  See `/tmp/octet-final/ai-parity.md` and `ai-parity-stage2-plan.md` in that directory.
+- **Exact RPC turn cost:** kernel `TurnFinished.turn_cost`, RPC immutable settled
+  cost/null propagation and nine TUI test-constructor additions postdate the
+  recheck. Require priced/unpriced/reopen and cross-crate consumer tests; see
+  `/tmp/octet-final/kernel-turn-cost-plan.md`, `ai-parity.md`, `editor-parity.md`.
+- **Extension F2 — ACKed, implementation active:** parent approved the real
+  binding/lifecycle protocol for surviving SDK peers, lifecycle rebinding and
+  ingress epoch fencing. This supersedes older awaiting-ACK plan wording; no
+  runtime closure is claimed. Initial two-peer/product delivery tests do not
+  cover the new contract. See `/tmp/octet-final/ext-host-f2-plan.md`, `ext-host.md`
+  and the parent's integration update. Runnable-example source repair privately
+  stages a current-host pin without changing the published 0.7.6 manifest; its
+  Rust rerun is pending, not unchanged-release installation qualification.
+- **F8 — P1 export privacy blocker, repaired in source only:** the latest
+  `/tmp/octet-final/parity-audit.md` export-visibility appendix independently
+  confirms that credential scrubbing did not enforce private extension metadata
+  visibility in ordinary JSON/HTML exports. The parent source repair now applies
+  the common `session_commands::project_export_visibility` boundary to real
+  `Entry.metadata.extension_metadata` before either format's redaction/rendering,
+  retaining **only explicit `public:true`** envelopes. Private and omitted-public
+  namespaces/values/provenance are excluded even with `--include-secrets`; that
+  flag bypasses credential scrubbing only within the export-eligible projection.
+  No recursive deletion of similarly named arbitrary tool/result data is added.
+  The authored actual CLI matrix covers **JSON/HTML × default/include-secrets**,
+  public credentials, explicit/default-private abandoned-branch annotations,
+  preserved source bytes/reopen and private output permissions. Parent updated
+  `docs/sessions.md`; this refresh does not edit that domain document. **Tests
+  are unrun; the P1 blocker is not behaviorally closed by source inspection or
+  the earlier coding-library receipt.**
+- **Typed-media HTML repair — source only, unrun:** traversal now follows actual
+  User/Assistant/ToolResult Media positions, preserving arbitrary `Image`/`Audio`
+  metadata instead of erasing or activating it. Two new unit cases are authored.
+  This is distinct from F8's shared JSON/HTML visibility projection; neither
+  repair is qualified by the failed export-filter build. Complete-content/
+  browser goldens and CLI qualification remain pending.
+
+### Current consumers, missing implementations and pending process gates
+
+Owner reports supersede their own older missing-consumer notes only where
+explicitly updated. `/tmp/octet-final/editor-parity.md` records the eight product
+input-dispatch tests, seven transcript-navigation tests and durable unpriced
+telemetry regression passing in coding-lib-02. `/tmp/octet-final/fast-consumer.md`
+records actual idle/active search ownership, command provenance, ordered model
+scope, `/hotkeys`, `/copy`, `/session`, custom compact instructions, checkpoint
+bootstrap and `/fast` consumers. These are no longer merely unused primitives.
+The `/fast` durable uncertainty marker and deliberate 272K Codex cap remain;
+new tier/budget work is not permission to erase unknown historical exposure.
+
+Kernel session-backed memos/checkpoints, injection and auxiliary retry consumers
+exist; F3/F4/F6, durable out-of-order `outcome_ready`, deferred-provider lifecycle
+and all-writer lifetime claim/settlement remain separate. Product `open-all`
+still has **zero pane effects**. The API 0.3 host bus exists, but F2 is open;
+scoped theme selection still has no principal/generation-preserving render
+consumer and is not offered. Ownerless standalone migration notification is an
+integration gap, not permission to launch extension processes for observation.
+
+**Missing implementation is not a hardware gate:** PiMessages/radius, exact
+current catalogs, remaining codec/metadata/image-generation depth, deferred
+provider suspend/poll, `/settings`, `/scoped-models`, `/debug`, durable bookmark
+navigation, true alternate-screen/final-document transfer, generic nested layout/
+scroll/mouse behavior, full Pi host control/UI/tool-result usage and termination,
+and native Firefox/Safari adapters remain incomplete. Full RequestOverrides/Azure
+and ACKed, actively implemented F2 still require integration/verification. See the
+[88-row historical inventory and current overlay](README.md), plus
+`/tmp/octet-final/{ai-parity,editor-parity,kernel-parity,ext-host,pi-bridge}.md`.
+
+**Pending current-source process qualification:** `parity_cli` (including actual
+HTML export/redaction and ordered model scope), `eval_harness` (six new model
+profile process cases plus four preserved cases), `slash_command_pty`,
+`activity_wait_pty`, `setup_cli_acceptance`, `pi_install` and `migration_import`.
+The coding-library pass does not run those targets. Exact owner scope/commands:
+`/tmp/octet-final/model-eval.md`, `fast-consumer.md`, `pi-bridge.md`, and the audit.
+The eval profile is a real runtime-backed **explicit local-loopback opt-in** with
+private credentials and bounded cases, not a claim of live/paid model quality or
+remote-provider authorization. Extension-owner custom compaction and ownerless
+configuration/migration notifications remain named integration limits.
+
+**Independent acceptance gates:** physical terminal/native clipboard/platform
+behavior, Windows PowerShell, real Pi package/SRI/runtime campaign (historical
+0.84.4 support is not additive 8a7b0c03 parity), live providers/billing/MCP, Apple
+hardware/signing, multiplexer ownership handover and signed/public release. Policy
+exclusions remain unchanged. Existing formatter failures and old platform/PTY/
+security receipts below are preserved, not rerun or waived.
+
+### Defects found by using the local build, and their receipts
+
+Both reports came from running the candidate binary, not from the suites, and
+each was a real product defect with the data already present in the repository:
+
+| Report | Root cause | Fix + evidence |
+| --- | --- | --- |
+| DeepSeek V4.1 Flash refused image attachments despite being a vision model | DeepSeek's `GET /models` is sparse; the pinned models.dev record (correctly `text,image`) was restricted to display/pricing, and the id fallback did not match the renamed `deepseek-flash` | Shared discovery now inherits input modalities from the pinned record when the endpoint asserts none. `sparse_inventory_inherits_pinned_image_input_without_overriding_endpoint_assertions` (unit) and `sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli` (real process: `--list-models` reports `1000000 384000 true`, and `deepseek-v4-pro` stays text-only and refuses the image before any request) |
+| The same model ran with a 128K window instead of 1M | The pinned record's `limit` was excluded for the same reason, and the V4-family constant only matched `deepseek-v4*` | Same inheritance for context/output limits when the endpoint asserts no limit field; a partially-asserting endpoint keeps independent leaves. Six existing expectations were updated with reasons; `request_output_keeps_estimator_slack_for_a_locally_served_model` and the CLI test above |
+| A local vLLM server rejected a turn: *"maximum context length is 131072 … requested 30896 output tokens and your prompt contains at least 100177 input tokens, for a total of at least 131073"* | `resolve_request_max_output_tokens` returned `window − estimate` exactly, and the estimate can be one token below the provider's own count | Bounded headroom (1% of window, clamped 256–4096) is now reserved; `docs/context.md` documents it |
+| The same rejection failed the turn outright | A bare numeric `400` (and `413`/`422`) selected the permanent-failure branch, so `looks_like_context_error` returned false and the existing compaction-and-retry path never ran | Those statuses are recoverable *for the context path only*; named policy/auth/quota/rate-limit codes still veto. Unit matrix `request_size_rejections_reach_the_compaction_path_in_every_server_shape` plus the end-to-end `local_server_request_size_rejection_compacts_once_and_retries` (real client, one compaction, one retry) |
+
+Also repaired while verifying: the local-model eval fixture accepted sockets
+from a non-blocking listener without forcing blocking mode, so the first read
+could return `WouldBlock` and the fixture closed the connection mid-request
+("connection closed before message completed"). This was the intermittent
+`eval_harness` failure seen repeatedly today (including before these edits) —
+a fixture race, not a product defect. Four consecutive green `eval_harness` runs
+follow the fix.
+
+**Environment note (not a product claim).** PTY contract targets
+(`activity_wait_pty`, `slash_command_pty`, `startup_frame_pty`) pass individually
+but have twice wedged when the whole coding suite ran back-to-back: a spawned
+`octet` ends in an unkillable exit state, and the test then blocks in
+`Child::wait()`. It was observed only after repeated forced kills of earlier PTY
+runs in this shell session; each target passes on a clean process table, and no
+product code path has been identified. It is recorded as an unresolved
+environment/harness interaction rather than a passing or failing claim.
+
+## Historical receipt boundary
+
+**Superseded rows in the historical passes below (do not read as current).**
+These rows were accurate for their frozen snapshot and are kept verbatim as
+history; the current state is in the section above:
+
+| Historical row | Superseded by |
+| --- | --- |
+| `T8`, `V9`, `V10` (`/fast` inert, no `set_service_tier` caller, docs saying so) | `/fast on/off/status` now calls `Agent::set_service_tier` through `app/mod.rs:550` and `app/bootstrap.rs:7227`, with tier-aware settlement/reservation; `docs/parity/providers.md` and `CHANGELOG.md` were rewritten accordingly. The durable `responses-priority-tier` uncertainty marker is deliberately retained. |
+| `1c.7 Azure` / `1c.9 xAI` "Pending" | `providers/contract.rs` + `protocol` wire tests now cover Azure destination/version overrides and the current-reference xAI Responses route; live acceptance is still not claimed. |
+| Any row describing `ls`/`find`/`grep` as missing work | Withdrawn by maintainer decision; behaviour is served by the ripgrep-backed `search` tool. |
+
+Everything below is retained verbatim from earlier review passes. Their dates,
+revision identities, failed commands and bounded conclusions are historical;
+use the current-candidate section above for the new qualification state.
+
 ## Final review — final-audit (post-crash)
 
 **Authoritative final frozen receipt, 2026-09-16 UTC; not a parity or release

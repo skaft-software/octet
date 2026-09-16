@@ -66,6 +66,10 @@ pub struct SearchTool;
 
 #[async_trait::async_trait]
 impl Tool for SearchTool {
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Search file contents with ripgrep (rg)")
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             constrained_sampling: None,

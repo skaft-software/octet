@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -163,6 +164,20 @@ def link_identity(
     return digest.hexdigest()
 
 
+def stage_fake_pi(destination: Path) -> Path:
+    """Assemble an authored fixture dependency only in caller-owned temp storage.
+
+    The limited validator proves bridge ordering/effect boundaries, not Pi's
+    real schema algorithm. Real-runtime qualification uses its installed package
+    unchanged and never receives this fake dependency.
+    """
+    shutil.copytree(FAKE_PI, destination)
+    shutil.copytree(
+        FIXTURES / "fake-pi-ai", destination / "node_modules/@earendil-works/pi-ai"
+    )
+    return destination
+
+
 class BridgeProcess:
     """Line-oriented JSON-RPC peer which drains both subprocess pipes."""
 
@@ -190,6 +205,11 @@ class BridgeProcess:
         if api_version not in {"0.2", "0.3"}:
             raise ValueError(f"unsupported test API version {api_version}")
         self.api_version = api_version
+        self._runtime_temp = None
+        if pi_package.resolve() == FAKE_PI.resolve():
+            self._runtime_temp = tempfile.TemporaryDirectory(prefix="octet-pi-fixture-")
+            pi_package = stage_fake_pi(Path(self._runtime_temp.name) / "pi-package")
+        self.pi_package = pi_package
         environment = os.environ.copy()
         environment.pop("OCTET_EXTENSION_DIR", None)
         environment.pop("OCTET_PI_FIXTURE_MODE", None)
@@ -473,6 +493,8 @@ class BridgeProcess:
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if stream is not None:
                 stream.close()
+        if self._runtime_temp is not None:
+            self._runtime_temp.cleanup()
 
     def __enter__(self) -> "BridgeProcess":
         return self

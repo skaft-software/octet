@@ -1344,10 +1344,10 @@
       "surface": "waitForIdle",
       "status": "safe_divergence",
       "behavioral_fixture": "context:waitForIdle",
-      "behavior": "Command dispatch is treated as idle and returns immediately.",
+      "behavior": "Returns at an observed idle boundary; a busy owner errors because the host idle-wait service is unavailable.",
       "safe_divergence": {
         "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Command dispatch is treated as idle and returns immediately."
+        "reason": "Returns at an observed idle boundary; a busy owner errors because the host idle-wait service is unavailable."
       }
     },
     {

@@ -28,10 +28,9 @@ Fail-closed rules, all of them bounded by :class:`BusLimits`:
 * envelopes are inert, frozen data: no callables, no handles, no capability
   grants, and no field can widen project trust.
 
-Host status: the host does not yet expose the ``event_bus`` capability, so
-:class:`HostEventBus` publish/subscribe calls fail closed with the host's
-``unknown_method`` error until ``bus/*`` lands. See
-``docs/extensions/event-bus.md`` for the exact host contract.
+Host status: API 0.3 hosts may offer ``event_bus`` only for a session-isolated
+service. Select the methods used, including ``bus/event`` for subscriptions.
+Legacy runtimes do not implement this wire. An absent service fails closed.
 """
 
 from __future__ import annotations
@@ -153,8 +152,9 @@ class BusLimits:
                     "invalid_limit",
                     "{0} must be a positive integer".format(name),
                 )
-        if self.max_queue_messages > 4096 or self.max_queue_bytes > 4 * 1024 * 1024:
-            raise BusError(RESOURCE_EXHAUSTED, "limit_above_ceiling")
+        for name, value in self.__dict__.items():
+            if value > self.__dataclass_fields__[name].default:
+                raise BusError(RESOURCE_EXHAUSTED, "limit_above_ceiling")
 
 
 DEFAULT_LIMITS = BusLimits()
@@ -224,15 +224,21 @@ class BusEnvelope:
     published_at_ms: int
     payload: Mapping[str, Any]
     byte_len: int
+    publisher_instance_id: str = ""
+    process_generation: int = 0
+    binding_id: str = ""
 
     def public(self) -> dict:
         """Return the JSON-safe projection that may cross a process boundary."""
 
         return {
+            "binding_id": self.binding_id,
             "topic": self.topic,
             "publisher": self.publisher,
             "sequence": self.sequence,
-            "publishedAtMs": self.published_at_ms,
+            "published_at_ms": self.published_at_ms,
+            "publisher_instance_id": self.publisher_instance_id,
+            "process_generation": self.process_generation,
             "payload": dict(self.payload),
         }
 
@@ -313,10 +319,12 @@ def _validate_value(field_spec: FieldSpec, value: Any, limits: BusLimits) -> Any
     if field_spec.kind == "enum":
         if not isinstance(value, str) or value not in field_spec.values:
             raise BusError(INVALID_PARAMS, "invalid_field_value", label)
-        return value
+        return screen_string(value, limits, label, field_spec.max_bytes)
     if field_spec.kind == "integer":
         if not isinstance(value, int) or isinstance(value, bool):
             raise BusError(INVALID_PARAMS, "invalid_field_type", label)
+        if abs(value) > 9_007_199_254_740_991:
+            raise BusError(INVALID_PARAMS, "nonportable_integer", label)
         if field_spec.minimum is not None and value < field_spec.minimum:
             raise BusError(INVALID_PARAMS, "field_below_minimum", label)
         if field_spec.maximum is not None and value > field_spec.maximum:
@@ -396,13 +404,15 @@ class BoundedQueue:
     def byte_len(self) -> int:
         return self._inner.byte_len
 
-    def push(self, envelope: BusEnvelope) -> None:
+    def check_capacity(self, envelope: BusEnvelope) -> None:
         if not isinstance(envelope, BusEnvelope):
             raise BusError(INVALID_PARAMS, "invalid_envelope")
         if len(self._inner.envelopes) + 1 > self._limits.max_queue_messages:
             raise BusError(RESOURCE_EXHAUSTED, "queue_full")
         if self._inner.byte_len + envelope.byte_len > self._limits.max_queue_bytes:
             raise BusError(RESOURCE_EXHAUSTED, "queue_bytes_exceeded")
+    def push(self, envelope: BusEnvelope) -> None:
+        self.check_capacity(envelope)
         self._inner.envelopes.append(envelope)
         self._inner.byte_len += envelope.byte_len
 
@@ -431,6 +441,9 @@ class TopicRegistry:
             raise BusError(INVALID_PARAMS, "invalid_topic_spec")
         owner = _identifier(spec.owner, self._limits, "topic_owner")
         name = _identifier(spec.name, self._limits, "topic_name")
+        validate_topic(spec.topic, self._limits)
+        if len(spec.fields) > self._limits.max_payload_fields or len(self._topics) >= 128:
+            raise BusError(RESOURCE_EXHAUSTED, "declaration_limit")
         if spec.topic in self._topics:
             raise BusError(INVALID_PARAMS, "topic_already_declared", spec.topic)
         field_names = set()
@@ -443,6 +456,23 @@ class TopicRegistry:
             if field_spec.name in field_names:
                 raise BusError(INVALID_PARAMS, "duplicate_field", field_spec.name)
             field_names.add(field_spec.name)
+            if field_spec.kind not in {"string", "integer", "boolean", "enum"}:
+                raise BusError(INVALID_PARAMS, "unknown_field_kind")
+            if type(field_spec.required) is not bool or type(field_spec.max_bytes) is not int or not 0 < field_spec.max_bytes <= self._limits.max_string_bytes:
+                raise BusError(INVALID_PARAMS, "invalid_field_spec")
+            for bound in (field_spec.minimum, field_spec.maximum):
+                if bound is not None and (field_spec.kind != "integer" or type(bound) is not int or abs(bound) > 9_007_199_254_740_991):
+                    raise BusError(INVALID_PARAMS, "invalid_field_bound")
+            if field_spec.minimum is not None and field_spec.maximum is not None and field_spec.minimum > field_spec.maximum:
+                raise BusError(INVALID_PARAMS, "invalid_field_bound")
+            if not all(isinstance(value, str) for value in field_spec.values):
+                raise BusError(INVALID_PARAMS, "invalid_enum")
+            if (field_spec.kind == "enum") != bool(field_spec.values) or len(field_spec.values) > 32 or len(set(field_spec.values)) != len(field_spec.values):
+                raise BusError(INVALID_PARAMS, "invalid_enum")
+            for value in field_spec.values:
+                if not isinstance(value, str):
+                    raise BusError(INVALID_PARAMS, "invalid_enum")
+                screen_string(value, self._limits, field_spec.name, field_spec.max_bytes)
         stored = TopicSpec(owner=owner, name=name, fields=tuple(spec.fields), description=spec.description)
         self._topics[stored.topic] = stored
         return stored
@@ -485,6 +515,8 @@ class EventBusKernel:
     def subscribe(self, extension_id: str, topic: Any) -> TopicSpec:
         subscriber = _identifier(extension_id, self._limits, "extension_id")
         spec = self._registry.get(topic)
+        if subscriber not in self._subscriptions and len(self._subscriptions) >= 64:
+            raise BusError(RESOURCE_EXHAUSTED, "peer_limit")
         topics = self._subscriptions.setdefault(subscriber, set())
         if spec.topic not in topics:
             if len(topics) + 1 > self._limits.max_subscriptions:
@@ -538,6 +570,16 @@ class EventBusKernel:
             byte_len=len(encoded),
         )
         for subscriber in self.subscribers(spec.topic):
+            # The host budget is shared by all topics of a subscriber, not a
+            # fresh allowance for each subscription. Validate every recipient
+            # before mutating any queue or consuming a sequence.
+            queues = [self._queues[(subscriber, topic)] for topic in self._subscriptions[subscriber]]
+            if sum(len(queue) for queue in queues) + 1 > self._limits.max_queue_messages:
+                raise BusError(RESOURCE_EXHAUSTED, "queue_full")
+            if sum(queue.byte_len for queue in queues) + envelope.byte_len > self._limits.max_queue_bytes:
+                raise BusError(RESOURCE_EXHAUSTED, "queue_bytes_exceeded")
+            self._queues[(subscriber, spec.topic)].check_capacity(envelope)
+        for subscriber in self.subscribers(spec.topic):
             self._queues[(subscriber, spec.topic)].push(envelope)
         self._sequences[sequence_key] = sequence
         return envelope
@@ -566,128 +608,348 @@ class EventBusKernel:
 
 
 class HostEventBus:
-    """Extension-side participant of the host-mediated bus.
+    """Binding-scoped API 0.3 participant with one bounded rebind worker.
 
-    Outbound calls go through the SDK host-request API (``bus/publish``,
-    ``bus/subscribe``, ``bus/unsubscribe``). Inbound deliveries arrive as
-    ``bus/event`` notifications and are validated with the same kernel rules
-    before the extension sees them. Everything fails closed: a local violation
-    never reaches the host, and an inbound violation is refused instead of
-    surfaced as data.
+    ``request(method, params, cancelled)`` must be thread-safe, bounded in time,
+    and stop waiting when the supplied threading.Event is set. Its response is
+    delivered by the ordinary serial protocol reader. That reader calls
+    :meth:`accept_lifecycle` (never an RPC), and :meth:`accept_event`.
+    Explicit operations may block and must run outside the reader callback.
+    Call :meth:`close` at process shutdown. No publication is queued or replayed.
     """
 
-    def __init__(
-        self,
-        request: Callable[[str, Mapping[str, Any]], Any],
-        registry: TopicRegistry,
-        *,
-        extension_id: str,
-        limits: BusLimits = DEFAULT_LIMITS,
-        now_ms: Optional[Callable[[], int]] = None,
-    ) -> None:
+    def __init__(self, request: Callable, registry: TopicRegistry, *, extension_id: str,
+                 limits: BusLimits = DEFAULT_LIMITS, now_ms: Optional[Callable[[], int]] = None) -> None:
+        import threading
         if not callable(request):
             raise BusError(INVALID_PARAMS, "invalid_host_request")
-        self._request = request
-        self._registry = registry
-        self._limits = limits
+        self._request, self._registry, self._limits = request, registry, limits
         self._extension_id = _identifier(extension_id, limits, "extension_id")
-        self._now_ms = now_ms if now_ms is not None else _monotonic_ms
-        self._subscribed: set = set()
+        self._condition = threading.Condition(threading.RLock())
+        self._operation = threading.Lock()
+        self._cancelled = threading.Event()
+        self._closed = False
+        self._binding_id = ""
+        self._binding_revision = 0
+        self._desired_declarations: dict = {}
+        self._desired_interests: set = set()
+        self._declared: set = set()
+        self._interests: set = set()
+        self._subscribed: dict = {}
+        self._observed: dict = {}
         self._sequences: dict = {}
+        self._dirty = False
+        self._working = False
+        self._rebind_error: Optional[str] = None
+        self._worker = threading.Thread(target=self._rebind, name="octet-bus-rebind", daemon=True)
+        self._worker.start()
 
     @property
     def extension_id(self) -> str:
         return self._extension_id
 
-    def declare(self, *, name: str, fields: Sequence[FieldSpec], description: str = "") -> TopicSpec:
-        """Declare a topic in this extension's namespace, then register it locally."""
+    def snapshot(self) -> dict:
+        """Content-free current ACK ledger; pending is explicitly not active."""
+        with self._condition:
+            return {"binding_id": self._binding_id, "binding_revision": self._binding_revision,
+                    "declared": sorted(self._declared), "subscribed": sorted(self._subscribed),
+                    "pending": sorted(self._interests - self._subscribed.keys()),
+                    "rebind_error": self._rebind_error}
 
-        spec = self._registry.declare(
-            TopicSpec(owner=self._extension_id, name=name, fields=tuple(fields), description=description)
-        )
-        return spec
+    def close(self, *, wait: bool = True) -> None:
+        with self._condition:
+            self._closed = True
+            self._cancelled.set()
+            self._declared.clear()
+            self._subscribed.clear()
+            self._interests.clear()
+            self._sequences.clear()
+            self._condition.notify_all()
+        if wait:
+            self._worker.join(timeout=2)
+
+    def wait_rebound(self, timeout: float = 5) -> bool:
+        """Wait outside the reader for this wake-up's bounded reconciliation."""
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: self._closed or (bool(self._binding_id) and not self._dirty and not self._working), timeout
+            ) and not self._closed and self._rebind_error is None
+
+    def _wake(self) -> None:
+        self._dirty = True
+        self._condition.notify_all()
+
+    def accept_lifecycle(self, params: Any) -> bool:
+        """Serial-reader callback: validate/update ledgers and wake one worker.
+
+        Old/repeated notices are inert. Invalid control fails the participant
+        closed; it cannot continue with an apparently active stale ledger.
+        """
+        from .api_v03 import ContractError, parse_bus_lifecycle_params
+        try:
+            # The generated tagged union has no single `from_wire`; the parser
+            # selects the variant by `kind` and validates the exact shape.
+            notice = parse_bus_lifecycle_params(params).to_wire()
+            with self._condition:
+                if self._closed:
+                    return False
+                if not notice["binding_id"]:
+                    raise BusError(INVALID_PARAMS, "invalid_binding")
+                if notice["kind"] == "binding":
+                    revision = notice["binding_revision"]
+                    if revision <= 0:
+                        raise BusError(INVALID_PARAMS, "invalid_binding_revision")
+                    if revision < self._binding_revision:
+                        return False
+                    if revision == self._binding_revision:
+                        if notice["binding_id"] != self._binding_id:
+                            raise BusError(INVALID_PARAMS, "conflicting_binding")
+                        return False
+                    if notice["binding_id"] == self._binding_id:
+                        raise BusError(INVALID_PARAMS, "reused_binding")
+                    import threading
+                    self._cancelled.set()
+                    self._cancelled = threading.Event()
+                    self._binding_id, self._binding_revision = notice["binding_id"], revision
+                    self._declared.clear()
+                    self._subscribed.clear()
+                    self._interests.clear()
+                    self._observed.clear()
+                    self._sequences.clear()
+                    self._rebind_error = None
+                    self._wake()
+                    return True
+                if notice["binding_id"] != self._binding_id:
+                    return False
+                topic = notice["topic"]
+                validate_topic(topic, self._limits)
+                if notice["topic_revision"] <= 0 or notice["process_generation"] <= 0 or not notice["publisher_instance_id"]:
+                    raise BusError(INVALID_PARAMS, "invalid_topic_provenance")
+                # Only schemas explicitly installed by this extension can be
+                # observed. This map cannot exceed the bounded local registry.
+                if topic not in self._registry.topics():
+                    return False
+                previous = self._observed.get(topic)
+                current = (notice["topic_revision"], notice["kind"] == "topic_available",
+                           notice["publisher_instance_id"], notice["process_generation"])
+                if previous is not None and current[0] <= previous[0]:
+                    if current[0] == previous[0] and current != previous:
+                        raise BusError(INVALID_PARAMS, "conflicting_topic_revision")
+                    return False
+                self._observed[topic] = current
+                self._subscribed.pop(topic, None)
+                self._sequences.pop(topic, None)
+                # Unavailable retains an ACKed pending interest; availability
+                # requires a fresh active subscription ACK, never a guessed gen.
+                if current[1]:
+                    self._interests.discard(topic)
+                if topic in self._desired_interests:
+                    self._wake()
+                return True
+        except (ContractError, BusError) as error:
+            self.close(wait=False)
+            if isinstance(error, BusError):
+                raise
+            raise BusError(INVALID_PARAMS, "invalid_lifecycle") from error
+
+    def _rpc(self, method: str, params: dict, parse: Any) -> dict:
+        """Send one binding-scoped request and validate its typed result.
+
+        `parse` is the generated parser for the reply model. Tagged unions have
+        no single `from_wire`, so the generated `parse_*` selector is the only
+        correct entry point for those shapes.
+        """
+        from .api_v03 import ContractError
+        with self._condition:
+            if self._closed or not self._binding_id:
+                raise BusError(CAPABILITY_MISMATCH, "bus_unbound")
+            # Capture here, never replace a queued operation's binding later.
+            binding, cancelled = self._binding_id, self._cancelled
+            params = {**params, "binding_id": binding}
+        response = self._request(method, params, cancelled)
+        try:
+            result = parse(response).to_wire()
+        except ContractError as error:
+            raise BusError(INVALID_PARAMS, "invalid_ack") from error
+        if result["binding_id"] != binding:
+            raise BusError(CAPABILITY_MISMATCH, "stale_ack")
+        return result
+
+    def _ack_current(self, result: dict) -> None:
+        if self._closed or result["binding_id"] != self._binding_id:
+            raise BusError(CAPABILITY_MISMATCH, "stale_ack")
+
+    @staticmethod
+    def _fields(spec: TopicSpec) -> list:
+        values = []
+        for field_spec in spec.fields:
+            value = {"name": field_spec.name, "kind": field_spec.kind, "required": field_spec.required,
+                     "max_bytes": field_spec.max_bytes, "values": list(field_spec.values)}
+            for key in ("minimum", "maximum"):
+                bound = getattr(field_spec, key)
+                if bound is not None:
+                    value[key] = bound
+            values.append(value)
+        return values
+
+    def _declare(self, spec: TopicSpec) -> None:
+        from .api_v03 import parse_bus_ack
+        with self._condition:
+            if spec.topic in self._declared:
+                return
+        reply = self._rpc("bus/declare", {"topic": spec.topic, "fields": self._fields(spec)}, parse_bus_ack)
+        with self._condition:
+            self._ack_current(reply)
+            self._declared.add(spec.topic)
+
+    def declare(self, *, name: str, fields: Sequence[FieldSpec], description: str = "") -> TopicSpec:
+        spec = TopicRegistry(self._limits).declare(TopicSpec(self._extension_id, name, tuple(fields), description))
+        with self._operation:
+            with self._condition:
+                existing = self._desired_declarations.get(spec.topic)
+                if existing is not None and existing != spec:
+                    raise BusError(INVALID_PARAMS, "topic_already_declared")
+                if existing is None and spec.topic in self._registry.topics():
+                    raise BusError(INVALID_PARAMS, "topic_already_declared")
+                if existing is None and len(self._registry.topics()) >= 128:
+                    raise BusError(RESOURCE_EXHAUSTED, "declaration_limit")
+            self._declare(spec)
+            with self._condition:
+                if existing is None:
+                    self._registry.declare(spec)
+                self._desired_declarations[spec.topic] = spec
+            return spec
+
+    def _subscribe(self, topic: str) -> None:
+        from .api_v03 import parse_bus_subscribe_result
+        with self._condition:
+            if topic in self._interests:
+                return
+        reply = self._rpc("bus/subscribe", {"topic": topic}, parse_bus_subscribe_result)
+        with self._condition:
+            self._ack_current(reply)
+            previous = self._observed.get(topic)
+            if previous is not None and reply["topic_revision"] < previous[0]:
+                raise BusError(CAPABILITY_MISMATCH, "stale_ack")
+            active = reply["state"] == "active"
+            if active and (not reply["publisher_instance_id"] or reply["process_generation"] <= 0 or reply["topic_revision"] <= 0):
+                raise BusError(INVALID_PARAMS, "invalid_topic_provenance")
+            self._interests.add(topic)
+            if active:
+                principal = (reply["publisher_instance_id"], reply["process_generation"])
+                self._subscribed[topic] = principal
+                self._observed[topic] = (reply["topic_revision"], True, *principal)
+            else:
+                self._subscribed.pop(topic, None)
 
     def subscribe(self, topic: Any) -> TopicSpec:
-        spec = self._registry.get(topic)
-        if spec.topic not in self._subscribed:
-            if len(self._subscribed) + 1 > self._limits.max_subscriptions:
-                raise BusError(RESOURCE_EXHAUSTED, "subscription_limit")
-            self._request("bus/subscribe", {"topic": spec.topic})
-            self._subscribed.add(spec.topic)
-        return spec
+        with self._operation:
+            with self._condition:
+                spec = self._registry.get(topic)
+                if topic not in self._desired_interests and len(self._desired_interests) >= self._limits.max_subscriptions:
+                    raise BusError(RESOURCE_EXHAUSTED, "subscription_limit")
+            self._subscribe(topic)
+            with self._condition:
+                self._desired_interests.add(topic)
+            return spec
 
     def unsubscribe(self, topic: Any) -> None:
-        spec = self._registry.get(topic)
-        if spec.topic in self._subscribed:
-            self._request("bus/unsubscribe", {"topic": spec.topic})
-            self._subscribed.discard(spec.topic)
+        from .api_v03 import parse_bus_ack
+        with self._operation:
+            with self._condition:
+                self._registry.get(topic)
+                if topic not in self._desired_interests:
+                    return
+            reply = self._rpc("bus/unsubscribe", {"topic": topic}, parse_bus_ack)
+            with self._condition:
+                self._ack_current(reply)
+                self._desired_interests.discard(topic)
+                self._interests.discard(topic)
+                self._subscribed.pop(topic, None)
+                self._sequences.pop(topic, None)
+
+    def _rebind(self) -> None:
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or self._dirty)
+                if self._closed:
+                    return
+                self._dirty = False
+                self._working = True
+                self._rebind_error = None
+                binding = self._binding_id
+            # One serialized worker, coalesced wakeup bit, bounded desired maps.
+            # Never hold the reader's condition while waiting for an RPC reply.
+            with self._operation:
+                with self._condition:
+                    declarations = list(self._desired_declarations.values())
+                    interests = sorted(self._desired_interests)
+                for item in [*(('declare', spec) for spec in declarations), *(('subscribe', topic) for topic in interests)]:
+                    with self._condition:
+                        if self._closed or binding != self._binding_id:
+                            break
+                    try:
+                        if item[0] == 'declare':
+                            self._declare(item[1])
+                        else:
+                            self._subscribe(item[1])
+                    except Exception:
+                        # No retry loop and no publication replay. Keep inactive;
+                        # a new lifecycle transition or explicit operation may try.
+                        with self._condition:
+                            if binding == self._binding_id:
+                                self._rebind_error = "rebind_failed"
+            with self._condition:
+                self._working = False
+                self._condition.notify_all()
 
     def publish(self, topic: Any, payload: Any) -> BusEnvelope:
-        spec = self._registry.get(topic)
-        if spec.owner != self._extension_id:
-            raise BusError(CAPABILITY_MISMATCH, "foreign_topic", spec.topic)
-        validated = validate_payload(spec, payload, self._limits)
-        encoded = _canonical_bytes(validated)
-        if len(encoded) > self._limits.max_message_bytes:
-            raise BusError(RESOURCE_EXHAUSTED, "message_too_large")
-        published_at_ms = int(self._now_ms())
-        response = self._request(
-            "bus/publish",
-            {
-                "topic": spec.topic,
-                "payload": validated,
-                "publishedAtMs": published_at_ms,
-            },
-        )
-        sequence = 0
-        if isinstance(response, Mapping):
-            raw_sequence = response.get("sequence")
-            if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool) and raw_sequence >= 0:
-                sequence = raw_sequence
-        return BusEnvelope(
-            topic=spec.topic,
-            publisher=self._extension_id,
-            sequence=sequence,
-            published_at_ms=published_at_ms,
-            payload=MappingProxyType(dict(validated)),
-            byte_len=len(encoded),
-        )
+        from .api_v03 import parse_bus_publish_result
+        with self._operation:
+            spec = self._registry.get(topic)
+            if spec.owner != self._extension_id:
+                raise BusError(CAPABILITY_MISMATCH, "foreign_topic", spec.topic)
+            validated = validate_payload(spec, payload, self._limits)
+            encoded = _canonical_bytes(validated)
+            if len(encoded) > self._limits.max_message_bytes:
+                raise BusError(RESOURCE_EXHAUSTED, "message_too_large")
+            reply = self._rpc("bus/publish", {"topic": topic, "payload": validated}, parse_bus_publish_result)
+            with self._condition:
+                self._ack_current(reply)
+                if reply["sequence"] <= 0:
+                    raise BusError(INVALID_PARAMS, "invalid_sequence")
+                return BusEnvelope(topic=topic, publisher=self._extension_id, sequence=reply["sequence"],
+                    published_at_ms=reply["published_at_ms"], payload=MappingProxyType(dict(validated)),
+                    byte_len=len(encoded), binding_id=reply["binding_id"])
 
     def accept_event(self, params: Any) -> Optional[BusEnvelope]:
-        """Validate one host ``bus/event`` delivery; return ``None`` when refused.
-
-        Refusals are local and typed: the caller (or the SDK dispatch loop) must
-        log the bounded :class:`BusError` reason and drop the message. A refused
-        message is never surfaced as data and never mutates local state.
-        """
-
-        if not isinstance(params, Mapping):
-            raise BusError(INVALID_PARAMS, "invalid_envelope")
-        topic = params.get("topic")
-        spec = self._registry.get(topic)
-        if spec.topic not in self._subscribed:
-            raise BusError(CAPABILITY_MISMATCH, "not_subscribed", spec.topic)
-        publisher = params.get("publisher")
-        if publisher == self._extension_id:
-            raise BusError(INVALID_PARAMS, "self_delivery")
-        _identifier(publisher, self._limits, "publisher")
-        sequence = params.get("sequence")
-        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
-            raise BusError(INVALID_PARAMS, "invalid_sequence")
-        validated = validate_payload(spec, params.get("payload"), self._limits)
-        expected = self._sequences.get(spec.topic, 0) + 1
-        if sequence < expected:
-            raise BusError(INVALID_PARAMS, "stale_sequence", spec.topic)
-        self._sequences[spec.topic] = sequence
-        return BusEnvelope(
-            topic=spec.topic,
-            publisher=publisher,
-            sequence=sequence,
-            published_at_ms=int(params.get("publishedAtMs", 0)),
-            payload=MappingProxyType(dict(validated)),
-            byte_len=len(_canonical_bytes(validated)),
-        )
-
+        from .api_v03 import ContractError, parse_bus_event_params
+        try:
+            event = parse_bus_event_params(params)
+        except ContractError as error:
+            raise BusError(INVALID_PARAMS, "invalid_envelope") from error
+        with self._condition:
+            if self._closed or not self._binding_id or event.binding_id != self._binding_id:
+                raise BusError(CAPABILITY_MISMATCH, "stale_binding")
+            spec = self._registry.get(event.topic)
+            principal = self._subscribed.get(spec.topic)
+            if principal is None:
+                raise BusError(CAPABILITY_MISMATCH, "not_subscribed", spec.topic)
+            if event.publisher != spec.owner:
+                raise BusError(INVALID_PARAMS, "foreign_publisher")
+            if principal != (event.publisher_instance_id, event.process_generation):
+                raise BusError(CAPABILITY_MISMATCH, "stale_publisher")
+            if event.sequence <= self._sequences.get(spec.topic, 0):
+                raise BusError(INVALID_PARAMS, "stale_sequence", spec.topic)
+            validated = validate_payload(spec, event.payload, self._limits)
+            encoded = _canonical_bytes(validated)
+            if len(encoded) > self._limits.max_message_bytes:
+                raise BusError(RESOURCE_EXHAUSTED, "message_too_large")
+            self._sequences[spec.topic] = event.sequence
+            return BusEnvelope(topic=spec.topic, publisher=event.publisher, sequence=event.sequence,
+                published_at_ms=event.published_at_ms, payload=MappingProxyType(dict(validated)), byte_len=len(encoded),
+                publisher_instance_id=event.publisher_instance_id, process_generation=event.process_generation,
+                binding_id=event.binding_id)
 
 def _monotonic_ms() -> int:
     import time

@@ -1577,12 +1577,24 @@ pub struct EphemeralAccountingRecord {
     pub recorded_at_unix_ms: u64,
     /// Cumulative session cost after the run, in microdollars.
     pub session_cost_microdollars: u64,
-    /// Whether the run exposed at least one unknown-usage attempt.
+    /// Whether the run has unknown usage or completed operations without exact pricing.
     pub has_uncertain_usage: bool,
     /// Provider usage records, exactly as the transcript recorded them.
     pub usage_records: Vec<octet_agent::UsageRecord>,
     /// Unknown-usage exposure records.
     pub usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
+}
+
+impl EphemeralAccountingRecord {
+    /// Derive price uncertainty from the retained receipts as well as the flag:
+    /// historical accounting-only ledgers predate unpriced-call reporting.
+    fn retain_accounting_uncertainty(&mut self) {
+        self.has_uncertain_usage |= !self.usage_uncertainty_records.is_empty()
+            || self
+                .usage_records
+                .iter()
+                .any(|record| record.cost.is_none() && record.cost_microdollars.is_none());
+    }
 }
 
 /// Aggregate durable ephemeral accounting for one workspace store.
@@ -1592,7 +1604,7 @@ pub struct EphemeralAccountingSummary {
     pub runs: usize,
     /// Sum of every recorded run's cumulative session cost.
     pub total_cost_microdollars: u64,
-    /// Whether any recorded run had unknown usage.
+    /// Whether any recorded run had unknown usage or absent exact pricing.
     pub has_uncertain_usage: bool,
     /// Provider usage records kept across every ephemeral run.
     pub usage_records: usize,
@@ -1674,7 +1686,8 @@ fn finish_ephemeral_run_state(
                 collect_ephemeral_accounting(&workspace_dir, &run.transcript_root)?
             };
         }
-        if let Some(record) = &run.pending {
+        if let Some(record) = &mut run.pending {
+            record.retain_accounting_uncertainty();
             let bytes = serde_json::to_vec(record)?;
             octet_agent::secure_fs::write_private_atomic(
                 &recovery,
@@ -1754,7 +1767,7 @@ fn read_ephemeral_accounting(transcript: &Path) -> anyhow::Result<EphemeralAccou
         accounting_id: None,
         recorded_at_unix_ms: now_unix_ms(),
         session_cost_microdollars: session.total_cost_microdollars(),
-        has_uncertain_usage: !usage_uncertainty_records.is_empty(),
+        has_uncertain_usage: session.has_uncertain_usage() || session.has_unpriced_usage(),
         usage_records: session.usage_records().to_vec(),
         usage_uncertainty_records,
     })
@@ -1978,10 +1991,12 @@ impl SessionStore {
         &self,
         record: &EphemeralAccountingRecord,
     ) -> anyhow::Result<()> {
+        let mut record = record.clone();
+        record.retain_accounting_uncertainty();
         let directory = self.dir.join(EPHEMERAL_ACCOUNTING_DIRECTORY);
         octet_agent::secure_fs::create_private_directory_all(&directory)?;
         let path = directory.join(EPHEMERAL_ACCOUNTING_FILE);
-        let mut line = serde_json::to_vec(record)?;
+        let mut line = serde_json::to_vec(&record)?;
         if line.len() > MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES {
             anyhow::bail!(
                 "ephemeral accounting record is {} bytes (limit {MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES})",
@@ -2021,9 +2036,10 @@ impl SessionStore {
         }
         if let Some(id) = &record.accounting_id {
             for prior in existing.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-                let prior: EphemeralAccountingRecord = serde_json::from_slice(prior)?;
+                let mut prior: EphemeralAccountingRecord = serde_json::from_slice(prior)?;
+                prior.retain_accounting_uncertainty();
                 if prior.accounting_id.as_ref() == Some(id) {
-                    if serde_json::to_value(&prior)? != serde_json::to_value(record)? {
+                    if serde_json::to_value(&prior)? != serde_json::to_value(&record)? {
                         anyhow::bail!("ephemeral accounting recovery key has conflicting data");
                     }
                     file.sync_all()?;
@@ -2042,7 +2058,7 @@ impl SessionStore {
     /// Aggregate durable accounting for every ephemeral run in this workspace.
     ///
     /// `has_uncertain_usage` is fail-closed: while any recorded run exposed
-    /// unknown usage, the workspace total remains uncertain.
+    /// unknown usage or absent exact pricing, the workspace total remains uncertain.
     pub fn ephemeral_accounting_summary(&self) -> anyhow::Result<EphemeralAccountingSummary> {
         let path = self
             .dir
@@ -2063,9 +2079,10 @@ impl SessionStore {
         }
         let mut summary = EphemeralAccountingSummary::default();
         for line in String::from_utf8_lossy(&bytes).lines() {
-            let Ok(record) = serde_json::from_str::<EphemeralAccountingRecord>(line) else {
+            let Ok(mut record) = serde_json::from_str::<EphemeralAccountingRecord>(line) else {
                 continue;
             };
+            record.retain_accounting_uncertainty();
             summary.runs += 1;
             summary.total_cost_microdollars = summary
                 .total_cost_microdollars
@@ -3046,6 +3063,83 @@ mod tests {
         let after = store.ephemeral_accounting_summary().unwrap();
         assert_eq!(after.runs, 2);
         assert!(after.has_uncertain_usage);
+    }
+
+    #[test]
+    fn unpriced_ephemeral_receipts_survive_legacy_ledger_and_recovery_flags() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let workspace = root_path.join("workspace");
+        let transcript_root = root_path.join("transcripts");
+        let accounting_root = root_path.join("durable");
+        let store = SessionStore::new(&accounting_root, &workspace);
+        let directory = transcript_root.join(workspace_key(&workspace));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("unpriced.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .record_compaction_usage(
+                EndpointId("fixture".into()),
+                ModelId("fixture".into()),
+                octet_ai::Usage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                    total_tokens: 6,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert!(session.has_unpriced_usage());
+        assert!(!session.has_uncertain_usage());
+        drop(session);
+        let mut record = read_ephemeral_accounting(&path).unwrap();
+        assert!(record.has_uncertain_usage);
+        assert!(record.usage_uncertainty_records.is_empty());
+        record.accounting_id = Some(workspace_key(&transcript_root));
+        store.append_ephemeral_accounting(&record).unwrap();
+        // Persist the pre-unpriced-reporting flag to exercise old accounting-only
+        // ledgers and recovery after the transcript itself is discarded.
+        record.has_uncertain_usage = false;
+        let legacy = serde_json::to_vec(&record).unwrap();
+        let ledger = store
+            .dir()
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        let mut line = legacy.clone();
+        line.push(b'\n');
+        std::fs::write(&ledger, &line).unwrap();
+        octet_agent::secure_fs::write_private_atomic(
+            &transcript_root.join(EPHEMERAL_ACCOUNTING_RECOVERY),
+            &legacy,
+            MAX_SESSION_FILE_BYTES,
+        )
+        .unwrap();
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert!(summary.has_uncertain_usage);
+        assert_eq!(summary.uncertainty_records, 0);
+        let mut run = EphemeralRun {
+            transcript_root: transcript_root.clone(),
+            accounting_session_dir: accounting_root,
+            workspace,
+            pending: None,
+        };
+        let recovered = finish_ephemeral_run_state(&mut run).unwrap().unwrap();
+        assert!(recovered.has_uncertain_usage);
+        assert!(!transcript_root.exists());
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(
+            summary.runs, 1,
+            "normalizing the flag must not duplicate a recovery receipt"
+        );
+        assert_eq!(summary.input_tokens, 4);
+        assert_eq!(summary.output_tokens, 2);
+        assert!(summary.has_uncertain_usage);
+        assert_eq!(
+            std::fs::read(ledger).unwrap(),
+            line,
+            "historical receipts are not rewritten"
+        );
     }
 
     #[test]

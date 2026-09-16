@@ -31,6 +31,7 @@ fn make_model(
     }
 
     let spec = ModelSpec {
+        preset: Default::default(),
         id: ModelId(format!("model-{:?}", protocol)),
         endpoint: EndpointId("ep-1".to_string()),
         api_name: "test-model".to_string(),

@@ -82,12 +82,6 @@ pub fn default_definitions(platform: &str, wsl: bool) -> Vec<KeybindingDefinitio
                 "app.message.followUp" if windows => vec!["ctrl+q".to_owned()],
                 "app.message.dequeue" if windows => vec!["alt+q".to_owned()],
                 "app.clipboard.pasteImage" if windows => vec!["alt+v".to_owned()],
-                "app.tree.foldOrUp" if darwin => {
-                    vec!["alt+left".to_owned(), "ctrl+left".to_owned()]
-                }
-                "app.tree.unfoldOrDown" if darwin => {
-                    vec!["alt+right".to_owned(), "ctrl+right".to_owned()]
-                }
                 _ => strings(keys),
             };
             KeybindingDefinition {
@@ -106,8 +100,13 @@ fn strings(keys: &[&str]) -> Vec<String> {
 /// Normalize a single key id so modifier order and spelling do not matter.
 #[must_use]
 pub fn normalize_key_id(raw: &str) -> String {
-    let mut parts: Vec<&str> = raw.split('+').collect();
-    let base = parts.pop().unwrap_or_default();
+    let raw = raw.trim();
+    let (prefix, base) = if let Some(prefix) = raw.strip_suffix('+') {
+        (prefix.strip_suffix('+').unwrap_or(prefix), "+")
+    } else {
+        raw.rsplit_once('+').unwrap_or(("", raw))
+    };
+    let parts: Vec<&str> = prefix.split('+').filter(|part| !part.is_empty()).collect();
     let base = match base.to_ascii_lowercase().as_str() {
         "esc" => "escape".to_owned(),
         "return" => "enter".to_owned(),
@@ -147,7 +146,7 @@ pub fn key_event_id(key: &KeyEvent) -> String {
         KeyCode::Char(character) => character.to_string(),
         KeyCode::Enter => "enter".to_owned(),
         KeyCode::Esc => "escape".to_owned(),
-        KeyCode::Tab => "tab".to_owned(),
+        KeyCode::Tab | KeyCode::BackTab => "tab".to_owned(),
         KeyCode::Backspace => "backspace".to_owned(),
         KeyCode::Delete => "delete".to_owned(),
         KeyCode::Insert => "insert".to_owned(),
@@ -166,7 +165,10 @@ pub fn key_event_id(key: &KeyEvent) -> String {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         modifiers.push("ctrl");
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT) {
+    if key.modifiers.contains(KeyModifiers::SHIFT)
+        || key.code == KeyCode::BackTab
+        || matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase())
+    {
         modifiers.push("shift");
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
@@ -193,9 +195,42 @@ pub struct KeybindingsManager {
 }
 
 impl KeybindingsManager {
+    /// Platform defaults without filesystem access (also used by deterministic tests).
+    #[must_use]
+    pub fn current_platform() -> Self {
+        Self::with_platform(Self::platform(), Self::is_wsl(), BTreeMap::new())
+    }
+
+    fn platform() -> &'static str {
+        if cfg!(windows) {
+            "win32"
+        } else if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        }
+    }
+
+    fn is_wsl() -> bool {
+        cfg!(target_os = "linux")
+            && (std::env::var_os("WSL_DISTRO_NAME").is_some()
+                || std::env::var_os("WSL_INTEROP").is_some())
+    }
+
+    /// Load the user's configuration; project files never change input ownership.
+    #[must_use]
+    pub fn for_user() -> Self {
+        dirs::home_dir().map_or_else(Self::current_platform, |home| {
+            Self::create(&home.join(".octet"), Self::platform(), Self::is_wsl())
+        })
+    }
+
     /// Build a manager from explicit definitions and user overrides.
     #[must_use]
-    pub fn new(definitions: Vec<KeybindingDefinition>, user_bindings: BTreeMap<String, Vec<String>>) -> Self {
+    pub fn new(
+        definitions: Vec<KeybindingDefinition>,
+        user_bindings: BTreeMap<String, Vec<String>>,
+    ) -> Self {
         let mut manager = Self {
             definitions,
             user_bindings,
@@ -300,7 +335,9 @@ impl KeybindingsManager {
     /// Whether `id` is part of the registry.
     #[must_use]
     pub fn has_definition(&self, id: &str) -> bool {
-        self.definitions.iter().any(|definition| definition.id == id)
+        self.definitions
+            .iter()
+            .any(|definition| definition.id == id)
     }
 
     fn rebuild(&mut self) {
@@ -404,13 +441,8 @@ pub const KEYBINDING_NAME_MIGRATIONS: &[(&str, &str)] = &[
     ("dequeue", "app.message.dequeue"),
     ("pasteImage", "app.clipboard.pasteImage"),
     ("newSession", "app.session.new"),
-    ("tree", "app.session.tree"),
     ("fork", "app.session.fork"),
     ("resume", "app.session.resume"),
-    ("treeFoldOrUp", "app.tree.foldOrUp"),
-    ("treeUnfoldOrDown", "app.tree.unfoldOrDown"),
-    ("treeEditLabel", "app.tree.editLabel"),
-    ("treeToggleLabelTimestamp", "app.tree.toggleLabelTimestamp"),
     ("toggleSessionPath", "app.session.togglePath"),
     ("toggleSessionSort", "app.session.toggleSort"),
     ("renameSession", "app.session.rename"),
@@ -422,7 +454,12 @@ pub const KEYBINDING_NAME_MIGRATIONS: &[(&str, &str)] = &[
 /// file exactly like upstream.
 #[must_use]
 pub fn load_raw_config(path: &Path) -> Option<serde_json::Map<String, Value>> {
-    let raw = std::fs::read_to_string(path).ok()?;
+    // Resolve the trusted user directory, but never follow a linked final file.
+    let path = path.parent()?.canonicalize().ok()?.join(path.file_name()?);
+    let raw = String::from_utf8(
+        octet_agent::secure_fs::read_regular_file_bounded(&path, 256 * 1024).ok()?,
+    )
+    .ok()?;
     let stripped = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
     match serde_json::from_str::<Value>(stripped) {
         Ok(Value::Object(map)) => Some(map),
@@ -479,7 +516,9 @@ fn order_keybindings_config(
 
 /// Filter a raw config object down to string and string-array values.
 #[must_use]
-pub fn to_keybindings_config(raw: &serde_json::Map<String, Value>) -> BTreeMap<String, Vec<String>> {
+pub fn to_keybindings_config(
+    raw: &serde_json::Map<String, Value>,
+) -> BTreeMap<String, Vec<String>> {
     let mut config = BTreeMap::new();
     for (key, value) in raw {
         let keys = match value {
@@ -525,6 +564,7 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("tui.editor.yank", &["ctrl+y"], "Yank"),
     ("tui.editor.yankPop", &["alt+y"], "Yank pop"),
     ("tui.editor.undo", &["ctrl+-"], "Undo"),
+    ("tui.editor.redo", &["ctrl+shift+-"], "Redo"),
     ("tui.input.newLine", &["shift+enter", "ctrl+j"], "Insert newline"),
     ("tui.input.submit", &["enter"], "Submit input"),
     ("tui.input.tab", &["tab"], "Tab / autocomplete"),
@@ -544,6 +584,7 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("tui.altScreen.previousPrompt", &["ctrl+shift+up", "ctrl+up"], "Jump to previous semantic prompt"),
     ("tui.altScreen.nextPrompt", &["ctrl+shift+down", "ctrl+down"], "Jump to next semantic prompt"),
     ("tui.altScreen.search", &["ctrl+shift+f"], "Search the primary scroll view"),
+    ("tui.altScreen.toggleScrollbar", &["ctrl+shift+b"], "Cycle transcript scrollbar hidden/auto/always"),
     ("tui.altScreen.searchNext", &["enter", "ctrl+g"], "Select the next search match"),
     ("tui.altScreen.searchPrevious", &["shift+enter", "ctrl+shift+g"], "Select the previous search match"),
     ("tui.altScreen.searchClose", &["escape"], "Close transcript search"),
@@ -567,15 +608,11 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("app.message.dequeue", &["alt+up"], "Restore queued messages"),
     ("app.clipboard.pasteImage", &["ctrl+v"], "Paste image from clipboard (text fallback)"),
     ("app.session.new", &[], "Start a new session"),
-    ("app.session.tree", &[], "Open session tree"),
     ("app.session.fork", &[], "Fork current session"),
     ("app.session.resume", &[], "Resume a session"),
-    ("app.tree.foldOrUp", &["ctrl+left", "alt+left"], "Fold tree branch or move up"),
-    ("app.tree.unfoldOrDown", &["ctrl+right", "alt+right"], "Unfold tree branch or move down"),
-    ("app.tree.editLabel", &["shift+l"], "Edit tree label"),
-    ("app.tree.toggleLabelTimestamp", &["shift+t"], "Toggle tree label timestamps"),
     ("app.session.togglePath", &["ctrl+p"], "Toggle session path display"),
     ("app.session.toggleSort", &["ctrl+s"], "Toggle session sort mode"),
+    ("app.session.search", &["ctrl+f"], "Search session transcripts for the query"),
     ("app.session.rename", &["ctrl+r"], "Rename session"),
     ("app.session.delete", &["ctrl+d"], "Delete session"),
     ("app.session.deleteNoninvasive", &["ctrl+backspace"], "Delete session when query is empty"),
@@ -585,13 +622,6 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("app.models.toggleProvider", &["ctrl+p"], "Toggle all models for provider"),
     ("app.models.reorderUp", &["alt+up"], "Move model up in order"),
     ("app.models.reorderDown", &["alt+down"], "Move model down in order"),
-    ("app.tree.filter.default", &["ctrl+d"], "Tree filter: default view"),
-    ("app.tree.filter.noTools", &["ctrl+t"], "Tree filter: hide tool results"),
-    ("app.tree.filter.userOnly", &["ctrl+u"], "Tree filter: user messages only"),
-    ("app.tree.filter.labeledOnly", &["ctrl+l"], "Tree filter: labeled entries only"),
-    ("app.tree.filter.all", &["ctrl+a"], "Tree filter: show all entries"),
-    ("app.tree.filter.cycleForward", &["ctrl+o"], "Tree filter: cycle forward"),
-    ("app.tree.filter.cycleBackward", &["shift+ctrl+o"], "Tree filter: cycle backward"),
 ];
 
 #[cfg(test)]
@@ -604,6 +634,20 @@ mod tests {
             .iter()
             .map(|(id, keys)| ((*id).to_owned(), strings(keys)))
             .collect()
+    }
+
+    #[test]
+    fn plus_backtab_and_oversized_files_are_handled_at_the_boundary() {
+        assert_eq!(normalize_key_id("shift+ctrl++"), "ctrl+shift++");
+        assert_eq!(
+            key_event_id(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
+            "shift+tab"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("keybindings.json");
+        std::fs::write(&path, " ".repeat(256 * 1024 + 1)).unwrap();
+        assert!(load_raw_config(&path).is_none());
+        assert!(load_raw_config(directory.path()).is_none());
     }
 
     #[test]
@@ -706,8 +750,10 @@ mod tests {
         ));
         // Esc and escape are the same key.
         let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(KeybindingsManager::with_platform("linux", false, BTreeMap::new())
-            .matches(&escape, "app.interrupt"));
+        assert!(
+            KeybindingsManager::with_platform("linux", false, BTreeMap::new())
+                .matches(&escape, "app.interrupt")
+        );
     }
 
     #[test]
@@ -715,7 +761,10 @@ mod tests {
         let manager = KeybindingsManager::with_platform("linux", false, BTreeMap::new());
         let resolved = manager.get_resolved_bindings();
         assert_eq!(resolved.len(), manager.definitions().len());
-        assert_eq!(resolved.get("tui.editor.undo").map(Vec::as_slice), Some(["ctrl+-".to_owned()].as_slice()));
+        assert_eq!(
+            resolved.get("tui.editor.undo").map(Vec::as_slice),
+            Some(["ctrl+-".to_owned()].as_slice())
+        );
     }
 
     #[test]
@@ -733,8 +782,14 @@ mod tests {
         assert!(!migrated.contains_key("undo"));
 
         let config = to_keybindings_config(&migrated);
-        assert_eq!(config.get("tui.editor.undo").map(Vec::as_slice), Some(["ctrl+z".to_owned()].as_slice()));
-        assert_eq!(config.get("custom.key").map(Vec::as_slice), Some(["f1".to_owned()].as_slice()));
+        assert_eq!(
+            config.get("tui.editor.undo").map(Vec::as_slice),
+            Some(["ctrl+z".to_owned()].as_slice())
+        );
+        assert_eq!(
+            config.get("custom.key").map(Vec::as_slice),
+            Some(["f1".to_owned()].as_slice())
+        );
     }
 
     #[test]
@@ -744,7 +799,10 @@ mod tests {
         let (migrated, changed) = migrate_keybindings_config(&raw);
         assert!(changed);
         let config = to_keybindings_config(&migrated);
-        assert_eq!(config.get("tui.editor.undo").map(Vec::as_slice), Some(["ctrl+y".to_owned()].as_slice()));
+        assert_eq!(
+            config.get("tui.editor.undo").map(Vec::as_slice),
+            Some(["ctrl+y".to_owned()].as_slice())
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ fn base_request(workspace: PathBuf) -> RunRequest {
 
 fn model_with_inputs(protocol: Protocol, input_modalities: ModalitySet) -> ModelSpec {
     ModelSpec {
+        preset: Default::default(),
         id: octet_ai::ModelId("test-model".into()),
         endpoint: EndpointId("test-provider".into()),
         api_name: "test-model".into(),

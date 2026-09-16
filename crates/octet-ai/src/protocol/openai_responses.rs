@@ -1032,7 +1032,8 @@ pub(crate) fn build_request(
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
     // 1. Normalize model-gated reasoning, then run validation.
-    let req = normalize_request_reasoning(req, &model.spec.capabilities);
+    let defaults = super::preset::request_defaults(model, req)?;
+    let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
     let diagnostics = validate_request(
         &req,
         &model.spec.capabilities,
@@ -1107,7 +1108,7 @@ pub(crate) fn build_request(
             ToolChoice::Required => Some(serde_json::Value::String("required".to_string())),
             ToolChoice::None => Some(serde_json::Value::String("none".to_string())),
             ToolChoice::Named(name) => Some(serde_json::json!({
-                "type": "function",
+                "type": if super::grammar::input_property(&req.tools, name)?.is_some() { "custom" } else { "function" },
                 "name": name
             })),
         }
@@ -1138,13 +1139,7 @@ pub(crate) fn build_request(
     // synthesize a default from the local capacity limit. Subscription
     // endpoints that reject this parameter select omission through runtime
     // metadata rather than a codec-side provider identity check.
-    let max_output_tokens = (!model
-        .endpoint
-        .runtime
-        .responses_profile
-        .omits_max_output_tokens())
-    .then_some(req.max_output_tokens)
-    .flatten();
+    let max_output_tokens = crate::effective_output_token_cap(model, req.max_output_tokens);
 
     let responses_options = req.responses.as_ref();
     // Codex `service_tier`: a declared endpoint capability, never a provider
@@ -1175,7 +1170,10 @@ pub(crate) fn build_request(
     } else {
         refresh_instructions
     };
-    let wire_input = serde_json::to_value(input).expect("Responses input serializes");
+    let mut wire_input = serde_json::to_value(input).expect("Responses input serializes");
+    if !responses_lite {
+        map_grammar_replay(&mut wire_input, &req, raw_input.is_none())?;
+    }
     let responses_req = ResponsesRequest {
         model: model.spec.api_name.clone(),
         input: wire_input,
@@ -1218,7 +1216,10 @@ pub(crate) fn build_request(
         stream: true,
     };
 
-    let body_bytes = serde_json::to_vec(&responses_req)
+    let mut body = serde_json::to_value(&responses_req)
+        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    super::preset::sampling(model, &req, &mut body)?;
+    let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "responses")?;
@@ -1232,6 +1233,69 @@ pub(crate) fn build_request(
         streaming: true,
         diagnostics,
     })
+}
+
+/// Convert canonical function-shaped history using the immutable request tool
+/// schema, and preserve authoritative custom-call provenance on opaque replay.
+/// Results are paired by call id, never inferred from their text payload.
+fn map_grammar_replay(
+    input: &mut serde_json::Value,
+    req: &Request,
+    canonical_calls: bool,
+) -> Result<(), AiError> {
+    let mut custom_ids = std::collections::HashSet::new();
+    for message in req.messages.iter().filter(|_| canonical_calls) {
+        if let Message::Assistant(assistant) = message {
+            for part in &assistant.content {
+                if let AssistantPart::ToolCall(call) = part {
+                    if super::grammar::input_property(&req.tools, &call.name)?.is_some() {
+                        custom_ids.insert(call.id.0.clone());
+                        custom_ids.insert(crate::protocol::normalize_tool_call_id(&call.id.0));
+                    }
+                }
+            }
+        }
+    }
+    let items = input.as_array_mut().expect("Responses input is an array");
+    for item in items.iter_mut() {
+        if canonical_calls
+            && item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
+        {
+            if let Some(name) = item.get("name").and_then(serde_json::Value::as_str) {
+                if let Some(property) = super::grammar::input_property(&req.tools, name)? {
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            DecodeError::InvalidProviderField(
+                                "custom replay call has no arguments".to_owned(),
+                            )
+                        })?;
+                    let text = super::grammar::replay_input(arguments, &property)?;
+                    let object = item.as_object_mut().expect("a function call is an object");
+                    object.remove("arguments");
+                    object.insert("type".to_owned(), "custom_tool_call".into());
+                    object.insert("input".to_owned(), text.into());
+                }
+            }
+        }
+        if item.get("type").and_then(serde_json::Value::as_str) == Some("custom_tool_call") {
+            if let Some(id) = item.get("call_id").and_then(serde_json::Value::as_str) {
+                custom_ids.insert(id.to_owned());
+            }
+        }
+    }
+    for item in items {
+        if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output")
+            && item
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| custom_ids.contains(id))
+        {
+            item["type"] = "custom_tool_call_output".into();
+        }
+    }
+    Ok(())
 }
 
 /// Flush buffered user content parts as a `message` item, preserving canonical
@@ -1316,6 +1380,10 @@ enum ResponsesSseEvent {
     ReasoningTextDelta { output_index: usize, delta: String },
     #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningSummaryDelta { output_index: usize, delta: String },
+    #[serde(rename = "response.custom_tool_call_input.delta")]
+    CustomToolInputDelta { output_index: usize, delta: String },
+    #[serde(rename = "response.custom_tool_call_input.done")]
+    CustomToolInputDone { output_index: usize, input: String },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta { output_index: usize, delta: String },
     #[serde(rename = "response.function_call_arguments.done")]
@@ -1392,6 +1460,8 @@ struct ResponsesResponseItem {
     /// not silently dropped by serde (unknown-field ignore).
     #[serde(default)]
     arguments: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
     /// Provider computer-use action (`computer_call` items only). Retained as
     /// raw JSON so the codec can validate the action discriminator and bound
     /// the canonical payload before surfacing it.
@@ -1413,6 +1483,8 @@ struct ResponsesResponseItemDone {
     /// shape as well as the documented `function_call_arguments.done` form.
     #[serde(default)]
     arguments: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
     /// Terminal computer-use action; see [`ResponsesResponseItem::action`].
     #[serde(default)]
     action: Option<serde_json::Value>,
@@ -1423,6 +1495,8 @@ struct ResponsesResponseItemDone {
 
 #[derive(Deserialize)]
 struct ResponsesResponseCompletedBlock {
+    #[serde(default)]
+    service_tier: Option<String>,
     /// Full terminal output is the only authoritative raw replay source. Added
     /// events are intentionally not used because some servers send skeletons.
     #[serde(default)]
@@ -1437,6 +1511,8 @@ struct ResponsesResponseCompletedBlock {
 
 #[derive(Deserialize)]
 struct ResponsesResponseIncompleteBlock {
+    #[serde(default)]
+    service_tier: Option<String>,
     /// Incomplete terminal responses carry the authoritative output produced
     /// before the limit/refusal stopped generation. Preserve it for exact
     /// Responses replay just as we do for completed responses.
@@ -1581,6 +1657,10 @@ fn close_open_tool_calls(
         .filter(|index| !builder.ended_indices.contains(index))
         .collect();
     for index in open {
+        if super::grammar::is_open(builder, index) {
+            super::grammar::finish(events, builder, index, None)?;
+            continue;
+        }
         // A computer call whose action never validated is not a representable
         // exchange: fail closed before the terminal response instead of
         // surfacing an actionless call for a caller to guess at.
@@ -1601,6 +1681,77 @@ fn close_open_tool_calls(
                 argument_error: None,
             },
         )?;
+    }
+    Ok(())
+}
+
+/// Terminal opaque custom input must agree with the call exposed to the host.
+/// A late monotonic suffix can complete an open call; changed closed input is
+/// rejected rather than leaving canonical execution and opaque replay divergent.
+fn reconcile_custom_output(
+    events: &mut Vec<StreamEvent>,
+    builder: &mut ResponseBuilder,
+    output: &[crate::responses::ResponsesItem],
+) -> Result<(), AiError> {
+    for item in output {
+        let item = item.as_json();
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("custom_tool_call") {
+            continue;
+        }
+        let invalid = || {
+            DecodeError::InvalidProviderField(
+                "terminal custom tool call disagrees with its streamed envelope".to_owned(),
+            )
+        };
+        let id = item
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let input = item
+            .get("input")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let index = builder
+            .tool_call_builders
+            .iter()
+            .find(|(_, call)| call.id.0 == id && call.name == name)
+            .map(|(index, _)| *index)
+            .ok_or_else(invalid)?;
+        super::grammar::finish(events, builder, index, Some(input))?;
+    }
+    Ok(())
+}
+
+/// Settle tier-aware pricing only after authoritative terminal usage/tier.
+/// Missing usage or an undeclared tariff is unpriced, never fabricated as zero.
+fn settle_responses_cost(
+    model: &crate::catalog::Model,
+    builder: &mut ResponseBuilder,
+    echoed: Option<&str>,
+) -> Result<(), AiError> {
+    let cost = match (&builder.pricing, &builder.usage) {
+        (Some(pricing), Some(usage)) => crate::pricing::responses_cost_of(
+            pricing,
+            usage,
+            model.endpoint.runtime.responses_profile,
+            &model.spec.api_name,
+            builder.requested_service_tier,
+            echoed,
+        )?,
+        _ => None,
+    };
+    builder.response_cost = Some(cost);
+    if cost.is_none() && builder.pricing.is_some() {
+        builder.add_diagnostic(crate::Diagnostic {
+            code: "unpriced_responses_tier".to_owned(),
+            message:
+                "Responses cost is unknown: missing usage or an unqualified service-tier tariff"
+                    .to_owned(),
+        });
     }
     Ok(())
 }
@@ -1668,7 +1819,7 @@ fn canonical_computer_action(arguments_json: &str) -> Option<serde_json::Value> 
 
 /// Decodes a streaming SSE event from OpenAI Responses, emitting StreamEvents.
 pub(crate) fn decode_stream_event(
-    _model: &crate::catalog::Model,
+    model: &crate::catalog::Model,
     sse_event: &SseEvent,
     builder: &mut ResponseBuilder,
 ) -> Result<Vec<StreamEvent>, AiError> {
@@ -1715,7 +1866,34 @@ pub(crate) fn decode_stream_event(
             )?;
         }
         ResponsesSseEvent::OutputItemAdded { output_index, item } => {
-            if item.r#type == "function_call" {
+            if item.r#type == "custom_tool_call" {
+                let key = format!("item_{output_index}");
+                let index = get_canonical_index(builder, &key);
+                let name = item.name.ok_or_else(|| {
+                    DecodeError::InvalidProviderField(
+                        "custom tool call is missing its name".to_owned(),
+                    )
+                })?;
+                if builder.tool_call_builders.contains_key(&index) {
+                    return Err(DecodeError::InvalidProviderField(
+                        "custom tool call started more than once".to_owned(),
+                    )
+                    .into());
+                }
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::ToolCallStart {
+                        index,
+                        id: ToolCallId(item.call_id.unwrap_or(item.id)),
+                        name,
+                    },
+                )?;
+                super::grammar::start(builder, index)?;
+                if let Some(input) = item.input {
+                    super::grammar::delta(&mut events, builder, index, &input)?;
+                }
+            } else if item.r#type == "function_call" {
                 let key = format!("item_{}", output_index);
                 let canonical_idx = get_canonical_index(builder, &key);
                 if let Some(name) = item.name {
@@ -1894,6 +2072,20 @@ pub(crate) fn decode_stream_event(
                 )?;
             }
         }
+        ResponsesSseEvent::CustomToolInputDelta {
+            output_index,
+            delta,
+        } => {
+            let index = get_canonical_index(builder, &format!("item_{output_index}"));
+            super::grammar::delta(&mut events, builder, index, &delta)?;
+        }
+        ResponsesSseEvent::CustomToolInputDone {
+            output_index,
+            input,
+        } => {
+            let index = get_canonical_index(builder, &format!("item_{output_index}"));
+            super::grammar::finish(&mut events, builder, index, Some(&input))?;
+        }
         ResponsesSseEvent::FunctionCallArgumentsDelta {
             output_index,
             delta,
@@ -1901,6 +2093,12 @@ pub(crate) fn decode_stream_event(
             if !delta.is_empty() {
                 let key = format!("item_{}", output_index);
                 let canonical_idx = get_canonical_index(builder, &key);
+                if super::grammar::is_open(builder, canonical_idx) {
+                    return Err(DecodeError::InvalidProviderField(
+                        "custom tool call received function arguments".to_owned(),
+                    )
+                    .into());
+                }
                 emit_event(
                     &mut events,
                     builder,
@@ -1917,6 +2115,12 @@ pub(crate) fn decode_stream_event(
         } => {
             let key = format!("item_{}", output_index);
             let canonical_idx = get_canonical_index(builder, &key);
+            if super::grammar::is_open(builder, canonical_idx) {
+                return Err(DecodeError::InvalidProviderField(
+                    "custom tool call received function arguments".to_owned(),
+                )
+                .into());
+            }
             // Providers are allowed to send the complete argument payload
             // only on the terminal event. If no deltas populated the builder,
             // feed that payload before closing the call. If deltas already
@@ -1954,7 +2158,10 @@ pub(crate) fn decode_stream_event(
             }
         }
         ResponsesSseEvent::OutputItemDone { output_index, item } => {
-            if item.r#type == "reasoning" {
+            if item.r#type == "custom_tool_call" {
+                let index = get_canonical_index(builder, &format!("item_{output_index}"));
+                super::grammar::finish(&mut events, builder, index, item.input.as_deref())?;
+            } else if item.r#type == "reasoning" {
                 let key = format!("reasoning_{}", output_index);
                 let canonical_idx = get_canonical_index(builder, &key);
                 // A duplicated `output_item.done` must not re-emit End (§8).
@@ -2106,6 +2313,7 @@ pub(crate) fn decode_stream_event(
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
                 backfill_reasoning_signatures(builder, &output)?;
+                reconcile_custom_output(&mut events, builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
             }
             close_open_tool_calls(&mut events, builder)?;
@@ -2117,6 +2325,7 @@ pub(crate) fn decode_stream_event(
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
             }
 
+            settle_responses_cost(model, builder, response.service_tier.as_deref())?;
             let resp = builder.finish_mut()?;
             emit_event(&mut events, builder, StreamEvent::Finished(resp))?;
         }
@@ -2129,6 +2338,7 @@ pub(crate) fn decode_stream_event(
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
                 backfill_reasoning_signatures(builder, &output)?;
+                reconcile_custom_output(&mut events, builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
             }
             close_open_tool_calls(&mut events, builder)?;
@@ -2138,6 +2348,7 @@ pub(crate) fn decode_stream_event(
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
             }
 
+            settle_responses_cost(model, builder, response.service_tier.as_deref())?;
             let resp = builder.finish_mut()?;
             emit_event(&mut events, builder, StreamEvent::Finished(resp))?;
         }
@@ -2258,6 +2469,7 @@ mod tests {
 
     fn make_test_model(reasoning: bool) -> Model {
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("test-o1".to_string()),
             endpoint: EndpointId("responses-ep".to_string()),
             api_name: "o1-2024-12-17".to_string(),

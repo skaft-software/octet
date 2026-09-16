@@ -790,6 +790,7 @@ mod tests {
             },
             stop_reason: octet_ai::StopReason::EndTurn,
             turn_usage: Usage::default(),
+            turn_cost: None,
             usage: Usage::default(),
             session_cost_microdollars: None,
             run_cost_microdollars: 0,

@@ -115,6 +115,67 @@ fn apply_tier(tier: &PricingTier, input_bucket: u64, rates: &mut ActiveRates) {
 /// sorting. Public callers can still pass an unsorted [`Pricing`]; that slow
 /// fallback preserves the original order-independent behavior.
 pub fn cost_of(pricing: &Pricing, usage: &Usage) -> Result<Cost, PricingError> {
+    cost_of_ratio(pricing, usage, 1, 1)
+        .map(|cost| cost.expect("integer catalog rates produce whole picodollars"))
+}
+
+/// Computes a Responses request's cost using an explicitly declared tier tariff.
+///
+/// The Codex runtime profile declares Pi's flex (1/2) and priority (2, or 5/2
+/// for the exact API model `gpt-5.5`) schedule. No provider name or URL is guessed.
+/// A Codex `default` echo retains requested flex/priority; other terminal echoes
+/// override the request. Absent echoes fall back to the requested tier.
+///
+/// Unknown tiers, unresolved `auto`, and premium/discounted tiers on undeclared
+/// profiles return `None`, not a fictional catalog-rate cost. Sub-picodollar
+/// totals that cannot fit [`Cost`] also return `None` rather than rounding down.
+/// Hosts can use this same function with no echo for request-budget estimates.
+/// Usage buckets, long-context price tiers, and fractional category costs are
+/// preserved before applying the integer ratio.
+pub fn responses_cost_of(
+    pricing: &Pricing,
+    usage: &Usage,
+    profile: crate::types::ResponsesRuntimeProfile,
+    api_name: &str,
+    requested: Option<crate::types::ServiceTier>,
+    echoed: Option<&str>,
+) -> Result<Option<Cost>, PricingError> {
+    use crate::types::{ResponsesRuntimeProfile, ServiceTier};
+    let tier = match echoed {
+        Some("default")
+            if profile == ResponsesRuntimeProfile::Codex
+                && matches!(requested, Some(ServiceTier::Flex | ServiceTier::Priority)) =>
+        {
+            requested
+        }
+        Some("default") => Some(ServiceTier::Default),
+        Some("flex") => Some(ServiceTier::Flex),
+        Some("priority") => Some(ServiceTier::Priority),
+        Some("auto") => Some(ServiceTier::Auto),
+        Some(_) => return Ok(None),
+        None => requested,
+    };
+    let (numerator, denominator) = match tier {
+        None | Some(ServiceTier::Default) => (1, 1),
+        Some(ServiceTier::Flex) if profile == ResponsesRuntimeProfile::Codex => (1, 2),
+        Some(ServiceTier::Priority) if profile == ResponsesRuntimeProfile::Codex => {
+            if api_name == "gpt-5.5" {
+                (5, 2)
+            } else {
+                (2, 1)
+            }
+        }
+        _ => return Ok(None),
+    };
+    cost_of_ratio(pricing, usage, numerator, denominator)
+}
+
+fn cost_of_ratio(
+    pricing: &Pricing,
+    usage: &Usage,
+    multiplier_numerator: u128,
+    multiplier_denominator: u128,
+) -> Result<Option<Cost>, PricingError> {
     // 1. Check subset invariants
     if usage.cache_write_1h_tokens > usage.cache_write_tokens {
         return Err(PricingError::InvalidUsageBuckets);
@@ -205,24 +266,42 @@ pub fn cost_of(pricing: &Pricing, usage: &Usage) -> Result<Cost, PricingError> {
         .and_then(|value| value.checked_add(output_numerator))
         .ok_or(PricingError::ArithmeticOverflow)?;
 
+    // Scale exact category numerators, never their already-floored fields.
+    let scale = |value: u128| {
+        value
+            .checked_mul(multiplier_numerator)
+            .ok_or(PricingError::ArithmeticOverflow)
+    };
+    let input_numerator = scale(input_numerator)?;
+    let cache_read_numerator = scale(cache_read_numerator)?;
+    let cache_write_numerator = scale(cache_write_numerator)?;
+    let output_standard_numerator = scale(output_standard_numerator)?;
+    let reasoning_numerator = scale(reasoning_numerator)?;
+    let total_numerator = scale(total_numerator)?;
+    if total_numerator % multiplier_denominator != 0 {
+        return Ok(None);
+    }
+    let total_numerator = total_numerator / multiplier_denominator;
+    let category_denominator = RATE_DENOMINATOR * multiplier_denominator;
+
     // 4. Split the exact request total into whole microdollars plus a
     // picodollar remainder, then safely downcast all fields.
-    let input = u64::try_from(input_numerator / RATE_DENOMINATOR)
+    let input = u64::try_from(input_numerator / category_denominator)
         .map_err(|_| PricingError::ArithmeticOverflow)?;
-    let cache_read = u64::try_from(cache_read_numerator / RATE_DENOMINATOR)
+    let cache_read = u64::try_from(cache_read_numerator / category_denominator)
         .map_err(|_| PricingError::ArithmeticOverflow)?;
-    let cache_write = u64::try_from(cache_write_numerator / RATE_DENOMINATOR)
+    let cache_write = u64::try_from(cache_write_numerator / category_denominator)
         .map_err(|_| PricingError::ArithmeticOverflow)?;
-    let output = u64::try_from(output_standard_numerator / RATE_DENOMINATOR)
+    let output = u64::try_from(output_standard_numerator / category_denominator)
         .map_err(|_| PricingError::ArithmeticOverflow)?;
-    let reasoning = u64::try_from(reasoning_numerator / RATE_DENOMINATOR)
+    let reasoning = u64::try_from(reasoning_numerator / category_denominator)
         .map_err(|_| PricingError::ArithmeticOverflow)?;
     let total = u64::try_from(total_numerator / RATE_DENOMINATOR)
         .map_err(|_| PricingError::ArithmeticOverflow)?;
     let total_picodollars_remainder = u32::try_from(total_numerator % RATE_DENOMINATOR)
         .map_err(|_| PricingError::ArithmeticOverflow)?;
 
-    Ok(Cost {
+    Ok(Some(Cost {
         input,
         output,
         cache_read,
@@ -230,12 +309,155 @@ pub fn cost_of(pricing: &Pricing, usage: &Usage) -> Result<Cost, PricingError> {
         reasoning,
         total,
         total_picodollars_remainder,
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_tier_scales_exact_categories_and_retains_sub_microdollars() {
+        use crate::types::{ResponsesRuntimeProfile::Codex, ServiceTier};
+        let pricing = Pricing {
+            input: TokenRate(600_000),
+            output: TokenRate(600_000),
+            cache_read: TokenRate(600_000),
+            cache_write_5m: TokenRate(600_000),
+            cache_write_1h: Some(TokenRate(600_000)),
+            reasoning: Some(TokenRate(600_000)),
+            tiers: vec![],
+        };
+        let usage = Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+            ..Usage::default()
+        };
+        let priority = responses_cost_of(
+            &pricing,
+            &usage,
+            Codex,
+            "gpt-5.4",
+            Some(ServiceTier::Priority),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((priority.input, priority.output), (1, 1));
+        assert_eq!(
+            (priority.total, priority.total_picodollars_remainder),
+            (2, 400_000)
+        );
+        let flex = responses_cost_of(
+            &pricing,
+            &usage,
+            Codex,
+            "gpt-5.4",
+            Some(ServiceTier::Flex),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((flex.total, flex.total_picodollars_remainder), (0, 600_000));
+        let premium = responses_cost_of(
+            &pricing,
+            &usage,
+            Codex,
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            Some("default"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((premium.total, premium.total_picodollars_remainder), (3, 0));
+    }
+
+    #[test]
+    fn service_tier_preserves_long_context_and_disjoint_usage_buckets() {
+        use crate::types::{ResponsesRuntimeProfile::Codex, ServiceTier};
+        let pricing = Pricing {
+            input: TokenRate(2_000_000),
+            output: TokenRate(4_000_000),
+            cache_read: TokenRate(500_000),
+            cache_write_5m: TokenRate(2_500_000),
+            cache_write_1h: Some(TokenRate(4_000_000)),
+            reasoning: Some(TokenRate(6_000_000)),
+            tiers: vec![PricingTier {
+                min_input_tokens: 10,
+                input: Some(TokenRate(4_000_000)),
+                output: Some(TokenRate(8_000_000)),
+                cache_read: None,
+                cache_write_5m: None,
+                cache_write_1h: None,
+                reasoning: None,
+            }],
+        };
+        let usage = Usage {
+            input_tokens: 8,
+            cache_read_tokens: 1,
+            cache_write_tokens: 1,
+            cache_write_1h_tokens: 1,
+            output_tokens: 2,
+            reasoning_tokens: 1,
+            total_tokens: 12,
+        };
+        // Catalog: input32 + read.5 + write4 + output8 + reasoning6 = 50.5.
+        let premium = responses_cost_of(
+            &pricing,
+            &usage,
+            Codex,
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(premium.input, 80);
+        assert_eq!(premium.cache_read, 1);
+        assert_eq!(premium.cache_write, 10);
+        assert_eq!(premium.output, 20);
+        assert_eq!(premium.reasoning, 15);
+        assert_eq!(
+            (premium.total, premium.total_picodollars_remainder),
+            (126, 250_000)
+        );
+    }
+
+    #[test]
+    fn service_tier_unrepresentable_fraction_is_unpriced_not_rounded_down() {
+        use crate::types::{ResponsesRuntimeProfile::Codex, ServiceTier};
+        let pricing = Pricing {
+            input: TokenRate(1),
+            output: TokenRate(0),
+            cache_read: TokenRate(0),
+            cache_write_5m: TokenRate(0),
+            cache_write_1h: None,
+            reasoning: None,
+            tiers: vec![],
+        };
+        let usage = Usage {
+            input_tokens: 1,
+            total_tokens: 1,
+            ..Usage::default()
+        };
+        assert!(responses_cost_of(
+            &pricing,
+            &usage,
+            Codex,
+            "gpt-5.5",
+            Some(ServiceTier::Flex),
+            None
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            cost_of(&pricing, &usage)
+                .unwrap()
+                .total_picodollars_remainder,
+            1
+        );
+    }
 
     #[test]
     fn test_cost_of_simple() {

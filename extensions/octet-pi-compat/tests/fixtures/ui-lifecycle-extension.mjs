@@ -66,6 +66,24 @@ export default function uiLifecycleFixture(pi) {
   register("ui-editor-read", async (_args, ctx) => {
     ctx.ui.notify(ctx.ui.getEditorText());
   });
+  for (const method of ["confirm", "input", "select"]) {
+    for (const mode of ["timeout", "abort", "pre-abort", "wait", "reply"]) {
+      register(`ui-dialog-${method}-${mode}`, async (_args, ctx) => {
+        const controller = new AbortController();
+        if (mode === "pre-abort") controller.abort();
+        const opts = { signal: controller.signal, ...(mode === "timeout" ? { timeout: 30 } : {}) };
+        const timer = mode === "abort" ? setTimeout(() => controller.abort(), 30) : undefined;
+        try {
+          const value = await ctx.ui[method]("fixture dialog", method === "select" ? ["first", "1st", "second"] : "detail", opts);
+          ctx.ui.notify(JSON.stringify({ method, value: value ?? null }));
+        } finally { clearTimeout(timer); }
+      });
+    }
+  }
+  register("ui-wait-idle", async (_args, ctx) => {
+    await ctx.waitForIdle();
+    ctx.ui.notify("idle-confirmed");
+  });
   register("ui-widget", async (_args, ctx) => {
     ctx.ui.setWidget("fixture-widget", ["visible"]);
   });

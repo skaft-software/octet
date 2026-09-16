@@ -402,6 +402,10 @@ pub struct PostMutationRescan {
     pub extension: String,
     /// Stable mutation identity that caused the request.
     pub mutation_id: String,
+    /// Host-owned resource family that settled.
+    pub kind: PostMutationKind,
+    /// Process generation that requested the rescan, independent of the resource revision.
+    pub process_generation: u64,
     /// Generation fence inherited from the settled host mutation.
     pub generation: u64,
     /// Selected opaque resource identities, already subset-validated by host.

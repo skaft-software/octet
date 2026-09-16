@@ -39,6 +39,13 @@ choices, generated extension flags, and defaults are not inferred here.
 [Terminal behavior](terminal.md), [provider setup](providers.md), and
 [configuration values](configuration.md#settings) are separate guides.
 
+RPC assistant messages use the completed response's settled cost, not a fresh
+calculation from the current catalog. Their `usage.cost` is `null` when pricing
+is unknown; a known zero is distinct. Known total-dollar projections include
+sub-microdollar remainder, while exact integer cost remains in the session
+ledger. Aggregate scalar costs are known subtotals whenever usage is uncertain
+or an operation is unpriced.
+
 ## Tools and limits
 
 | Form | Contract |
@@ -58,6 +65,12 @@ choices, generated extension flags, and defaults are not inferred here.
 | `--telemetry PATH` | Owner-only opt-in telemetry, separate from sessions; no raw prompts/tool payloads. |
 
 [Tools and permissions](tools.md) explains why full access is not a sandbox.
+Hard token/cost ceilings also require an enforceable provider output limit.
+Routes that omit that bound, including Codex Responses, presets explicitly
+omitting `max_output_tokens`, and native Responses compaction, refuse hard-ceiling
+admission before dispatch. A catalog output maximum is not a substitute for a
+wire-enforced bound. Without those ceilings, the ordinary uncapped route remains
+available; this does not clear historical usage uncertainty.
 
 ## Provider setup
 
@@ -114,7 +127,7 @@ octet sessions list [--query TEXT]
 octet sessions inspect ID
 octet sessions rename ID "NAME"
 octet sessions tag ID TAG...
-octet sessions export ID [--output PATH] [--force] [--include-secrets]
+octet sessions export ID [--format json|html] [--output PATH] [--force] [--include-secrets]
 octet sessions delete ID
 octet sessions repair ID
 octet doctor
@@ -126,8 +139,58 @@ with both. Fork creates a new session before startup. Listing and
 inspection are read-only. Delete moves to recoverable trash; repair backs up
 before removing only a torn final append. Export redacts by default, refuses an
 existing destination without `--force`, and warns for `--include-secrets`.
+Both formats always exclude private extension metadata; opting out of credential
+scrubbing does not widen that visibility boundary.
 `doctor` performs read-mostly prerequisite/provider/model checks without an Agent
 or executable-extension startup. [Sessions](sessions.md).
+
+## Local evaluation
+
+```text
+octet eval run SUITE [--artifact-dir DIR] [--baseline REPORT.json]
+octet eval run SUITE --model-profile /absolute/private-model.json
+```
+
+The default is a harness-owned scripted fixture, **not** a model benchmark.
+`--model-profile` explicitly selects an independently running local model server.
+The owner-private regular JSON file (maximum 16 KiB, no symlinks/hardlinks) has
+this shape:
+
+```json
+{
+  "schema": "octet-eval-model-1",
+  "base_url": "http://127.0.0.1:8000/v1/",
+  "model": "operator-selected-model",
+  "api_key": "",
+  "context_window": 32768,
+  "max_output_tokens": 1024,
+  "pricing": {"input": 0, "output": 0, "cache_read": 0, "cache_write_5m": 0}
+}
+```
+
+The endpoint must be literal-loopback HTTP, with an explicit non-default port
+and `/v1/` path: no DNS names, remote destinations, redirects, query strings,
+custom headers or ambient credentials. `api_key` is required; empty means none.
+Pricing is optional. When present, all four integer rates are required, in
+microdollars per million tokens; explicit zeros declare a free server. Missing
+pricing remains **unknown**, not free. Local routing does not prove the server
+itself avoids downstream paid inference. Model mode rejects scripted fixture
+replies in the suite.
+
+Each case uses a new private HOME/workspace/session, cleared environment, no
+tools/context files, one model turn, and the literal prompt on stdin. The
+profile's token limit and any known-price case cost ceiling constrain admission;
+unknown pricing with a cost ceiling refuses before inference. There is no
+aggregate run-wide cost ceiling.
+
+`--case-timeout-ms N` defaults to 60000 (range 1–120000);
+`--max-output-bytes N` defaults to 262144 per stdout/stderr stream (range
+1–1048576). Exceeding either bound terminates/reaps the case. A suite is bounded
+to 1 MiB, 64 cases and 32 KiB per prompt. Private reports record backend, selected
+model, pass/latency/token/cost measurements and baseline deltas. Failed or
+interrupted calls retain available durable accounting; missing usage or pricing
+is uncertain, never a fabricated exact zero. Failed cases are observations in
+the report, not necessarily a nonzero harness exit.
 
 ## Instructions and resources
 

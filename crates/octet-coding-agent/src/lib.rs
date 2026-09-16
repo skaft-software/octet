@@ -162,8 +162,8 @@ async fn run() -> anyhow::Result<()> {
         return cli::catalog_publish::run(command, &config);
     }
     if let Some(cli::TopLevelCommand::Eval { command }) = top_level_command.clone() {
-        // The harness owns its own isolated runs; it needs no configured model
-        // and never contacts a live provider.
+        // The harness owns isolated runs, using a scripted fixture by default
+        // or the operator's explicit private loopback model profile.
         return cli::eval::run(command, &config.invocation_cwd);
     }
     if let Some(cli::TopLevelCommand::Setup { options }) = top_level_command.clone() {
@@ -193,7 +193,7 @@ async fn run() -> anyhow::Result<()> {
     let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
     let result = match mode {
         config::Mode::Interactive if capabilities.interactive => {
-            modes::interactive::run_interactive(config).await
+            modes::interactive::run_interactive_with_model_scope(config, parity.models.clone()).await
         }
         config::Mode::Interactive => {
             modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await

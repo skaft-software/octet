@@ -246,6 +246,7 @@ pub(super) fn reconcile_terminal_size(
 
     let mut shell = state.borrow_mut();
     shell.size = dimensions;
+    shell.reset_transcript_navigation_pointer();
     // Deferred history remains lazy; only the materialized tail participates
     // in this resize reflow. Semantic navigation can hydrate older blocks
     // later without delaying the resize or replaying them through the PTY.
@@ -318,7 +319,13 @@ pub(super) fn render_loop_with_terminal(
         };
         // Sleep only to the next deadline, not for a fresh full interval after
         // every event/layout. Model, tool, input and Stop preempt the timeout.
-        let poll = animations.poll_interval(welcome, Instant::now());
+        let now = Instant::now();
+        let scrollbar_deadline = state.borrow().transcript_scrollbar_deadline();
+        let poll = animations.poll_interval(welcome, now).min(
+            scrollbar_deadline
+                .map(|deadline| deadline.saturating_duration_since(now))
+                .unwrap_or(RESIZE_POLL_INTERVAL),
+        );
         let command = match rx.recv_timeout(poll) {
             Ok(command) => Some(command),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -341,7 +348,8 @@ pub(super) fn render_loop_with_terminal(
             semantic_command,
             resized,
             welcome,
-            animations.remaining(Instant::now()).is_zero(),
+            animations.remaining(Instant::now()).is_zero()
+                || scrollbar_deadline.is_some_and(|deadline| deadline <= Instant::now()),
         ) {
             continue;
         }
@@ -358,6 +366,7 @@ pub(super) fn render_loop_with_terminal(
                 shell.invalidate_transcript();
             }
             animations.advance(&mut shell, now);
+            shell.expire_transcript_scrollbar(now);
         }
         tui.request_render();
         last_render = Some(Instant::now());

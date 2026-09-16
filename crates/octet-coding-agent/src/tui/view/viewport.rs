@@ -456,14 +456,17 @@ pub(super) fn resolved_scroll_from_bottom(
 }
 
 fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -> Vec<String> {
+    state.refresh_transcript_search(width);
     let transcript = transcript_lines(state, width);
+    state.reveal_transcript_search(transcript.len(), available);
     let scroll = resolved_scroll_from_bottom(state, transcript.len(), available);
     let scrolled = scroll > 0;
     let capacity = transcript_viewport_capacity(available, scrolled);
     let end = transcript.len().saturating_sub(scroll);
     let start = end.saturating_sub(capacity);
     let mut lines = transcript[start..end].to_vec();
-    if scrolled {
+    state.decorate_transcript_search(&mut lines, start);
+    if scrolled || !state.follow_tail {
         capture_viewport_anchor(state, start, end);
     } else if state.follow_tail {
         state.viewport_anchor.set(None);
@@ -483,7 +486,9 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
         lines.push(fit_line(
             &state.theme.fg(
                 "muted",
-                &format!("↑ {scroll} rows back{new_output} · PageDown returns to live"),
+                &format!(
+                    "↑ {scroll} rows back{new_output} · Jump to latest · PageDown returns to live"
+                ),
             ),
             width,
         ));
@@ -504,6 +509,7 @@ pub(super) fn render_shell_viewport_at(
     } else {
         transcript_viewport_lines(state, width, chrome.transcript_rows)
     };
+    state.decorate_transcript_navigation(&mut lines, width, &chrome, now);
     append_viewport_chrome(&mut lines, chrome);
     lines
 }

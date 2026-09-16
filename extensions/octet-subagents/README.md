@@ -1,7 +1,8 @@
 # octet-subagents
 
 **Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
+published assets. This source checkout targets local octet 0.8.0 via its exact runtime pin;
+published 0.7.6 assets retain their historical compatibility.
 See the [release record](../../docs/releases/v0.7.6.md) for publication and
 installation evidence.
 
@@ -64,7 +65,7 @@ octet extension install octet-subagents
 octet --enable-extension octet-subagents
 ```
 
-For source testing with a locally built octet 0.7.6 and reviewed local
+For source testing with a locally built octet 0.8.0 and reviewed local
 archive, use `octet extension install --path ./octet-subagents-0.7.6.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
 starts nothing; the bundle stays disabled until explicitly enabled. Default full
@@ -134,7 +135,8 @@ as `awaiting approval` and cannot be given unattended work.
 
 ## Reference
 
-Bundle `0.7.6` requires exactly octet `0.7.6` and retains API `0.2`. The detailed
+This source bundle retains distribution `0.7.6` and API `0.2`, with an exact
+local runtime requirement of octet `0.8.0`. The detailed
 contract is a bundled-runtime reference, not a current extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.

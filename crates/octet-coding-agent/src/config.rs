@@ -116,12 +116,13 @@ impl Default for SandboxPolicy {
 }
 
 /// Tool names understood by the v0.1 coding product.
-pub const SUPPORTED_TOOL_NAMES: [&str; 8] = [
+pub const SUPPORTED_TOOL_NAMES: [&str; 9] = [
     "read",
     "search",
     "edit",
     "write",
     "bash",
+    "powershell",
     "search_skills",
     "load_skill",
     "read_skill_resource",
@@ -148,7 +149,8 @@ impl Default for ToolPolicy {
                 // `bash` already provides faster, composable discovery through
                 // rg/find/ls. Keep the narrower search schema available for
                 // explicit allowlists without charging every default request.
-                .filter(|name| *name != "search")
+                // PowerShell is likewise explicit-only and Windows-gated.
+                .filter(|name| !matches!(*name, "search" | "powershell"))
                 .map(str::to_owned)
                 .collect(),
             excluded: BTreeSet::new(),
@@ -493,6 +495,7 @@ impl Config {
                 "write" => self.sandbox.allow_write,
                 // Process mode deliberately has shell-equivalent authority.
                 "bash" => self.sandbox.process_execution_allowed(),
+                "powershell" => cfg!(windows) && self.sandbox.process_execution_allowed(),
                 _ => true,
             }
     }
@@ -657,6 +660,10 @@ mod tests {
             assert!(policy.enabled(name), "{name}");
         }
         assert!(!policy.enabled("search"));
+        assert!(!policy.enabled("powershell"));
+        assert!(ToolPolicy::only(["powershell".to_owned()])
+            .unwrap()
+            .enabled("powershell"));
         assert!(ToolPolicy::only(["search".to_owned()])
             .unwrap()
             .enabled("search"));

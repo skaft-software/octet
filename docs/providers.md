@@ -11,23 +11,39 @@ Use `/model [id]` to select a model and `/status` to inspect its route and
 capabilities. Live discovery is used where a provider exposes it. `--offline`
 skips optional discovery, **not inference traffic**.
 
-A pinned, provider-scoped models.dev supplement fills missing **display names and
-pricing only** for models actually returned by supported built-in discovery. It
-never supplies operational limits, image support, tool/structured-output flags,
-or reasoning controls. Endpoint assertions remain authoritative; existing
-provider/protocol declarations may supply their own documented sparse defaults,
-not snapshot-derived capabilities. False, unknown, null, and malformed explicit
-assertions are not replaced by snapshot optimism. Configured/custom metadata and
-routes keep precedence; Codex account inventory does not inherit the supplement.
-Builds and runtime never fetch models.dev. See the
-[catalog source and pricing review](../crates/octet-ai/models/SOURCES.md) for
+A pinned, provider-scoped models.dev supplement fills missing **display names,
+pricing, input modalities and context/output limits** for models actually
+returned by supported built-in discovery. It never supplies tool/structured-output
+flags or reasoning controls, and it never replaces a value the endpoint asserts. Endpoint assertions remain authoritative: a live inventory
+that asserts any modality field — including an explicit text-only list, or a
+false/null/malformed assertion — is honored as-is and the supplement is not
+consulted for modalities at all. Only a sparse inventory that says nothing about
+input modalities may inherit the snapshot's documented `image`/`audio` input.
+Configured/custom metadata and routes keep precedence; Codex account inventory
+does not inherit the supplement. Builds and runtime never fetch models.dev. See
+the [catalog source and pricing review](../crates/octet-ai/models/SOURCES.md) for
 snapshot provenance and the distinction between retained rich records and the
-display/pricing-only discovery contract.
+discovery projection.
+
+Input modalities and limits are part of that projection because several providers
+publish a sparse model list. Direct DeepSeek is the concrete case: its
+`GET /models` returns identifiers only, so before this projection a documented
+vision model such as `deepseek-flash` (V4.1 Flash) registered **without** image
+input (every attachment failed closed with "Image input is unsupported") and with
+the generic 128K/64K placeholder instead of its documented 1M context / 384K
+output, silently capping the usable window. Its snapshot record publishes no
+price at all, which `models-dev-source.json` marks as an unverified pricing
+provider, so DeepSeek spend stays unknown rather than estimated. The
+snapshot is consulted per provider and model, so a snapshot entry that declares
+text-only input keeps that decision — `deepseek/deepseek-v4-pro` stays
+text-only — and a model absent from the snapshot gains no capability.
 
 For sparse direct DeepSeek `deepseek-flash`, the supplement supplies the display
-name **DeepSeek V4.1 Flash**, not the snapshot's 1M context / 384K output or image
-and structured-output support. Without endpoint limits the existing fallback is
-128K context / 64K output. Its Off/low/high/max reasoning and native DeepSeek
+name **DeepSeek V4.1 Flash**, its documented text+image input, and its documented
+1M context / 384K output. These apply only because the endpoint asserts none: a
+model absent from the snapshot, or an endpoint that publishes its own number,
+keeps the generic 128K/64K fallback or the endpoint's value respectively.
+Structured-output support is still not taken from the snapshot. Its Off/low/high/max reasoning and native DeepSeek
 controls/replay come from the provider-scoped source contract, not models.dev;
 explicit endpoint reasoning metadata can narrow or disable that contract. The
 separate `deepseek-v4` family keeps its declared 1M/384K limits and

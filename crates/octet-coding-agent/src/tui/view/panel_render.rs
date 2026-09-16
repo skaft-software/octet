@@ -174,7 +174,18 @@ pub(super) fn session_picker_ordering(picker: &PickerState) -> Vec<usize> {
             {
                 return None;
             }
-            let score = match_session_search(meta, &query)?;
+            let score = if let Some((searched, hits)) = &picker.entry_search {
+                if searched == &picker.filter {
+                    let text = hits.get(&meta.path)?;
+                    text.to_lowercase()
+                        .find(&picker.filter.to_lowercase())
+                        .unwrap_or(0) as f64
+                } else {
+                    match_session_search(meta, &query)?
+                }
+            } else {
+                match_session_search(meta, &query)?
+            };
             Some((index, score))
         })
         .collect::<Vec<_>>();
@@ -183,6 +194,58 @@ pub(super) fn session_picker_ordering(picker: &PickerState) -> Vec<usize> {
         // Store discovery is already newest-first. Keeping this order makes a
         // filtered recent view stable and avoids a second filesystem sort.
         PickerSort::Recent => {}
+        PickerSort::Relevance => scored.sort_by(|(left, a), (right, b)| {
+            a.partial_cmp(b)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| rows[*right].modified.cmp(&rows[*left].modified))
+                .then_with(|| rows[*left].id.cmp(&rows[*right].id))
+        }),
+        PickerSort::Threaded => {
+            // Iterative traversal, preserving discovery order among siblings.
+            // Workspace-local ids are never linked across store directories;
+            // corrupt cycles and filtered-out parents cannot hide a session.
+            let by_id = scored
+                .iter()
+                .map(|(index, _)| {
+                    (
+                        (rows[*index].path.parent(), rows[*index].id.as_str()),
+                        *index,
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>();
+            let mut children: std::collections::HashMap<usize, Vec<usize>> =
+                std::collections::HashMap::new();
+            let mut roots = Vec::new();
+            for (index, _) in &scored {
+                let parent = rows[*index]
+                    .forked_from_session_id
+                    .as_deref()
+                    .and_then(|id| by_id.get(&(rows[*index].path.parent(), id)).copied());
+                if let Some(parent) = parent.filter(|parent| parent != index) {
+                    children.entry(parent).or_default().push(*index);
+                } else {
+                    roots.push(*index);
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut ordered = Vec::new();
+            for root in roots
+                .into_iter()
+                .chain(scored.iter().map(|(index, _)| *index))
+            {
+                let mut pending = vec![root];
+                while let Some(index) = pending.pop() {
+                    if !seen.insert(index) {
+                        continue;
+                    }
+                    ordered.push((index, 0.0));
+                    if let Some(children) = children.get(&index) {
+                        pending.extend(children.iter().rev().copied());
+                    }
+                }
+            }
+            scored = ordered;
+        }
         PickerSort::Name => scored.sort_by(|(left, left_score), (right, right_score)| {
             let left_meta = &rows[*left];
             let right_meta = &rows[*right];
@@ -444,7 +507,11 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
                     &inset,
                     None,
                     ("tab", "scope"),
-                    &[("re:<pattern>", "filter"), ("\"phrase\"", "exact")],
+                    &[
+                        ("^f", "transcripts"),
+                        ("re:<pattern>", "filter"),
+                        ("\"phrase\"", "exact"),
+                    ],
                 )
             },
             |status| fit_line(&format!("{inset}{status}"), width),
@@ -456,7 +523,11 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             &inset,
             None,
             ("tab", "scope"),
-            &[("re:<pattern>", "filter"), ("\"phrase\"", "exact")],
+            &[
+                ("^f", "transcripts"),
+                ("re:<pattern>", "filter"),
+                ("\"phrase\"", "exact"),
+            ],
         )
     };
     let second = if picker.confirming_delete || picker.rename.is_some() {
@@ -1341,7 +1412,10 @@ fn render_subagent_heading(state: &ShellState, label: &str, count: usize, width:
     let prefix = format!("{}", " ".repeat(usize::from(plan.inset)));
     let text = panel_cell(&format!("{label} · {count}"), state.theme.unicode());
     fit_line(
-        &format!("{prefix}{}", state.theme.bold(&subdued_text(&state.theme, &text))),
+        &format!(
+            "{prefix}{}",
+            state.theme.bold(&subdued_text(&state.theme, &text))
+        ),
         width,
     )
 }
@@ -1649,14 +1723,13 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                     let visible = panel
                         .groups
                         .iter()
-                        .filter(|group| {
-                            group.indices.iter().any(|index| filtered.contains(index))
-                        })
+                        .filter(|group| group.indices.iter().any(|index| filtered.contains(index)))
                         .count();
                     let hidden = usize::from(panel.groups.iter().any(|group| {
-                        group.indices.iter().any(|index| {
-                            searched.contains(index) && panel.hides(*index)
-                        })
+                        group
+                            .indices
+                            .iter()
+                            .any(|index| searched.contains(index) && panel.hides(*index))
                     }));
                     visible + hidden + usize::from(!filtered.is_empty())
                 })
@@ -1837,33 +1910,35 @@ fn render_panel_output_with_limit(
             // Chrome is budgeted out of the body so a bounded panel can never
             // render past the row allowance it was given.
             let subagents = action.subagent_panel();
-            let searched = subagents
-                .map(|_| searched_indices_for_action(items, descriptions, action, filter));
+            let searched =
+                subagents.map(|_| searched_indices_for_action(items, descriptions, action, filter));
             let subagent_counts = subagents
                 .zip(searched.as_ref())
                 .map(|(panel, searched)| panel.counts(searched));
-            let hidden_groups: Vec<(String, usize)> =
-                match (subagents, searched.as_ref()) {
-                    (Some(panel), Some(searched)) => panel
-                        .groups
-                        .iter()
-                        .filter_map(|group| {
-                            let count = group.indices.iter().filter(|index| {
-                                searched.contains(index) && panel.hides(**index)
-                            }).count();
-                            (count > 0).then(|| (group.label.clone(), count))
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                };
+            let hidden_groups: Vec<(String, usize)> = match (subagents, searched.as_ref()) {
+                (Some(panel), Some(searched)) => panel
+                    .groups
+                    .iter()
+                    .filter_map(|group| {
+                        let count = group
+                            .indices
+                            .iter()
+                            .filter(|index| searched.contains(index) && panel.hides(**index))
+                            .count();
+                        (count > 0).then(|| (group.label.clone(), count))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             let visible_groups = subagents.map_or(0, |panel| {
-                panel.groups.iter().filter(|group| {
-                    group.indices.iter().any(|index| filtered.contains(index))
-                }).count()
+                panel
+                    .groups
+                    .iter()
+                    .filter(|group| group.indices.iter().any(|index| filtered.contains(index)))
+                    .count()
             });
             // A column header is chrome, so it yields before any worker row.
-            let show_subagent_header =
-                subagents.is_some() && max_body >= SUBAGENT_HEADER_MIN_BODY;
+            let show_subagent_header = subagents.is_some() && max_body >= SUBAGENT_HEADER_MIN_BODY;
             let requested_chrome = visible_groups
                 .saturating_add(usize::from(!hidden_groups.is_empty()))
                 .saturating_add(usize::from(show_subagent_header));
@@ -1886,11 +1961,7 @@ fn render_panel_output_with_limit(
             if filtered.is_empty() && !hidden_groups_empty && max_body > 0 {
                 // Every remaining worker is behind a collapsed heading: report
                 // the groups instead of claiming there are no items.
-                lines.push(render_hidden_subagent_groups(
-                    state,
-                    &hidden_groups,
-                    width,
-                ));
+                lines.push(render_hidden_subagent_groups(state, &hidden_groups, width));
             } else if filtered.is_empty() && max_body > 0 {
                 let lifecycle = if matches!(&surface.lifecycle, OrdinarySurfaceLifecycle::Empty(_))
                 {
@@ -1980,11 +2051,7 @@ fn render_panel_output_with_limit(
                     lines.extend(item_render.lines);
                 }
                 if !hidden_groups_empty {
-                    lines.push(render_hidden_subagent_groups(
-                        state,
-                        &hidden_groups,
-                        width,
-                    ));
+                    lines.push(render_hidden_subagent_groups(state, &hidden_groups, width));
                 }
             }
             if show_footer {

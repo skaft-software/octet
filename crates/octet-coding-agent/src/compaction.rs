@@ -4,13 +4,10 @@ use std::io::{self, Write};
 
 use octet_agent::{
     build_handoff_message, build_turn_prefix_handoff_message, finish_handoff, prepare_handoff,
-    EntryId, HandoffPreparation, InputPart, Session, SUMMARIZATION_SYSTEM_PROMPT,
+    CancellationToken, EntryId, InputPart, Session, SUMMARIZATION_SYSTEM_PROMPT,
     SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
 };
-use octet_ai::{
-    AssistantPart, Media, Message, OutputFormat, OutputModalities, Request, ToolChoice,
-    ToolResultPart, UserPart,
-};
+use octet_ai::{AssistantPart, Media, Message, ToolResultPart, UserPart};
 
 use crate::app::App;
 
@@ -163,115 +160,14 @@ pub fn choose_first_kept(session: &Session, keep_recent_tokens: u64) -> Option<E
     .flatten()
 }
 
-/// Call a tool-free compaction subagent, persist its billable telemetry, and
-/// return its text.
-async fn compaction_call(
-    client: &octet_ai::AiClient,
-    model: &octet_ai::Model,
-    session: &mut Session,
-    cache_retention: octet_ai::CacheRetention,
-    system: &str,
-    messages: Vec<Message>,
-    output_tokens: u64,
-) -> anyhow::Result<String> {
-    let request = Request {
-        system: Some(system.into()),
-        messages,
-        tools: vec![],
-        tool_choice: ToolChoice::None,
-        max_output_tokens: Some(model.spec.limits.max_output_tokens.clamp(1, output_tokens)),
-        temperature: None,
-        stop: vec![],
-        reasoning: octet_ai::select_auxiliary_reasoning(model)?,
-        reasoning_mode: octet_ai::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: octet_ai::CompatibilityMode::Strict,
-        cache_retention,
-        session_id: Some(session.cache_key()),
-    };
-    let response = client.complete(model, request).await?;
-    let cost = response.cost;
-    // A failed/empty compaction response is still paid work. Persist it before
-    // checking the stop reason so session totals survive every outcome.
-    session.record_compaction_usage(
-        model.endpoint.id.clone(),
-        model.spec.id.clone(),
-        response.usage,
-        cost,
-    )?;
-    if !matches!(
-        response.stop_reason,
-        octet_ai::StopReason::EndTurn | octet_ai::StopReason::StopSequence
-    ) {
-        anyhow::bail!(
-            "compaction subagent did not finish normally: {:?}",
-            response.stop_reason
-        );
-    }
-    let text = response
-        .message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            AssistantPart::Text(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
-    if text.trim().is_empty() {
-        anyhow::bail!("compaction subagent returned no text")
-    }
-    Ok(text)
-}
-
-/// Produce the main structured checkpoint summary.
-pub async fn summarize(
-    client: &octet_ai::AiClient,
-    model: &octet_ai::Model,
-    session: &mut Session,
-    cache_retention: octet_ai::CacheRetention,
-    preparation: &HandoffPreparation,
-) -> anyhow::Result<String> {
-    compaction_call(
-        client,
-        model,
-        session,
-        cache_retention,
-        SUMMARIZATION_SYSTEM_PROMPT,
-        vec![build_handoff_message(preparation)],
-        SUMMARY_OUTPUT_TOKENS,
-    )
-    .await
-}
-
-/// Produce the dedicated summary for the prefix of a split turn.
-async fn summarize_turn_prefix(
-    client: &octet_ai::AiClient,
-    model: &octet_ai::Model,
-    session: &mut Session,
-    cache_retention: octet_ai::CacheRetention,
-    messages: &[Message],
-) -> anyhow::Result<String> {
-    compaction_call(
-        client,
-        model,
-        session,
-        cache_retention,
-        SUMMARIZATION_SYSTEM_PROMPT,
-        vec![build_turn_prefix_handoff_message(messages)],
-        TURN_PREFIX_OUTPUT_TOKENS,
-    )
-    .await
-}
-
 fn summary_request_size(
     model: &octet_ai::Model,
+    system: &str,
     message: &Message,
     output_limit: u64,
 ) -> (u64, u64) {
     let output_tokens = model.spec.limits.max_output_tokens.clamp(1, output_limit);
-    let estimated_input = estimate_text_tokens(SUMMARIZATION_SYSTEM_PROMPT)
+    let estimated_input = estimate_text_tokens(system)
         .saturating_add(estimate_messages_tokens(std::slice::from_ref(message)))
         .saturating_add(FRAMING_OVERHEAD_TOKENS);
     let input_budget = model
@@ -284,7 +180,37 @@ fn summary_request_size(
 
 /// Attempt one nonfatal semantic-boundary compaction.
 pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutcome> {
+    attempt_compaction_with_instructions(app, None).await
+}
+
+/// Manual summary instructions affect only this bounded compaction request.
+/// The agent owns retries, uncertainty, hard budgets and accounting; this layer
+/// commits the final handoff once and never records a second usage receipt.
+pub async fn attempt_compaction_with_instructions(
+    app: &mut App,
+    instructions: Option<&str>,
+) -> anyhow::Result<CompactionOutcome> {
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if instructions.is_some_and(|value| {
+        value.len() > 16 * 1024
+            || value
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    }) {
+        anyhow::bail!("compaction instructions must be at most 16 KiB without terminal controls");
+    }
+    let system = match instructions {
+        Some(instructions) => format!("{SUMMARIZATION_SYSTEM_PROMPT}\n\nAdditional user instructions for this handoff:\n{instructions}"),
+        None => SUMMARIZATION_SYSTEM_PROMPT.to_owned(),
+    };
     if app.config.compaction.mode == crate::config::CompactionMode::NativeResponses {
+        if instructions.is_some() {
+            return Ok(CompactionOutcome::Skipped {
+                reason: "custom instructions require local compaction mode".into(),
+            });
+        }
         return Ok(match app.agent.compact_responses_native().await {
             Ok(_) => CompactionOutcome::NativeCompacted,
             Err(error) => CompactionOutcome::Skipped {
@@ -321,9 +247,6 @@ pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutco
             })
         }
     };
-    // Clone immutable request dependencies before borrowing the session for
-    // durable compaction telemetry.
-    let client = app.client.clone();
     // Bootstrap resolves an explicit override and stores it on the agent. The
     // active route remains the safe default for credentials and cache affinity.
     let model = app
@@ -331,7 +254,6 @@ pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutco
         .compaction_model()
         .cloned()
         .unwrap_or_else(|| app.model.clone());
-    let cache_retention = app.config.cache_retention;
 
     let mut summary = if preparation.messages.is_empty() {
         preparation
@@ -341,7 +263,7 @@ pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutco
     } else {
         let summary_message = build_handoff_message(&preparation);
         let (estimated_input, input_budget) =
-            summary_request_size(&model, &summary_message, SUMMARY_OUTPUT_TOKENS);
+            summary_request_size(&model, &system, &summary_message, SUMMARY_OUTPUT_TOKENS);
         if estimated_input > input_budget {
             return Ok(CompactionOutcome::Skipped {
                 reason: format!(
@@ -362,14 +284,17 @@ pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutco
                 reason: error.to_string(),
             });
         }
-        match summarize(
-            &client,
-            &model,
-            app.agent.session_mut(),
-            cache_retention,
-            &preparation,
-        )
-        .await
+        match app
+            .agent
+            .summarize_with_retry(
+                &model,
+                &system,
+                vec![summary_message],
+                output_tokens,
+                CancellationToken::default(),
+                std::mem::drop,
+            )
+            .await
         {
             Ok(summary) => summary,
             Err(error) => {
@@ -383,7 +308,7 @@ pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutco
     if !preparation.turn_prefix_messages.is_empty() {
         let prefix_message = build_turn_prefix_handoff_message(&preparation.turn_prefix_messages);
         let (estimated_input, input_budget) =
-            summary_request_size(&model, &prefix_message, TURN_PREFIX_OUTPUT_TOKENS);
+            summary_request_size(&model, &system, &prefix_message, TURN_PREFIX_OUTPUT_TOKENS);
         if estimated_input > input_budget {
             return Ok(CompactionOutcome::Skipped {
                 reason: format!(
@@ -404,14 +329,17 @@ pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutco
                 reason: error.to_string(),
             });
         }
-        let prefix_summary = match summarize_turn_prefix(
-            &client,
-            &model,
-            app.agent.session_mut(),
-            cache_retention,
-            &preparation.turn_prefix_messages,
-        )
-        .await
+        let prefix_summary = match app
+            .agent
+            .summarize_with_retry(
+                &model,
+                &system,
+                vec![prefix_message],
+                output_tokens,
+                CancellationToken::default(),
+                std::mem::drop,
+            )
+            .await
         {
             Ok(summary) => summary,
             Err(error) => {

@@ -16,7 +16,7 @@ session-scoped reports re-open the same session file with
 `Session::open_read_only` — the handle the live `/subagents` drill-in already
 uses. Nothing here mutates the running session or the frozen agent.
 
-Immediate during a run: `/help`, `/cost`, `/cache`, `/tree`, `/context`,
+Immediate during a run: `/help`, `/cost`, `/cache`, `/context`,
 `/update`, `/name`, `/export`, `/extensions status`, `/extensions inspect`, the
 `/model` inline picker, and the `/thinking` effort picker. The six
 "available at the next idle boundary" notices are removed. `/context` during a
@@ -117,9 +117,8 @@ The `Working`/`Thinking` status shimmer is a variation of the **model's own colo
   is `#1f1f1f`, i.e. `gpt-6-astra`), or a session with no model identity (`ModelLab::Unknown`/no lab), gets an
   exact profile grey: luminance movement only, zero hue rotation.
 - The two statuses no longer differ by hue. They differ by the documented non-chromatic cue
-  `ACTIVITY_THINKING_SWEEP_DEPTH = 0.80`: `Thinking` travels 80% of the luminance separation `Working` travels,
-  the same colour family at a shallower depth (0.07 of relative luminance on the dark profile, 0.016 on the light
-  one).
+  `ACTIVITY_THINKING_SWEEP_DEPTH = 0.80`: `Thinking` uses 80% of `Working`'s baseline-to-sweep RGB blend,
+  producing the same colour family at a shallower luminance depth.
 - The highlight now completes a full traverse before looping. It enters before the margin dot, crosses every
   label cell, exits past the trailing edge, and the first and last position of a cycle leave every rendered cell
   at the resting colour (`ACTIVITY_SWEEP_REST_FRAMES = 2`, cycle = label width + 12). Previously the ramp was
@@ -128,6 +127,41 @@ The `Working`/`Thinking` status shimmer is a variation of the **model's own colo
 - The max/ultra rainbow is unchanged and remains gated to that emphasis level only: `status_rainbow_strength` is
   non-zero only for the `max`/`ultra` reasoning levels inside the two-second emphasis window, so no lower level
   can reach it.
-- Contrast is unchanged (`ACTIVITY_DARK_SWEEP_LUMINANCE = 0.50`, `ACTIVITY_LIGHT_SWEEP_LUMINANCE = 0.09`): every
-  cell is still foreground-only, and the tint is built at the cell's own luminance so it adds hue and chroma
-  without moving any cell outside the band the profile already proved contrast-safe.
+- The previously qualified text sweep endpoints remain unchanged (`ACTIVITY_DARK_SWEEP_LUMINANCE = 0.50`,
+  `ACTIVITY_LIGHT_SWEEP_LUMINANCE = 0.09`). Every cell is still foreground-only, and the tint is built at the
+  cell's own luminance so it adds hue and chroma without changing the sweep's luminance falloff.
+
+### Visibility follow-up — rendered-style checks passed, PTY pending
+
+The resting text luminance now moves toward the profile's contrast extreme:
+0.85 → 0.98 on dark, 0.01 → 0.002 on light. The dot uses its own quieter resting
+foreground (0.30 dark / 0.18 light) and pulses toward that text baseline when the
+same sweep crosses it: brighter on dark, darker on light. Its solid glyph and
+size stay fixed. The shared phase, complete traverse/rest, neutral identity,
+unknown-background fallback, static reduced-motion/no-color paths, and max/ultra
+rainbow palette/gate remain unchanged.
+
+New rendered-style tests in `tui::view::reasoning_render` cover dot baseline,
+peak and rest, stronger label separation and contrast, and ANSI16 foreground-code
+fallback; the static-fallback regression now spans all profiles and complete
+cycles. The first parent library run recorded **28 passed, 1 failed** in this
+module: the ANSI16 neutral-identity test exposed RGB-nearest quantization mapping
+an exact grey (`#a7a7a7`) to bright magenta (SGR 95). This was a rendering defect,
+not a stale whitelist. Activity encoding now restricts exact greys to the four
+neutral ANSI16 entries; chromatic/rainbow colours and other depths retain their
+existing encoding. The original neutral-code assertion remains, with an added
+all-256-greys regression and unchanged-chromatic-encoding coverage.
+
+The parent reruns (`parity-next-coding-lib-02.log`, then
+`parity-next-coding-lib-04.log`) passed **all 30 `reasoning_render` tests**,
+including the exhaustive 256-grey ANSI16 regression and truecolor/ANSI256 dot
+baseline/peak/rest and label-contrast checks. The current library receipt is
+**1521 passed, 0 failed, 1 ignored** on `parity-next-wave3-source.sha256`, and
+`tests/activity_wait_pty.rs` now passes **2 tests** inside
+`parity-next-coding-all-07` (the same run's only failure was the unrelated
+embedded-documentation artifact assertion, which reproduces only when
+documentation is edited while the archive is being built).
+
+That still qualifies rendered-cell styles and the PTY harness, not a physical
+terminal's appearance or a human-observed smoothness judgment. Arbitrary terminal
+transparency and custom ANSI16 palettes remain outside this receipt's scope.

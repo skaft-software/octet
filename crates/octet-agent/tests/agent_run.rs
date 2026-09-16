@@ -743,6 +743,45 @@ impl Respond for AbortableCompactionScript {
     }
 }
 
+struct LocalServerRequestSizeScript {
+    main_calls: Arc<AtomicUsize>,
+}
+
+impl Respond for LocalServerRequestSizeScript {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let tools_empty = match body.get("tools") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(tools) => tools.as_array().is_some_and(Vec::is_empty),
+        };
+        if tools_empty {
+            return ResponseTemplate::new(200)
+                .set_body_string(text_turn("compacted summary"))
+                .insert_header("content-type", "text/event-stream");
+        }
+        let index = self.main_calls.fetch_add(1, Ordering::SeqCst);
+        if index < 2 {
+            return ResponseTemplate::new(200)
+                .set_body_string(tool_turn(&[(
+                    &format!("read_{index}"),
+                    "read",
+                    serde_json::json!({"path": "large.txt"}),
+                )]))
+                .insert_header("content-type", "text/event-stream");
+        }
+        match index {
+            // Verbatim shape of a vLLM context-length rejection, including the
+            // numeric code that used to veto the compaction path.
+            2 => ResponseTemplate::new(400).set_body_string(
+                r#"{"object":"error","message":"This model's maximum context length is 131072 tokens. However, you requested 30896 output tokens and your prompt contains at least 100177 input tokens, for a total of at least 131073 tokens. (parameter=input_tokens, value=100177)","type":"BadRequestError","param":null,"code":400}"#,
+            ),
+            _ => ResponseTemplate::new(200)
+                .set_body_string(text_turn("recovered after compaction"))
+                .insert_header("content-type", "text/event-stream"),
+        }
+    }
+}
+
 impl Respond for ContextAwareScript {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -801,6 +840,7 @@ fn scripted_model(uri: &str) -> Model {
             },
             pricing: None,
             cache: octet_ai::CacheCompatibility::default(),
+            preset: Default::default(),
         }),
         endpoint: Arc::new(Endpoint {
             id: EndpointId("test".to_string()),
@@ -1165,6 +1205,14 @@ async fn collect(run: &mut octet_agent::Run<'_>) -> Vec<AgentEvent> {
 }
 
 fn session_with_authoritative_pressure(path: &Path, total_tokens: u64) -> Session {
+    session_with_authoritative_pressure_and_pricing(path, total_tokens, None)
+}
+
+fn session_with_authoritative_pressure_and_pricing(
+    path: &Path,
+    total_tokens: u64,
+    pricing: Option<&Pricing>,
+) -> Session {
     let mut session = Session::create(path).unwrap();
     let mut latest_assistant = None;
     for index in 0..5 {
@@ -1183,18 +1231,22 @@ fn session_with_authoritative_pressure(path: &Path, total_tokens: u64) -> Sessio
                 .unwrap(),
         );
     }
+    let usage = Usage {
+        input_tokens: total_tokens.saturating_sub(1_000),
+        output_tokens: 1_000,
+        total_tokens,
+        ..Usage::default()
+    };
+    // Pricing is declared when the synthetic historical response is created;
+    // never retrofit a known price onto previously unpriced durable history.
+    let cost = pricing.map(|pricing| octet_ai::pricing::cost_of(pricing, &usage).unwrap());
     session
         .record_assistant_usage(
             latest_assistant.unwrap(),
             EndpointId("test".into()),
             ModelId("scripted".into()),
-            Usage {
-                input_tokens: total_tokens.saturating_sub(1_000),
-                output_tokens: 1_000,
-                total_tokens,
-                ..Usage::default()
-            },
-            None,
+            usage,
+            cost,
         )
         .unwrap();
     session
@@ -1258,7 +1310,16 @@ fn request_has_no_tools(request: &serde_json::Value) -> bool {
 
 #[tokio::test]
 async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
-    for body in [empty_turn(), reasoning_only_turn("private trace only")] {
+    // Each shape names its own cause: an empty reply, and a model that spent the
+    // whole turn on reasoning without ever emitting answer text (what a local
+    // thinking model does when its budget or template produces no final answer).
+    for (body, expected) in [
+        (empty_turn(), "no user-visible content"),
+        (
+            reasoning_only_turn("private trace only"),
+            "reasoning but no answer text",
+        ),
+    ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("messages"))
@@ -1280,8 +1341,8 @@ async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
         match assert_single_run_finished(&events) {
             FinishReason::Failed(error) => {
                 assert!(
-                    error.to_string().contains("no user-visible content"),
-                    "unexpected failure: {error}"
+                    error.to_string().contains(expected),
+                    "expected {expected:?}, got: {error}"
                 );
             }
             other => panic!("empty terminal response must fail, got {other:?}"),
@@ -2278,6 +2339,50 @@ async fn provider_context_error_forces_one_compaction_before_retry() {
         .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
 }
 
+/// A strict self-hosted/local server answers HTTP 400 with a machine-readable
+/// `"code":400` inside a provider-shaped error body. Before this regression the
+/// numeric code selected the permanent branch, so the request failed instead of
+/// compacting; a real vLLM deployment rejected a 131072-token window this way.
+#[tokio::test]
+async fn local_server_request_size_rejection_compacts_once_and_retries() {
+    let server = MockServer::start().await;
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(LocalServerRequestSizeScript {
+            main_calls: Arc::clone(&main_calls),
+        })
+        .mount(&server)
+        .await;
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    // The session must hold a reducible episode before the rejection, exactly
+    // like a real run; otherwise there is legitimately nothing to compact.
+    std::fs::write(workspace.join("large.txt"), "small\n").unwrap();
+    let mut agent = build_agent(
+        &server.uri(),
+        &workspace,
+        &sessions.path().join("local-request-size.jsonl"),
+        Some(6),
+    );
+    let output = agent.complete("compact and retry").await.unwrap();
+    assert!(matches!(output.reason, FinishReason::Completed), "{output:?}");
+    assert!(
+        agent
+            .session()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })),
+        "the rejection must commit exactly the one compaction it used"
+    );
+    assert_eq!(
+        main_calls.load(Ordering::SeqCst),
+        4,
+        "two tool turns, one rejected request, then one successful retry"
+    );
+}
+
 #[tokio::test]
 async fn abort_cancels_compaction_without_late_usage_or_summary_commits() {
     let server = MockServer::start().await;
@@ -2995,12 +3100,22 @@ async fn restart_never_replays_a_mutating_tool_without_an_idempotency_contract()
         })))
         .unwrap();
 
+    agent
+        .session()
+        .tool_invocation(0)
+        .unwrap()
+        .replace_partial_output("latest checkpoint: effect outcome not known")
+        .unwrap();
     let output = agent.complete("continue after restart").await.unwrap();
     assert_eq!(output.text, "reconciled");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert!(body.to_string().contains("indeterminate after restart"));
+    assert!(body
+        .to_string()
+        .contains("latest checkpoint: effect outcome not known"));
+    assert!(body.to_string().contains("external outcome is unknown"));
 }
 
 #[tokio::test]
@@ -4691,6 +4806,50 @@ async fn marked_tool_output_remains_rich_across_lowering_events_and_session_reop
         .any(|part| matches!(part, octet_ai::ToolResultPart::Media(Media::Image(_)))));
 }
 
+
+fn assert_bounded_invocation_batch(path: &Path, expected_calls: usize, prefix: &str) {
+    let records = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<octet_agent::SessionRecord>(line).unwrap())
+        .collect::<Vec<_>>();
+    let scopes = records
+        .iter()
+        .filter_map(|record| match record {
+            octet_agent::SessionRecord::ToolInvocation { scope, .. } => Some(scope),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!scopes.is_empty());
+    assert!(
+        scopes
+            .iter()
+            .all(|scope| scope.invocation_id().parse::<usize>().unwrap() < 32),
+        "refused calls must not allocate live-effect slots"
+    );
+    let reopened = Session::open_read_only(path).unwrap();
+    let results = reopened
+        .entries()
+        .iter()
+        .flat_map(|entry| match &entry.value {
+            EntryValue::Message(Message::User(user)) => user
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    UserPart::ToolResult(result) => Some(result),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), expected_calls);
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result.tool_call_id.0, format!("{prefix}{index}"));
+        assert_eq!(result.is_error, index >= 32);
+    }
+}
+
 #[tokio::test]
 async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
     let server = MockServer::start().await;
@@ -4715,7 +4874,7 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
         .unwrap();
     session
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
-            content: (0..35)
+            content: (0..65)
                 .map(|index| {
                     AssistantPart::ToolCall(ToolCall {
                         id: octet_ai::ToolCallId(format!("recover-{index}")),
@@ -4774,8 +4933,8 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(results.len(), 35);
-    for index in 32..35 {
+    assert_eq!(results.len(), 65);
+    for index in 32..65 {
         let id = format!("recover-{index}");
         let result = results
             .iter()
@@ -4787,6 +4946,7 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
             Some(octet_ai::ToolResultPart::Text(text)) if text.contains("per-turn tool-call limit")
         ));
     }
+    assert_bounded_invocation_batch(&session_path, 65, "recover-");
 }
 
 #[tokio::test]
@@ -4843,6 +5003,12 @@ async fn host_classification_overrides_a_safe_replay_claim() {
     })
     .unwrap();
 
+    agent
+        .session()
+        .tool_invocation(0)
+        .unwrap()
+        .replace_partial_output("checkpoint from host-classified observation")
+        .unwrap();
     let output = agent.complete("continue").await.unwrap();
 
     assert_eq!(output.text, "reconciled");
@@ -4852,6 +5018,10 @@ async fn host_classification_overrides_a_safe_replay_claim() {
     assert!(body
         .to_string()
         .contains("did not replay this host-classified effect"));
+    assert!(body
+        .to_string()
+        .contains("checkpoint from host-classified observation"));
+    assert!(body.to_string().contains("external outcome is unknown"));
 }
 
 #[tokio::test]
@@ -6699,7 +6869,11 @@ impl GatedToolTurnServer {
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
         let task = tokio::spawn(async move {
-            let head = head + &text_block(64, &[TOOL_TURN_PENDING]);
+            // The marker must occupy a fresh content-block index. Deriving it
+            // from the supplied head keeps fixtures with different block counts
+            // from colliding with an existing block.
+            let marker_index = highest_block_index(&head) + 1;
+            let head = head + &text_block(marker_index, &[TOOL_TURN_PENDING]);
             for (index, body) in [head, text_turn("done")].into_iter().enumerate() {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
@@ -6757,6 +6931,21 @@ impl Drop for GatedToolTurnServer {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Highest `content_block_start`/`content_block_delta` index present in a
+/// fixture stream, so generated follow-up blocks never reuse an index.
+fn highest_block_index(frames: &str) -> usize {
+    let mut highest = None;
+    let mut rest = frames;
+    while let Some(position) = rest.find("\"index\":") {
+        rest = &rest[position + "\"index\":".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(index) = digits.parse::<usize>() {
+            highest = Some(highest.map_or(index, |current: usize| current.max(index)));
+        }
+    }
+    highest.unwrap_or(0)
 }
 
 fn recon_bash_head() -> String {
@@ -7072,7 +7261,7 @@ async fn recon_bash_max_tokens_and_abort_never_execute() {
 #[tokio::test]
 async fn recon_bash_obeys_per_turn_call_limit() {
     let mut head = msg_start();
-    for index in 0..35 {
+    for index in 0..65 {
         head += &tool_block(
             index,
             &format!("call_{index}"),
@@ -7101,7 +7290,7 @@ async fn recon_bash_obeys_per_turn_call_limit() {
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 35);
+    assert_eq!(results.len(), 65);
     for (index, (id, result)) in results.iter().enumerate() {
         assert_eq!(id.0, format!("call_{index}"));
         if index < 32 {
@@ -7118,6 +7307,7 @@ async fn recon_bash_obeys_per_turn_call_limit() {
         assert_single_run_finished(&events),
         FinishReason::Completed
     ));
+    assert_bounded_invocation_batch(&h.session_path, 65, "call_");
 }
 
 #[tokio::test]
@@ -7482,6 +7672,13 @@ fn recovery_provider_error(code: &str) -> String {
 }
 
 async fn recovery_harness(bodies: Vec<String>) -> (Agent, MockServer, tempfile::TempDir, PathBuf) {
+    recovery_harness_with_output_cap(bodies, false).await
+}
+
+async fn recovery_harness_with_output_cap(
+    bodies: Vec<String>,
+    capped: bool,
+) -> (Agent, MockServer, tempfile::TempDir, PathBuf) {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("responses"))
@@ -7494,8 +7691,13 @@ async fn recovery_harness(bodies: Vec<String>) -> (Agent, MockServer, tempfile::
     let workspace = tempfile::tempdir().unwrap();
     let session_path = workspace.path().join("session.jsonl");
     std::fs::write(workspace.path().join("lifecycle.txt"), "local result").unwrap();
+    let mut model = recovery_codex_model(&server.uri());
+    if capped {
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Default;
+    }
     let agent = build_responses_agent_from_session(
-        recovery_codex_model(&server.uri()),
+        model,
         Session::create(&session_path).unwrap(),
         workspace.path(),
         Some(4),
@@ -7621,11 +7823,14 @@ async fn qualified_codex_permanent_failures_do_not_replace() {
 }
 
 #[tokio::test]
-async fn qualified_codex_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
-    let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
-        responses_text_turn("no", "must not replay", "response.completed", "no"),
-    ])
+async fn cap_supported_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
+    let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(
+        vec![
+            interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+            responses_text_turn("no", "must not replay", "response.completed", "no"),
+        ],
+        true,
+    )
     .await;
     agent.set_max_session_cost_microdollars(Some(u64::MAX));
     let mut run = agent.prompt("bounded spending").await.unwrap();
@@ -8019,6 +8224,13 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
         request: octet_ai::Request,
         _: Vec<octet_ai::Diagnostic>,
     ) -> Result<octet_ai::ResponseStream, octet_ai::AiError> {
+        // These synthetic successful responses explicitly report zero tokens.
+        // Preserve their declared zero price rather than fabricate unpriced
+        // history that prevents the auxiliary HTTP-budget test from dispatching.
+        let response_cost = model
+            .pricing
+            .as_ref()
+            .map(|pricing| octet_ai::pricing::cost_of(pricing, &Usage::default()).unwrap());
         self.requests.lock().unwrap().push(request);
         let step = self
             .steps
@@ -8035,7 +8247,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                 yield Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
                     message: AssistantMessage { content: vec![AssistantPart::Text("R".into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn, usage: octet_ai::Usage::default(),
-                    cost: None, response_id: None, responses_output: None, diagnostics: Vec::new(),
+                    cost: response_cost, response_id: None, responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
             RecoveryStep::Opening(phase) => {
@@ -8066,22 +8278,35 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                 yield Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
                     message: AssistantMessage { content: vec![AssistantPart::Text(text.into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn,
-                    usage: octet_ai::Usage::default(), cost: None, response_id: None,
+                    usage: octet_ai::Usage::default(), cost: response_cost, response_id: None,
                     responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
         }
     }
 }
+
 fn operation_recovery_agent(
     steps: Vec<RecoveryStep>,
     extensions: ExtensionHost,
+) -> (Agent, Arc<OperationRecoveryTransport>, tempfile::TempDir) {
+    operation_recovery_agent_with_output_cap(steps, extensions, false)
+}
+
+fn operation_recovery_agent_with_output_cap(
+    steps: Vec<RecoveryStep>,
+    extensions: ExtensionHost,
+    capped: bool,
 ) -> (Agent, Arc<OperationRecoveryTransport>, tempfile::TempDir) {
     let transport = Arc::new(OperationRecoveryTransport {
         steps: std::sync::Mutex::new(steps.into()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let model = recovery_codex_model("http://127.0.0.1:1/");
+    let mut model = recovery_codex_model("http://127.0.0.1:1/");
+    if capped {
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Default;
+    }
     let client = AiClient::new();
     client.register_host_stream_transport(model.endpoint.id.clone(), transport.clone());
     let workspace = tempfile::tempdir().unwrap();
@@ -8525,7 +8750,8 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
         (429, "insufficient_quota", false),
         (401, "invalid_api_key", false),
     ] {
-        let (mut agent, server, _workspace, _) = recovery_harness(vec![]).await;
+        let (mut agent, server, _workspace, _) =
+            recovery_harness_with_output_cap(vec![], hard_budget).await;
         server.reset().await;
         Mock::given(method("POST"))
             .and(path("responses"))
@@ -8548,7 +8774,11 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
             matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
             "{events:?}"
         );
-        assert_eq!(wire_requests(&server).await.len(), 1);
+        let requests = wire_requests(&server).await;
+        assert_eq!(requests.len(), 1);
+        if hard_budget {
+            assert!(requests[0]["max_output_tokens"].as_u64().is_some());
+        }
         assert!(!events
             .iter()
             .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
@@ -8556,6 +8786,36 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
             assert!(agent.session().has_uncertain_usage());
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unpriced_history_blocks_auxiliary_cost_reservation_before_dispatch() {
+    let (mut agent, transport, workspace) =
+        operation_recovery_agent(Vec::new(), ExtensionHost::new());
+    agent
+        .replace_session_at_idle(session_with_authoritative_pressure(
+            &workspace.path().join("unpriced-pressure.jsonl"),
+            180_000,
+        ))
+        .unwrap();
+    agent
+        .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
+        .unwrap();
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    let error = agent
+        .complete("cannot price historical exposure")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, octet_agent::AgentError::CostUnavailable { .. }),
+        "{error:?}"
+    );
+    assert!(transport.requests.lock().unwrap().is_empty());
+    assert!(agent.session().has_unpriced_usage());
+    assert!(
+        !agent.session().has_uncertain_usage(),
+        "known tokens without pricing are not unknown token usage"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -8576,21 +8836,29 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 if !gate {
                     steps.push(RecoveryStep::Reply("answer", Duration::ZERO));
                 }
-                let (mut agent, transport, workspace) =
-                    operation_recovery_agent(steps, ExtensionHost::new());
+                let (mut agent, transport, workspace) = operation_recovery_agent_with_output_cap(
+                    steps,
+                    ExtensionHost::new(),
+                    hard_budget,
+                );
                 if gate {
                     agent.set_completion_policy(CompletionPolicy::TerminalGate);
                 } else {
                     agent
-                        .replace_session_at_idle(session_with_authoritative_pressure(
+                        .replace_session_at_idle(session_with_authoritative_pressure_and_pricing(
                             &workspace.path().join("pressure.jsonl"),
                             180_000,
+                            agent.model().spec.pricing.as_ref(),
                         ))
                         .unwrap();
                     agent
                         .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
                         .unwrap();
                 }
+                assert!(
+                    !agent.session().has_unpriced_usage(),
+                    "this fixture must reach HTTP admission, not stop at pricing preflight"
+                );
                 if hard_budget {
                     agent.set_max_session_cost_microdollars(Some(u64::MAX));
                 }
@@ -8627,7 +8895,7 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
 }
 
 #[tokio::test]
-async fn manual_native_http_503_with_hard_budget_records_uncertainty_and_never_replaces() {
+async fn manual_native_with_hard_budget_refuses_uncapped_dispatch() {
     let (mut agent, server, _workspace, _) = recovery_harness(vec![responses_text_turn(
         "main",
         "prior answer",
@@ -8638,25 +8906,21 @@ async fn manual_native_http_503_with_hard_budget_records_uncertainty_and_never_r
     Mock::given(method("POST"))
         .and(path("responses/compact"))
         .respond_with(ResponseTemplate::new(503))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
     agent.complete("initial task").await.unwrap();
     agent.set_max_session_cost_microdollars(Some(u64::MAX));
     assert!(matches!(
         agent.compact_responses_native().await,
-        Err(octet_agent::AgentError::ProviderRecovery {
-            retries: 0,
-            usage_unknown: true,
-            ..
-        })
+        Err(octet_agent::AgentError::OutputLimitUnavailable)
     ));
-    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(!agent.session().has_uncertain_usage());
     assert_eq!(
-        agent.session().usage_uncertainty_records()[0].operation,
-        "native_compaction"
+        wire_requests(&server).await.len(),
+        1,
+        "only the earlier unbounded main answer was dispatched"
     );
-    assert_eq!(wire_requests(&server).await.len(), 2);
 }
 
 struct HeldOutageRetryHook(Arc<AtomicUsize>);
@@ -8768,10 +9032,10 @@ async fn qualified_provider_stream_json_recovery_never_dispatches_provisional_to
         "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":7}\n\n",
     ] {
         for hard_budget in [false, true] {
-            let (mut agent, server, _workspace, _) = recovery_harness(vec![
+            let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(vec![
                 interrupted_responses_prefix("tool") + malformed,
                 responses_text_turn("ok", "recovered", "response.completed", "accepted"),
-            ]).await;
+            ], hard_budget).await;
             if hard_budget { agent.set_max_session_cost_microdollars(Some(u64::MAX)); }
             let mut run = agent.prompt("recover malformed provider frame").await.unwrap();
             let events = collect_virtual_recovery(&mut run).await;
@@ -8861,6 +9125,26 @@ async fn terminal_gate_final_poll_and_turn_finished_submission_boundaries_preser
                     .filter(|event| matches!(event, AgentEvent::TurnFinished { .. }))
                     .count(),
                 2
+            );
+            let emitted_costs = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::TurnFinished { turn_cost, .. } => Some(*turn_cost),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let durable_costs = agent
+                .session()
+                .usage_records()
+                .iter()
+                .filter_map(|record| match record.kind {
+                    UsageRecordKind::AssistantTurn { .. } => Some(record.cost),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                emitted_costs, durable_costs,
+                "control admission must retain each immutable assistant cost"
             );
             let delivered: usize = events
                 .iter()
@@ -10651,14 +10935,11 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         .collect::<Vec<_>>();
     assert_eq!(
         declared,
-        vec!["read", "edit", "write", "bash"],
+        vec!["read", "edit", "write", "bash", "search"],
         "contributions follow wire order for exactly the tools that declare a snippet"
     );
-    // Recorded gap (not this worker's path): `SearchTool` is registered and
-    // callable but declares no `promptSnippet`, so a rendered section cannot
-    // name it. The renderer never invents an entry for a tool that contributes
-    // nothing, and a registered-but-uncontributed tool must not silently
-    // vanish from the *surface* either.
+    // Search contributes its own snippet and stays callable. Rendering does
+    // not reintroduce any of the withdrawn ls/find/grep aliases.
     assert!(
         enabled
             .agent
@@ -10668,8 +10949,8 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         "search stays registered"
     );
     assert!(
-        !declared.contains(&"search"),
-        "an uncontributing tool is not fabricated into the section"
+        declared.contains(&"search"),
+        "the real search contribution reaches the section"
     );
     enabled.agent.complete("hello").await.unwrap();
     let requests = wire_requests(enabled.server.as_ref().unwrap()).await;
@@ -10715,7 +10996,11 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
     // A tool-free run never advertises tools, even with the section enabled.
     let mut answer_only = harness(vec![text_turn("answer")], Some(1)).await;
     answer_only.agent.set_tool_prompt_section_enabled(true);
-    let mut run = answer_only.agent.prompt_without_tools("hello").await.unwrap();
+    let mut run = answer_only
+        .agent
+        .prompt_without_tools("hello")
+        .await
+        .unwrap();
     let events = collect(&mut run).await;
     drop(run);
     assert!(matches!(
@@ -10729,4 +11014,577 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         "a run that exposes no tools must not advertise them"
     );
     assert!(request_has_no_tools(&requests[0]));
+}
+
+struct DurableMemoProbe {
+    handles: Arc<std::sync::Mutex<Vec<octet_agent::tools::durability::InvocationHandle>>>,
+}
+
+#[async_trait::async_trait]
+impl Tool for DurableMemoProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            name: "durable_memo_probe".into(),
+            description: "Records a session-backed memo".into(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            constrained_sampling: None,
+        }
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::Safe
+    }
+    fn effect(&self, _: &serde_json::Value, _: &ToolContext<'_>) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let handle = context
+            .invocation()
+            .expect("agent must inject the durable capability");
+        let value: String =
+            handle.replay_step("step/read", || "recorded observation".to_owned())?;
+        self.handles.lock().unwrap().push(handle.clone());
+        Ok(ToolOutput::new(value))
+    }
+}
+
+#[tokio::test]
+async fn durable_memos_are_injected_into_sequential_and_parallel_calls() {
+    for width in [1, 2, 65] {
+        let server = MockServer::start().await;
+        let ids = (0..width)
+            .map(|index| format!("memo-{index}"))
+            .collect::<Vec<_>>();
+        let script = vec![
+            tool_turn(
+                &(0..width)
+                    .map(|index| {
+                        (
+                            ids[index].as_str(),
+                            "durable_memo_probe",
+                            serde_json::json!({}),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            text_turn("done"),
+        ];
+        let cursor = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(move |_: &wiremock::Request| {
+                ResponseTemplate::new(200)
+                    .set_body_string(script[cursor.fetch_add(1, Ordering::SeqCst)].clone())
+                    .insert_header("content-type", "text/event-stream")
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("memo.jsonl");
+        let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = build_agent_with_extra_tool(
+            &server.uri(),
+            workspace.path(),
+            &path,
+            Some(4),
+            DurableMemoProbe {
+                handles: handles.clone(),
+            },
+        );
+        assert_eq!(agent.complete("observe").await.unwrap().text, "done");
+        let handles = handles.lock().unwrap();
+        assert_eq!(handles.len(), width.min(32));
+        assert_bounded_invocation_batch(&path, width, "memo-");
+        assert!(handles
+            .iter()
+            .all(|handle| handle.get_memo("step/read").is_err()));
+        let bytes = std::fs::read_to_string(&path).unwrap();
+        assert!(bytes.contains("tool_invocation"));
+        assert!(bytes.contains("step/read"));
+        assert!(bytes.contains("recorded observation"));
+        drop(agent);
+        assert!(Session::open(path).unwrap().tool_invocation(0).is_err());
+    }
+}
+
+struct RetrySummaryOnce(AtomicUsize);
+impl Respond for RetrySummaryOnce {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let summary = body
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty);
+        let body = if summary && self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            msg_start() + &text_block(0, &["unfinished summary"])
+        } else if summary {
+            text_turn("recovered summary")
+        } else {
+            text_turn("answer")
+        };
+        ResponseTemplate::new(200)
+            .set_body_string(body)
+            .insert_header("content-type", "text/event-stream")
+    }
+}
+
+#[tokio::test]
+async fn ordinary_route_summary_retry_keeps_boundary_live_and_commits_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(RetrySummaryOnce(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("summary.jsonl");
+    let session = session_with_authoritative_pressure(&path, 180_000);
+    let mut agent = build_agent_from_session(&server.uri(), directory.path(), session, Some(4));
+    agent
+        .set_compaction_token_policy(true, 0.85, 10_000)
+        .unwrap();
+    let mut run = agent.prompt("continue").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::ProviderOperationRetry { operation: octet_agent::ProviderOperation::LocalCompaction, error, .. }
+            if error.contains("summarization retry scheduled"))));
+    assert_eq!(
+        agent
+            .session()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        agent
+            .session()
+            .usage_records()
+            .iter()
+            .filter(|record| matches!(record.kind, UsageRecordKind::Compaction))
+            .count(),
+        2,
+        "history and split-turn prefix each have one completed usage record"
+    );
+    let requests = wire_requests(&server).await;
+    let summaries = requests
+        .iter()
+        .filter(|request| {
+            request
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests.len(),
+        4,
+        "failed history + history retry + prefix + answer"
+    );
+    assert_eq!(summaries.len(), 3);
+    assert_eq!(
+        summaries[0], summaries[1],
+        "retry reuses the same history request"
+    );
+    assert_ne!(
+        summaries[1]["messages"], summaries[2]["messages"],
+        "prefix is a separate grounded summary, not duplicate history"
+    );
+    assert!(summaries[2].to_string().contains("PREFIX of a turn"));
+    assert!(agent.session().entries().iter().any(|entry| matches!(&entry.value,
+        EntryValue::Compaction { summary, .. } if summary.contains("**Turn Context (split turn):**"))));
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(agent.session().has_uncertain_usage());
+    drop(agent);
+    assert!(Session::open(path).unwrap().has_uncertain_usage());
+}
+
+#[tokio::test]
+async fn branch_summary_uses_real_retry_consumer_and_keeps_one_caller_commit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(RetrySummaryOnce(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = build_agent(
+        &server.uri(),
+        directory.path(),
+        &directory.path().join("branch.jsonl"),
+        Some(4),
+    );
+    let preparation = octet_agent::prepare_branch_handoff(
+        vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("abandoned branch evidence".into())],
+        })],
+        &octet_agent::CompactionDetails::default(),
+    );
+    let mut events = Vec::new();
+    let summary = agent
+        .summarize_branch_with_retry(
+            &preparation,
+            octet_agent::CancellationToken::default(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap();
+    assert!(summary.contains("recovered summary"));
+    assert!(
+        agent.session().entries().is_empty(),
+        "retry consumer must not commit the branch on its own"
+    );
+    assert_eq!(agent.session().usage_records().len(), 1);
+    assert!(agent.session().has_uncertain_usage());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderOperationRetry {
+            operation: octet_agent::ProviderOperation::BranchSummary,
+            ..
+        }
+    )));
+    agent
+        .session_mut()
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text(summary)],
+        })))
+        .unwrap();
+    assert_eq!(agent.session().entries().len(), 1);
+}
+
+#[tokio::test]
+async fn session_checkpoint_consumer_writes_auxiliary_records_and_expires_them() {
+    let server = MockServer::start().await;
+    let script = [scripted_tool_turn("progress_test"), text_turn("done")];
+    let cursor = AtomicUsize::new(0);
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(200)
+                .set_body_string(script[cursor.fetch_add(1, Ordering::SeqCst)].clone())
+                .insert_header("content-type", "text/event-stream")
+        })
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checkpoint.jsonl");
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        directory.path(),
+        &path,
+        Some(4),
+        ProgressTool {
+            duration_ms: 100,
+            abortable: true,
+        },
+    );
+    agent.enable_session_partial_output_checkpoints("progress_test", Duration::from_millis(10));
+    assert_eq!(agent.complete("checkpoint").await.unwrap().text, "done");
+    assert!(agent.partial_output_checkpoint_stats().unwrap().published > 0);
+    let bytes = std::fs::read_to_string(&path).unwrap();
+    assert!(bytes.contains("pi.pending.tool_output"));
+    for line in bytes.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        if value["type"] == "tool_invocation" {
+            assert!(!line.contains("complete_stdout=true"));
+        }
+    }
+    drop(agent);
+    let reopened = Session::open(path).unwrap();
+    assert!(!reopened
+        .context()
+        .unwrap()
+        .iter()
+        .any(|message| serde_json::to_string(message)
+            .unwrap()
+            .contains("pi.pending.tool_output")));
+}
+
+#[tokio::test]
+async fn dropping_manual_summary_after_dispatch_persists_unknown_usage_without_fictional_totals() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(60))
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(text_turn("late summary")),
+        )
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("dropped-summary.jsonl");
+    let mut agent = build_agent(&server.uri(), directory.path(), &path, Some(4));
+    let preparation =
+        octet_agent::prepare_branch_handoff(Vec::new(), &octet_agent::CompactionDetails::default());
+    let mut pending = Box::pin(agent.summarize_branch_with_retry(
+        &preparation,
+        octet_agent::CancellationToken::default(),
+        std::mem::drop,
+    ));
+    tokio::select! {
+        result = &mut pending => panic!("request unexpectedly settled: {result:?}"),
+        _ = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !server.received_requests().await.unwrap().is_empty() { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }) => {},
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    drop(pending);
+    assert!(agent.session().has_uncertain_usage());
+    assert!(agent.session().usage_records().is_empty());
+    assert_eq!(agent.session().total_cost_microdollars(), 0);
+    assert!(agent.session().entries().is_empty());
+    drop(agent);
+    assert!(Session::open_read_only(path).unwrap().has_uncertain_usage());
+}
+
+#[tokio::test]
+async fn cancelled_summary_before_dispatch_does_not_invent_exposure() {
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = build_agent(
+        &server.uri(),
+        directory.path(),
+        &directory.path().join("presend.jsonl"),
+        Some(4),
+    );
+    let preparation =
+        octet_agent::prepare_branch_handoff(Vec::new(), &octet_agent::CompactionDetails::default());
+    let cancel = octet_agent::CancellationToken::default();
+    cancel.cancel();
+    assert!(matches!(
+        agent
+            .summarize_branch_with_retry(&preparation, cancel, std::mem::drop)
+            .await,
+        Err(octet_agent::AgentError::Cancelled)
+    ));
+    assert!(!agent.session().has_uncertain_usage());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+fn response_with_tier_echo(body: String, tier: &str) -> String {
+    body.lines()
+        .map(|line| {
+            if let Some(json) = line.strip_prefix("data: ") {
+                let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+                if value["type"] == "response.completed" {
+                    value["response"]["service_tier"] = serde_json::json!(tier);
+                }
+                format!("data: {value}\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn turn_finished_cost_is_the_exact_settled_tier_cost_not_catalog_or_gate_cost() {
+    use octet_ai::{ResponsesRuntimeProfile as Profile, ServiceTier};
+    for (api, requested, echoed, profile, expected) in [
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            "default",
+            Profile::Codex,
+            Some((62, 500_045)),
+        ),
+        (
+            "gpt-5.4",
+            Some(ServiceTier::Priority),
+            "default",
+            Profile::Codex,
+            Some((50, 36)),
+        ),
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Flex),
+            "default",
+            Profile::Codex,
+            Some((12, 500_009)),
+        ),
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            "flex",
+            Profile::Codex,
+            Some((12, 500_009)),
+        ),
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            "future-tier",
+            Profile::Codex,
+            None,
+        ),
+        ("gpt-5.5", None, "priority", Profile::Default, None),
+    ] {
+        for gated in [false, true] {
+            let server = MockServer::start().await;
+            let mut bodies = vec![response_with_tier_echo(
+                responses_text_turn("answer", "answer", "response.completed", "answer"),
+                echoed,
+            )];
+            if gated {
+                bodies.push(response_with_tier_echo(
+                    responses_text_turn("gate", "R", "response.completed", "gate"),
+                    "default",
+                ));
+            }
+            Mock::given(method("POST"))
+                .and(path("responses"))
+                .respond_with(Script {
+                    bodies,
+                    next: AtomicUsize::new(0),
+                })
+                .mount(&server)
+                .await;
+            let workspace = tempfile::tempdir().unwrap();
+            let session_path = workspace.path().join("tier-cost.jsonl");
+            let mut model = recovery_codex_model(&server.uri());
+            Arc::make_mut(&mut model.spec).api_name = api.into();
+            let pricing = Arc::make_mut(&mut model.spec).pricing.as_mut().unwrap();
+            pricing.input = TokenRate(3_000_002);
+            pricing.output = TokenRate(5_000_004);
+            Arc::make_mut(&mut model.endpoint).runtime.responses_profile = profile;
+            let base_pricing = model.spec.pricing.clone().unwrap();
+            let mut agent = build_responses_agent_from_session(
+                model,
+                Session::create(&session_path).unwrap(),
+                workspace.path(),
+                Some(3),
+                "test",
+                ReasoningConfig::Off,
+            );
+            agent.set_service_tier(requested).unwrap();
+            if gated {
+                agent.set_completion_policy(CompletionPolicy::TerminalGate);
+            }
+            let mut run = agent.prompt("account this exact response").await.unwrap();
+            let events = collect(&mut run).await;
+            drop(run);
+            assert!(
+                matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                "{events:?}"
+            );
+            let turns = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::TurnFinished {
+                        turn_usage,
+                        turn_cost,
+                        run_cost_microdollars,
+                        ..
+                    } => Some((*turn_usage, *turn_cost, *run_cost_microdollars)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(turns.len(), 1);
+            let (usage, cost, run_subtotal) = turns[0];
+            assert_eq!(
+                cost.map(|cost| (cost.total, cost.total_picodollars_remainder)),
+                expected,
+                "{api}/{requested:?}/{echoed}/gate={gated}"
+            );
+            let durable = agent
+                .session()
+                .usage_records()
+                .iter()
+                .find(|record| matches!(record.kind, UsageRecordKind::AssistantTurn { .. }))
+                .unwrap();
+            assert_eq!(cost, durable.cost);
+            assert_eq!(usage, durable.usage);
+            assert_ne!(
+                cost,
+                Some(octet_ai::pricing::cost_of(&base_pricing, &usage).unwrap())
+            );
+            let gate_cost = agent
+                .session()
+                .usage_records()
+                .iter()
+                .find_map(|record| match record.kind {
+                    UsageRecordKind::TerminalGate { .. } => Some(record.cost.unwrap()),
+                    _ => None,
+                });
+            assert_eq!(gate_cost.is_some(), gated);
+            let exact_subtotal = cost
+                .into_iter()
+                .chain(gate_cost)
+                .map(|cost| {
+                    u128::from(cost.total) * 1_000_000
+                        + u128::from(cost.total_picodollars_remainder)
+                })
+                .sum::<u128>();
+            assert_eq!(u128::from(run_subtotal), exact_subtotal / 1_000_000);
+            let requests = wire_requests(&server).await;
+            if gated {
+                assert!(requests[1].get("service_tier").is_none());
+            }
+            if cost.is_none() {
+                assert!(agent.session().has_unpriced_usage());
+                agent.set_max_session_cost_microdollars(Some(u64::MAX));
+                assert!(matches!(
+                    agent.ensure_request_cost_capacity(agent.model(), 1, 1),
+                    Err(octet_agent::AgentError::CostUnavailable { .. })
+                ));
+            }
+            drop(agent);
+            let reopened = Session::open_read_only(&session_path).unwrap();
+            let durable = reopened
+                .usage_records()
+                .iter()
+                .find(|record| matches!(record.kind, UsageRecordKind::AssistantTurn { .. }))
+                .unwrap();
+            assert_eq!(cost, durable.cost);
+        }
+    }
+}
+
+#[tokio::test]
+async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+        responses_text_turn("settled", "settled", "response.completed", "settled"),
+    ])
+    .await;
+    let mut run = agent
+        .prompt("retry without fictional pricing")
+        .await
+        .unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+    let costs = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnFinished { turn_cost, .. } => Some(*turn_cost),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(costs.len(), 1);
+    assert_eq!(agent.session().usage_records().len(), 1);
+    assert_eq!(costs[0], agent.session().usage_records()[0].cost);
+    assert!(costs[0].is_some());
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert_eq!(wire_requests(&server).await.len(), 2);
 }

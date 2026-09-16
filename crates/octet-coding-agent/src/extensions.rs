@@ -10,6 +10,8 @@
 #[cfg(feature = "serve")]
 pub mod serve;
 
+mod mutation_resources;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -23,7 +25,7 @@ use crossterm::event::Event;
 use octet_agent::extension_process::{
     ConfirmationRequest, ConfirmationResponse, ContextContribution, ContextPlacement,
     DiscoveredExtension, ExtensionAutocompleteRequest, ExtensionEditorRequest,
-    ExtensionEditorResponse, ExtensionEvent, ExtensionFlag, ExtensionHealthSnapshot,
+    ExtensionEditorResponse, ExtensionEvent, ExtensionEventBus, ExtensionFlag, ExtensionHealthSnapshot,
     ExtensionHealthState, ExtensionHook, ExtensionHookDisposition, ExtensionHostState,
     ExtensionInputRequest, ExtensionInputResponse, ExtensionLifecycleEvent,
     ExtensionLifecycleOutcome, ExtensionManifest, ExtensionPolicy,
@@ -1234,6 +1236,9 @@ impl ExtensionProviderRuntime {
                         max_output_tokens,
                     },
                     pricing: None,
+                    // API 0.3 provider declarations carry no model presets or
+                    // HTTP headers; never infer unnegotiated transport authority.
+                    preset: Default::default(),
                     cache: CacheCompatibility {
                         supports_long_retention: false,
                         send_session_id_header: false,
@@ -1359,6 +1364,7 @@ pub struct ExecutableExtensions {
     input_cancellations: VecDeque<PendingInputCancellation>,
     input_tasks: Vec<JoinHandle<()>>,
     policy_supervisors: Vec<JoinHandle<()>>,
+    event_bus: Option<Arc<ExtensionEventBus>>,
     session_lifecycle_service: Option<ExtensionSessionLifecycleService>,
     session_lifecycle_receiver: Option<ExtensionSessionLifecycleReceiver>,
     session_id: Option<String>,
@@ -1374,6 +1380,8 @@ pub struct ExecutableExtensions {
     /// product resource owner drains this queue and decides how to rescan; an
     /// extension never receives authority to perform the host mutation.
     pending_post_mutation_rescans: VecDeque<PostMutationRescan>,
+    mutation_family_generations: BTreeMap<String, u64>,
+    rescan_global_config: Option<PathBuf>,
     /// Discovery configuration bound at product construction.
     ///
     /// A post-mutation rescan must re-resolve through the same workspace trust,
@@ -1631,6 +1639,7 @@ impl Default for ExecutableExtensions {
             input_cancellations: VecDeque::new(),
             input_tasks: Vec::new(),
             policy_supervisors: Vec::new(),
+            event_bus: None,
             session_lifecycle_service: None,
             session_lifecycle_receiver: None,
             session_id: None,
@@ -1640,6 +1649,8 @@ impl Default for ExecutableExtensions {
             last_lifecycle_outcome: None,
             seen_post_mutation_ids: VecDeque::new(),
             pending_post_mutation_rescans: VecDeque::new(),
+            mutation_family_generations: BTreeMap::new(),
+            rescan_global_config: None,
             rescan_config: None,
             #[cfg(test)]
             lifecycle_delivery_test_control: None,
@@ -1888,6 +1899,7 @@ impl ExecutableExtensions {
             .cloned()
             .collect::<Vec<_>>();
 
+        let event_bus = Arc::new(ExtensionEventBus::default());
         let (session_lifecycle_service, session_lifecycle_receiver) =
             if active_session_lifecycle_enabled(config)
                 && startable.iter().any(extension_session_lifecycle_eligible)
@@ -1934,6 +1946,7 @@ impl ExecutableExtensions {
                 let workspace = config.workspace.clone();
                 let state = host_state.clone();
                 let session_lifecycle_service = session_lifecycle_service.clone();
+                let event_bus = event_bus.clone();
                 let provider_registry = provider_runtime.registry();
                 let subagents_tool_available =
                     model.spec.capabilities.tools && config.tool_available("subagent_spawn");
@@ -1965,6 +1978,9 @@ impl ExecutableExtensions {
                                 } else {
                                     None
                                 };
+                            if extension_session_lifecycle_eligible(&entry.descriptor) {
+                                runtime.event_bus = Some(event_bus.clone());
+                            }
                             runtime.provider_registry = Some(provider_registry.clone());
                             runtime
                         })
@@ -2130,11 +2146,13 @@ impl ExecutableExtensions {
         extensions.shortcuts = shortcuts;
         extensions.summaries = summaries;
         extensions.diagnostics.extend(diagnostics);
+        extensions.event_bus = Some(event_bus);
         extensions.session_lifecycle_service = session_lifecycle_service;
         extensions.session_lifecycle_receiver = session_lifecycle_receiver;
         extensions.session_id = host_state.session_id.clone();
         extensions.resource_owner = Some(session.resource_owner_key());
         extensions.rescan_config = Some(config.clone());
+        extensions.rescan_global_config = crate::cli::global_config_path();
         extensions.start_policy_supervisors();
         extensions.start_session_lifecycle();
         extensions
@@ -2759,6 +2777,8 @@ impl ExecutableExtensions {
         // old active session and must not bleed into the replacement.
         self.pending_context = PendingContext::default();
         self.pending_post_mutation_rescans.clear();
+        self.mutation_family_generations.clear();
+        if let Some(bus) = &self.event_bus { bus.reset(); }
         self.session_id = host_state(session, model, reasoning, sessions).session_id;
         self.resource_owner = Some(session.resource_owner_key());
         let active_owner = self.resource_owner.as_deref();
@@ -3645,6 +3665,12 @@ impl ExecutableExtensions {
         }
         self.seen_post_mutation_ids
             .push_back(mutation.mutation_id().to_owned());
+        if mutation.kind() != PostMutationKind::Resource {
+            for resource in mutation.affected_resources().iter().filter(|resource| mutation_resources::known(resource)) {
+                let current = self.mutation_family_generations.entry(resource.clone()).or_default();
+                *current = (*current).max(mutation.generation());
+            }
+        }
 
         let resource_owner = self.resource_owner.clone();
         let calls = self
@@ -3659,6 +3685,7 @@ impl ExecutableExtensions {
             .cloned()
             .map(|process| {
                 let name = process.descriptor().manifest.name.clone();
+                let process_generation = process.health_snapshot().generation;
                 let mutation = mutation.clone();
                 let resource_owner = resource_owner.clone();
                 async move {
@@ -3667,12 +3694,12 @@ impl ExecutableExtensions {
                         process.post_mutation(&mutation, resource_owner.as_deref()),
                     )
                     .await;
-                    (name, result)
+                    (name, process_generation, result)
                 }
             });
         let results = futures_util::future::join_all(calls).await;
         let mut accepted = Vec::new();
-        for (extension, result) in results {
+        for (extension, process_generation, result) in results {
             let disposition = match result {
                 Ok(Ok(disposition)) => disposition,
                 Ok(Err(error)) => {
@@ -3705,6 +3732,8 @@ impl ExecutableExtensions {
             let request = PostMutationRescan {
                 extension,
                 mutation_id: mutation.mutation_id().to_owned(),
+                kind: mutation.kind(),
+                process_generation,
                 generation: mutation.generation(),
                 resource_ids: resource_ids.to_vec(),
             };
@@ -3718,15 +3747,30 @@ impl ExecutableExtensions {
         accepted
     }
 
+    /// Observe a completed user-configuration transaction. Never call for a
+    /// preview, failed/partial write, or an in-memory-only setting change.
+    /// The caller owns the stable ID and increasing resource generation.
+    pub async fn notify_configuration_changed(
+        &mut self,
+        mutation_id: impl Into<String>,
+        generation: u64,
+        state: PostMutationState,
+    ) -> Vec<PostMutationRescan> {
+        let Some(mutation) = PostMutationContext::new(
+            mutation_id, PostMutationKind::Configuration,
+            ["resource:settings".to_owned()], generation, state,
+        ) else {
+            self.diagnostics.push("warning: rejected invalid configuration post_mutation notification");
+            return Vec::new();
+        };
+        self.notify_post_mutation(mutation).await
+    }
+
     /// Convenience bridge for a host-owned committing migration integration.
     ///
     /// Dry-run scanners must never invoke this method. A committing ingestion
     /// path must have a safely bound extension owner, pass the same stable ID
     /// on retry, and call this only after commit or a completed rollback.
-    #[expect(
-        dead_code,
-        reason = "CLI ingestion does not bind an executable-extension observation owner"
-    )]
     pub async fn notify_migration_ingested(
         &mut self,
         mutation_id: impl Into<String>,
@@ -3793,8 +3837,25 @@ impl ExecutableExtensions {
         }
         let mut messages = Vec::new();
         let mut selected = BTreeMap::new();
+        let mut families = BTreeMap::new();
         for request in requests {
+            let requester_current = self.processes.iter().any(|process| {
+                process.descriptor().manifest.name == request.extension && process.is_running()
+                    && process.health_snapshot().generation == request.process_generation
+            });
+            if !requester_current {
+                messages.push("warning: discarded stale post_mutation requesting process".into());
+                continue;
+            }
             for resource_id in request.resource_ids {
+                if request.kind != PostMutationKind::Resource && mutation_resources::known(&resource_id) {
+                    if self.mutation_family_generations.get(&resource_id) == Some(&request.generation) {
+                        families.insert(resource_id, request.generation);
+                    } else {
+                        messages.push("warning: discarded stale post_mutation resource generation".into());
+                    }
+                    continue;
+                }
                 let process = self.processes.iter().find(|process| {
                     opaque_extension_resource_id(&process.descriptor().manifest.name) == resource_id
                 });
@@ -3813,6 +3874,9 @@ impl ExecutableExtensions {
                     (process.descriptor().clone(), request.generation),
                 );
             }
+        }
+        for (resource, generation) in families {
+            messages.push(mutation_resources::rescan(&resource, generation, config, self.rescan_global_config.as_deref()));
         }
         if selected.is_empty() {
             return messages;
@@ -5169,6 +5233,38 @@ where
 mod tests {
     use super::*;
 
+    #[test]
+    fn extension_host_state_does_not_project_model_preset_headers() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let sessions = SessionStore::new(directory.path(), directory.path());
+        let mut model = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.spec).preset.headers.insert(
+            "x-private-model-header".into(),
+            "model-header-value-must-not-be-public".into(),
+        );
+        let projected = serde_json::to_value(host_state(
+            &session,
+            &model,
+            &ReasoningConfig::Off,
+            &sessions,
+        ))
+        .unwrap();
+        assert_eq!(projected["model"], "gpt-4o-mini");
+        let encoded = projected.to_string();
+        for forbidden in [
+            "preset",
+            "headers",
+            "x-private-model-header",
+            "model-header-value-must-not-be-public",
+        ] {
+            assert!(!encoded.contains(forbidden), "{forbidden}");
+        }
+    }
+
     fn shortcut(key: &str, name: &str) -> ShortcutDefinition {
         ShortcutDefinition {
             key: key.to_owned(),
@@ -5539,6 +5635,8 @@ args = ["--keep", "--experimental-streamable-http-mcp"]
             .push_back(PostMutationRescan {
                 extension: "fixture-extension".into(),
                 mutation_id: "mutation:old".into(),
+                kind: PostMutationKind::Resource,
+                process_generation: 1,
                 generation: 1,
                 resource_ids: vec!["resource:old".into()],
             });
@@ -7791,3 +7889,7 @@ context = true
 #[cfg(test)]
 #[path = "extensions/hook_tests.rs"]
 mod hook_tests;
+
+#[cfg(test)]
+#[path = "extensions/bus_tests.rs"]
+mod bus_tests;

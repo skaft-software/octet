@@ -342,6 +342,7 @@ fn responses_profile_expression(value: &str) -> Option<&'static str> {
     match value {
         "default" => Some("ResponsesRuntimeProfile::Default"),
         "codex" => Some("ResponsesRuntimeProfile::Codex"),
+        "azure" => Some("ResponsesRuntimeProfile::Azure"),
         _ => None,
     }
 }

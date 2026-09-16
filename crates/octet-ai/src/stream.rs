@@ -212,6 +212,10 @@ pub(crate) struct ResponseBuilder {
     pub(crate) model: ModelId,
     pub(crate) protocol: Protocol,
     pub(crate) pricing: Option<Pricing>,
+    /// The exact tier carried by this physical Responses request.
+    pub(crate) requested_service_tier: Option<crate::types::ServiceTier>,
+    /// None until a codec settles pricing; Some(None) explicitly means unpriced.
+    pub(crate) response_cost: Option<Option<crate::pricing::Cost>>,
     /// The request's exact tool-definition snapshot. `None` is reserved for
     /// direct schema-less codec fixtures; production assembly sets `Some`, even
     /// when the request has no tools, so known response tools are validated
@@ -293,6 +297,8 @@ impl ResponseBuilder {
             model,
             protocol,
             pricing,
+            requested_service_tier: None,
+            response_cost: None,
             tool_definitions: None,
             response_id: None,
             responses_output: None,
@@ -809,11 +815,14 @@ impl ResponseBuilder {
         };
 
         let usage = self.usage.unwrap_or_default();
-        let cost = self
-            .pricing
-            .as_ref()
-            .map(|p| crate::pricing::cost_of(p, &usage).map_err(AiError::Pricing))
-            .transpose()?;
+        let cost = match self.response_cost {
+            Some(cost) => cost,
+            None => self
+                .pricing
+                .as_ref()
+                .map(|p| crate::pricing::cost_of(p, &usage).map_err(AiError::Pricing))
+                .transpose()?,
+        };
 
         Ok(Response {
             message,

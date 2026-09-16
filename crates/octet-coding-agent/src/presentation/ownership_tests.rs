@@ -51,6 +51,7 @@ fn turn_finished(
         message: assistant_message(protocol, content),
         stop_reason: StopReason::EndTurn,
         turn_usage,
+        turn_cost: None,
         usage: turn_usage,
         session_cost_microdollars: None,
         run_cost_microdollars: 0,

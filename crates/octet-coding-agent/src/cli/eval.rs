@@ -1,24 +1,19 @@
 #![allow(missing_docs)]
 
-//! Isolated, fixture-backed evaluation harness (parity row 5.11).
+//! Isolated evaluation with a safe scripted default and explicit local-model opt-in.
 //!
-//! The harness is a *bounded measurement rig*, not a second agent runner:
-//!
-//! * **Own provider injection.** Every case runs against a loopback HTTP
-//!   fixture the harness starts itself inside its own temporary `HOME`. The
-//!   octet child process is spawned with `env_clear()`, so no ambient
-//!   credential, proxy or provider endpoint is visible to it, and the suite
-//!   schema rejects any field that could name a remote endpoint. A live or paid
-//!   provider call is therefore impossible by construction, not by policy.
-//! * **Own artifact directory.** Each run writes a private run directory with
-//!   `report.json`, incrementally appended `runs.jsonl` and `report.txt`.
-//! * **Pass / latency / cost recording.** Per case: pass or fail against the
-//!   declared expectation and budgets, wall-clock latency, provider usage, the
-//!   session's cost total and whether that cost is exact or uncertain. A run can
-//!   be compared with an earlier report (`--baseline`) to record
-//!   candidate-minus-baseline deltas.
+//! `--model-profile` admits one bounded owner-private operator profile, never
+//! suite or ambient routing. Only literal loopback Chat endpoints are supported.
+//! The ordinary octet provider runtime performs inference; no response wrapper
+//! sits between it and the selected server. `--offline` disables discovery, not
+//! inference. Each case owns a fresh HOME/workspace/session, has no tools, and
+//! is bounded by wall time and captured output. Private reports preserve known
+//! usage even on failure and label unknown prices/settlement as uncertain. A
+//! selected local server is operator-authorized: its own downstream routing or
+//! billing is outside this harness's control. No OAuth or persistent store policy
+//! is changed.
 
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -51,6 +46,16 @@ pub enum EvalCommand {
         /// Compare against an earlier `report.json` and record the deltas.
         #[arg(long, value_name = "REPORT.json")]
         baseline: Option<PathBuf>,
+        /// Explicit owner-private `octet-eval-model-1` JSON profile for a local
+        /// OpenAI Chat model. Omit to use only the harness's scripted fixture.
+        #[arg(long, value_name = "FILE")]
+        model_profile: Option<PathBuf>,
+        /// Hard per-case child deadline (1..=120000 ms), including startup.
+        #[arg(long, default_value_t = 60000, value_parser = clap::value_parser!(u64).range(1..=120000))]
+        case_timeout_ms: u64,
+        /// Maximum captured bytes per child output stream (1..=1048576).
+        #[arg(long, default_value_t = 262144, value_parser = clap::value_parser!(u64).range(1..=1048576))]
+        max_output_bytes: u64,
     },
 }
 
@@ -60,12 +65,122 @@ pub fn run(command: EvalCommand, cwd: &Path) -> anyhow::Result<()> {
             suite,
             artifact_dir,
             baseline,
-        } => run_suite(&suite, artifact_dir.as_deref(), baseline.as_deref(), cwd),
+            model_profile,
+            case_timeout_ms,
+            max_output_bytes,
+        } => run_suite(
+            &suite,
+            artifact_dir.as_deref(),
+            baseline.as_deref(),
+            cwd,
+            model_profile.as_deref(),
+            CaseLimits {
+                timeout_ms: case_timeout_ms,
+                output_bytes: max_output_bytes as usize,
+            },
+        ),
     }
 }
 
-/// One scripted fixture reply. The harness never talks to a real provider, so a
-/// case can only choose *what its own loopback fixture answers*.
+const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct CaseLimits {
+    timeout_ms: u64,
+    output_bytes: usize,
+}
+
+/// Invocation-only profile. Deliberately not the ambient credential-store schema.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelProfile {
+    schema: String,
+    base_url: String,
+    model: String,
+    /// Empty explicitly selects unauthenticated local inference.
+    api_key: String,
+    context_window: u64,
+    max_output_tokens: u64,
+    /// Omission means unknown, NOT the custom-provider runtime's free default.
+    pricing: Option<EvalPricing>,
+}
+
+/// Operator-declared microdollars per million tokens. All rates are required;
+/// explicit zero prices declare a free server rather than infer one.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvalPricing {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write_5m: u64,
+}
+
+impl ModelProfile {
+    fn read(path: &Path) -> anyhow::Result<Self> {
+        let bytes = octet_agent::secure_fs::read_private_file_bounded(path, 16 * 1024)?;
+        // Do not echo parser errors: unknown field names/values can be secrets.
+        let profile: Self = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("invalid octet-eval-model-1 profile"))?;
+        let url = url::Url::parse(&profile.base_url).map_err(|_| {
+            anyhow::anyhow!("eval profile requires a literal HTTP loopback endpoint")
+        })?;
+        let loopback = match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        if profile.schema != "octet-eval-model-1"
+            || url.scheme() != "http"
+            || !loopback
+            || url.port().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/v1/"
+        {
+            anyhow::bail!("eval profile requires octet-eval-model-1 and http://<loopback-IP>:<port>/v1/ without userinfo, query or fragment");
+        }
+        if profile.model.is_empty()
+            || profile.model.len() > 256
+            || profile.model.trim() != profile.model
+            || profile.model.chars().any(char::is_control)
+            || profile.api_key.len() > 4096
+            || profile
+                .api_key
+                .chars()
+                .any(|c| !c.is_ascii() || c.is_control())
+            || !(1024..=1_048_576).contains(&profile.context_window)
+            || !(1..=16_384).contains(&profile.max_output_tokens)
+            || profile.max_output_tokens >= profile.context_window
+        {
+            anyhow::bail!("eval profile has invalid model, key or token limits");
+        }
+        Ok(profile)
+    }
+
+    fn write_credential(&self, path: &Path) -> anyhow::Result<()> {
+        let record = serde_json::json!({
+            "version": 1,
+            "providers": {"eval": {
+                "base_url": self.base_url, "api_key": self.api_key,
+                "auto_discover": false, "headers": [],
+                "models": [{"api_name": self.model, "context_window": self.context_window,
+                    "max_output_tokens": self.max_output_tokens, "tools": false,
+                    "reasoning": false, "pricing": self.pricing}]
+            }}
+        });
+        octet_agent::secure_fs::write_private_atomic(
+            path,
+            format!("{record}\n").as_bytes(),
+            32 * 1024,
+        )?;
+        Ok(())
+    }
+}
+
+/// A scripted fixture reply, used only when no operator profile was selected.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FixtureReply {
@@ -119,7 +234,7 @@ impl Expectation {
         let trimmed = output.trim();
         if let Some(expected) = &self.equals {
             if trimmed != expected.trim() {
-                return Some(format!("expected {expected:?}, got {trimmed:?}"));
+                return Some(format!("expected answer to equal {expected:?}"));
             }
         }
         if let Some(needle) = &self.contains {
@@ -136,8 +251,8 @@ impl Expectation {
     }
 }
 
-/// Optional per-case ceilings. A case that exceeds one fails, with the
-/// measured value recorded in its artifact record.
+/// Per-case ceilings. Latency terminates the child; cost is enforced by the
+/// agent's pre-request reservation as well as checked against settled usage.
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
@@ -161,8 +276,8 @@ pub struct EvalCase {
     pub expect: Expectation,
     /// What the case's own loopback fixture answers.
     #[serde(default)]
-    pub fixture: FixtureReply,
-    /// Optional pass ceilings.
+    pub fixture: Option<FixtureReply>,
+    /// Optional hard ceilings.
     #[serde(default)]
     pub budgets: Budgets,
 }
@@ -193,6 +308,9 @@ pub struct EvalCaseRecord {
     pub output_tokens: u64,
     /// Provider requests the loopback fixture answered for this case.
     pub fixture_requests: u64,
+    /// Durable usage records, not an inferred count of accepted generations.
+    #[serde(default)]
+    pub usage_records: u64,
     /// Why the case failed, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
@@ -210,16 +328,18 @@ pub struct EvalTotals {
     pub cost_microdollars_total: u64,
     pub input_tokens_total: u64,
     pub output_tokens_total: u64,
+    #[serde(default)]
+    pub usage_uncertain_cases: u64,
 }
 
 /// What the run was isolated from, recorded so an artifact is self-describing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvalIsolation {
-    /// Always `injected-fixture`: the harness supplies the only credentials.
+    /// `injected-fixture` or `operator-profile`; no ambient credential is read.
     pub credentials: String,
     /// Always `loopback-only`.
     pub network: String,
-    /// The loopback base URL every case ran against.
+    /// Last scripted-fixture URL; empty for operator-profile runs (no route secrets).
     pub fixture_base_url: String,
     /// Always `stripped`: the child sees no ambient environment.
     pub ambient_environment: String,
@@ -241,6 +361,11 @@ pub struct EvalDeltas {
     pub input_tokens_total_delta: i64,
     pub baseline_output_tokens_total: u64,
     pub output_tokens_total_delta: i64,
+    #[serde(default)]
+    pub usage_uncertain_cases_delta: i64,
+    /// False means numeric cost deltas compare known subtotals only.
+    #[serde(default)]
+    pub cost_delta_exact: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -250,6 +375,13 @@ pub struct EvalRunReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suite: Option<String>,
     pub isolation: EvalIsolation,
+    #[serde(default)]
+    pub backend: String,
+    /// Exact selected runtime identity, not an assertion about server internals.
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub pricing: String,
     pub cases: Vec<EvalCaseRecord>,
     pub totals: EvalTotals,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -261,12 +393,23 @@ fn run_suite(
     artifact_dir: Option<&Path>,
     baseline: Option<&Path>,
     cwd: &Path,
+    model_profile: Option<&Path>,
+    limits: CaseLimits,
 ) -> anyhow::Result<()> {
-    let bytes = std::fs::read(suite_path)
-        .map_err(|error| anyhow::anyhow!("could not read eval suite {}: {error}", suite_path.display()))?;
+    let profile = model_profile
+        .map(|path| ModelProfile::read(&cwd.join(path)))
+        .transpose()?;
+    let suite_path = cwd.join(suite_path);
+    let bytes = octet_agent::secure_fs::read_regular_file_bounded(&suite_path, MAX_DOCUMENT_BYTES)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "could not read eval suite {}: {error}",
+                suite_path.display()
+            )
+        })?;
     let suite: EvalSuite = serde_json::from_slice(&bytes).map_err(|error| {
         anyhow::anyhow!(
-            "eval suite {} is not a valid {EVAL_SUITE_SCHEMA} document ({error}); the harness only runs scripted loopback fixtures, so a suite cannot name a provider, endpoint or key",
+            "eval suite {} is not a valid {EVAL_SUITE_SCHEMA} document ({error}); a suite cannot name a provider, endpoint or key; use an explicit operator --model-profile for local inference",
             suite_path.display()
         )
     })?;
@@ -277,68 +420,157 @@ fn run_suite(
             suite.schema
         );
     }
-    if suite.cases.is_empty() {
-        anyhow::bail!("eval suite {} has no cases", suite_path.display());
+    if suite.cases.is_empty() || suite.cases.len() > 64 {
+        anyhow::bail!("eval suite requires 1..=64 cases");
+    }
+    if suite
+        .name
+        .as_ref()
+        .is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control))
+    {
+        anyhow::bail!("eval suite name must be at most 128 bytes without controls");
     }
     let mut seen = std::collections::HashSet::new();
     for case in &suite.cases {
+        if case.id.is_empty()
+            || case.id.len() > 128
+            || case.id.chars().any(char::is_control)
+            || case.prompt.trim().is_empty()
+            || case.prompt.len() > 32 * 1024
+        {
+            anyhow::bail!(
+                "eval case requires a bounded id (128 bytes) and prompt (1..=32768 bytes)"
+            );
+        }
+        if [
+            &case.expect.equals,
+            &case.expect.contains,
+            &case.expect.not_contains,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|text| text.len() > 4096)
+        {
+            anyhow::bail!("eval expectations are bounded to 4096 bytes");
+        }
+        if profile.is_some() && case.fixture.is_some() {
+            anyhow::bail!(
+                "model-backed eval refuses scripted fixture replies; remove fixture from the suite"
+            );
+        }
+        if let Some(reply) = &case.fixture {
+            if reply.response.len() > 256 * 1024
+                || reply.input_tokens > 1_000_000
+                || reply.output_tokens > 1_000_000
+            {
+                anyhow::bail!("scripted fixture response or tokens exceed eval bounds");
+            }
+        }
         if !seen.insert(case.id.clone()) {
-            anyhow::bail!("eval suite {} repeats case id {:?}", suite_path.display(), case.id);
+            anyhow::bail!(
+                "eval suite {} repeats case id {:?}",
+                suite_path.display(),
+                case.id
+            );
         }
     }
 
+    // Validate every local input before initiating even explicitly authorized inference.
+    let baseline = baseline
+        .map(|path| read_baseline(&cwd.join(path)))
+        .transpose()?;
     let artifact_root = artifact_dir
-        .map(Path::to_path_buf)
+        .map(|path| cwd.join(path))
         .unwrap_or_else(|| cwd.join(".eval"));
     std::fs::create_dir_all(&artifact_root)?;
     let run_id = format!("{}-{}", timestamp(), std::process::id());
     let run_dir = artifact_root.join(&run_id);
     octet_agent::secure_fs::create_private_directory_all(&run_dir)?;
 
-    // The harness owns the child's entire environment: one private HOME with one
-    // injected loopback credential, no inherited variables at all.
-    let home = tempfile::Builder::new()
-        .prefix("octet-eval-home-")
-        .tempdir()?;
-    let session_root = tempfile::Builder::new()
-        .prefix("octet-eval-sessions-")
-        .tempdir()?;
-    let workspace = tempfile::Builder::new()
-        .prefix("octet-eval-workspace-")
-        .tempdir()?;
-    let credentials = home.path().join(".octet/credentials");
-    octet_agent::secure_fs::create_private_directory_all(&credentials)?;
-
     let executable = std::env::current_exe()
         .map_err(|error| anyhow::anyhow!("could not locate the running octet binary: {error}"))?;
 
-    let mut runs = std::fs::File::create(run_dir.join("runs.jsonl"))?;
+    let runs_path = run_dir.join("runs.jsonl");
+    octet_agent::secure_fs::write_private_atomic(&runs_path, b"", MAX_DOCUMENT_BYTES)?;
+    let mut runs = octet_agent::secure_fs::open_regular_file_for_append(&runs_path)?;
     let mut records = Vec::new();
     let mut fixture_base_url = String::new();
+    let model = profile
+        .as_ref()
+        .map(|p| format!("custom/eval/{}", p.model))
+        .unwrap_or_else(|| format!("custom/{EVAL_FIXTURE_MODEL}"));
+    let pricing_known = profile.as_ref().is_none_or(|p| p.pricing.is_some());
     for case in &suite.cases {
-        let fixture = LoopbackFixture::start(&case.fixture.response, &case.fixture)?;
-        fixture_base_url = fixture.base_url.clone();
-        write_injected_credential(&credentials.join("custom.json"), &fixture.base_url)?;
-        let started = Instant::now();
-        let outcome = run_case(
-            &executable,
-            home.path(),
-            session_root.path(),
-            workspace.path(),
-            case,
-        );
-        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let (usage, failure) = match outcome {
-            Ok(usage) => (usage, None),
-            Err(error) => (CaseUsage::default(), Some(format!("{error:#}"))),
+        // Fresh per-case roots prevent accidental prior-case session accounting,
+        // config, history or prompt leakage. All disappear even after a refusal.
+        let isolated = tempfile::Builder::new()
+            .prefix("octet-eval-case-")
+            .tempdir()?;
+        let root = isolated.path().canonicalize()?;
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        let session_root = root.join("sessions");
+        let credentials = home.join(".octet/credentials");
+        for directory in [&credentials, &workspace, &session_root] {
+            octet_agent::secure_fs::create_private_directory_all(directory)?;
+        }
+        let fixture = if let Some(profile) = &profile {
+            profile.write_credential(&credentials.join("custom.json"))?;
+            None
+        } else {
+            let reply = case.fixture.clone().unwrap_or_default();
+            let fixture = LoopbackFixture::start(&reply.response, &reply)?;
+            fixture_base_url = fixture.base_url.clone();
+            write_injected_credential(&credentials.join("custom.json"), &fixture.base_url)?;
+            Some(fixture)
         };
+        let started = Instant::now();
+        let (usage, failure) = if !pricing_known && case.budgets.max_cost_microdollars.is_some() {
+            // The ordinary custom registry assumes free when prices are absent.
+            // Eval must not turn unknown spend into a zero-cost hard guarantee.
+            (
+                CaseUsage::default(),
+                Some(
+                    "hard cost budget refused: profile pricing is unknown (no request sent)"
+                        .to_owned(),
+                ),
+            )
+        } else {
+            match run_case(
+                &executable,
+                &home,
+                &session_root,
+                &workspace,
+                case,
+                &model,
+                limits,
+                pricing_known,
+            ) {
+                Ok(outcome) => outcome,
+                Err(_) => (
+                    CaseUsage {
+                        usage_uncertain: true,
+                        ..CaseUsage::default()
+                    },
+                    Some("could not supervise the isolated run".to_owned()),
+                ),
+            }
+        };
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut failure = failure.or_else(|| case.expect.evaluate(&usage.output));
         if let Some(limit) = case.budgets.max_latency_ms {
             if failure.is_none() && latency_ms > limit {
-                failure = Some(format!("latency {latency_ms}ms exceeds the {limit}ms budget"));
+                failure = Some(format!(
+                    "latency {latency_ms}ms exceeds the {limit}ms budget"
+                ));
             }
         }
         if let Some(limit) = case.budgets.max_cost_microdollars {
+            if failure.is_none() && usage.usage_uncertain {
+                failure = Some(
+                    "hard cost budget cannot be verified: usage or pricing is uncertain".to_owned(),
+                );
+            }
             if failure.is_none() && usage.cost_microdollars > limit {
                 failure = Some(format!(
                     "cost {}µ$ exceeds the {limit}µ$ budget",
@@ -354,8 +586,16 @@ fn run_suite(
             usage_uncertain: usage.usage_uncertain,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
-            fixture_requests: fixture.requests(),
-            failure,
+            fixture_requests: fixture.as_ref().map_or(0, LoopbackFixture::requests),
+            usage_records: usage.usage_records,
+            failure: failure.map(|mut message| {
+                if let Some(profile) = &profile {
+                    if !profile.api_key.is_empty() {
+                        message = message.replace(&profile.api_key, "[REDACTED]");
+                    }
+                }
+                message
+            }),
         };
         // Write continuously: a killed run still leaves its evidence behind.
         serde_json::to_writer(&mut runs, &record)?;
@@ -366,30 +606,52 @@ fn run_suite(
     drop(runs);
 
     let totals = totals_of(&records);
-    let deltas = match baseline {
-        Some(path) => Some(deltas_against(path, &totals)?),
-        None => None,
-    };
+    let deltas = baseline.as_ref().map(|base| deltas_against(base, &totals));
     let report = EvalRunReport {
         schema: EVAL_RUN_SCHEMA.to_owned(),
         run_id: run_id.clone(),
         suite: suite.name.clone(),
         isolation: EvalIsolation {
-            credentials: "injected-fixture".to_owned(),
+            credentials: if profile.is_some() {
+                "operator-profile"
+            } else {
+                "injected-fixture"
+            }
+            .to_owned(),
             network: "loopback-only".to_owned(),
             fixture_base_url,
             ambient_environment: "stripped".to_owned(),
             offline: true,
         },
+        backend: if profile.is_some() {
+            "model"
+        } else {
+            "scripted-fixture"
+        }
+        .to_owned(),
+        model,
+        pricing: if profile.is_none() {
+            "fixture-free"
+        } else if pricing_known {
+            "operator-declared"
+        } else {
+            "unknown"
+        }
+        .to_owned(),
         cases: records,
         totals,
         deltas,
     };
-    std::fs::write(
-        run_dir.join("report.json"),
-        format!("{}\n", serde_json::to_string_pretty(&report)?),
+    octet_agent::secure_fs::write_private_atomic(
+        &run_dir.join("report.json"),
+        format!("{}\n", serde_json::to_string_pretty(&report)?).as_bytes(),
+        MAX_DOCUMENT_BYTES,
     )?;
-    std::fs::write(run_dir.join("report.txt"), render_report(&report))?;
+    octet_agent::secure_fs::write_private_atomic(
+        &run_dir.join("report.txt"),
+        render_report(&report).as_bytes(),
+        MAX_DOCUMENT_BYTES,
+    )?;
 
     crate::output::stdout_line(render_report(&report));
     crate::output::stdout_line(format!("Artifacts: {}", run_dir.display()));
@@ -406,6 +668,7 @@ struct CaseUsage {
     usage_uncertain: bool,
     input_tokens: u64,
     output_tokens: u64,
+    usage_records: u64,
 }
 
 fn run_case(
@@ -414,61 +677,169 @@ fn run_case(
     session_root: &Path,
     workspace: &Path,
     case: &EvalCase,
-) -> anyhow::Result<CaseUsage> {
-    let output = Command::new(executable)
+    model: &str,
+    limits: CaseLimits,
+    pricing_known: bool,
+) -> anyhow::Result<(CaseUsage, Option<String>)> {
+    // Stdin carries literal prompt text, so @file/--flag syntax in a suite
+    // cannot become CLI options or cause local file expansion.
+    let mut input = tempfile::tempfile()?;
+    input.write_all(case.prompt.as_bytes())?;
+    input.rewind()?;
+    let mut command = Command::new(executable);
+    command
         .current_dir(workspace)
-        // The child sees nothing ambient: no keys, no proxies, no HOME state.
         .env_clear()
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("PWD", workspace)
         .env("TERM", "dumb")
         .env("LANG", "C.UTF-8")
-        .args(["--offline", "--no-context-files", "--no-tools"])
+        .env("OCTET_COMPACTION_MODE", "disabled")
+        .env(
+            "OCTET_SYSTEM_PROMPT",
+            "Answer the user's evaluation prompt. No tools are available.",
+        )
+        .args([
+            "--offline",
+            "--safe-mode",
+            "--no-context-files",
+            "--no-tools",
+            "--max-turns",
+            "1",
+        ])
         .arg("--workspace")
         .arg(workspace)
         .arg("--session-dir")
         .arg(session_root)
         .args(["--color", "never", "--model"])
-        .arg(format!("custom/{EVAL_FIXTURE_MODEL}"))
+        .arg(model)
         .arg("--print")
-        .arg(&case.prompt)
-        .stdin(Stdio::null())
+        .stdin(Stdio::from(input))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| anyhow::anyhow!("could not start the isolated octet run: {error}"))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "the isolated run exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+        .stderr(Stdio::piped());
+    if let Some(limit) = case.budgets.max_cost_microdollars {
+        // Not a post-hoc threshold: the agent reserves worst-case request cost
+        // before sending, and refuses unknown/unsettled usage on later requests.
+        command.env("OCTET_MAX_COST_MICRODOLLARS", limit.to_string());
+    }
+    let mut child = command.spawn()?;
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("isolated child output pipes unavailable");
+    };
+    let overflow = Arc::new(AtomicBool::new(false));
+    let stdout = capture_bounded(stdout, limits.output_bytes, Arc::clone(&overflow));
+    let stderr = capture_bounded(stderr, limits.output_bytes, Arc::clone(&overflow));
+    let timeout = Duration::from_millis(
+        case.budgets
+            .max_latency_ms
+            .unwrap_or(limits.timeout_ms)
+            .min(limits.timeout_ms),
+    );
+    let started = Instant::now();
+    let (status, mut failure) = loop {
+        let reason = if overflow.load(Ordering::SeqCst) {
+            Some("isolated run exceeded the output capture bound".to_owned())
+        } else if started.elapsed() >= timeout {
+            Some("isolated run exceeded the hard wall-time budget".to_owned())
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            let _ = child.kill();
+            break (child.wait().ok(), Some(reason));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break (Some(status), None),
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(_) => {
+                let _ = child.kill();
+                break (
+                    child.wait().ok(),
+                    Some("could not wait for isolated run".to_owned()),
+                );
+            }
+        }
+    };
+    let output = stdout.join().unwrap_or_default();
+    let stderr_bytes = stderr.join().unwrap_or_default(); // Never persisted into report artifacts.
+    if overflow.load(Ordering::SeqCst) {
+        failure = Some("isolated run exceeded the output capture bound".to_owned());
+    }
+    let interrupted = failure.is_some();
+    if failure.is_none() && !status.is_some_and(|status| status.success()) {
+        // Diagnostics stay out of the persisted report by design; surface a
+        // bounded tail on the test/log stream only, so an intermittent isolated
+        // failure is diagnosable without leaking provider text into artifacts.
+        let diagnostics = String::from_utf8_lossy(&stderr_bytes);
+        eprintln!(
+            "isolated run failed status={status:?}: {}",
+            diagnostics.chars().take(2_000).collect::<String>()
         );
+        failure = Some("isolated run failed (provider diagnostics omitted)".to_owned());
     }
     let mut usage = CaseUsage {
-        output: String::from_utf8_lossy(&output.stdout).into_owned(),
+        output: String::from_utf8_lossy(&output).into_owned(),
+        usage_uncertain: true,
         ..CaseUsage::default()
     };
+    // Read accounting even after nonzero exit/timeout. An absent or torn usage
+    // settlement never becomes a fictitious zero-cost successful observation.
     if let Some(transcript) = newest_transcript(session_root) {
-        // The harness reads its own child's session for accounting, then the
-        // temporary session root disappears with the run.
         if let Ok(session) = octet_agent::Session::open_read_only(transcript) {
             usage.cost_microdollars = session.total_cost_microdollars();
-            usage.usage_uncertain = session.has_uncertain_usage();
+            usage.usage_records = session.usage_records().len() as u64;
+            usage.usage_uncertain = !pricing_known
+                || interrupted
+                || session.has_uncertain_usage()
+                || usage.usage_records == 0;
             for record in session.usage_records() {
                 usage.input_tokens = usage.input_tokens.saturating_add(record.usage.input_tokens);
-                usage.output_tokens = usage.output_tokens.saturating_add(record.usage.output_tokens);
+                usage.output_tokens = usage
+                    .output_tokens
+                    .saturating_add(record.usage.output_tokens);
+                usage.usage_uncertain |=
+                    record.cost.is_none() || record.usage == octet_ai::Usage::default();
             }
         }
     }
-    Ok(usage)
+    Ok((usage, failure))
+}
+
+fn capture_bounded(
+    mut stream: impl std::io::Read + Send + 'static,
+    limit: usize,
+    overflow: Arc<AtomicBool>,
+) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return output,
+                Ok(read) => {
+                    let keep = read.min(limit.saturating_sub(output.len()));
+                    output.extend_from_slice(&chunk[..keep]);
+                    if keep < read {
+                        overflow.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn newest_transcript(root: &Path) -> Option<PathBuf> {
     let mut newest: Option<(SystemTime, PathBuf)> = None;
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
@@ -480,7 +851,10 @@ fn newest_transcript(root: &Path) -> Option<PathBuf> {
             let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
                 continue;
             };
-            if newest.as_ref().is_none_or(|(current, _)| modified >= *current) {
+            if newest
+                .as_ref()
+                .is_none_or(|(current, _)| modified >= *current)
+            {
                 newest = Some((modified, path));
             }
         }
@@ -509,11 +883,12 @@ fn write_injected_credential(path: &Path, base_url: &str) -> anyhow::Result<()> 
 fn totals_of(records: &[EvalCaseRecord]) -> EvalTotals {
     let cases = records.len() as u64;
     let passed = records.iter().filter(|record| record.passed).count() as u64;
-    let latency_ms_total = records.iter().map(|record| record.latency_ms).sum::<u64>();
-    let cost_microdollars_total = records
+    let latency_ms_total = records
         .iter()
-        .map(|record| record.cost_microdollars)
-        .sum::<u64>();
+        .fold(0u64, |sum, record| sum.saturating_add(record.latency_ms));
+    let cost_microdollars_total = records.iter().fold(0u64, |sum, record| {
+        sum.saturating_add(record.cost_microdollars)
+    });
     EvalTotals {
         cases,
         passed,
@@ -530,13 +905,21 @@ fn totals_of(records: &[EvalCaseRecord]) -> EvalTotals {
             latency_ms_total as f64 / cases as f64
         },
         cost_microdollars_total,
-        input_tokens_total: records.iter().map(|record| record.input_tokens).sum(),
-        output_tokens_total: records.iter().map(|record| record.output_tokens).sum(),
+        input_tokens_total: records
+            .iter()
+            .fold(0u64, |sum, record| sum.saturating_add(record.input_tokens)),
+        output_tokens_total: records
+            .iter()
+            .fold(0u64, |sum, record| sum.saturating_add(record.output_tokens)),
+        usage_uncertain_cases: records
+            .iter()
+            .filter(|record| record.usage_uncertain)
+            .count() as u64,
     }
 }
 
-fn deltas_against(path: &Path, totals: &EvalTotals) -> anyhow::Result<EvalDeltas> {
-    let bytes = std::fs::read(path)
+fn read_baseline(path: &Path) -> anyhow::Result<EvalTotals> {
+    let bytes = octet_agent::secure_fs::read_regular_file_bounded(path, MAX_DOCUMENT_BYTES)
         .map_err(|error| anyhow::anyhow!("could not read baseline {}: {error}", path.display()))?;
     let baseline: EvalRunReport = serde_json::from_slice(&bytes).map_err(|error| {
         anyhow::anyhow!(
@@ -544,8 +927,18 @@ fn deltas_against(path: &Path, totals: &EvalTotals) -> anyhow::Result<EvalDeltas
             path.display()
         )
     })?;
-    let base = &baseline.totals;
-    Ok(EvalDeltas {
+    if baseline.schema != EVAL_RUN_SCHEMA {
+        anyhow::bail!("baseline schema must be {EVAL_RUN_SCHEMA}");
+    }
+    // Recompute from cases; old artifacts lacked an aggregate uncertainty flag.
+    Ok(totals_of(&baseline.cases))
+}
+
+fn deltas_against(base: &EvalTotals, totals: &EvalTotals) -> EvalDeltas {
+    EvalDeltas {
+        usage_uncertain_cases_delta: totals.usage_uncertain_cases as i64
+            - base.usage_uncertain_cases as i64,
+        cost_delta_exact: totals.usage_uncertain_cases == 0 && base.usage_uncertain_cases == 0,
         baseline_cases: base.cases,
         baseline_pass_rate_pp: base.pass_rate_pp,
         pass_rate_pp_delta: totals.pass_rate_pp - base.pass_rate_pp,
@@ -561,7 +954,7 @@ fn deltas_against(path: &Path, totals: &EvalTotals) -> anyhow::Result<EvalDeltas
         baseline_output_tokens_total: base.output_tokens_total,
         output_tokens_total_delta: i64::try_from(totals.output_tokens_total).unwrap_or(i64::MAX)
             - i64::try_from(base.output_tokens_total).unwrap_or(i64::MAX),
-    })
+    }
 }
 
 fn render_report(report: &EvalRunReport) -> String {
@@ -573,6 +966,10 @@ fn render_report(report: &EvalRunReport) -> String {
         report.totals.passed,
         report.totals.failed,
         report.totals.pass_rate_pp
+    ));
+    out.push_str(&format!(
+        "  backend {}, model {}, pricing {}, uncertain cases {}\n",
+        report.backend, report.model, report.pricing, report.totals.usage_uncertain_cases
     ));
     for record in &report.cases {
         out.push_str(&format!(
@@ -595,7 +992,7 @@ fn render_report(report: &EvalRunReport) -> String {
         out.push('\n');
     }
     out.push_str(&format!(
-        "  latency mean {:.1}ms, cost total {}µ$ ({} injected, {}, offline)\n",
+        "  latency mean {:.1}ms, known cost subtotal {}µ$ ({} injected, {}, discovery offline)\n",
         report.totals.latency_ms_mean,
         report.totals.cost_microdollars_total,
         report.isolation.credentials,
@@ -611,6 +1008,15 @@ fn render_report(report: &EvalRunReport) -> String {
             deltas.cost_microdollars_total_delta,
             deltas.input_tokens_total_delta,
             deltas.output_tokens_total_delta
+        ));
+        out.push_str(&format!(
+            "  uncertainty delta {:+}; cost delta {}\n",
+            deltas.usage_uncertain_cases_delta,
+            if deltas.cost_delta_exact {
+                "exact under declared prices"
+            } else {
+                "known subtotals only"
+            }
         ));
     }
     out
@@ -654,7 +1060,8 @@ impl LoopbackFixture {
                     Err(_) => break,
                 };
                 let _ = socket.set_nonblocking(false);
-                let _ = socket.set_read_timeout(Some(Duration::from_secs(10)));
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
+                let _ = socket.set_write_timeout(Some(Duration::from_secs(1)));
                 let request = read_request(&mut socket);
                 let (content_type, body) = if request.starts_with("GET /v1/models ") {
                     (
@@ -724,6 +1131,9 @@ fn read_request(socket: &mut std::net::TcpStream) -> String {
                 .flatten()
         })
         .unwrap_or(0);
+    if length > 512 * 1024 {
+        return String::new();
+    }
     while request.len() < header_end + length {
         let mut bytes = [0u8; 1024];
         match socket.read(&mut bytes) {
@@ -773,8 +1183,8 @@ mod tests {
             r#"{"schema":"octet-eval-suite-1","cases":[{"id":"a","prompt":"p","fixture":{"response":"ok","input_tokens":3,"output_tokens":4}}]}"#,
         )
         .unwrap();
-        assert_eq!(honest.cases[0].fixture.input_tokens, 3);
-        assert_eq!(honest.cases[0].fixture.output_tokens, 4);
+        assert_eq!(honest.cases[0].fixture.as_ref().unwrap().input_tokens, 3);
+        assert_eq!(honest.cases[0].fixture.as_ref().unwrap().output_tokens, 4);
     }
 
     #[test]
@@ -813,6 +1223,7 @@ mod tests {
                 input_tokens: 3,
                 output_tokens: 4,
                 fixture_requests: 1,
+                usage_records: 1,
                 failure: None,
             },
             EvalCaseRecord {
@@ -824,6 +1235,7 @@ mod tests {
                 input_tokens: 7,
                 output_tokens: 8,
                 fixture_requests: 1,
+                usage_records: 1,
                 failure: Some("expected the answer to contain \"nope\"".to_owned()),
             },
         ];

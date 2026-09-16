@@ -26,18 +26,20 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/resume [id]` | Open the session picker or resume an ID. |
 | `/fork` | Fork from an active-branch user message or the whole conversation. |
 | `/clone` | Clone the current session at its active head. |
-| `/tree` | Show the complete durable conversation branch tree. |
-| `/checkout <id>` | Move the durable head to another entry and branch without deleting ancestry. |
 | `/model [id]` | Open the model picker or select an ID. |
+| `/fast [on\|off\|status]` | Toggle/inspect capability-gated Responses priority; active changes wait for a safe boundary. |
 | `/thinking [level]` | Inspect/change [model-supported reasoning](providers.md#reasoning). |
 | `/theme [auto\|light\|dark]` | Choose the compiled terminal appearance or open its picker. |
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
-| `/compact` | Request compaction at the next safe boundary. |
+| `/compact [instructions]` | Request compaction at the next safe boundary; bounded custom instructions apply to local summaries, not native Responses compact. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
-| `/reload` | Reload instructions, prompts, skills, and enabled extensions at a safe boundary. |
+| `/reload` | Reload user keybindings, instructions, prompts, skills, and enabled extensions at a safe boundary. |
 | `/login [provider]` | Sign in to a subscription provider. |
 | `/logout [provider]` | Remove its stored credential. |
 | `/status` | Active model, context, capabilities, and diagnostics. |
+| `/session [info]` | Read-only session identity, file, branch, checkpoints and accounting. |
+| `/hotkeys` | Inspect the resolved keyboard bindings. |
+| `/copy` | Copy the last assistant message through the existing text clipboard consumer. |
 | `/context` | Context composition and effective capacity. |
 | `/cost` | Turn/session usage and cost accounting, including durable delegated spend. |
 | `/cache` | Provider-reported prompt-cache diagnostics. |
@@ -50,12 +52,28 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/extensions [status\|reload]` | Open installed-bundle enable/disable menu or inspect/reload state. |
 | `/subagents` | With the trusted, enabled subagents package live, browse workers and read-only transcripts. |
 | `/help [command]` | Local command help and self-documentation. |
-| `/quit` | Exit octet. |
+| `/exit` | Exit octet. |
 
 `/theme` changes only the compiled terminal appearance selector; it does not
 load arbitrary theme files. [Theme status](themes.md).
 Additional extension commands depend on the enabled, independently trusted
 package; its README is authoritative for arguments.
+
+## Priority and compaction boundaries
+
+Bare `/fast` toggles priority; `/fast status` distinguishes current and queued
+selection. Unsupported routes refuse rather than silently ignoring the switch.
+Selection survives compatible same-session rebuilds, but resets on another
+session or process restart; it is not a persisted preference. Enabling it first
+records durable priority-cost uncertainty. Disabling it does not erase that
+exposure, and hard cost ceilings remain fail-closed. The default 272K Codex
+context cap is unchanged. Selection is not proof that a provider granted priority.
+
+Custom `/compact` instructions are at most 16 KiB and reject unsupported control
+characters. Native Responses compaction explicitly refuses custom instructions.
+Local main/split-prefix summaries use host-owned retries, reservations and
+accounting; the summary is committed once. This does not promise retry-progress
+UI or exactly-once inference after a transport interruption.
 
 ## Extension activation menu
 
@@ -85,6 +103,9 @@ extension processes stopped. [Discovery and trust](resources.md).
 | Option+Up / Alt+Up | Move the newest queued follow-up into an empty composer for editing; no submission or interruption. |
 | Ctrl+C | Clear a nonempty draft; otherwise abort active work, no-op while idle. |
 | Ctrl+D | Close from any interactive input surface after active-work and child-process cleanup. |
+| Ctrl+P / Ctrl+Shift+P | Cycle models within the available resolved `--models` scope (or the available catalog without a scope); backward is Alt+P on Windows/WSL. Drafts are preserved. |
+| Ctrl+L | Open the model selector. |
+| Ctrl+Up / Ctrl+Down | Jump between semantic prompt boundaries. |
 | Ctrl+O | Globally disclose retained reasoning, compaction, delegated activity, tool commands, tool evidence, and shell output. Cannot recover discarded capture bytes. |
 | PageUp / PageDown | Semantic transcript navigation; PageUp claims the bounded viewport, PageDown returns toward live output. |
 | Up / Down | Select a visible path/`@` suggestion; otherwise move through the editor. While idle, Up at cursor 0 recalls sent prompts; Down past the newest restores the draft. |
@@ -103,3 +124,19 @@ do not auto-dispatch follow-ups; retained entries can still be recalled while
 idle. Option+Up never overwrites a nonempty draft. Attachment/paste chips retain
 their payloads when recalled. Held-key repeats do not submit, interrupt, or pop
 queue entries.
+
+## User keybindings and transcript search
+
+The interactive shell loads `~/.octet/keybindings.json`; `/reload` reloads it and
+`/hotkeys` shows the resolved platform bindings. Invalid or conflicting bindings
+are diagnosed, not silently granted executable authority. Bindings do not add
+clipboard image permission or chord handling.
+
+Ctrl+Shift+F (Ctrl+F on Windows/WSL) opens bounded rendered-transcript search in
+the primary-screen viewport. Enter/Ctrl+G selects the next match;
+Shift+Enter/Ctrl+Shift+G selects the previous one; Escape closes search. Search
+owns its query input, including paste, rather than submitting it or admitting
+attachments. It does not search discarded capture bytes or native terminal
+scrollback. The resume picker's Ctrl+F separately searches bounded session text.
+Ctrl+Shift+B cycles hidden/auto/always transcript scrollbar modes for this shell;
+this is not a persisted preference or alternate-screen switch.

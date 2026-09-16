@@ -55,7 +55,8 @@ pub enum SessionCommand {
         /// Portable JSON (default) or a script-free, self-contained HTML view.
         #[arg(long, value_enum, default_value = "json")]
         format: ExportFormat,
-        /// Include raw values. Use only when the destination is trusted.
+        /// Include raw export-eligible values. Private extension metadata stays excluded.
+        /// Use only when the destination is trusted.
         #[arg(long)]
         include_secrets: bool,
         /// Replace an existing export path.
@@ -355,7 +356,8 @@ fn export_with_format(
     let opened_path = crate::session_store::absolute_read_path(&path)?;
     let bytes =
         octet_agent::secure_fs::read_regular_file_bounded(&opened_path, MAX_SESSION_FILE_BYTES)?;
-    let (records, ignored_torn_tail) = parse_export_records(&bytes)?;
+    let (mut records, ignored_torn_tail) = parse_export_records(&bytes)?;
+    project_export_visibility(&mut records);
     let mut redaction_count = 0usize;
     let meta = store
         .list()
@@ -434,6 +436,30 @@ fn export_cli(
         ));
     }
     Ok(())
+}
+
+/// Visibility is independent of credential scrubbing and applies to all export
+/// formats, including --include-secrets. Match EntryMetadata's public-only
+/// projection without round-tripping or deleting unrelated/unknown record data.
+fn project_export_visibility(records: &mut [Value]) {
+    for record in records {
+        if record["type"] != "entry" {
+            continue;
+        }
+        let Some(metadata) = record.get_mut("metadata").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if let Some(extensions) = metadata
+            .get_mut("extension_metadata")
+            .and_then(Value::as_object_mut)
+        {
+            extensions
+                .retain(|_, value| value.get("public").and_then(Value::as_bool) == Some(true));
+            if extensions.is_empty() {
+                metadata.remove("extension_metadata");
+            }
+        }
+    }
 }
 
 fn parse_export_records(bytes: &[u8]) -> anyhow::Result<(Vec<Value>, bool)> {
@@ -978,6 +1004,29 @@ mod tests {
         assert_eq!(row.matches('\t').count(), 3, "{row:?}");
         assert!(row.contains("^["), "{row:?}");
         assert!(row.contains("<BEL>"), "{row:?}");
+    }
+
+    #[test]
+    fn export_visibility_uses_only_actual_entry_metadata_and_keeps_public_values() {
+        let ordinary = serde_json::json!({"extension_metadata": {"data": {"public": false, "value": "ordinary tool data"}}});
+        let public = serde_json::json!({"public": true, "value": ordinary.clone()});
+        let mut records = vec![
+            serde_json::json!({"type": "entry", "metadata": {
+                "display_text": "keep host field",
+                "extension_metadata": {"public": public.clone(), "private": {"public": false, "value": "hidden"}, "default": {"value": "also hidden"}}
+            }, "value": ordinary.clone()}),
+            serde_json::json!({"type": "entry", "metadata": {"extension_metadata": {"private": {"value": "hidden"}}}}),
+            serde_json::json!({"type": "other", "metadata": ordinary.clone()}),
+        ];
+        project_export_visibility(&mut records);
+        assert_eq!(
+            records[0]["metadata"]["extension_metadata"],
+            serde_json::json!({"public": public})
+        );
+        assert_eq!(records[0]["metadata"]["display_text"], "keep host field");
+        assert_eq!(records[0]["value"], ordinary);
+        assert!(records[1]["metadata"].get("extension_metadata").is_none());
+        assert_eq!(records[2]["metadata"], ordinary);
     }
 
     #[test]

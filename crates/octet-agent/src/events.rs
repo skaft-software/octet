@@ -164,6 +164,8 @@ pub struct ToolPolicyDecision {
 pub enum ProviderOperation {
     /// Local handoff-summary inference.
     LocalCompaction,
+    /// Tool-free abandoned-branch handoff summary.
+    BranchSummary,
     /// Native Responses compact endpoint.
     NativeCompaction,
     /// Tool-free final-answer acceptance gate.
@@ -385,7 +387,7 @@ pub enum AgentEvent {
     CandidateRejected {
         /// Cumulative billable token usage, including terminal-gate calls.
         usage: Usage,
-        /// Cost accrued during this run, including terminal-gate calls.
+        /// Known cost subtotal during this run, including terminal-gate calls.
         run_cost_microdollars: u64,
         /// Cumulative host-session cost when pricing is known, so owner
         /// surfaces can track spend between accepted turns.
@@ -405,13 +407,18 @@ pub enum AgentEvent {
         /// `output_tokens`. `total_tokens` is therefore the actual context
         /// consumed by this turn, not a session or run total.
         turn_usage: Usage,
+        /// Exact settled cost of this assistant response, as persisted with its
+        /// usage. Includes fractional total cost; excludes auxiliary requests,
+        /// children and other turns. `None` means unpriced, never a known zero.
+        turn_cost: Option<Cost>,
         /// Cumulative billable token usage across the run so far. This is for
         /// run accounting only and must not be used as context-window usage.
         usage: Usage,
         /// Cumulative session cost in microdollars (1/1,000,000 USD).
-        /// `None` when pricing is not configured for the active model.
+        /// `None` when pricing is unavailable for any completed operation.
         session_cost_microdollars: Option<u64>,
-        /// Cost accrued during this run only, in microdollars.
+        /// Known cost subtotal for this run only, in microdollars; unpriced
+        /// operations and uncertain attempts are not fictional zero charges.
         run_cost_microdollars: u64,
     },
 

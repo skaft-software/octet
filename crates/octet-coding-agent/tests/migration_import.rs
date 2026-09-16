@@ -5,10 +5,21 @@ use std::process::Command;
 
 #[test]
 fn pi_adapter_source_package_manifest_validates_without_model_tools() {
-    let manifest = octet_agent::ExtensionManifest::parse(include_str!(
-        "../../../extensions/octet-import-pi/extension.toml"
-    ))
-    .unwrap();
+    // The tracked adapter pins the last *published* host. This local candidate
+    // is a newer version than that pin, so validation runs against a private
+    // byte-identical copy whose only change is the required host version. The
+    // tracked manifest keeps its published-release pin, and no adapter source
+    // or distribution metadata is rewritten by this test.
+    let tracked = include_str!("../../../extensions/octet-import-pi/extension.toml");
+    assert!(
+        tracked.contains("requires_octet = \"=0.7.6\""),
+        "{tracked}"
+    );
+    let staged = tracked.replace(
+        "requires_octet = \"=0.7.6\"",
+        &format!("requires_octet = \"={}\"", env!("CARGO_PKG_VERSION")),
+    );
+    let manifest = octet_agent::ExtensionManifest::parse(&staged).unwrap();
     assert_eq!(manifest.name, "octet-import-pi");
     assert_eq!(manifest.api_version, "0.3");
     assert_eq!(manifest.entrypoint.command, "extension.sh");
@@ -75,4 +86,67 @@ fn dry_run_import_maps_canonical_model_without_destination_artifacts() {
         fs::read_dir(&home).unwrap().next().is_none(),
         "dry run created destination artifacts"
     );
+}
+
+#[test]
+fn import_preserves_policy_and_source_while_disabling_imported_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("pi");
+    let home = temp.path().join("home");
+    fs::create_dir_all(source.join("skills/review")).unwrap();
+    fs::create_dir_all(home.join(".octet")).unwrap();
+    let policy = b"enabled_extensions = [\"existing\"]\ntrusted_extensions = [\"existing\"]\n";
+    let config = home.join(".octet/config.toml");
+    fs::write(&config, policy).unwrap();
+    let settings = br#"{"mcpServers":{"review":{"command":"never-execute-pi-import-fixture","args":["--stdio"],"enabled":true,"required":true,"env":{"TOKEN":"PI_IMPORT_SECRET"},"headers":{"Authorization":"PI_IMPORT_SECRET"},"cwd":"/private/source"}},"trusted_extensions":["unreviewed"]}"#;
+    let skill = b"---\nname: review\ndisable-model-invocation: false\n---\nReview carefully.\n";
+    fs::write(source.join("settings.json"), settings).unwrap();
+    fs::write(source.join("skills/review/SKILL.md"), skill).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_octet"))
+            .current_dir(temp.path())
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("LANG", "C.UTF-8")
+            .args(["--offline", "migrate", "import", "pi", "--source"])
+            .arg(&source)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["skills_disabled"], 1);
+    assert_eq!(report["mcp_servers_disabled"], 1);
+    let mcp_bytes = fs::read(home.join(".octet/mcp.json")).unwrap();
+    let mcp: serde_json::Value = serde_json::from_slice(&mcp_bytes).unwrap();
+    let server = &mcp["servers"]["review"];
+    assert_eq!(server["enabled"], false);
+    assert_eq!(server["required"], false);
+    for field in ["env", "headers", "cwd"] {
+        assert!(server.get(field).is_none());
+    }
+    for bytes in [&output.stdout, &output.stderr, &mcp_bytes] {
+        assert!(!String::from_utf8_lossy(bytes).contains("PI_IMPORT_SECRET"));
+    }
+    let imported_skill = fs::read_to_string(home.join(".octet/skills/review/SKILL.md")).unwrap();
+    let frontmatter = imported_skill.split("---").nth(1).unwrap();
+    assert!(frontmatter.contains("disable-model-invocation: true"));
+    assert_eq!(fs::read(&config).unwrap(), policy);
+    assert_eq!(fs::read(source.join("settings.json")).unwrap(), settings);
+    assert_eq!(fs::read(source.join("skills/review/SKILL.md")).unwrap(), skill);
+    let repeated = run();
+    assert!(repeated.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(report["skills_disabled"], 0);
+    assert_eq!(report["mcp_servers_disabled"], 0);
+    assert_eq!(fs::read(&config).unwrap(), policy);
+    assert_eq!(fs::read(home.join(".octet/mcp.json")).unwrap(), mcp_bytes);
 }

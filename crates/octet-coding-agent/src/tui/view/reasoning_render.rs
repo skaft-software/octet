@@ -86,15 +86,20 @@ const ACTIVITY_RAINBOW: [Rgb; 7] = [
 //   dark  floor  0.50: (0.50 + 0.05) / 1.2 = 0.458 -> 0.508 / 0.101 = 5.0:1
 //   light ceiling 0.09: 1.2 * 0.14 - 0.05 = 0.118 -> 0.795 / 0.168 = 4.7:1
 //
-// The *separation* between the two is what was reported as "too subtle". A
-// resting foreground must move far enough that the travelling highlight is
-// unmistakable, so both profiles now separate by at least 0.35 (dark) and
-// 0.08 (light, which the light profile's contrast ceiling caps) of relative
-// luminance instead of 0.23 and 0.04 (0.01 -> 0.05, essentially invisible).
-const ACTIVITY_DARK_BASE_LUMINANCE: f64 = 0.85;
+// Strengthen the sweep by moving the resting text toward the profile's contrast
+// extreme, not by making the travelling band less readable. The previous
+// 0.85/0.01 baselines left too little visible movement, especially after ANSI256
+// quantization. The sweep endpoints (and the rainbow palette) stay unchanged.
+const ACTIVITY_DARK_BASE_LUMINANCE: f64 = 0.98;
 const ACTIVITY_DARK_SWEEP_LUMINANCE: f64 = 0.50;
-const ACTIVITY_LIGHT_BASE_LUMINANCE: f64 = 0.01;
+const ACTIVITY_LIGHT_BASE_LUMINANCE: f64 = 0.002;
 const ACTIVITY_LIGHT_SWEEP_LUMINANCE: f64 = 0.09;
+
+// A single dot needs a larger pulse than a bold word. It rests at a quieter
+// model foreground and gains contrast when the same sweep crosses it: brighter
+// on dark terminals, darker on light ones. No size, glyph, or background change.
+const ACTIVITY_MARKER_DARK_BASE_LUMINANCE: f64 = 0.30;
+const ACTIVITY_MARKER_LIGHT_BASE_LUMINANCE: f64 = 0.18;
 
 /// The `Working` rainbow is clamped to its own readable band. These are
 /// deliberately separate from the resting baselines above: retuning resting
@@ -149,10 +154,10 @@ const ACTIVITY_RAMP_HUE_SPAN: f64 = 24.0;
 /// the same colour, so they differ in *luminance range* - a difference that
 /// survives an achromatic identity, where no hue can differ - and never in hue.
 ///
-/// `0.80` was chosen to be unmistakable but quiet: 0.07 of relative luminance on
-/// the dark profile (0.35 separation) and 0.016 on the light one (0.08), so one
-/// to three ANSI256 grayscale steps at the highlight. Every per-label invariant
-/// is untouched by it: each label's falloff is still strictly monotone (the
+/// `0.80` keeps Thinking quieter without changing its hue. Both labels benefit
+/// from the stronger resting-text contrast, and the dot uses this same depth
+/// with its own higher-contrast pulse palette. Every per-label invariant is
+/// untouched: each label's falloff is still strictly monotone (the
 /// centre stays the most distinct cell of its own label), both endpoints stay
 /// inside the luminance band the profile already proved contrast-safe, and the
 /// cycle length stays identical.
@@ -678,6 +683,27 @@ fn activity_shimmer_color(
     }
 }
 
+fn activity_shimmer_foreground(theme: &OctetTheme, color: Rgb, text: &str) -> String {
+    if theme.capabilities().color == ColorDepth::Ansi16 && color.0 == color.1 && color.1 == color.2 {
+        // RGB-nearest across all sixteen entries can turn grey into magenta:
+        // #a7a7a7 is closer to the nominal bright-magenta entry than either
+        // neighbouring grey. A neutral activity must use only neutral entries.
+        // Match the theme encoder's nominal greys; physical ANSI16 colours are
+        // still terminal-customizable. Chromatic/rainbow colours use the normal
+        // encoder unchanged.
+        let (_, index) = [(0u8, 0u8), (102, 8), (229, 7), (255, 15)]
+            .into_iter()
+            .min_by_key(|(grey, _)| grey.abs_diff(color.0))
+            .expect("ANSI16 has neutral entries");
+        return sexy_tui_rs::theme::palette::apply_foreground(
+            Color::Ansi16(index),
+            sexy_tui_rs::ColorDepth::Ansi16,
+            text,
+        );
+    }
+    theme.rgb_fg(color, text)
+}
+
 fn activity_shimmer_label(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
@@ -704,7 +730,7 @@ fn activity_shimmer_label(
             shimmer_frame,
             rainbow_strength,
         );
-        rendered.push_str(&theme.rgb_fg(color, grapheme));
+        rendered.push_str(&activity_shimmer_foreground(theme, color, grapheme));
         index += grapheme.width();
     }
     theme.bold(&rendered)
@@ -733,6 +759,19 @@ pub(super) fn activity_shimmer_marker(
     let Some((baseline, sweep)) = activity_shimmer_palette(theme, reasoning) else {
         return static_marker();
     };
+    // Reuse the label's phase/falloff, but not its already-bright resting dot.
+    // An unknown background keeps the established fallback palette unchanged.
+    let (baseline, sweep) = match theme.background() {
+        TerminalBackground::Dark => (
+            activity_color_at_most(baseline, ACTIVITY_MARKER_DARK_BASE_LUMINANCE),
+            baseline,
+        ),
+        TerminalBackground::Light => (
+            activity_color_at_least(baseline, ACTIVITY_MARKER_LIGHT_BASE_LUMINANCE),
+            baseline,
+        ),
+        TerminalBackground::Unknown => (baseline, sweep),
+    };
     let retry_label = reasoning
         .retry_activity
         .as_ref()
@@ -750,7 +789,7 @@ pub(super) fn activity_shimmer_marker(
         shimmer_frame,
         rainbow_strength,
     );
-    theme.rgb_fg(color, marker)
+    activity_shimmer_foreground(theme, color, marker)
 }
 
 fn reasoning_detail_line(theme: &OctetTheme, reasoning: &AssistantBlock) -> String {
@@ -1137,37 +1176,56 @@ mod tests {
                 animation: false,
                 ..TerminalCapabilities::test(true, true, ColorDepth::TrueColor)
             },
+            TerminalCapabilities {
+                animation: false,
+                ..TerminalCapabilities::test(true, true, ColorDepth::Ansi256)
+            },
+            TerminalCapabilities {
+                animation: false,
+                ..TerminalCapabilities::test(true, false, ColorDepth::Ansi16)
+            },
         ] {
-            let theme = theme::test_theme_with(capabilities);
-            for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba), None] {
-                let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
-                for label in ["Working", "Thinking"] {
-                    assert_eq!(
-                        activity_shimmer_palette(&theme, &reasoning),
-                        None,
-                        "{capabilities:?}/{lab:?}: this theme must not animate"
-                    );
-                    let expected = theme.bold(&theme.model_fg(lab, label));
-                    for frame in [0, 1, 7, 19] {
-                        let rendered = activity_shimmer_label(&theme, &reasoning, label, frame, 0);
+            for background in [
+                TerminalBackground::Dark,
+                TerminalBackground::Light,
+                TerminalBackground::Unknown,
+            ] {
+                let theme = theme::test_theme_for(background, capabilities);
+                for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba), None] {
+                    for label in ["Working", "Thinking"] {
+                        let reasoning = activity_reasoning(lab, label);
                         assert_eq!(
-                            rendered, expected,
-                            "{capabilities:?}/{lab:?}/{label}: the static fallback must not shimmer \
-                             (frame {frame})"
+                            activity_shimmer_palette(&theme, &reasoning),
+                            None,
+                            "{capabilities:?}/{lab:?}: this theme must not animate"
                         );
-                        assert_eq!(
-                            activity_shimmer_label(&theme, &reasoning, label, frame, 100),
-                            rendered,
-                            "{capabilities:?}/{lab:?}/{label}: max/ultra must not tint a terminal \
-                             that cannot animate"
-                        );
-                        assert!(!rendered.contains(";48;2;"), "{rendered:?}");
+                        let expected = theme.bold(&theme.model_fg(lab, label));
+                        for frame in 0..=activity_cycle(label) {
+                            for strength in [0, 100] {
+                                let rendered = activity_shimmer_label(
+                                    &theme, &reasoning, label, frame, strength,
+                                );
+                                assert_eq!(
+                                    rendered, expected,
+                                    "{background:?}/{capabilities:?}/{lab:?}/{label}: \
+                                     static fallback at frame {frame}, rainbow={strength}"
+                                );
+                                for marker in ["•", "*"] {
+                                    assert_eq!(
+                                        activity_shimmer_marker(
+                                            &theme, &reasoning, frame, strength, marker,
+                                        ),
+                                        theme.model_fg(lab, marker),
+                                        "the dot must share the static fallback, including its peak"
+                                    );
+                                }
+                                if capabilities.color == ColorDepth::None {
+                                    assert_eq!(rendered, label);
+                                    assert!(!rendered.contains('\x1b'));
+                                }
+                            }
+                        }
                     }
-                    assert_eq!(
-                        activity_shimmer_marker(&theme, &reasoning, 3, 100, "•"),
-                        theme.model_fg(lab, "•"),
-                        "{capabilities:?}/{lab:?}: the margin dot shares the static fallback"
-                    );
                 }
             }
         }
@@ -1273,6 +1331,237 @@ mod tests {
     fn resting_colour(theme: &OctetTheme, reasoning: &AssistantBlock) -> Rgb {
         let (baseline, _) = activity_shimmer_palette(theme, reasoning).expect("activity palette");
         quantized(theme, baseline)
+    }
+
+    #[test]
+    fn activity_dot_has_a_visible_sweep_correlated_pulse_and_returns_to_rest() {
+        for (background, surface) in [
+            (TerminalBackground::Dark, (64, 64, 64)),
+            (TerminalBackground::Light, (224, 224, 224)),
+        ] {
+            for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+                let theme = theme::test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, true, depth),
+                );
+                for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba), None] {
+                    for label in ["Working", "Thinking", "Compacting context"] {
+                        let reasoning = activity_reasoning(lab, label);
+                        for marker in ["•", "*"] {
+                            let render = |frame| {
+                                activity_shimmer_marker(&theme, &reasoning, frame, 0, marker)
+                            };
+                            let resting = render(0);
+                            let baseline = rendered_foregrounds(&resting)[0];
+                            let peak_frame = centre_frame(ACTIVITY_MARKER_INDEX);
+                            let peak = rendered_foregrounds(&render(peak_frame))[0];
+                            let baseline_luminance = luminance(baseline);
+                            let peak_luminance = luminance(peak);
+                            // A tiny dot needs substantially more than a merely
+                            // different RGB value, including after quantization.
+                            assert!(
+                                contrast_ratio(baseline_luminance, peak_luminance) >= 2.0,
+                                "{background:?}/{depth:?}/{lab:?}/{label}: dot {baseline:?} -> {peak:?}"
+                            );
+                            assert_eq!(
+                                peak_luminance > baseline_luminance,
+                                background == TerminalBackground::Dark,
+                                "the pulse must gain contrast against the terminal surface"
+                            );
+                            let cycle = activity_cycle(label);
+                            for frame in 0..cycle {
+                                let rendered = render(frame);
+                                assert_eq!(strip_terminal_sequences(&rendered), marker);
+                                assert_eq!(visible_width(&rendered), 1);
+                                assert!(!rendered.contains("\x1b[48;"));
+                                assert!(!rendered.contains("\x1b[2m"));
+                                let colors = rendered_foregrounds(&rendered);
+                                assert_eq!(colors.len(), 1);
+                                let current = luminance(colors[0]);
+                                assert!(contrast_ratio(current, luminance(surface)) >= 2.5);
+                                if lab == Some(ModelLab::OpenAi) {
+                                    assert_eq!(chroma(colors[0]), 0.0, "{rendered:?}");
+                                }
+                                if frame.abs_diff(peak_frame) > ACTIVITY_SWEEP_HALF as usize {
+                                    assert_eq!(rendered, resting, "dot must rest outside the sweep");
+                                } else {
+                                    assert_ne!(rendered, resting, "dot must pulse inside the sweep");
+                                    assert!(
+                                        (current - baseline_luminance).abs()
+                                            <= (peak_luminance - baseline_luminance).abs(),
+                                        "{background:?}/{depth:?}/{lab:?}/{label}: frame {frame} \
+                                         must not outshine the dot's centre frame"
+                                    );
+                                }
+                            }
+                            assert_eq!(render(cycle - 1), resting);
+                            assert_eq!(render(cycle), resting);
+                            // The dot peaks before the first letter, not on an
+                            // independent spinner/breathing clock.
+                            assert_eq!(centre_frame(0) - peak_frame, ACTIVITY_LABEL_OFFSET as usize);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_activity_text_has_strong_sweep_separation_without_losing_contrast() {
+        for (background, surface, minimum_separation) in [
+            (TerminalBackground::Dark, (64, 64, 64), 1.5),
+            (TerminalBackground::Light, (224, 224, 224), 1.7),
+        ] {
+            for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+                let theme = theme::test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, true, depth),
+                );
+                for lab in [
+                    Some(ModelLab::OpenAi),
+                    Some(ModelLab::Alibaba),
+                    Some(ModelLab::Meta),
+                    Some(ModelLab::Google),
+                    None,
+                ] {
+                    for label in ["Working", "Thinking", "Compacting context"] {
+                        let reasoning = activity_reasoning(lab, label);
+                        let rest = collapsed_reasoning_lines_at(&theme, &reasoning, 0, 0);
+                        let resting = rendered_foregrounds(&rest[0])[0];
+                        for frame in 0..activity_cycle(label) {
+                            let rows = collapsed_reasoning_lines_at(&theme, &reasoning, frame, 0);
+                            assert_eq!(rows.len(), 1);
+                            assert_eq!(strip_terminal_sequences(&rows[0]), label);
+                            assert!(rows[0].contains("\x1b[1m"));
+                            assert!(!rows[0].contains("\x1b[48;"));
+                            let colors = rendered_foregrounds(&rows[0]);
+                            assert_eq!(colors.len(), label.len());
+                            for (cell, color) in colors.into_iter().enumerate() {
+                                assert!(
+                                    contrast_ratio(luminance(color), luminance(surface)) >= 4.5,
+                                    "{background:?}/{depth:?}/{lab:?}/{label}: frame {frame}, cell {cell}"
+                                );
+                                if frame == centre_frame(cell as isize) {
+                                    assert!(
+                                        contrast_ratio(luminance(color), luminance(resting))
+                                            >= minimum_separation,
+                                        "{background:?}/{depth:?}/{lab:?}/{label}: \
+                                         cell {cell} {resting:?} -> {color:?} must visibly sweep"
+                                    );
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            collapsed_reasoning_lines_at(
+                                &theme, &reasoning, activity_cycle(label) - 1, 0,
+                            ),
+                            rest
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn activity_foreground_keeps_ansi16_greys_neutral_without_recolouring_other_cells() {
+        let ansi16 =
+            theme::test_theme_with(TerminalCapabilities::test(true, true, ColorDepth::Ansi16));
+        // The four nominal neutral entries, including the #a7a7a7 interval
+        // that the unrestricted RGB-nearest encoder maps to bright magenta.
+        for (start, end, code) in [
+            (0u8, 51u8, 30),
+            (52, 165, 90),
+            (166, 242, 37),
+            (243, 255, 97),
+        ] {
+            for grey in start..=end {
+                assert_eq!(
+                    activity_shimmer_foreground(&ansi16, (grey, grey, grey), "*"),
+                    format!("\x1b[{code}m*\x1b[39m"),
+                    "neutral grey {grey} must stay in the ANSI16 neutral ramp"
+                );
+            }
+        }
+        for depth in [
+            ColorDepth::None,
+            ColorDepth::TrueColor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+        ] {
+            let theme = theme::test_theme_with(TerminalCapabilities::test(true, true, depth));
+            if depth != ColorDepth::Ansi16 {
+                for grey in 0..=u8::MAX {
+                    let color = (grey, grey, grey);
+                    assert_eq!(
+                        activity_shimmer_foreground(&theme, color, "x"),
+                        theme.rgb_fg(color, "x")
+                    );
+                }
+            }
+            for color in ACTIVITY_RAINBOW
+                .into_iter()
+                .chain([(166, 167, 167), (31, 32, 31)])
+            {
+                assert_eq!(
+                    activity_shimmer_foreground(&theme, color, "x"),
+                    theme.rgb_fg(color, "x"),
+                    "{depth:?}: chromatic activity/rainbow encoding must be unchanged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ansi16_activity_pulse_keeps_supported_styles_and_neutral_identity() {
+        // ANSI16 colours are terminal-customizable: assert the actual supported
+        // foreground codes change, not a fictitious physical RGB contrast ratio.
+        let codes = |rendered: &str| {
+            rendered
+                .split("\x1b[")
+                .filter_map(|part| part.split_once('m')?.0.parse::<u8>().ok())
+                .filter(|code| matches!(code, 30..=37 | 90..=97))
+                .collect::<Vec<_>>()
+        };
+        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+            let theme = theme::test_theme_for(
+                background,
+                TerminalCapabilities::test(true, false, ColorDepth::Ansi16),
+            );
+            for label in ["Working", "Thinking"] {
+                let reasoning = activity_reasoning(Some(ModelLab::OpenAi), label);
+                let rest_dot = activity_shimmer_marker(&theme, &reasoning, 0, 0, "*");
+                let rest_text = activity_shimmer_label(&theme, &reasoning, label, 0, 0);
+                for frame in 0..activity_cycle(label) {
+                    let dot = activity_shimmer_marker(&theme, &reasoning, frame, 0, "*");
+                    let text = activity_shimmer_label(&theme, &reasoning, label, frame, 0);
+                    assert_eq!(strip_terminal_sequences(&dot), "*");
+                    assert_eq!(strip_terminal_sequences(&text), label);
+                    for rendered in [&dot, &text] {
+                        assert!(!rendered.contains("38;"));
+                        assert!(!rendered.contains("48;"));
+                        let foregrounds = codes(rendered);
+                        assert!(
+                            foregrounds.iter().all(|code| matches!(code, 30 | 37 | 90 | 97)),
+                            "{background:?}/{label} frame {frame}: neutral activity emitted \
+                             non-neutral ANSI16 codes {foregrounds:?} in {rendered:?}"
+                        );
+                    }
+                    assert_eq!(codes(&dot).len(), 1);
+                    assert_eq!(codes(&text).len(), label.len());
+                    if frame == centre_frame(ACTIVITY_MARKER_INDEX) {
+                        assert_ne!(codes(&dot), codes(&rest_dot));
+                    }
+                    if frame == centre_frame(0) {
+                        assert_ne!(codes(&text)[0], codes(&rest_text)[0]);
+                    }
+                    if frame + 1 == activity_cycle(label) {
+                        assert_eq!(dot, rest_dot);
+                        assert_eq!(text, rest_text);
+                    }
+                }
+            }
+        }
     }
 
     fn shimmer_cell_luminances(
@@ -1901,7 +2190,7 @@ mod tests {
                 let separation = (luminance(baseline) - luminance(sweep)).abs();
                 let bound = one_sweep_step_luminance(baseline, sweep);
                 let resting = resting_colour(&theme, &reasoning);
-                let resting_marker = theme.rgb_fg(baseline, "•");
+                let resting_marker = activity_shimmer_marker(&theme, &reasoning, 0, 0, "•");
                 let cycle = activity_cycle(label);
                 let mut rest_frames = 0;
                 let mut first_frame_at_rest = false;
@@ -2011,7 +2300,7 @@ mod tests {
                         activity_shimmer_palette(&theme, &reasoning).expect("activity palette");
                     let identity = ActivityIdentity::for_model(&theme, &reasoning);
                     let resting = resting_colour(&theme, &reasoning);
-                    let resting_marker = theme.rgb_fg(baseline, "•");
+                    let resting_marker = activity_shimmer_marker(&theme, &reasoning, 0, 0, "•");
                     let cycle = activity_cycle(label);
                     let mut rest_frames = Vec::new();
 

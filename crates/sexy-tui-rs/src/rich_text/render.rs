@@ -2783,7 +2783,7 @@ impl SyntaxCache {
             return Some(lines.clone());
         }
         self.misses = self.misses.saturating_add(1);
-        let lines = Arc::new(super::highlight::highlight(code, language)?);
+        let lines = Arc::new(super::highlight_code(code, language)?);
         self.bytes = self.bytes.saturating_add(code.len());
         self.order.push_back(key.clone());
         self.entries.insert(key, lines.clone());

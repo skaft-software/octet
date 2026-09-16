@@ -37,53 +37,52 @@ route/discovery/credential declaration is landed; the static catalog needs a
 models.dev generation pass. Deterministic checks here do not qualify live
 provider availability.
 
-## Codex `service_tier` (row 1a.1 — codec + agent-side plumbing landed; no command selects a tier yet)
+## Codex `service_tier` (row 1a.1 + `/fast` — wired end to end)
 
-Headline status (re-verified against this tree by worker `ai12b`, HEAD `df2e8980`
-plus the in-flight wave edits): the codec field **and** the agent-side caller are
-landed, but the user-facing `/fast` command still does not call the setter, so
-**no live run selects a tier today**. The request path is complete; the missing
-half is one UI call site (owned by `modes/interactive.rs`, not by the
-codec/agent rows). The independent verifier's C2 row
-(`docs/parity/VERIFICATION.md:319`, superseded by C10; raw finding at `:482`)
-and the earlier "landed, unblocks roadmap #175 `/fast`" headline both described
-earlier revisions.
+Current status in this tree: the codec field, the agent-side validation and the
+user-facing `/fast` command are all wired. `/fast on` calls
+`Agent::set_service_tier(Some(ServiceTier::Priority))` through
+`crates/octet-coding-agent/src/app/mod.rs:550` and the bootstrap path
+(`app/bootstrap.rs:7227`), including when the change is queued to a safe boundary
+while a run is active.
 
-What the agent side does (`crates/octet-agent/src/agent.rs`, 34 `service_tier`
-references, re-counted): it keeps the selection in the `service_tier` field
-(`:727`) and exposes `Agent::set_service_tier` (`:6505`) with the
-`Agent::service_tier` accessor (`:6512`). A requested tier is validated by
-`resolve_service_tier` (`:3786`), which fails closed with the codec's typed
+What the agent side does: it keeps the selection in the `service_tier` field
+(`crates/octet-agent/src/agent.rs:731`) and exposes `Agent::set_service_tier`
+(`:6901`). A requested tier is validated by `resolve_service_tier` (`:3786`),
+which fails closed with the codec's typed
 `octet_ai::UnsupportedError::ServiceTier` unless
 `model.spec.protocol == Protocol::OpenAiResponses` **and**
 `model.endpoint.runtime.responses_profile.accepts_service_tier()` — a declared
-capability, never a provider name. Both live-run `ResponsesOptions` builders
-(`durable_responses_options` `:3750`, `native_responses_options` `:3801`) call
-`ResponsesOptions::with_service_tier` (`crates/octet-ai/src/responses.rs:362`)
-when a tier is selected, and `responses_prewarm_request` (`:5780`) reuses those
-same builders, so the WebSocket pre-warm carries the identical tier. Every other
-route fails closed rather than silently dropping a billing-changing control.
-The codec re-checks the same declaration independently
-(`crates/octet-ai/src/protocol/openai_responses.rs:1154`): a tier on a route
-whose profile does not declare the field is a typed error, and the field is
-absent from the wire when no tier was requested.
-Verified behavior (both run green on this tree):
-`crates/octet-agent/src/agent.rs:10552`
-`a_requested_service_tier_is_gated_by_the_route_and_never_silently_dropped`
-(non-Codex route rejected, `None` clears, Codex profile accepted, a requested
-tier still rides on the request when there is no replay window) and
-`crates/octet-ai/src/protocol/openai_responses.rs:3173`
-`service_tier_fails_closed_on_a_profile_that_does_not_declare_it`.
+capability, never a provider name. Both live-run `ResponsesOptions` builders call
+`ResponsesOptions::with_service_tier` when a tier is selected, and
+`responses_prewarm_request` reuses those same builders, so the WebSocket pre-warm
+carries the identical tier. Every other route fails closed rather than silently
+dropping a billing-changing control. The codec re-checks the same declaration
+independently: a tier on a route whose profile does not declare the field is a
+typed error, and the field is absent from the wire when no tier was requested.
 
-What is still missing for `/fast` to reach the wire: `apply_fast_command`
-(`crates/octet-coding-agent/src/modes/interactive.rs:1651`) still reports "this
-build's Codex request path does not send a service tier yet" and never calls
-`Agent::set_service_tier` — `rg -n set_service_tier crates/` shows only the
-definition plus the agent's own tests
-(`crates/octet-agent/tests/agent_run.rs:9718`, `:9741`, `:9754`). Until that call
-site lands, `/fast on` changes nothing on the wire; the accurate status is
-"agent API ready, UI consumer pending". See the consumer contract in
-`../swarm-audit/EXECUTION-agent3.md` (tui11's row).
+Settlement and reservation are tier-aware. `octet_ai::responses_cost_of` applies
+the declaration-owned Codex tariffs (flex ×0.5, priority ×2, exact API name
+`gpt-5.5` ×2.5) to the provider's echoed tier, scaling before category flooring so
+long-context tiers and picodollar precision survive. An unknown or unqualified
+tier, an unresolved `auto`, or absent terminal usage stays **unpriced**, never a
+catalog-price fiction. The kernel's conservative reservation prices the
+worst-case catalog bucket for the selected request through the same helper and
+fails closed when the tariff is unknown or the exact amount is unrepresentable.
+
+`/fast` therefore keeps a deliberate durable `responses-priority-tier`
+uncertainty marker (`app/mod.rs:546`, read back in `modes/interactive.rs:8874`):
+enabling priority can leave exposure even if no later inference happens, and
+disabling or restarting never erases historical exposure. Retiring that marker is
+a product decision that needs its own worst-case reservation/restart/budget
+receipt; the marker is not cleared by this work.
+
+Behavioral receipts: `parity-next-agent-int-05` (every agent target green,
+including the tier gating and reservation tests), `parity-next-ai-all`
+(`provider_parity` covers the tier wire/tariff and default-echo precedence) and
+`parity-next-coding-lib-04` (the `fast_` and `held_open_` command tests,
+compaction/restart preservation and the fail-closed budget cases). No live
+provider billing run is claimed.
 
 Upstream anchors: `packages/ai/src/api/openai-responses.ts:105`, `:321`
 (`params.service_tier = options.serviceTier`), `:362-389`
