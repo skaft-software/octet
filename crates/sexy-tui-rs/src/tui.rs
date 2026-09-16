@@ -484,6 +484,15 @@ impl<'a> TUI<'a> {
         self.input_listeners.push(f);
     }
 
+    /// The most recently composed frame, one entry per terminal row.
+    ///
+    /// This is the frame as last rendered, retained for differential rendering.
+    /// It is exposed for diagnostics (the coding agent's `/debug` surface) and
+    /// carries no cursor or viewport state.
+    pub fn rendered_frame(&self) -> &[String] {
+        &self.previous_frame
+    }
+
     /// Request a re-render at the next opportunity.
     pub fn request_render(&mut self) {
         self.request_render_force(false);

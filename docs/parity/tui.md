@@ -133,13 +133,20 @@ The `Working`/`Thinking` status shimmer is a variation of the **model's own colo
 
 ### Visibility follow-up — rendered-style checks passed, PTY pending
 
-The resting text luminance now moves toward the profile's contrast extreme:
-0.85 → 0.98 on dark, 0.01 → 0.002 on light. The dot uses its own quieter resting
-foreground (0.30 dark / 0.18 light) and pulses toward that text baseline when the
-same sweep crosses it: brighter on dark, darker on light. Its solid glyph and
-size stay fixed. The shared phase, complete traverse/rest, neutral identity,
-unknown-background fallback, static reduced-motion/no-color paths, and max/ultra
-rainbow palette/gate remain unchanged.
+The resting text luminance moves toward the profile's contrast extreme, but
+deliberately not *onto* it: **0.95 on dark (about #f9)** and **0.0085 on light
+(about #16)**, up from 0.85/0.01 and then 0.98/0.002. Pure-extreme rest values
+read as glaring white on a dark terminal and hard black on a light one. The
+light resting value is bounded by measurement, not taste: at 0.009 the pinned
+1.7:1 worst-case cell separation fails for a blue identity (Meta) after ANSI256
+quantization, so 0.0085 is the largest easing that holds, and the light sweep
+ceiling moves with it (0.09 → 0.095) to keep the sweep's pinned 0.08 relative
+luminance travel. The dot uses its own quieter resting foreground (0.30 dark /
+0.18 light) and pulses toward that text baseline when the same sweep crosses it:
+brighter on dark, darker on light. Its solid glyph and size stay fixed. The
+shared phase, complete traverse/rest, neutral identity, unknown-background
+fallback, static reduced-motion/no-color paths, and max/ultra rainbow
+palette/gate remain unchanged.
 
 New rendered-style tests in `tui::view::reasoning_render` cover dot baseline,
 peak and rest, stronger label separation and contrast, and ANSI16 foreground-code

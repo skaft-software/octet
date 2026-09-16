@@ -1111,6 +1111,16 @@ fn global_config_path_from_home(home: Option<PathBuf>) -> Option<PathBuf> {
         .map(|home| home.join(".octet").join("config.toml"))
 }
 
+/// Owner-private diagnostics log written by the hidden `/debug` command.
+///
+/// Mirrors the release-notes convention of deriving from the same home
+/// directory as the global config, so a relocated `HOME` relocates both.
+pub fn debug_log_path() -> Option<PathBuf> {
+    dirs::home_dir()
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".octet").join("octet-debug.log"))
+}
+
 pub fn persist_model(model: &str) -> anyhow::Result<()> {
     let path = global_config_path().ok_or_else(|| {
         anyhow::anyhow!("cannot persist model: user home directory is unavailable")

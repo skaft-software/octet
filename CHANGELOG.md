@@ -12,6 +12,12 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Interaction
 
+- Ease the resting activity colours off the profile extremes: the dark theme's
+  Working/Thinking label now rests at a slightly greyed off-white (about #f9
+  instead of #fd) and the light theme's rests at a soft near-black (about #16
+  instead of #00), each with the sweep ceiling moved to keep the travelling band
+  and the margin dot's pulse at their previously pinned separations.
+
 - Withdraw the `/tree` and `/checkout` slash commands (maintainer decision) with
   their keybinding: the durable connector tree stays available through
   `octet sessions inspect`, and branch movement stays available through the

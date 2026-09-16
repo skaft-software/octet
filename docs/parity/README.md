@@ -187,13 +187,13 @@ outcomes. Grouped options below remain individually required, not alternatives.
 | 2d.1 | /settings defaults/theme/transport/images/editor padding | TUI | Unverified |
 | 2d.2 | /scoped-models all/clear/provider toggle/reorder/persistence/cycling | TUI | Unverified |
 | 2d.3 | /hotkeys | TUI | Verified for the executed cases; `/hotkeys` is a built-in command rendered from the resolved binding set |
-| 2d.4 | /debug rendered lines and message JSON | TUI | Unverified |
+| 2d.4 | /debug rendered lines and message JSON | TUI | Verified; hidden command (exact-name only, absent from the popup and `/help`) writes an owner-private `~/.octet/octet-debug.log` with the terminal size, every rendered line plus its visible width, and the agent messages as JSONL, then reports the path. Coverage: `commands::tests::debug_is_hidden_but_parses_and_reports_every_rendered_line` and `tui::view::renderer_runtime::scheduler_tests::diagnostics_read_the_retained_frame_without_scheduling_a_repaint` inside the 1525-test coding library receipt |
 | 2d.5 | /copy last message | TUI | Verified for the executed cases; `/copy` returns the last clean assistant message through `copy_last_assistant()` |
 | 2d.6 | /compact custom instructions | TUI | Verified for the executed cases; `/compact` accepts bounded local instructions (16 KiB, control-checked) through `summarize_with_retry` host accounting, and native Responses compaction explicitly refuses them instead of dropping them |
 | 2d.7 | Tree bookmark/timestamp toggles and five filter modes | TUI | Withdrawn by maintainer decision; the `/tree` and `/checkout` slash commands were deleted on 2026-09-16, so the upstream tree surface has no local consumer. The durable connector tree remains readable through `octet sessions inspect`. |
 | 2d.8 | Resume threaded/relevance sorting and full-transcript search | TUI | Verified for the executed cases; Resume gained Relevance and Threaded ordering (iterative parent-before-child, orphans/cycles stay visible, no cross-store ID linking) and the transcript search above |
 | 2d.9 | Model cycling forward/back and selector hotkeys | TUI | Partial; forward/back cycling follows the App-supplied scope order, de-duplicates while preserving it and advances from the last queued target while active, with selector bindings and a `--models` glob scope; the `--reasoning` suffix ordering and full ordered-scope parity remain |
-| 2d.10 | /session file/id/message/token/cost detail | TUI | Pending |
+| 2d.10 | /session file/id/message/token/cost detail | TUI | Verified; `/session` reports file, id, title, head, entry and active-branch message counts, checkpoints, usage records, the token buckets and exact cost, and appends “known subtotal only; usage or pricing uncertain” for unknown exposure. Coverage: `commands::tests::session_detail_reports_file_identity_messages_tokens_cost_and_uncertainty` inside the coding library receipt |
 | 2d.11 | !command / !!command context exclusion | TUI | Pending |
 | 3.1 | Explicit callback-based vendor-neutral TelemetryContext/TelemetrySpan, no global/exporter | telemetry | Landed |
 | 3.2 | NOOP and InMemory implementations | telemetry | Landed |
