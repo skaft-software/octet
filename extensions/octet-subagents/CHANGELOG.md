@@ -4,26 +4,13 @@
 
 ### Added
 
-- `/subagents open-all tmux|herdr`: reopen the parent session and every **running**
-  worker as separate interactive octet sessions, one pane/window per session
-  (`octet_subagents/launcher.py`). Fails closed when the multiplexer or the `octet`
-  binary is missing (never downloads or installs one), refuses above the
-  eight-worker pane cap, passes every session id/path/flag as a separate `argv`
-  element (never a shell, never string interpolation, metacharacter ids refused),
-  never prints or argv-passes a credential or token, and reports exactly what
-  existed when the multiplexer fails partway. Worker panes are planned and
-  validated but reported **blocked** for the opaque `agent-session:*` handle that
-  `octet --resume` cannot resolve today, naming the exact missing primitive — a
-  *launchable* handle for a session-owned delegated child (the session store
-  resolves only `<session-dir>/<id>.jsonl`, and the host's only resolver for the
-  reference returns a read-only locked inspection session) — instead of
-  fabricating a resume. Workers that are still owned but not attached to any run,
-  or parked at the host approval boundary, are returned as `skipped` rows and
-  named in the report with the reattach/approve step, so open-all never opens a
-  stale pane and never hides a live worker. herdr support is verified against
-  herdr's own
-  documentation (pane split via `.result.pane.pane_id`, `pane run` command string,
-  the `HERDR_ENV=1` ownership guardrail).
+- `/subagents open-all tmux|herdr` remains **Partial**: bounded opaque-handle
+  plans and fresh owner-bound host status are retained, but every worker and the
+  current parent stay blocked. Even a launchable non-live snapshot cannot
+  authorize execution: atomic host writer claim/settlement is unavailable.
+  Product open-all has zero pane effects, including repeated calls. Direct
+  multiplexer adapter tests retain herdr preflight and honest partial-failure
+  reporting; no fake lease or new host ownership API is introduced.
 - Per-worker `provider`, `model`, and `reasoning` spawn inputs
   (`octet_subagents/reasoning.py`, `model.py`), defaulting to `inherit`. The
   selection is validated fail-closed with typed errors and is never silently

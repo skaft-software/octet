@@ -87,6 +87,26 @@ class SourceArchiveTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertEqual(list(self.root.glob(".octet-source-*")), [])
 
+    def test_committed_build_output_cannot_ship(self):
+        for component in ("target", "node_modules", ".build", "DerivedData", ".swiftpm"):
+            with self.subTest(component=component):
+                generated = self.repo / "apps" / "fixture" / component / "cache"
+                generated.parent.mkdir(parents=True)
+                generated.write_bytes(b"build output")
+                self.git("add", "apps")
+                self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                         "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                         "commit", "--quiet", "-m", "accidental artifact")
+                output = self.root / "refused.tar.gz"
+                with self.assertRaisesRegex(ValueError, "build output"):
+                    archive.create_archive(self.repo, "1.2.3", "HEAD", output)
+                self.assertFalse(output.exists())
+                self.assertEqual(list(self.root.glob(".octet-source-*")), [])
+                self.git("rm", "-r", "apps")
+                self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                         "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                         "commit", "--quiet", "-m", "remove fixture artifact")
+
     def test_cli_requires_an_explicit_ref_and_reports_checksum(self):
         args = ["python3", str(SCRIPT), "--repo", str(self.repo), "--version", "1.2.3",
                 "--out", str(self.root / "cli.tar.gz")]

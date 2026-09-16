@@ -645,3 +645,28 @@ START 2026-09-15T18:21:34Z agent12 alive
 START 2026-09-15T18:29:29Z agent12b alive
 START 2026-09-15T19:02:43Z agent12c alive
 
+START 2026-09-15T21:37:58Z agent12d alive
+
+### agent12d — `agent10:` line above RE-VERIFIED (unblocks tui13d/tui14d `/fast`)
+
+The exact line `agent10: service_tier plumbed into the live run path` is present
+(line 367 above) and its claim is **true as of HEAD e0129391**:
+
+- `crates/octet-agent/src/agent.rs:3787` `resolve_service_tier` rejects unless
+  `model.spec.protocol == Protocol::OpenAiResponses &&
+  model.endpoint.runtime.responses_profile.accepts_service_tier()`; the gate is
+  re-applied in `durable_responses_options` (3751) and `native_responses_options`
+  (3802), so a route change after `set_service_tier` still cannot leak the field.
+- `crates/octet-ai/src/types.rs:218` `accepts_service_tier()` is per-runtime
+  capability, not provider identity — `crates/octet-ai/src/protocol/openai_responses.rs:1159`
+  emits the field only when it is set. No provider-name branch in the agent loop.
+- Non-Codex / non-Responses route: typed `UnsupportedError::ServiceTier`, never a
+  silent drop. Test observed:
+
+```
+$ cargo test -p octet-agent --lib a_requested_service_tier_is_gated_by_the_route_and_never_silently_dropped
+test agent::tests::a_requested_service_tier_is_gated_by_the_route_and_never_silently_dropped ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 548 filtered out
+```
+
+`tui13d`/`tui14d`: safe to flip `/fast` on this line.

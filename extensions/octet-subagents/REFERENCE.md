@@ -251,59 +251,42 @@ timestamp on resume, so elapsed time always measures the current run.
 
 ## `/subagents open-all <tmux|herdr>`
 
-The escape hatch: reopen the **parent session and every running worker** as
-separate interactive octet sessions, one pane/window per session, so a worker can
-be orchestrated independently of the read-only parent-controlled panel. Every
-property below is enforced in code and covered by
-`extensions/octet-subagents/tests/test_launcher.py`.
+**Partial — all product pane execution is blocked pending atomic host writer
+claim/settlement.** An owner-bound command refreshes `agent/list`, retains
+`launchable`, `launch_blocked` and `live_task`, then reports blocked plans using
+the host's opaque `agent-session:<sha256>` handle. The session store can resolve
+that handle for `octet --resume`; handle support does not confer ownership.
 
-- **Fail closed when the multiplexer is absent.** `tmux`/`herdr` are discovered
-  with a read-only `PATH` lookup. If the multiplexer is missing — or the `octet`
-  binary is missing — the command refuses with an actionable message naming it.
-  octet never downloads or installs a multiplexer.
-- **Running workers only.** `done`/`failed`/`limit_reached`/`stopped`/`timed_out`
-  workers get no pane; the parent always gets one. A worker that is still owned
-  by the session but not attached to any run, and a worker parked by the host at
-  the approval boundary, get no pane either — and are returned in the result's
-  `skipped` rows and named in the report with the reattach/approve step, so the
-  row can never become a silent omission.
-- **Bounded.** At most `MAX_OPEN_ALL_PANES` panes (the eight-worker fleet cap plus
-  the parent). Above the cap the whole request is refused before anything is
-  created.
-- **Shell-safe.** Every session identifier, path, and flag is a separate argv
-  element; the multiplexer is always invoked with an argv list and never
-  `shell=True`. A session id must match a strict allowlist and a worker handle
-  must be an opaque `agent-session:<sha256>` reference, so a metacharacter can
-  never reach a command line. herdr has no argv-list pane executor, so its single
-  command string is assembled only from tokens that already passed the same
-  shell-safe allowlist.
-- **No secret leakage.** Only the opaque, path-free session reference and the
-  host-provided session id are ever placed on a command line. No credential,
-  token, or transcript path is read, printed, or argv-passed, and none appears in
-  the notice text.
-- **Clean failure.** Panes are created one at a time; the first failure stops the
-  run, reports exactly what exists, destroys nothing, leaves no silently orphaned
-  panes, and is safe to re-run.
-- **Ownership.** herdr's documented agent guardrail requires `HERDR_ENV=1` (this
-  process must already be inside a herdr-managed pane), so open-all refuses to
-  drive a herdr session it does not own.
-- **What a pane can launch today.** The parent pane resumes the host session id
-  directly. A worker's only host-published handle is the opaque
-  `agent-session:<sha256>` reference (`crates/octet-agent/src/delegation.rs`
-  `delegated_session_reference`), which is one-way and names a delegated child
-  transcript under the owner-private `.delegation/team-*/` directory. The session
-  store resolves an id only as `<session-dir>/<id>.jsonl`
-  (`crates/octet-coding-agent/src/session_store.rs` `path_by_id`), so
-  `octet --resume <reference>` cannot open it; the host's only resolver for that
-  reference (`crates/octet-coding-agent/src/extensions/serve.rs`
-  `driver_for_delegated_session`: `AuthorityProfile::ReadOnly`,
-  `SessionLiveState::Locked`) returns a read-only locked inspection session
-  reachable inside the owning process, not a launchable interactive one. The
-  worker argv is still planned and validated, but no resume is fabricated for it:
-  the pane is reported as **blocked**, naming the exact missing primitive — a
-  launchable handle for a session-owned delegated child, which session-scoped
-  reattachment supplies. The normal read-only parent-controlled mode is untouched
-  by this command.
+Even settled/detached workers with `launchable: true`, `live_task: false` and no
+host refusal remain blocked: **atomic host writer claim/settlement unavailable**.
+Live or approval-parked workers retain their more specific refusal. Missing
+records lose launchability; cached command fallback cannot authorize a launch.
+The **parent pane stays blocked** because the calling process still owns it.
+
+The existing `Session::persist` stale-length check is per-write, not a lifetime
+writer lock. A launchability observation cannot prevent a concurrent host resume
+or repeated launch. Consequently product open-all never splits panes or submits
+commands; execution must not be enabled on snapshots or operator coordination.
+A real host-owned exclusive claim/settlement primitive is required first. There
+are no fabricated leases or new ownership APIs in this extension.
+
+- Missing `tmux`/`herdr` or `octet` refuses without downloading/installing.
+- At most eight candidate workers plus the blocked parent are planned. Detached,
+  parked and other unlaunchable retained workers are named in skipped rows.
+- Session IDs/references remain strict allowlisted separate argv elements. No
+  transcript path, credential or token is used. Duplicate worker handles in one
+  plan are refused even though all rows are blocked.
+- herdr still requires `HERDR_ENV=1`; no outside-session control is attempted.
+- The low-level adapters remain directly unit-tested: tmux builds session/window
+  argv; herdr validates command tokens and all local bounds before splitting.
+  Adapter failure stops further operations without destroying existing panes.
+  Known pane IDs survive submission failure; malformed replies, nonzero
+  acknowledgements and timeouts preserve uncertainty rather than claim no effect.
+  These direct tests do not grant product execution authority.
+
+The read-only parent-controlled panel and owner-bound continue/stop tools are
+unchanged. Stub adapter tests do not qualify a real herdr installation or atomic
+cross-process ownership transfer.
 
 ## Lifecycle and restart behavior
 
@@ -352,10 +335,10 @@ a retired record as detachment, not death:
   boundary, the extension renders the bounded `awaiting_approval` state (panel
   row, detail body, wait result). `subagent_continue` refuses it with
   `worker_awaiting_approval`; `subagent_stop` still stops it explicitly.
-- **Open-all composes.** `/subagents open-all` resolves each running worker's
-  session through the same contract (the host's opaque `agent-session:*`
-  reference) so a pane always targets the live session of a running worker
-  rather than a stale one.
+- **Open-all remains Partial.** `/subagents open-all` retains the host's opaque
+  `agent-session:*` reference in blocked plans, but never opens a worker pane
+  without atomic host writer claim/settlement. Neither the handle nor a fresh
+  launchability snapshot grants ownership.
 
 A supervised extension restart receives a new process generation but the host service retains trees by stable extension principal plus durable session owner. The next owner-scoped call resyncs with `agent/list`, marks recovered records as restarted, and restores the public task name, profile, idempotency fingerprint, host-created/started/completed/deadline timestamps, policy, usage, and stable session reference. Retrying the same spawn key returns the same child without creating another session. A complete process-host rebuild creates a new service boundary for mutation; retained transcript inspection remains separately read-only and provenance-authorized.
 

@@ -33,13 +33,10 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     let mut lines = vec!["Telemetry".to_owned()];
     if let Some(usage) = state.last_turn_usage {
         lines.extend([
-            if state.usage_uncertain {
-                // Interrupted usage stays recorded in state and is surfaced on
-                // the non-TUI channels; the TUI reports the provider figure.
-                "Usage source   provider-reported".to_owned()
-            } else {
-                "Usage source   provider-reported (exact)".to_owned()
-            },
+            // One plain label in every case: the provider API is the source of
+            // truth. Interrupted usage stays recorded in `usage_uncertain` and
+            // is surfaced on the non-TUI channels, never annotated here.
+            "Usage source   provider-reported".to_owned(),
             format!("Input tokens   {}", usage.input_tokens),
             format!("Cache read     {}", usage.cache_read_tokens),
             format!("Cache write    {}", usage.cache_write_tokens),
@@ -187,14 +184,17 @@ mod tests {
             );
             // Only the dollar figures: no subtotal wording, no `+ unknown`,
             // no `~` approximation and no `?` uncertainty marker.
-            for forbidden in ["subtotal", "+", "~", "?", "unknown"] {
+            for forbidden in ["subtotal", "+", "~", "?", "unknown", "(exact)"] {
                 assert!(
                     !telemetry.contains(forbidden),
                     "{forbidden:?} leaked into {telemetry:?}"
                 );
             }
+            // The usage-source label is the same plain fact in both cases.
             assert!(
-                telemetry.contains("Usage source   provider-reported"),
+                telemetry
+                    .lines()
+                    .any(|line| line == "Usage source   provider-reported"),
                 "{telemetry:?}"
             );
             // Uncertainty is a durable state fact, not a rendering claim.
@@ -202,6 +202,71 @@ mod tests {
                 state.usage_uncertain, usage_uncertain,
                 "cost rendering must not clear the recorded uncertainty"
             );
+        }
+    }
+
+    /// Every priced rendering path stays a plain dollar figure — including the
+    /// reported case where the session carries durable interrupted-usage records
+    /// — while the token stream estimate keeps its own `~`, which is not cost.
+    #[test]
+    fn cost_lines_never_carry_uncertainty_markers_in_any_cost_state() {
+        for usage_uncertain in [false, true] {
+            for price_display in [
+                PriceDisplay::Priced,
+                PriceDisplay::ExplicitZero,
+                PriceDisplay::Unknown,
+            ] {
+                for (run_cost_available, session_cost_microdollars) in [
+                    (true, Some(2_410_000u64)),
+                    (true, None),
+                    (false, Some(2_410_000)),
+                    (false, None),
+                ] {
+                    let mut state = priced_state(usage_uncertain);
+                    state.price_display = price_display;
+                    state.run_cost_available = run_cost_available;
+                    state.session_cost_microdollars = session_cost_microdollars;
+                    let telemetry = status_telemetry(&state, Instant::now());
+                    assert_cost_lines_are_plain_dollars(&telemetry);
+                    assert_eq!(
+                        state.usage_uncertain, usage_uncertain,
+                        "rendering must never clear the durable uncertainty flag"
+                    );
+                }
+            }
+        }
+
+        // A live turn has only a streaming token estimate; the cost lines still
+        // show a plain dollar figure or an honest absence, never `~` or `?`.
+        let mut live = priced_state(true);
+        live.last_turn_usage = None;
+        live.run_cost_available = false;
+        live.session_cost_microdollars = None;
+        live.turn_generation_started_at = Some(Instant::now());
+        live.turn_streamed_output_bytes = 480;
+        let telemetry = status_telemetry(&live, Instant::now());
+        assert!(
+            telemetry.contains("Output tokens  ~120 (stream estimate)"),
+            "{telemetry:?}"
+        );
+        assert_cost_lines_are_plain_dollars(&telemetry);
+    }
+
+    /// The cost area is only the two labelled cost lines: no `+`, `~`, `?`,
+    /// "subtotal" or "unknown" marker may ever appear there.
+    fn assert_cost_lines_are_plain_dollars(telemetry: &str) {
+        let cost_lines = telemetry
+            .lines()
+            .filter(|line| line.starts_with("Turn cost") || line.starts_with("Session cost"))
+            .collect::<Vec<_>>();
+        assert_eq!(cost_lines.len(), 2, "{telemetry:?}");
+        for line in cost_lines {
+            for forbidden in ["subtotal", "+", "~", "?", "unknown"] {
+                assert!(
+                    !line.contains(forbidden),
+                    "{forbidden:?} leaked into {line:?} ({telemetry:?})"
+                );
+            }
         }
     }
 
@@ -286,7 +351,7 @@ mod tests {
                 KeyCode::Char('x'),
                 KeyModifiers::NONE,
             ))),
-            Ok(Event::Paste(" draft during startup".into())),
+            Ok(Event::Paste(" draft during startup ".into())),
             Ok(Event::Key(KeyEvent::new(
                 KeyCode::Char('z'),
                 KeyModifiers::NONE,
@@ -298,14 +363,14 @@ mod tests {
         let sink_at_end = recorded.clone();
         let source = tokio_stream::iter(keys)
             .inspect(move |_| {
-                sink.borrow_mut().push(plain(&observer.render(96)));
+                sink.borrow_mut().push(observer.render(96).join("\n"));
             })
             .chain(futures_util::stream::poll_fn(move |_| {
                 if !captured_last {
                     captured_last = true;
                     sink_at_end
                         .borrow_mut()
-                        .push(plain(&observer_at_end.render(96)));
+                        .push(observer_at_end.render(96).join("\n"));
                 }
                 if let Some(done_tx) = done_tx.take() {
                     let _ = done_tx.send(());
@@ -325,13 +390,15 @@ mod tests {
         .await
         .expect("the silent startup phase completes");
 
-        // 1. Nothing rendered before readiness: no phase label, no notice, no
+        // 1. No startup chatter before readiness: no phase label, no notice, no
         //    bootstrap trace line, no branding.
         let frames = recorded.borrow().clone();
         assert!(!frames.is_empty());
         for frame in &frames {
+            assert!(frame.contains(CURSOR_MARKER), "startup lost its cursor: {frame:?}");
             for forbidden in [
                 "starting extensions",
+                "extensions",
                 "discovering models",
                 "model discovery",
                 "startup build",
@@ -339,6 +406,9 @@ mod tests {
                 "signing in",
                 "octet-startup",
                 "octet",
+                "codex",
+                "Codex context",
+                "notice",
             ] {
                 assert!(
                     !frame.contains(forbidden),
@@ -347,29 +417,46 @@ mod tests {
             }
         }
 
-        // 2. Keystrokes typed before readiness were accepted and buffered, and
-        //    the draft was visible in the composer with a live cursor.
+        // Silent startup is unbranded, not invisible: input remains typeable
+        // and the retained draft is painted before extension discovery ends.
         assert_eq!(shell.pending(), "x draft during startup z");
         let last = frames.last().expect("a frame was painted");
         assert!(last.contains("x draft during startup z"), "{last:?}");
         assert!(last.contains(CURSOR_MARKER), "{last:?}");
 
-        // 3. The frame assertion is sensitive: a phase label really would paint.
+        // 3. The frame assertion is sensitive: a lifecycle label really would
+        //    paint, and while such a label is present the composer paints the
+        //    draft with a live cursor.
         let mut control = InteractiveShell::test_shell();
         control.set_size(96, 18);
         control.state.borrow_mut().startup_pending = true;
+        control.state.borrow_mut().editor.set_text("x draft during startup z");
         control.set_run_label("discovering models…");
-        let control_frame = plain(&ShellComponent::new(control.state.clone(), false).render(96));
+        let control_lines = ShellComponent::new(control.state.clone(), false).render(96);
+        let control_frame = plain(&control_lines);
         assert!(control_frame.contains("discovering models"), "{control_frame:?}");
+        assert!(
+            control_frame.contains("x draft during startup z"),
+            "{control_frame:?}"
+        );
+        assert!(
+            control_lines.iter().any(|line| line.contains(CURSOR_MARKER)),
+            "{control_frame:?}"
+        );
 
         // 4. Readiness paints one atomic frame: identity, workspace, retained
-        //    notice and the draft all appear together, and none of them was
+        //    notice appear together with the already visible draft. Branding was not
         //    visible in any earlier paint.
         shell.set_identity("cerebras", "cerebras/gemma-4-31b", "off");
         shell.set_workspace(std::path::PathBuf::from("/startup-fixture/workspace"));
         shell.notice("read-only onboarding notice");
         shell.finish_startup();
-        let ready = plain(&component.render(96));
+        let ready_lines = component.render(96);
+        let ready = plain(&ready_lines);
+        assert!(
+            ready_lines.iter().any(|line| line.contains(CURSOR_MARKER)),
+            "the ready frame keeps a live composer cursor: {ready:?}"
+        );
         for expected in [
             "cerebras/gemma-4-31b",
             "/startup-fixture/workspace",

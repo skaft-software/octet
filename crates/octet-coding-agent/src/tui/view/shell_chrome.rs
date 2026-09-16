@@ -140,14 +140,35 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
     (above, below)
 }
 
-fn render_subagent_activity(_state: &ShellState, _width: u16) -> Vec<String> {
-    // Retired: delegated workers render as a settled transcript tool block at
-    // the point the delegation occurred. Nothing about the roster may be
-    // composed into pinned chrome, because the chrome strip draws below
-    // whatever the reader just submitted - a session-scoped roster that
-    // outlives its turn reappeared under every new prompt there and consumed
-    // the row budget the new turn's `Working` indicator needs.
-    Vec::new()
+fn render_subagent_activity(state: &ShellState, width: u16) -> Vec<String> {
+    // While reading history, changing live chrome must not shrink or move the
+    // semantic viewport. Worker updates remain in their transcript block;
+    // returning to the tail restores the live strip.
+    if !state.run.is_active() || !state.follow_tail {
+        return Vec::new();
+    }
+    let Some(view) = state.subagent_activity.as_ref() else {
+        return Vec::new();
+    };
+    let mut live = view.clone();
+    live.telemetry
+        .retain(|child| matches!(child.state.as_str(), "pending" | "running"));
+    live.activities.retain(|activity| {
+        matches!(
+            activity.state,
+            octet_agent::ExtensionPresentationState::Loading
+                | octet_agent::ExtensionPresentationState::Pending
+                | octet_agent::ExtensionPresentationState::Active
+                | octet_agent::ExtensionPresentationState::Running
+        )
+    });
+    if !super::subagent_activity_is_active(&live) {
+        return Vec::new();
+    }
+    // Reader filters apply to history, never hide currently active workers.
+    live.state_filter = None;
+    live.failure_reason = None;
+    super::subagent_activity_render_rows(&live, &state.theme, width, false)
 }
 
 pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> ShellChrome {
@@ -187,7 +208,7 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         // and credential/endpoint prompts own the temporary composer. Neither
         // should expose a provisional model footer before launch readiness.
         let mut composer = if state.tool_input_prompt.is_some()
-            || (state.panel.is_none() && state.overlay.is_none() && !state.run_label.is_empty())
+            || (state.panel.is_none() && state.overlay.is_none())
         {
             let mut lines =
                 crate::tui::composer_surface::render_composer_surface(state, width, now);

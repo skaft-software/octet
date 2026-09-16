@@ -233,7 +233,17 @@ text docs/openrouter-batches.md
 text docs/package-assets.txt
 text docs/packages.md
 text docs/parity/AUDIT-security.md
+text docs/parity/DELIVERY.md
+text docs/parity/PR_BODY.md
 text docs/parity/README.md
+text docs/parity/REVIEW-agent.md
+text docs/parity/REVIEW-ai.md
+text docs/parity/REVIEW-bootstrap.md
+text docs/parity/REVIEW-extensions.md
+text docs/parity/REVIEW-host-boundary.md
+text docs/parity/REVIEW-rendering.md
+text docs/parity/REVIEW-serve-regressions.md
+text docs/parity/REVIEW-tui-runtime.md
 text docs/parity/VERIFICATION.md
 text docs/parity/cli.md
 text docs/parity/codecs.md

@@ -82,7 +82,7 @@ class PiRuntimeEvidenceHarnessTests(unittest.TestCase):
             self.assertEqual(1, decision["repetitions"])
             self.assertFalse(decision["release_approval"]["approved"])
             self.assertEqual(
-                {"runtime_manager_adapter", "inference_attribution", "repetitions"},
+                {"runtime_manager_adapter", "inference_attribution", "repetitions", "cross_platform_review"},
                 {gate["gate"] for gate in decision["release_approval"]["gates"]},
             )
             self.assertEqual(
@@ -194,6 +194,17 @@ class PiRuntimeDecisionTests(unittest.TestCase):
         incomplete = self.harness.release_decision(profiles, self.thresholds, 1, "hermetic_fixture", False)
         self.assertEqual("incomplete", incomplete["status"])
         self.assertIn("repetitions", {gate["gate"] for gate in incomplete["release_approval"]["gates"]})
+
+    def test_external_pid_and_adapter_name_cannot_approve_a_release(self) -> None:
+        decision = self.harness.release_decision(
+            passing_profiles(), self.thresholds, 5, "runtime_manager", True
+        )
+        self.assertEqual("pass", decision["status"])
+        self.assertFalse(decision["release_approval"]["approved"])
+        gates = {row["gate"]: row for row in decision["release_approval"]["gates"]}
+        self.assertIn("cross_platform_review", gates)
+        self.assertEqual("external PID snapshot only", gates["inference_attribution"]["observed"])
+        self.assertTrue(all(not row["satisfied"] for row in gates.values()))
 
     def test_unmeasurable_metric_is_unavailable_not_estimated(self) -> None:
         profiles = passing_profiles()

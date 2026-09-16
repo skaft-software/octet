@@ -61,7 +61,7 @@ def create_archive(repo: Path, version: str, source_ref: str, output: Path) -> s
                 relative = entry.name[len(prefix):]
                 if entry.isfile():
                     found.add(relative)
-                if "node_modules" in Path(relative).parts or "target" in Path(relative).parts:
+                if {"node_modules", "target", ".build", "DerivedData", ".swiftpm"}.intersection(Path(relative).parts):
                     raise ValueError("archive contains dependency or build output")
         if not REQUIRED_PATHS <= found:
             raise ValueError("archive is missing required source files")

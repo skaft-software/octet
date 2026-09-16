@@ -64,15 +64,15 @@ def static_credential_provider(
     authorization stays policy-gated and unimplemented.
     """
 
-    for server in config.servers:
-        if (
-            server.enabled
-            and server.transport == "streamable-http"
-            and server.auth is not None
-            and server.auth.type == STATIC_CREDENTIAL_AUTH_TYPE
-        ):
-            return StaticEnvironmentCredentialProvider()
-    return None
+    credentials = {
+        server.id: server.auth.credential
+        for server in config.servers
+        if server.enabled
+        and server.transport == "streamable-http"
+        and server.auth is not None
+        and server.auth.type == STATIC_CREDENTIAL_AUTH_TYPE
+    }
+    return StaticEnvironmentCredentialProvider(credentials) if credentials else None
 
 
 def build_runtime(

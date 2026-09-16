@@ -2961,7 +2961,22 @@ impl AssistantFrameJournal {
         }
         self.settled = true;
         let _ = self.file.sync_data();
-        let _ = std::fs::remove_file(&self.path);
+        // Read from the descriptor we created, then compare-and-delete. A
+        // replaced pathname or parent must not redirect cleanup to a new file.
+        if self.file.rewind().is_ok() {
+            let mut bytes = Vec::new();
+            if Read::by_ref(&mut self.file)
+                .take((MAX_PARTIAL_FRAME_JOURNAL_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .is_ok()
+            {
+                let _ = crate::secure_fs::remove_private_file_if_unchanged(
+                    &self.path,
+                    &bytes,
+                    MAX_PARTIAL_FRAME_JOURNAL_BYTES,
+                );
+            }
+        }
     }
 
     /// Durable sidecar path of this journal.
@@ -2990,33 +3005,29 @@ impl Session {
     ///
     /// Kept beside the session so a journal and the log it belongs to move
     /// together. It is never a session record and is never replayed as one.
-    fn partial_assistant_frames_path(&self) -> PathBuf {
-        let name = self
+    fn partial_assistant_frames_path(&self) -> Result<PathBuf, SessionError> {
+        let name = self.path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "session has no filename")
+        })?;
+        let mut name = name.to_os_string();
+        name.push(".partial-assistant-frames");
+        let parent = self
             .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "session".to_string());
-        let mut path = self.path.clone();
-        path.set_file_name(format!("{name}.partial-assistant-frames"));
-        path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        Ok(parent.canonicalize()?.join(name))
     }
 
     /// Opens a fresh durable journal for one in-flight assistant attempt.
     ///
-    /// Any earlier journal is truncated: only one attempt streams at a time,
-    /// and a stale partial from a previous crashed process is consumed through
-    /// [`Self::take_partial_assistant`] before a new attempt begins. The file
-    /// is created owner-only next to the session log.
+    /// A stale journal must first be consumed through [`Self::take_partial_assistant`].
+    /// Exclusive, descriptor-bound creation never follows links or truncates an
+    /// existing target. The file is created owner-only next to the session log.
     pub fn begin_assistant_frame_journal(&mut self) -> Result<AssistantFrameJournal, SessionError> {
-        let path = self.partial_assistant_frames_path();
-        let mut options = OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&path)?;
+        let path = self.partial_assistant_frames_path()?;
+        let file = crate::secure_fs::create_regular_file_for_append(&path)
+            .map_err(partial_journal_file_error)?;
         Ok(AssistantFrameJournal {
             path,
             file,
@@ -3037,16 +3048,28 @@ impl Session {
     pub fn take_partial_assistant(
         &mut self,
     ) -> Result<Option<octet_ai::AssistantMessage>, SessionError> {
-        let path = self.partial_assistant_frames_path();
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let path = self.partial_assistant_frames_path()?;
+        let bytes = match crate::secure_fs::read_private_file_bounded(
+            &path,
+            MAX_PARTIAL_FRAME_JOURNAL_BYTES,
+        ) {
+            Ok(bytes) => bytes,
+            Err(crate::secure_fs::SecureFileError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(None)
+            }
+            Err(error) => return Err(partial_journal_file_error(error)),
         };
-        let frames = read_partial_assistant_frames(file)?;
-        // The journal is consumed whether or not the prefix reduces: a
-        // structurally invalid prefix must not be republished on every start.
-        let _ = std::fs::remove_file(&path);
+        let frames = read_partial_assistant_frames(&bytes)?;
+        // Never acknowledge consumption if cleanup failed or a replacement
+        // changed the snapshot. Otherwise a later start could republish it.
+        crate::secure_fs::remove_private_file_if_unchanged(
+            &path,
+            &bytes,
+            MAX_PARTIAL_FRAME_JOURNAL_BYTES,
+        )
+        .map_err(partial_journal_file_error)?;
         if frames.is_empty() {
             return Ok(None);
         }
@@ -3060,34 +3083,44 @@ impl Session {
 /// A torn final line is the expected crash shape; it is dropped rather than
 /// treated as corruption. An oversized file is rejected instead of read.
 fn read_partial_assistant_frames(
-    file: File,
+    bytes: &[u8],
 ) -> Result<Vec<octet_ai::AssistantMessageFrame>, SessionError> {
-    let mut reader = BufReader::new(file);
+    if bytes.len() > MAX_PARTIAL_FRAME_JOURNAL_BYTES {
+        return Err(SessionError::Limit(
+            "partial assistant frame journal exceeded its byte bound".into(),
+        ));
+    }
     let mut frames = Vec::new();
-    let mut line = String::new();
-    let mut total = 0usize;
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        // Even a syntactically valid final value is uncommitted without the
+        // newline; invalid UTF-8 in a torn tail is discarded the same way.
+        if !line.ends_with(b"\n") {
             break;
         }
-        total = total.saturating_add(read);
-        if total > MAX_PARTIAL_FRAME_JOURNAL_BYTES {
-            return Err(SessionError::Limit(
-                "partial assistant frame journal exceeded its bound".to_string(),
-            ));
-        }
-        let trimmed = line.trim_end_matches(['\n', '\r']);
-        if trimmed.is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_str::<octet_ai::AssistantMessageFrame>(trimmed) {
+        if frames.len() == MAX_PARTIAL_FRAME_JOURNAL_FRAMES {
+            return Err(SessionError::Limit(
+                "partial assistant frame journal exceeded its frame bound".into(),
+            ));
+        }
+        match serde_json::from_slice::<octet_ai::AssistantMessageFrame>(line) {
             Ok(frame) => frames.push(frame),
             Err(_) => break,
         }
     }
     Ok(frames)
+}
+
+fn partial_journal_file_error(error: crate::secure_fs::SecureFileError) -> SessionError {
+    match error {
+        crate::secure_fs::SecureFileError::Io(error) => SessionError::Io(error),
+        crate::secure_fs::SecureFileError::TooLarge { .. } => {
+            SessionError::Limit(error.to_string())
+        }
+        error => SessionError::Io(std::io::Error::other(error)),
+    }
 }
 
 /// Active skills resolved for a given leaf entry along its branch ancestry.
@@ -5522,6 +5555,111 @@ mod tests {
         let mut reopened = Session::open(&path).unwrap();
         assert!(reopened.take_partial_assistant().unwrap().is_none());
         assert!(!journal_path.exists());
+    }
+
+    #[test]
+    fn partial_assistant_journal_never_truncates_an_existing_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let mut journal = session.begin_assistant_frame_journal().unwrap();
+        for frame in frame_stream("keep this prefix") {
+            journal.append(&frame).unwrap();
+        }
+        let original = std::fs::read(journal.path()).unwrap();
+        assert!(session.begin_assistant_frame_journal().is_err());
+        assert_eq!(std::fs::read(journal.path()).unwrap(), original);
+        drop(journal);
+        assert!(session.take_partial_assistant().unwrap().is_some());
+        assert!(session.begin_assistant_frame_journal().is_ok());
+    }
+
+    #[test]
+    fn partial_assistant_journal_bounds_reads_and_discards_torn_utf8_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let mut journal = session.begin_assistant_frame_journal().unwrap();
+        for frame in frame_stream("valid prefix") {
+            journal.append(&frame).unwrap();
+        }
+        journal.file.write_all(b"{\"torn\":\"\xff").unwrap();
+        drop(journal);
+        assert!(session.take_partial_assistant().unwrap().is_some());
+
+        let journal = session.begin_assistant_frame_journal().unwrap();
+        journal
+            .file
+            .set_len((MAX_PARTIAL_FRAME_JOURNAL_BYTES + 1) as u64)
+            .unwrap();
+        drop(journal);
+        assert!(matches!(
+            session.take_partial_assistant(),
+            Err(SessionError::Limit(_))
+        ));
+        assert!(session.partial_assistant_frames_path().unwrap().exists());
+
+        let frame = octet_ai::AssistantMessageFrame::TextDelta {
+            index: 0,
+            delta: "x".into(),
+        };
+        let mut line = serde_json::to_vec(&frame).unwrap();
+        // A JSON value without its newline is still an uncommitted tail.
+        assert!(read_partial_assistant_frames(&line).unwrap().is_empty());
+        line.push(b'\n');
+        let bytes = line.repeat(MAX_PARTIAL_FRAME_JOURNAL_FRAMES + 1);
+        assert!(bytes.len() < MAX_PARTIAL_FRAME_JOURNAL_BYTES);
+        assert!(matches!(
+            read_partial_assistant_frames(&bytes),
+            Err(SessionError::Limit(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_assistant_journal_rejects_symlinks_hardlinks_and_special_files() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let path = session.partial_assistant_frames_path().unwrap();
+        let target = directory.path().join("target");
+        std::fs::write(&target, b"do not overwrite").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(session.begin_assistant_frame_journal().is_err());
+        assert!(session.take_partial_assistant().is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"do not overwrite");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&target, &path).unwrap();
+        assert!(session.begin_assistant_frame_journal().is_err());
+        assert!(session.take_partial_assistant().is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"do not overwrite");
+        std::fs::remove_file(&path).unwrap();
+        let fifo = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo is a valid NUL-terminated pathname, with a valid mode.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(session.begin_assistant_frame_journal().is_err());
+        assert!(session.take_partial_assistant().is_err());
+    }
+
+    #[test]
+    fn partial_assistant_journal_settlement_preserves_a_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let mut journal = session.begin_assistant_frame_journal().unwrap();
+        for frame in frame_stream("original") {
+            journal.append(&frame).unwrap();
+        }
+        let path = journal.path().to_owned();
+        std::fs::rename(&path, path.with_extension("old")).unwrap();
+        let mut replacement = session.begin_assistant_frame_journal().unwrap();
+        for frame in frame_stream("replacement") {
+            replacement.append(&frame).unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        journal.settle();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        replacement.settle();
+        assert!(!path.exists());
     }
 
     #[test]

@@ -1559,6 +1559,7 @@ fn indexed_entry_from_record(record: &serde_json::Value) -> Option<IndexedEntry>
 /// records for ephemeral `--no-session` runs.
 const EPHEMERAL_ACCOUNTING_DIRECTORY: &str = ".accounting";
 const EPHEMERAL_ACCOUNTING_FILE: &str = "ephemeral-sessions.jsonl";
+const EPHEMERAL_ACCOUNTING_RECOVERY: &str = ".accounting-recovery.json";
 const MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES: usize = 256 * 1024;
 const MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -1569,6 +1570,9 @@ const MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 /// and fail-closed across the run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EphemeralAccountingRecord {
+    /// Stable invocation key, allowing recovery after an ambiguous append.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_id: Option<String>,
     /// Wall-clock time the record was durably appended.
     pub recorded_at_unix_ms: u64,
     /// Cumulative session cost after the run, in microdollars.
@@ -1604,6 +1608,7 @@ struct EphemeralRun {
     transcript_root: PathBuf,
     accounting_session_dir: PathBuf,
     workspace: PathBuf,
+    pending: Option<EphemeralAccountingRecord>,
 }
 
 /// The one active ephemeral run, if any. A shared process may take a single
@@ -1624,48 +1629,135 @@ pub fn begin_ephemeral_run(
         transcript_root,
         accounting_session_dir,
         workspace,
+        pending: None,
     });
 }
 
-/// Persist the active ephemeral run's accounting, delete its transcript
-/// directory, and return what was recorded.
+/// Persist all sessions in the active ephemeral invocation and discard conversations.
 ///
-/// A no-op returning `None` when no run is active. The transcript is discarded
-/// even when accounting fails, because the conversation must never outlive the
-/// run.
+/// Failure keeps the run registered for retry. A private accounting-only snapshot
+/// is staged before append, so an append failure never requires a transcript to
+/// survive. The returned error retains the original append failure and identifies
+/// the recovery file (which also survives process exit).
 pub fn finish_ephemeral_run() -> anyhow::Result<Option<EphemeralAccountingRecord>> {
-    let run = EPHEMERAL_RUN
+    let mut active = EPHEMERAL_RUN
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let Some(run) = run else {
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(run) = active.as_mut() else {
         return Ok(None);
     };
-    let store = SessionStore::new(&run.accounting_session_dir, &run.workspace);
-    let workspace_dir = run.transcript_root.join(workspace_key(&run.workspace));
-    let recorded = match newest_transcript(&workspace_dir) {
-        Some(path) => store.record_ephemeral_accounting(&path).map(Some),
-        None => Ok(None),
-    };
-    let _ = std::fs::remove_dir_all(&run.transcript_root);
-    recorded
+    let result = finish_ephemeral_run_state(run);
+    if result.is_ok() {
+        *active = None;
+    }
+    result
 }
 
-fn newest_transcript(directory: &Path) -> Option<PathBuf> {
-    let mut newest: Option<(SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(directory).ok()?.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-            continue;
+fn finish_ephemeral_run_state(
+    run: &mut EphemeralRun,
+) -> anyhow::Result<Option<EphemeralAccountingRecord>> {
+    use anyhow::Context as _;
+
+    let workspace_dir = run.transcript_root.join(workspace_key(&run.workspace));
+    let recovery = run.transcript_root.join(EPHEMERAL_ACCOUNTING_RECOVERY);
+    let snapshot = (|| -> anyhow::Result<()> {
+        if run.pending.is_none() {
+            // A caller may re-register the same recovery root after process exit.
+            run.pending = if recovery.exists() {
+                Some(serde_json::from_slice(
+                    &octet_agent::secure_fs::read_private_file_bounded(
+                        &recovery,
+                        MAX_SESSION_FILE_BYTES,
+                    )?,
+                )?)
+            } else {
+                collect_ephemeral_accounting(&workspace_dir, &run.transcript_root)?
+            };
         }
-        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
-            continue;
-        };
-        if newest.as_ref().is_none_or(|(current, _)| modified >= *current) {
-            newest = Some((modified, path));
+        if let Some(record) = &run.pending {
+            let bytes = serde_json::to_vec(record)?;
+            octet_agent::secure_fs::write_private_atomic(
+                &recovery,
+                &bytes,
+                MAX_SESSION_FILE_BYTES,
+            )?;
+        }
+        Ok(())
+    })();
+    // Privacy does not depend on the ledger (or recovery filesystem) being writable.
+    // If even staging fails, the in-process accounting-only snapshot still permits
+    // retry; report that failure, rather than falsely claiming durable recovery.
+    let cleanup = match std::fs::remove_dir_all(&workspace_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    };
+    snapshot.context("could not stage ephemeral accounting recovery; retry before exit")?;
+    cleanup.context("could not remove ephemeral conversation directory")?;
+    if let Some(record) = &run.pending {
+        let store = SessionStore::new(&run.accounting_session_dir, &run.workspace);
+        store.append_ephemeral_accounting(record).with_context(|| {
+            format!(
+                "ephemeral accounting append failed; accounting-only recovery retained at {}",
+                recovery.display()
+            )
+        })?;
+    }
+    std::fs::remove_dir_all(&run.transcript_root)?;
+    Ok(run.pending.clone())
+}
+
+fn collect_ephemeral_accounting(
+    directory: &Path,
+    invocation: &Path,
+) -> anyhow::Result<Option<EphemeralAccountingRecord>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        {
+            paths.push(entry.path());
         }
     }
-    newest.map(|(_, path)| path)
+    paths.sort();
+    let mut combined: Option<EphemeralAccountingRecord> = None;
+    for path in paths {
+        let record = read_ephemeral_accounting(&path)?;
+        if let Some(total) = &mut combined {
+            total.session_cost_microdollars = total
+                .session_cost_microdollars
+                .saturating_add(record.session_cost_microdollars);
+            total.has_uncertain_usage |= record.has_uncertain_usage;
+            total.usage_records.extend(record.usage_records);
+            total.usage_uncertainty_records.extend(record.usage_uncertainty_records);
+        } else {
+            combined = Some(record);
+        }
+    }
+    if let Some(record) = &mut combined {
+        record.accounting_id = Some(workspace_key(invocation));
+    }
+    Ok(combined)
+}
+
+fn read_ephemeral_accounting(transcript: &Path) -> anyhow::Result<EphemeralAccountingRecord> {
+    let session = Session::open_read_only(transcript.to_path_buf())
+        .map_err(|error| anyhow::anyhow!("ephemeral accounting could not read the run: {error}"))?;
+    let usage_uncertainty_records = session.usage_uncertainty_records().to_vec();
+    Ok(EphemeralAccountingRecord {
+        accounting_id: None,
+        recorded_at_unix_ms: now_unix_ms(),
+        session_cost_microdollars: session.total_cost_microdollars(),
+        has_uncertain_usage: !usage_uncertainty_records.is_empty(),
+        usage_records: session.usage_records().to_vec(),
+        usage_uncertainty_records,
+    })
 }
 
 fn now_unix_ms() -> u64 {
@@ -1877,17 +1969,7 @@ impl SessionStore {
         &self,
         transcript: &Path,
     ) -> anyhow::Result<EphemeralAccountingRecord> {
-        let session = Session::open_read_only(transcript.to_path_buf()).map_err(|error| {
-            anyhow::anyhow!("ephemeral accounting could not read the run: {error}")
-        })?;
-        let usage_uncertainty_records = session.usage_uncertainty_records().to_vec();
-        let record = EphemeralAccountingRecord {
-            recorded_at_unix_ms: now_unix_ms(),
-            session_cost_microdollars: session.total_cost_microdollars(),
-            has_uncertain_usage: !usage_uncertainty_records.is_empty(),
-            usage_records: session.usage_records().to_vec(),
-            usage_uncertainty_records,
-        };
+        let record = read_ephemeral_accounting(transcript)?;
         self.append_ephemeral_accounting(&record)?;
         Ok(record)
     }
@@ -1916,6 +1998,42 @@ impl SessionStore {
             }
             Err(error) => return Err(error.into()),
         };
+        // Serialize read/deduplicate/repair/append across concurrent invocations.
+        // A complete record whose fsync failed is retried by syncing, not appending
+        // it again. A torn trailing write is discarded before retrying its snapshot.
+        fs2::FileExt::lock_exclusive(&file)?;
+        let mut existing = Vec::new();
+        (&mut file)
+            .take(MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES + 1)
+            .read_to_end(&mut existing)?;
+        if existing.len() as u64 > MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES {
+            anyhow::bail!("ephemeral accounting ledger exceeds its byte limit");
+        }
+        if !existing.is_empty() && existing.last() != Some(&b'\n') {
+            let tail = existing.iter().rposition(|byte| *byte == b'\n').map_or(0, |i| i + 1);
+            if serde_json::from_slice::<EphemeralAccountingRecord>(&existing[tail..]).is_ok() {
+                file.write_all(b"\n")?;
+                existing.push(b'\n');
+            } else {
+                file.set_len(tail as u64)?;
+                existing.truncate(tail);
+            }
+        }
+        if let Some(id) = &record.accounting_id {
+            for prior in existing.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+                let prior: EphemeralAccountingRecord = serde_json::from_slice(prior)?;
+                if prior.accounting_id.as_ref() == Some(id) {
+                    if serde_json::to_value(&prior)? != serde_json::to_value(record)? {
+                        anyhow::bail!("ephemeral accounting recovery key has conflicting data");
+                    }
+                    file.sync_all()?;
+                    return Ok(());
+                }
+            }
+        }
+        if (existing.len() + line.len()) as u64 > MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES {
+            anyhow::bail!("ephemeral accounting ledger exceeds its byte limit");
+        }
         file.write_all(&line)?;
         file.sync_all()?;
         Ok(())
@@ -2856,7 +2974,7 @@ mod tests {
                     total_tokens: 50,
                     ..octet_ai::Usage::default()
                 },
-                None,
+                Some(octet_ai::Cost { total: 7, ..octet_ai::Cost::default() }),
                 Some(true),
             )
             .unwrap();
@@ -2928,6 +3046,108 @@ mod tests {
         let after = store.ephemeral_accounting_summary().unwrap();
         assert_eq!(after.runs, 2);
         assert!(after.has_uncertain_usage);
+    }
+
+    #[test]
+    fn ephemeral_finish_accounts_for_all_sessions_including_an_empty_newest_session() {
+        for second_has_usage in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let workspace = root.path().join("workspace");
+            let transcript_root = root.path().join("transcripts");
+            let store = SessionStore::new(&root.path().join("durable"), &workspace);
+            let directory = transcript_root.join(workspace_key(&workspace));
+            std::fs::create_dir_all(&directory).unwrap();
+            write_ephemeral_transcript(&directory.join("first.jsonl"), true);
+            if second_has_usage {
+                write_ephemeral_transcript(&directory.join("second.jsonl"), false);
+            } else {
+                Session::create(directory.join("second.jsonl")).unwrap();
+            }
+            let mut run = EphemeralRun {
+                transcript_root: transcript_root.clone(),
+                accounting_session_dir: root.path().join("durable"),
+                workspace,
+                pending: None,
+            };
+            let record = finish_ephemeral_run_state(&mut run).unwrap().unwrap();
+            let count = if second_has_usage { 2 } else { 1 };
+            assert_eq!(record.usage_records.len(), count);
+            assert_eq!(record.session_cost_microdollars, 7 * count as u64);
+            assert!(record.has_uncertain_usage);
+            assert_eq!(record.usage_uncertainty_records.len(), 1);
+            assert!(!transcript_root.exists());
+            let summary = store.ephemeral_accounting_summary().unwrap();
+            assert_eq!(summary.runs, 1, "one invocation, not one record per RPC session");
+            assert_eq!(summary.input_tokens, 40 * count as u64);
+            assert_eq!(summary.usage_records, count);
+        }
+    }
+
+    #[test]
+    fn ephemeral_append_failure_keeps_private_accounting_only_and_retries_once() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let transcript_root = root.path().join("transcripts");
+        let accounting_root = root.path().join("durable");
+        let store = SessionStore::new(&accounting_root, &workspace);
+        let directory = transcript_root.join(workspace_key(&workspace));
+        std::fs::create_dir_all(&directory).unwrap();
+        write_ephemeral_transcript(&directory.join("first.jsonl"), true);
+        write_ephemeral_transcript(&directory.join("second.jsonl"), false);
+        // A directory in place of the ledger fails deterministically, even as root.
+        let ledger = store.dir().join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        std::fs::create_dir_all(&ledger).unwrap();
+        begin_ephemeral_run(transcript_root.clone(), accounting_root.clone(), workspace.clone());
+        let error = finish_ephemeral_run().unwrap_err();
+        assert!(error.to_string().contains("accounting-only recovery retained"), "{error:#}");
+        assert!(error.chain().count() > 1, "original append failure must be retained");
+        assert!(!directory.exists(), "no conversation survives failed accounting");
+        let recovery = transcript_root.join(EPHEMERAL_ACCOUNTING_RECOVERY);
+        let bytes = octet_agent::secure_fs::read_private_file_bounded(
+            &recovery, MAX_SESSION_FILE_BYTES,
+        ).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!text.contains("ephemeral prompt"));
+        assert!(!text.contains("ephemeral answer"));
+        let record: EphemeralAccountingRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record.usage_records.len(), 2);
+        assert!(record.has_uncertain_usage);
+        // Retrying before repair reports the original failure again, never a no-op.
+        assert!(finish_ephemeral_run().is_err());
+        std::fs::remove_dir(&ledger).unwrap();
+        // Simulate a complete but unacknowledged append (e.g. sync failure), then
+        // process-state loss. Disk-only recovery must not double-count that append.
+        store.append_ephemeral_accounting(&record).unwrap();
+        begin_ephemeral_run(transcript_root.clone(), accounting_root, workspace);
+        let recovered = finish_ephemeral_run().unwrap().unwrap();
+        assert_eq!(recovered.usage_records.len(), 2);
+        assert!(!transcript_root.exists());
+        assert!(finish_ephemeral_run().unwrap().is_none());
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(summary.runs, 1);
+        assert_eq!(summary.usage_records, 2);
+        assert_eq!(summary.total_cost_microdollars, 14);
+        assert!(summary.has_uncertain_usage);
+    }
+
+    #[test]
+    fn ephemeral_accounting_retry_repairs_a_torn_append() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        let transcript = root.path().join("source.jsonl");
+        write_ephemeral_transcript(&transcript, true);
+        let mut record = read_ephemeral_accounting(&transcript).unwrap();
+        record.accounting_id = Some("retry-key".into());
+        let directory = store.dir().join(EPHEMERAL_ACCOUNTING_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        let ledger = directory.join(EPHEMERAL_ACCOUNTING_FILE);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&ledger, &bytes[..bytes.len() / 2]).unwrap();
+        store.append_ephemeral_accounting(&record).unwrap();
+        store.append_ephemeral_accounting(&record).unwrap();
+        assert_eq!(store.ephemeral_accounting_summary().unwrap().runs, 1);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
     }
 
     #[test]

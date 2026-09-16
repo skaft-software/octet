@@ -75,3 +75,9 @@ START 2026-09-15T18:21:34Z wiring12 alive
 START 2026-09-15T18:29:30Z wiring12b alive
 
 START 2026-09-15T19:02:45Z wiring12c alive
+
+START 2026-09-15T21:37:58Z wiring12d alive
+- 2026-09-15T21:38Z wiring12d alive: plan = (1) bootstrap startup readiness split
+  (availability -> route selection -> route init -> optional catalog enrichment),
+  (2) Codex model note off startup (lazy first-turn/on-demand), (3) verify + finish the
+  launchable-child-handle wiring that wiring11 recorded as done (re-run its tests).

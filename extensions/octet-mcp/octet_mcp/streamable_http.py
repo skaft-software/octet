@@ -86,14 +86,17 @@ class StaticEnvironmentCredentialProvider:
     ``authentication_unavailable``.
     """
 
-    def __init__(self, environ: Optional[Mapping[str, str]] = None) -> None:
+    def __init__(self, credentials: Mapping[str, str], environ: Optional[Mapping[str, str]] = None) -> None:
+        # Bind this source to each static-bearer descriptor. A bearer broker
+        # reference on another server is not consent to read an environment var.
+        self._credentials = dict(credentials)
         # ``None`` reads the live process environment at request time so a
         # rotated value is observed without restarting the extension.
         self._environ = environ
 
     def bearer_token(self, credential: str, *, server_id: str, resource_owner: ResourceOwner) -> Optional[str]:
-        del server_id, resource_owner
-        if not is_static_credential_environment(credential):
+        del resource_owner
+        if self._credentials.get(server_id) != credential or not is_static_credential_environment(credential):
             return None
         source = os.environ if self._environ is None else self._environ
         try:

@@ -1,8 +1,9 @@
 """Bounded escape-hatch launcher for `/subagents open-all <tmux|herdr>`.
 
-The escape hatch an operator asked for: pluck the parent session and every
-*running* subagent out of the read-only parent-controlled panel and reopen each
-one as its own interactive octet session, one pane per session.
+Product pane execution is Partial: both workers and the current parent remain
+blocked until atomic host writer claim/settlement exists. Opaque handles and the
+low-level multiplexer adapters are retained, but a launchability snapshot is not
+exclusive ownership.
 
 House rules implemented here, in order of severity:
 
@@ -22,7 +23,7 @@ House rules implemented here, in order of severity:
    token, or transcript path is read, printed, or argv-passed.
 5. **Clean failure.** Panes are created one at a time; the first failure stops
    the run and reports exactly what exists, without destroying anything and
-   without leaving orphaned panes behind. The command is re-runnable.
+   with known pane IDs and unknown outcomes retained. Inspect before retrying.
 
 `herdr` is real and verified against its own documentation (fetched 2026-09-15):
 `herdrdev/herdr` ("Terminal workspace manager for AI coding agents", https://herdr.dev,
@@ -150,7 +151,7 @@ def _octet_binary() -> str:
 
 @dataclass(frozen=True)
 class Pane:
-    """One planned pane: the parent session or one running worker."""
+    """One planned pane, including explicit blocked ownership rows."""
 
     role: str
     name: str
@@ -182,6 +183,7 @@ class LaunchPlan:
     panes: Tuple[Pane, ...]
     session_name: Optional[str] = None
     inside_multiplexer: bool = True
+    workspace: Optional[str] = None
 
     @property
     def executable(self) -> Tuple[Pane, ...]:
@@ -205,22 +207,24 @@ class LaunchOutcome:
         return self.failure is None
 
 
+ATOMIC_WRITER_CLAIM_BLOCKED_REASON = (
+    "atomic host writer claim/settlement unavailable; a launchability snapshot "
+    "is not exclusive ownership. Worker pane execution is blocked until the "
+    "host provides an atomic writer claim/settlement primitive"
+)
 WORKER_PANE_BLOCKED_REASON = (
-    "the only handle the host publishes for a delegated child session is the "
-    "path-free opaque reference `agent-session:<sha256>` "
-    "(crates/octet-agent/src/delegation.rs `delegated_session_reference`). The "
-    "session store resolves an id only as `<session-dir>/<id>.jsonl` "
-    "(crates/octet-coding-agent/src/session_store.rs `path_by_id`), and the "
-    "delegated child transcript lives in the owner-private "
-    "`.delegation/team-*/` directory, so `octet --resume <reference>` cannot "
-    "open it. The host's only resolver for that reference hands back a "
-    "read-only, externally locked inspection session "
-    "(crates/octet-coding-agent/src/extensions/serve.rs "
-    "`driver_for_delegated_session`: `AuthorityProfile::ReadOnly`, "
-    "`SessionLiveState::Locked`), reachable inside the owning process and not a "
-    "launchable interactive session. The pane argv is still built and validated, "
-    "but nothing is launched for it: the missing primitive is a launchable "
-    "handle for a session-owned delegated child."
+    "the host has not confirmed that this worker is launchable with no live task; "
+    "refresh through an owner-bound /subagents command for current status. "
+    "Pane execution still requires atomic host writer claim/settlement"
+)
+PARENT_PANE_BLOCKED_REASON = (
+    "the current process still owns the parent session; opening it with --resume "
+    "would create a second writer. Parent handover requires host-owned settlement "
+    "and an exclusive ownership transfer, which this command cannot perform"
+)
+LIVE_WORKER_BLOCKED_REASON = (
+    "a live worker owns this session; stop it and wait for authoritative settlement "
+    "before opening another writer"
 )
 # A session-owned worker that is not attached to any run gets no pane: the
 # extension holds no live handle for it, and open-all never opens a stale one.
@@ -267,8 +271,25 @@ def resolve_parent_pane(
         handle_kind="host_session_id",
         handle=handle,
         argv=argv,
-        resolvable=True,
+        resolvable=False,
+        blocked_reason=PARENT_PANE_BLOCKED_REASON,
     )
+
+
+def worker_blocked_reason(worker: Any) -> str:
+    if getattr(worker, "state", None) == "awaiting_approval":
+        return PARKED_WORKER_NOT_OPENED_REASON
+    if getattr(worker, "live_task", None) is True:
+        return LIVE_WORKER_BLOCKED_REASON
+    if not getattr(worker, "host_present", False):
+        return DETACHED_WORKER_NOT_OPENED_REASON
+    reason = getattr(worker, "launch_blocked", None)
+    if isinstance(reason, str) and reason:
+        return bounded_text(reason, 512)
+    if (getattr(worker, "launchable", False) is not True
+            or getattr(worker, "live_task", None) is not False):
+        return WORKER_PANE_BLOCKED_REASON
+    return ATOMIC_WRITER_CLAIM_BLOCKED_REASON
 
 
 def resolve_worker_pane(
@@ -306,10 +327,9 @@ def resolve_worker_pane(
         handle_kind="opaque_session_reference",
         handle=handle,
         argv=argv,
-        # The host exposes no launchable handle for a delegated child session:
-        # see WORKER_PANE_BLOCKED_REASON.
+        # Host launchability is only an observation, never a writer claim.
         resolvable=False,
-        blocked_reason=WORKER_PANE_BLOCKED_REASON,
+        blocked_reason=worker_blocked_reason(worker),
     )
 
 
@@ -361,7 +381,7 @@ def plan_open_all(
     workspace: Optional[str],
     environment: Optional[Mapping[str, str]] = None,
 ) -> LaunchPlan:
-    """Plan one pane per running worker plus the parent, fail-closed."""
+    """Retain opaque handles and blocked rows; no product pane is executable."""
     environment = os.environ if environment is None else environment
     if not isinstance(multiplexer, str) or multiplexer not in MULTIPLEXERS:
         raise SubagentError(
@@ -384,11 +404,12 @@ def plan_open_all(
             "pane; refusing to drive a herdr session it does not own",
             code="multiplexer_not_owner",
         )
-    running = [worker for worker in workers if getattr(worker, "active", False)]
-    planned = 1 + len(running)
+    candidates = [worker for worker in workers
+                  if getattr(worker, "active", False) or getattr(worker, "launchable", False) is True]
+    planned = 1 + len(candidates)
     if planned > MAX_OPEN_ALL_PANES:
         raise SubagentError(
-            "open-all would open %d panes, above the documented cap of %d "
+            "open-all would plan %d panes, above the documented cap of %d "
             "(the parent plus the %d-worker fleet cap); nothing was opened"
             % (planned, MAX_OPEN_ALL_PANES, MAX_ACTIVE_CHILDREN),
             code="pane_cap",
@@ -418,7 +439,7 @@ def plan_open_all(
             first=True,
         )
     ]
-    for worker in running:
+    for worker in candidates:
         panes.append(
             resolve_worker_pane(
                 worker,
@@ -427,30 +448,37 @@ def plan_open_all(
                 workspace=workspace,
                 inside=inside,
                 session_name=session_name,
-                # The parent pane owns session creation (when the operator is not
-                # already inside the multiplexer); worker panes always add a
-                # window to that session, never a second session with the same
-                # name.
-                first=False,
+                # Display-only argv: no planned row grants execution authority.
+                first=len(panes) == 1,
             )
         )
-    return LaunchPlan(
+    handles = [pane.handle for pane in panes if pane.role == "worker"]
+    if len(set(handles)) != len(handles):
+        raise SubagentError("duplicate worker session handles; nothing was opened", code="invalid_launch")
+    plan = LaunchPlan(
         multiplexer=multiplexer,
         binary=binary,
         panes=tuple(panes),
         session_name=session_name,
         inside_multiplexer=inside,
+        workspace=workspace,
     )
+    _preflight(plan)
+    return plan
 
 
-def _run(argv: Sequence[str]) -> subprocess.CompletedProcess:
-    """Execute one exact argv. Never a shell, never a string command."""
+def _validate_command(argv: Sequence[str]) -> None:
+    """Validate all local bounds before any multiplexer effect."""
     if not isinstance(argv, (list, tuple)) or not argv:
         raise SubagentError("refusing to run an empty command", code="invalid_launch")
     if any(not isinstance(token, str) or not token for token in argv):
         raise SubagentError("refusing a command with an empty argv element", code="invalid_launch")
     if len(" ".join(argv).encode("utf-8")) > MAX_COMMAND_BYTES:
         raise SubagentError("refusing an oversized launch command", code="invalid_launch")
+
+
+def _run(argv: Sequence[str]) -> subprocess.CompletedProcess:
+    _validate_command(argv)
     return subprocess.run(  # noqa: S603 - argv list, shell=False, bounded timeout
         list(argv),
         shell=False,
@@ -477,7 +505,19 @@ def _herdr_command(argv: Sequence[str]) -> str:
                 "refusing a herdr command token with shell metacharacters",
                 code="unsafe_command_token",
             )
+    _validate_command(tokens)
     return " ".join(tokens)
+
+
+def _preflight(plan: LaunchPlan) -> None:
+    for pane in plan.executable:
+        if plan.multiplexer == "herdr":
+            command = _herdr_command(pane.argv[1:])
+            # Reserve the maximum pane-id length before creating a pane.
+            _validate_command(["herdr", "pane", "run", "p" * 512, command])
+            _validate_command(_herdr_split(plan.workspace))
+        else:
+            _validate_command(pane.argv)
 
 
 def _herdr_pane_id(stdout: Any) -> str:
@@ -485,14 +525,15 @@ def _herdr_pane_id(stdout: Any) -> str:
         value = json.loads(stdout if isinstance(stdout, str) else "")
     except (TypeError, ValueError):
         raise SubagentError(
-            "herdr pane split did not return JSON; nothing was opened for this pane",
+            "herdr pane split returned malformed JSON; a pane may exist but its id is unknown",
             code="multiplexer_protocol",
         )
-    pane = value.get("result", {}).get("pane", {}) if isinstance(value, dict) else {}
+    result = value.get("result") if isinstance(value, dict) else None
+    pane = result.get("pane") if isinstance(result, dict) else None
     pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
     if not isinstance(pane_id, str) or _SAFE_TOKEN_RE.fullmatch(pane_id) is None:
         raise SubagentError(
-            "herdr pane split returned no usable pane id; nothing was opened for this pane",
+            "herdr pane split returned no usable pane id; a pane may exist but its id is unknown",
             code="multiplexer_protocol",
         )
     return pane_id
@@ -509,35 +550,46 @@ def _open_tmux_pane(pane: Pane) -> Dict[str, Any]:
     return {"pane": pane.plan_row(), "returncode": 0}
 
 
-def _open_herdr_pane(pane: Pane, *, workspace: Optional[str]) -> Dict[str, Any]:
-    # Only the documented split form is used: the herdr skill text fetched from
-    # herdrdev/herdr uses `--direction right` (an unobserved direction value is
-    # never passed), and `--current` pins the split to the caller's own pane.
+def _herdr_split(workspace: Optional[str]) -> List[str]:
     split = ["herdr", "pane", "split", "--current", "--direction", "right", "--no-focus"]
     if workspace:
         split += ["--cwd", workspace]
-    result = _run(split)
-    if result.returncode != 0:
-        return {
-            "pane": pane.plan_row(),
-            "returncode": result.returncode,
-            "stderr": bounded_text((result.stderr or "").strip(), 512),
-        }
-    pane_id = _herdr_pane_id(result.stdout)
+    return split
+
+
+def _open_herdr_pane(pane: Pane, *, workspace: Optional[str]) -> Dict[str, Any]:
+    # Validate the command BEFORE splitting. Parsing/submission can still fail
+    # after an effect; retain the pane id and distinguish creation from launch.
     command = _herdr_command(pane.argv[1:])
-    submitted = _run(["herdr", "pane", "run", pane_id, command])
-    if submitted.returncode != 0:
-        return {
-            "pane": pane.plan_row(),
-            "pane_id": pane_id,
-            "returncode": submitted.returncode,
-            "stderr": bounded_text((submitted.stderr or "").strip(), 512),
-        }
-    return {"pane": pane.plan_row(), "pane_id": pane_id, "returncode": 0}
+    row: Dict[str, Any] = {"pane": pane.plan_row(), "returncode": None,
+                           "pane_created": None, "command_submitted": False}
+    try:
+        result = _run(_herdr_split(workspace))
+        row["returncode"] = result.returncode
+        if result.returncode != 0:
+            row["stderr"] = bounded_text((result.stderr or "split failed").strip(), 512)
+            return row
+        row["returncode"] = None
+        pane_id = _herdr_pane_id(result.stdout)
+        row.update(pane_id=pane_id, pane_created=True, command_submitted=None)
+        submitted = _run(["herdr", "pane", "run", pane_id, command])
+        row["returncode"] = submitted.returncode
+        # A failed acknowledgement does not prove that Enter was never sent.
+        row["command_submitted"] = True if submitted.returncode == 0 else None
+        if submitted.returncode != 0:
+            row["stderr"] = bounded_text((submitted.stderr or "command submission failed").strip(), 512)
+    except subprocess.TimeoutExpired:
+        row["stderr"] = "herdr did not answer within %ds; the last operation may have taken effect" % COMMAND_TIMEOUT_SECONDS
+    except SubagentError as error:
+        row["stderr"] = str(error)
+    except OSError:
+        row["stderr"] = "herdr could not be executed; inspect existing panes before retrying"
+    return row
 
 
 def execute_plan(plan: LaunchPlan, *, workspace: Optional[str] = None) -> LaunchOutcome:
     """Create the resolvable panes one by one; stop cleanly at the first failure."""
+    _preflight(plan)
     outcome = LaunchOutcome(multiplexer=plan.multiplexer)
     for pane in plan.panes:
         if not pane.resolvable:
@@ -552,7 +604,7 @@ def execute_plan(plan: LaunchPlan, *, workspace: Optional[str] = None) -> Launch
             created = (
                 _open_tmux_pane(pane)
                 if plan.multiplexer == "tmux"
-                else _open_herdr_pane(pane, workspace=workspace)
+                else _open_herdr_pane(pane, workspace=plan.workspace)
             )
         except subprocess.TimeoutExpired:
             created = {
@@ -561,6 +613,9 @@ def execute_plan(plan: LaunchPlan, *, workspace: Optional[str] = None) -> Launch
                 "stderr": "the multiplexer did not answer within %ds"
                 % COMMAND_TIMEOUT_SECONDS,
             }
+        except OSError:
+            created = {"pane": pane.plan_row(), "returncode": None,
+                       "stderr": "the multiplexer could not be executed"}
         except SubagentError as error:
             created = {
                 "pane": pane.plan_row(),
@@ -568,18 +623,19 @@ def execute_plan(plan: LaunchPlan, *, workspace: Optional[str] = None) -> Launch
                 "stderr": str(error),
             }
         if created.get("returncode") != 0:
+            if created.get("pane_created") is True:
+                outcome.created.append(created)
             outcome.failure = created
             outcome.notices.append(
                 "open-all stopped at pane %s/%s; panes already created were left "
-                "untouched and nothing else was opened. Fix the cause and re-run "
-                "the command." % (pane.role, pane.name)
+                "untouched. The failed operation may have taken effect; inspect "
+                "existing panes before re-running to avoid duplicate writers." % (pane.role, pane.name)
             )
             return outcome
         outcome.created.append(created)
     if outcome.blocked:
         outcome.notices.append(
-            "%d running worker pane(s) were planned but not opened; see the "
-            "blocked-pane reason. The parent session pane was opened."
+            "%d pane(s) were planned but not opened; see each blocked-pane reason."
             % len(outcome.blocked)
         )
     return outcome
@@ -615,7 +671,6 @@ def skipped_worker_row(worker: Any) -> Dict[str, Any]:
     opened, and both are named with the recoverable next step.
     """
     state = str(getattr(worker, "state", "") or "orphaned")
-    parked = state == "awaiting_approval"
     name = bounded_text(
         " ".join(str(getattr(worker, "name", "worker")).split()), MAX_PANE_LABEL_BYTES
     )
@@ -625,7 +680,7 @@ def skipped_worker_row(worker: Any) -> Dict[str, Any]:
         "state": state,
         "reattachable": bool(getattr(worker, "reattachable", False)),
         "reason": (
-            PARKED_WORKER_NOT_OPENED_REASON if parked else DETACHED_WORKER_NOT_OPENED_REASON
+            worker_blocked_reason(worker) or WORKER_PANE_BLOCKED_REASON
         ),
     }
 
@@ -644,14 +699,20 @@ def render_outcome(
             len(outcome.created),
             len(outcome.blocked),
             len(skipped),
-            "clean" if outcome.ok else "stopped early",
+            ("blocked (Partial)" if outcome.blocked else "clean") if outcome.ok else "stopped early",
         )
     ]
     for created in outcome.created:
         pane = created["pane"]
-        lines.append("- opened %s pane (%s)" % (pane["role"], pane["name"]))
+        if created.get("returncode") == 0:
+            lines.append("- opened %s pane (%s); interactive startup is not confirmed" % (pane["role"], pane["name"]))
+        else:
+            lines.append("- created %s pane (%s), id %s; command submission failed or is unconfirmed"
+                         % (pane["role"], pane["name"], created["pane_id"]))
     if outcome.failure is not None:
         pane = outcome.failure["pane"]
+        if outcome.failure.get("pane_created") is None:
+            lines.append("- pane creation may have taken effect; inspect the multiplexer before retrying")
         lines.append(
             "- FAILED %s pane (%s): %s"
             % (pane["role"], pane["name"], outcome.failure.get("stderr") or "no detail")
@@ -666,7 +727,7 @@ def render_outcome(
         lines.append(
             "- not opened %s worker (%s): %s"
             % (
-                "parked" if row.get("state") == "awaiting_approval" else "detached",
+                "parked" if row.get("state") == "awaiting_approval" else row.get("state", "unknown"),
                 row.get("name"),
                 row.get("reason") or "no reason recorded",
             )
@@ -674,8 +735,9 @@ def render_outcome(
     for notice in outcome.notices:
         lines.append(notice)
     lines.append(
-        "The read-only parent-controlled /subagents panel is unchanged; these "
-        "panes are separate interactive octet sessions."
+        "The read-only parent-controlled /subagents panel is unchanged. "
+        "Product pane execution remains Partial: atomic host writer "
+        "claim/settlement unavailable."
     )
     return bounded_text("\n".join(lines), 16 * 1024)
 

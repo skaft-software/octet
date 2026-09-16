@@ -960,6 +960,31 @@ class Api03ProviderBridgeTests(unittest.TestCase):
         response = self.v03_tool(bridge, "fixture_provider_setup_status")
         return json.loads(response["result"]["content"][0]["text"])
 
+    def test_api_03_optional_theme_offer_is_validated_but_not_selected(self) -> None:
+        for offered in (True, False):
+            with self.subTest(offered=offered), BridgeProcess(api_version="0.3") as bridge:
+                contract = v03_contract(providers=False)
+                self.assertIn("theme_selection", contract["optional_capabilities"])
+                self.assertIn("theme/select", contract["optional_methods"])
+                if not offered:
+                    contract["optional_capabilities"].remove("theme_selection")
+                    contract["optional_methods"].remove("theme/select")
+                selected = bridge.initialize(contract=contract)["contract"]
+                self.assertEqual(contract["required_capabilities"], selected["capabilities"])
+                self.assertEqual(contract["required_methods"], selected["methods"])
+
+        for invalid in ("missing_capability", "unknown_capability"):
+            with self.subTest(invalid=invalid), BridgeProcess(api_version="0.3") as bridge:
+                contract = v03_contract(providers=False)
+                if invalid == "missing_capability":
+                    contract["optional_capabilities"].remove("theme_selection")
+                else:
+                    contract["optional_capabilities"].append("unknown_optional")
+                response = bridge.request(
+                    "initialize", bridge.initialization_params(contract=contract)
+                )
+                self.assertEqual(-32011, response["error"]["code"])
+
     def test_api_03_selects_host_owned_provider_catalog_and_auth(self) -> None:
         bridge, catalog_requests, auth_requests = self.provider_bridge()
         with bridge:

@@ -114,7 +114,11 @@ frontend that owns the transcript or an on-demand surface:
   assistant turn after readiness — or read it without consuming via
   `App::codex_context_report()` from `/context`, `/status`, or `/telemetry`. Both
   accessors always use the effective model only, so a session on another provider
-  shows no Codex note however many Codex models the catalog carries;
+  shows no Codex note however many Codex models the catalog carries. These two
+  calls are the frontend-owned delivery points (`modes/interactive.rs` and the
+  `/context` / `/status` / `/telemetry` surfaces); no startup frame, catalog
+  build, or extension lifecycle renders the note, and nothing in
+  `app/bootstrap.rs` prints it;
 * `Bootstrap::take_codex_context_note(&ModelId)` is the same latch available
   before `build_app`, kept for frontends that resolve a model without building the
   `App` yet;
@@ -251,7 +255,8 @@ Stable phase names, in startup order:
 
 | Phase | Covers |
 | --- | --- |
-| `catalog.base` | cheap local availability filter (no network) |
+| `catalog.base` | embedded catalog plus the cheap local availability filter (no network) |
+| `catalog.selected` | selected-route inventory wait for a non-Codex builtin route; with `catalog.base` before it, the delta is the wait readiness attributes to the user's own selection (skipped for a Codex route, which registers inside `catalog.codex`) |
 | `catalog.codex` | selected-route Codex registration |
 | `catalog.copilot` | selected-route Copilot registration |
 | `catalog.fallback` | plan could not name the route; fleet catalog built |

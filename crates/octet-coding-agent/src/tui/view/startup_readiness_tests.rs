@@ -222,3 +222,25 @@ fn renderer_reconstruction_preserves_pending_and_ready_startup_state() {
         assert_eq!(shell.state.borrow().startup_card_started_at, started);
     }
 }
+
+#[test]
+fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
+    for application_viewport in [false, true] {
+        let mut shell = pending_shell();
+        let component = ShellComponent::new(shell.state.clone(), application_viewport);
+        for (width, height) in [(24, 4), (46, 8), (96, 18)] {
+            shell.set_size(width, height);
+            for draft in ["", "startup draft"] {
+                shell.state.borrow_mut().editor.set_text(draft);
+                let frame = component.render(width);
+                assert_unbranded(&frame);
+                assert_eq!(frame.len(), usize::from(height));
+                assert!(frame.iter().any(|row| row.contains(CURSOR_MARKER)));
+                assert!(frame.iter().all(|row| visible_width(row) <= usize::from(width)));
+                assert!(plain(&frame).contains(draft));
+                assert!(!plain(&frame).contains("extensions"));
+                assert!(!plain(&frame).contains("discovering"));
+            }
+        }
+    }
+}

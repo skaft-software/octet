@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import unittest
+from unittest import mock
 
 try:
     from .helpers import FakeCancellation, owner
@@ -608,125 +609,64 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn("reattach <name-or-id>", usage)
         self.assertIn("open-all tmux", usage)
 
-    def test_open_all_command_opens_the_parent_and_names_detached_workers(self):
-        """open-all composes with reattachment: no stale pane, no silent row."""
-        live = self.spawn("live-worker")["worker"]["id"]
-        gone = self.spawn("gone-worker")["worker"]["id"]
-        self.host.start(live)
-        self.host.start(gone)
-        self.orchestrator.status(self.client, self.owner, {"target": gone})
-        records = {agent_id: self.host.agents[agent_id] for agent_id in (live, gone)}
+    def test_cached_open_all_cannot_reuse_launch_authority(self):
+        self.spawn()
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.command(["open-all", "tmux"], {"host": {"session_id": PARENT_ID}})
+        self.assertEqual(raised.exception.code, "owner_required")
 
-        # The owning run ended: both records disappear before the next observation.
-        self.host.owners[("octet-subagents@test", "owner-a")] = []
-        self.host.agents.clear()
-        self.orchestrator.status(self.client, self.owner, {"target": gone})
-        cached = {"host": {"session_id": PARENT_ID}}
+    def test_launchability_is_observed_and_cleared_on_missing_record(self):
+        agent_id = self.spawn()["worker"]["id"]
+        state = self.orchestrator._owner_state(self.owner)
+        record = self.host.agents[agent_id].record()
+        record.update(launchable=True, live_task=False, launch_blocked=None)
+        self.orchestrator._reconcile_snapshot(state, {"agents": [record]})
+        self.assertTrue(state.workers[agent_id].launchable)
+        self.assertFalse(state.workers[agent_id].live_task)
+        record.update(launchable=False, live_task=True, launch_blocked="live worker")
+        self.orchestrator._reconcile_snapshot(state, {"agents": [record]})
+        self.assertFalse(state.workers[agent_id].launchable)
+        self.assertEqual(state.workers[agent_id].launch_blocked, "live worker")
+        record.pop("live_task")
+        record.pop("launchable")
+        record.pop("launch_blocked")
+        self.orchestrator._reconcile_snapshot(state, {"agents": [record]})
+        self.assertIsNone(state.workers[agent_id].live_task)
+        self.assertFalse(state.workers[agent_id].launchable)
+        self.orchestrator._reconcile_snapshot(state, {"agents": []})
+        self.assertFalse(state.workers[agent_id].host_present)
+        self.assertFalse(state.workers[agent_id].launchable)
 
+    def test_owner_bound_open_all_refreshes_before_planning(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        with mock.patch.object(self.orchestrator, "open_all", return_value={}) as launch:
+            self.orchestrator.open_all_owned(self.client, self.owner, ["tmux"], FakeCancellation())
+        self.assertEqual(launch.call_args.kwargs["workers"][0].state, "running")
+
+    def test_fresh_host_launchability_cannot_authorize_product_panes(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        self.host.complete(agent_id, "Settled fixture.")
+        snapshot = self.client.list_agents()
+        snapshot["agents"][0].update(launchable=True, live_task=False, launch_blocked=None)
         stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                result = self.orchestrator.command(["open-all", "tmux"], cached)
-                calls = stub.recorded()
-        finally:
-            stub.close()
-
-        # Detached-but-alive workers are named, and no pane is fabricated for
-        # them from a stale handle.
-        self.assertEqual(
-            [row["name"] for row in result["skipped"]], ["live-worker", "gone-worker"]
-        )
-        self.assertTrue(all(row["state"] == "orphaned" for row in result["skipped"]))
-        self.assertTrue(all(row["reattachable"] for row in result["skipped"]))
-        self.assertEqual([pane["name"] for pane in result["panes"]], ["parent"])
-        self.assertIn("- not opened detached worker (live-worker)", result["text"])
-        self.assertIn("Reattach it with /subagents wait", result["text"])
-        self.assertEqual(len(calls), 1, "only the parent pane is created")
-        self.assertEqual(
-            calls[0],
-            [
-                "new-session",
-                "-d",
-                "-s",
-                "octet-fleet-%s" % PARENT_ID[:32],
-                "-n",
-                "parent",
-                "-c",
-                "/workspace",
-                "--",
-                os.path.join(stub.directory.name, "octet"),
-                "--resume",
-                PARENT_ID,
-            ],
-        )
-        self.assertTrue(
-            any("unopened" in notice["title"] for notice in result["notifications"])
-        )
-        for secret in SECRETS.values():
-            self.assertNotIn(secret, result["text"])
-
-        # Reattachment is the recovery path: the republished live records are
-        # planned again, so open-all never depends on a stale handle.
-        self.host.agents.update(records)
-        self.host.owners[("octet-subagents@test", "owner-a")] = [live, gone]
-        self.orchestrator.status(self.client, self.owner, {"target": gone})
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                again = self.orchestrator.command(["open-all", "tmux"], cached)
-        finally:
-            stub.close()
-        self.assertEqual(again["skipped"], [])
-        self.assertEqual(
-            [pane["name"] for pane in again["panes"]],
-            ["parent", "live-worker", "gone-worker"],
-        )
-        self.assertEqual([pane["resolvable"] for pane in again["panes"]], [True, False, False])
-
-    def test_open_all_command_never_opens_a_worker_parked_at_the_approval_boundary(self):
-        parked = self.spawn("parked-worker")["worker"]["id"]
-        self.host.start(parked)
-        self.host.agents[parked].status = {"state": "awaiting_approval"}
-        self.host.agents[parked].phase = "waiting for approval"
-        self.orchestrator.status(self.client, self.owner, {"target": parked})
-
-        stub = Stub()
-        try:
-            with stub.path(TMUX=None):
-                result = self.orchestrator.command(
-                    ["open-all", "tmux"], {"host": {"session_id": PARENT_ID}}
-                )
-                calls = stub.recorded()
-        finally:
-            stub.close()
-
-        self.assertEqual([row["state"] for row in result["skipped"]], ["awaiting_approval"])
-        self.assertIn("- not opened parked worker (parked-worker)", result["text"])
-        self.assertIn("unattended mutation", result["text"])
-        self.assertEqual([pane["name"] for pane in result["panes"]], ["parent"])
-        self.assertEqual(len(calls), 1)
-
-    def test_open_all_command_refuses_a_missing_multiplexer_and_creates_nothing(self):
-        live = self.spawn("live-worker")["worker"]["id"]
-        self.host.start(live)
-        self.orchestrator.status(self.client, self.owner, {"target": live})
-        cached = {"host": {"session_id": PARENT_ID}}
-        stub = Stub()
-        try:
-            empty = os.path.join(stub.directory.name, "empty-bin")
-            os.makedirs(empty, exist_ok=True)
-            with stub.path(TMUX=None, PATH=empty):
-                with self.assertRaises(SubagentError) as raised:
-                    self.orchestrator.command(["open-all", "tmux"], cached)
-                calls = stub.recorded()
-                with self.assertRaises(SubagentError) as unsupported:
-                    self.orchestrator.command(["open-all", "screen"], cached)
-        finally:
-            stub.close()
-        self.assertEqual(raised.exception.code, "multiplexer_missing")
-        self.assertIn("never downloads or installs", str(raised.exception))
-        self.assertEqual(unsupported.exception.code, "unsupported_multiplexer")
-        self.assertEqual(calls, [], "nothing is created when the request is refused")
+        self.addCleanup(stub.close)
+        with stub.path(TMUX=None, HERDR_ENV="1"):
+            with mock.patch.object(self.client, "list_agents", return_value=snapshot) as listed:
+                with mock.patch("octet_subagents.launcher._run") as run:
+                    for multiplexer in ("tmux", "herdr"):
+                        for attempt in range(2):
+                            with self.subTest(multiplexer=multiplexer, attempt=attempt):
+                                result = self.orchestrator.open_all_owned(
+                                    self.client, self.owner, [multiplexer], FakeCancellation())
+                                self.assertIn("0 pane(s) created", result["text"])
+                                self.assertIn("atomic host writer claim/settlement unavailable",
+                                              result["text"])
+                                self.assertTrue(all(not pane["resolvable"] for pane in result["panes"]))
+                    run.assert_not_called()
+                self.assertEqual(listed.call_count, 4)
+        self.assertEqual(stub.recorded(), [])
 
     def test_wall_timeout_interrupts_and_has_distinct_terminal_state(self):
         agent_id = self.spawn(timeout_seconds=5)["worker"]["id"]

@@ -3058,10 +3058,17 @@ async fn unknown_api_03_last_initial_provider_model_preflights_restarts_and_relo
         .and_then(std::path::Path::parent)
         .expect("coding-agent crate has a repository root")
         .to_owned();
-    let bridge = repository
-        .join("extensions/octet-pi-compat/bridge.mjs")
-        .to_string_lossy()
-        .into_owned();
+    // The staged launcher must select a complete package: the bridge resolves
+    // its helpers under the host-supplied OCTET_EXTENSION_DIR, not beside an
+    // out-of-package script argument. Missing helpers fail before initialize.
+    for file in ["bridge.mjs", "semantic_ui.mjs", "editor_handoff.mjs"] {
+        std::fs::copy(
+            repository.join("extensions/octet-pi-compat").join(file),
+            provider.join(file),
+        )
+        .unwrap();
+    }
+    let bridge = provider.join("bridge.mjs").to_string_lossy().into_owned();
     let provider_extension = repository
         .join("extensions/octet-pi-compat/tests/fixtures/provider-extension.mjs")
         .to_string_lossy()
@@ -5664,6 +5671,31 @@ fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
     let app = rebuild_app(app, None, None, None, None).unwrap();
     assert_eq!(app.take_codex_context_note(), None);
     assert_eq!(app.codex_context_report(), Some(report.as_str()));
+
+    // /new opens a different transcript, so its first assistant turn owes its
+    // own note rather than inheriting the old session's delivered latch.
+    let app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::CreateNew(directory.path().join("new-note.jsonl"))),
+    )
+    .unwrap();
+    assert_eq!(app.take_codex_context_note().as_deref(), Some(report.as_str()));
+    assert_eq!(app.take_codex_context_note(), None);
+
+    // Reopening that same transcript is not a new note-delivery boundary.
+    let current = app.agent.session().path().to_owned();
+    let app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::OpenExisting(current)),
+    )
+    .unwrap();
+    assert_eq!(app.take_codex_context_note(), None);
 }
 
 /// Deferring provider inventories must stay an enrichment concern, not an
@@ -5672,6 +5704,14 @@ fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
 /// registration and no second activation. Extension startup itself is unchanged
 /// (`activate_eager` already fans out with `join_all`); this pins that readiness
 /// and enrichment never enter that path.
+///
+/// The configuration-level narrowing is asserted on `catalog_readiness` itself:
+/// a unit-test build never reads an ambient Codex credential
+/// (`register_codex_catalog` skips the ambient HOME in tests), so the narrowed
+/// catalog cannot resolve `codex/gpt-6-astra` and `bootstrap` completes the
+/// launch with the fleet catalog through its documented repair rule. The wait
+/// that narrowing actually removes is proven by the consultation counters in
+/// `narrowed_readiness_never_consults_an_unrelated_provider`.
 #[test]
 fn deferred_enrichment_does_not_start_extensions_or_duplicate_providers() {
     let directory = tempfile::tempdir().unwrap();
@@ -5679,8 +5719,17 @@ fn deferred_enrichment_does_not_start_extensions_or_duplicate_providers() {
     config.extension_paths = vec![directory.path().join("extensions")];
     config.enabled_extensions = vec!["fixture-extension".into()];
 
+    assert_eq!(
+        catalog_readiness(&config).route_ids(),
+        vec!["codex"],
+        "the launch decision itself is the narrowed Codex route"
+    );
+
     let mut boot = bootstrap(config).unwrap();
-    assert_eq!(boot.readiness_plan().route_ids(), vec!["codex"]);
+    assert!(
+        boot.readiness_plan().is_fleet(),
+        "an unresolvable selection is completed by the fleet repair, never failed"
+    );
     assert!(
         boot.prestarted_extensions.borrow().is_none(),
         "readiness must not start an extension host"

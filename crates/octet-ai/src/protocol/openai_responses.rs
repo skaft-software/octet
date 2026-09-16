@@ -1623,6 +1623,11 @@ fn computer_call_arguments(
         return Err(computer_action_error(kind));
     }
     let action = action.expect("validated action is present");
+    if pending_safety_checks.is_some_and(|checks| !checks.is_array()) {
+        return Err(AiError::Decode(DecodeError::Json(
+            "OpenAI Responses computer safety checks must be an array".to_owned(),
+        )));
+    }
     let mut payload = serde_json::Map::with_capacity(2);
     payload.insert("action".to_owned(), action.clone());
     if let Some(checks) =
@@ -2040,29 +2045,41 @@ pub(crate) fn decode_stream_event(
                     )?;
                 }
             } else if item.r#type == "computer_call" {
-                // Computer calls put the authoritative action on the terminal
-                // item. Fill it only when the added event carried none, so a
-                // repeated action never appends a second payload.
+                // A terminal action/check must not silently replace an already
+                // published payload. The canonical stream has no replacement
+                // event, so refuse a changed instruction before ToolCallEnd
+                // rather than losing a late safety check or executing stale data.
                 let key = format!("item_{}", output_index);
                 let canonical_idx = get_canonical_index(builder, &key);
-                if builder
-                    .tool_call_builders
-                    .get(&canonical_idx)
-                    .is_some_and(|call| call.arguments_json.trim().is_empty())
-                    && (item.action.is_some() || item.pending_safety_checks.is_some())
-                {
-                    let arguments = computer_call_arguments(
-                        item.action.as_ref(),
-                        item.pending_safety_checks.as_ref(),
-                    )?;
-                    emit_event(
-                        &mut events,
-                        builder,
-                        StreamEvent::ToolCallArgsDelta {
-                            index: canonical_idx,
-                            delta: arguments,
-                        },
-                    )?;
+                if let Some(call) = builder.tool_call_builders.get(&canonical_idx) {
+                    if item.action.is_some() || item.pending_safety_checks.is_some() {
+                        let prior: Option<serde_json::Value> =
+                            serde_json::from_str(&call.arguments_json).ok();
+                        let arguments = computer_call_arguments(
+                            item.action.as_ref().or_else(|| prior.as_ref()?.get("action")),
+                            item.pending_safety_checks.as_ref().or_else(|| {
+                                prior.as_ref()?.get("pending_safety_checks")
+                            }),
+                        )?;
+                        if let Some(prior) = prior {
+                            let terminal: serde_json::Value = serde_json::from_str(&arguments)
+                                .expect("computer_call_arguments produces JSON");
+                            if prior != terminal {
+                                return Err(AiError::Decode(DecodeError::Json(
+                                    "OpenAI Responses terminal computer action or safety checks changed after publication".to_owned(),
+                                )));
+                            }
+                        } else {
+                            emit_event(
+                                &mut events,
+                                builder,
+                                StreamEvent::ToolCallArgsDelta {
+                                    index: canonical_idx,
+                                    delta: arguments,
+                                },
+                            )?;
+                        }
+                    }
                 }
                 if builder.tool_call_builders.contains_key(&canonical_idx)
                     && !builder.ended_indices.contains(&canonical_idx)
@@ -4098,6 +4115,49 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output
             computer_call_of(resp).arguments_value().unwrap(),
             serde_json::json!({"action": {"type": "screenshot"}})
         );
+    }
+
+    #[tokio::test]
+    async fn computer_safety_checks_must_be_an_array() {
+        for checks in [serde_json::json!({"id":"check"}), serde_json::json!("check")] {
+            let item = serde_json::json!({
+                "type":"computer_call", "id":"cc_1", "call_id":"call_c1",
+                "action":{"type":"screenshot"}, "pending_safety_checks":checks,
+            });
+            let data = format!(
+                "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_x\"}}}}\n\n\
+                 data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{item}}}\n\n"
+            );
+            let error = run(data.as_bytes(), 0).await.unwrap_err();
+            assert!(error.to_string().contains("safety checks must be an array"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_computer_payload_changes_fail_before_executable_completion() {
+        for terminal in [
+            serde_json::json!({"action":{"type":"wait"}}),
+            serde_json::json!({"pending_safety_checks":[{"id":"late-check"}]}),
+            serde_json::json!({"pending_safety_checks":{"id":"malformed-check"}}),
+        ] {
+            let mut item = terminal;
+            item["type"] = serde_json::json!("computer_call");
+            item["id"] = serde_json::json!("cc_1");
+            item["call_id"] = serde_json::json!("call_c1");
+            let data = format!(
+                "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_x\"}}}}\n\n\
+                 data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"computer_call\",\"id\":\"cc_1\",\"call_id\":\"call_c1\",\"action\":{{\"type\":\"screenshot\"}}}}}}\n\n\
+                 data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{item}}}\n\n\
+                 data: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\n"
+            );
+            let error = run(data.as_bytes(), 1).await.unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("changed after publication")
+                    || message.contains("safety checks must be an array"),
+                "{error}"
+            );
+        }
     }
 
     #[tokio::test]

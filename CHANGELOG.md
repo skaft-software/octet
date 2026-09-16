@@ -6,8 +6,9 @@ Additive Pi-parity pass against `earendil-works/pi` @
 `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`, plus the tracked roadmap. Per-row
 status is in [`docs/parity/README.md`](docs/parity/README.md); the adversarial
 verification pass is in
-[`docs/parity/VERIFICATION.md`](docs/parity/VERIFICATION.md). `Landed` below
-means code plus a behavioural test that was actually run.
+[`docs/parity/VERIFICATION.md`](docs/parity/VERIFICATION.md). This is a
+review candidate, not a completed-parity or release-qualification claim. The
+ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Interaction
 
@@ -18,11 +19,14 @@ means code plus a behavioural test that was actually run.
   its picker inline. Previously these commands were unusable during streaming.
 - Add platform-aware discoverability hints, including the queued-follow-up edit
   binding (`option+↑` on macOS, `alt+↑` elsewhere).
-- Strengthen the model-adaptive activity shimmer: the `Thinking` label now
-  carries a coloured sweep instead of a luminance-only wash, and both the dark
-  and light profiles meet a quantified minimum luminance/chroma separation at
-  the sweep centre (the light profile previously moved 0.01→0.05 and was
-  effectively invisible).
+- Keep startup silent and the composer editable while extensions initialize;
+  defer model-context notices until terminal teardown.
+- Let `/goal` mutate and report the durable goal during an active response.
+- Give activity shimmer a complete sweep and rest phase. Working and Thinking
+  share a model-derived hue family; neutral identities stay neutral in both
+  appearances. Physical-terminal appearance remains a separate acceptance gate.
+- Display plain-dollar footer costs without weakening durable uncertainty or
+  budget accounting.
 - Redesign the `/subagents` panel: group by state with counts, collapse terminal
   groups by default, aligned columns with a header row, bounded failure reasons
   and bounded rendering.
@@ -46,20 +50,23 @@ means code plus a behavioural test that was actually run.
 - Record cost and usage above 272K as uncertain rather than exact
   (`Session::record_usage_uncertainty`), since the whole request is priced at the
   long-context tier rather than only the excess.
-- Protect the Codex websocket from dropping: bounded-backoff reconnect that
-  resumes the in-flight response instead of failing the turn, a typed error when
-  resumption is impossible, and no duplicated or gapped deltas on resume.
+- Keep WebSocket connection-limit retries in the host's physical-attempt budget
+  instead of secretly resending inference in the transport. Stored-response
+  cursor recovery is bounded; ordinary non-stored Codex responses cannot be
+  resumed by inventing a new request after output has begun.
 
 ### Subagents
 
-- Add `/subagents open-all tmux` and `/subagents open-all herdr`, opening the
-  parent and every running worker as separate interactive sessions, one per pane.
-  Fails closed when the multiplexer is absent; never auto-installs; passes ids as
-  separate argv elements with no shell interpolation; never places credentials in
-  argv or messages; bounded pane count.
-- Add per-spawn and per-worker provider, model and reasoning selection for
-  multimodel orchestration, validated fail-closed and clamped to the model's
-  supported levels.
+- Settle completed workers once into their owning transcript block, avoid replay
+  on later turns, and preserve history anchors while live workers update.
+- Add bounded `/subagents open-all tmux|herdr` planning and multiplexer adapters.
+  Product pane execution is disabled for all workers and the parent until the
+  host provides atomic writer claim/settlement. An opaque handle or fresh
+  launchability snapshot is not a writer lease; adapters are directly tested,
+  not qualified live handover.
+- Keep API 0.2 child model execution inherited. Requested provider/model/reasoning
+  metadata does not establish multimodel execution; unsupported selections fail
+  closed rather than silently selecting another model.
 - Workers survive the parent turn: durable child records are owned by the
   session rather than the run, with reattachment on a later turn and an explicit
   parent wait. A detached worker parks at the approval boundary in a bounded
@@ -67,22 +74,28 @@ means code plus a behavioural test that was actually run.
 
 ### Providers, codecs and tools
 
-- Land the strict JSON-schema and grammar/regex custom-tool paths across the
-  codec families, and remove a declared-but-unimplemented capability claim.
+- Add strict JSON-schema and grammar/regex request declarations, and remove a
+  declared-but-unimplemented deferred-tool capability claim. Grammar custom-call
+  decoding and history/result replay remain incomplete; declarations alone do
+  not establish codec parity.
 - Land Anthropic caller-beta merge, refusal fallbacks, and the Mistral
   Conversations finish/base-URL classification fixes that previously failed
   assertions.
-- Add the Codex `service_tier` request field. (*The `/fast` command remains
-  inert: the live-run `ResponsesOptions` builders do not yet set a tier.*)
-- Add the assistant-message frame encoder/reducer for durable partial republish.
+- Wire the agent's optional service tier into live `ResponsesOptions`, gated by
+  the declared route capability. The `/fast` UI consumer remains unavailable;
+  the command does not enable a tier.
+- Add an assistant-message frame encoder/reducer and a bounded partial-message
+  journal. Partial recovery observations do not replace authoritative usage or
+  tool-outcome records.
 - Add typed provider declarations covering sampling params, headers,
   `vllmPriority`, `supportsMaxOutputTokens`, thinking-token budget fields,
   `$var` chat-template interpolation and bearer-token credential aliases.
 - Tool behaviours: bash output spill, bounded interval checkpoints and the
   session environment contract; original-file non-overlapping multi-edit with
-  legacy normalization; adopted preview coalescing; unanimous finalized-result
-  batch termination; durable invocation memos; deferred suspend/resume handles;
-  summarization retry distinct from compaction failure. The agent tool surface
+  legacy normalization; preview coalescing and unanimous finalized-result batch
+  termination; invocation-memo and deferred-handle primitives; summarization
+  retry distinct from compaction failure. The ledger identifies missing durable
+  consumers separately from these primitives. The agent tool surface
   stays `read`/`write`/`edit`/`bash` with ripgrep-backed `search`, matching
   0.7.6: the Pi-parity `ls`, `find` and `grep` tools were withdrawn by
   maintainer decision, and their behaviours are served by `search` (rg) plus
@@ -93,6 +106,9 @@ means code plus a behavioural test that was actually run.
 - Add `--mode json` session-event JSONL, `--list-models` search,
   `--session-id`/`--name`, sequential positional prompts with bounded `@file`
   and media expansion, and piped stdin in every mode.
+- Keep `--no-session` transcripts ephemeral while preserving usage from every
+  RPC session; failed accounting appends retain private accounting-only recovery
+  and retry idempotently without restoring conversation data.
 - Add incremental session/entry search backed by a disposable SQLite projection
   that re-reads only changed transcripts, and fail-closed catalog publish gates
   (checksum, count, schema, minimum client version, required providers) with an
@@ -117,11 +133,10 @@ means code plus a behavioural test that was actually run.
 
 ### Editor and TUI
 
-- Namespaced, user-configurable JSON keybindings with conflict reporting,
-  platform defaults and legacy-name migration.
-- Undo/redo with fish-style coalescing; kill-ring with yank and yank-pop;
-  word/line deletion and forward/backward jumps; OSC 133 A/B/C zones; focus
-  reporting with focus-out interaction reset.
+- Add reusable keybinding parsing/conflict detection, editor undo/redo,
+  kill/yank, word/line actions and OSC 133 zone primitives. Product key dispatch,
+  user-binding loading and viewport prompt jumps remain incomplete.
+- Preserve focus reporting with focus-out interaction reset.
 - Port LaTeX rendering (symbol tables, parser, fraction/operator/matrix layout)
   and add a bounded, self-contained Mermaid box-drawing engine; both fail closed
   on unsupported syntax instead of misrendering it.
@@ -130,19 +145,23 @@ means code plus a behavioural test that was actually run.
 
 - Add `scripts/changelog.py` (release extraction and link repair) and
   `scripts/create-source-archive.py` (deterministic source artifact).
-- Add the additive-parity ledger, per-domain detail documents, an independent
-  verification report, and Codex context documentation.
+- Add the additive-parity ledger, per-domain detail documents, independent review
+  reports, and Codex context documentation. Remove accidentally tracked Swift
+  build caches and reject them in deterministic source archives.
+- Keep benchmark measurement verdicts separate from release approval: an external
+  PID snapshot cannot satisfy inference attribution or cross-platform review.
 
 ### Known gaps at this checkpoint
 
-- `cargo check --workspace --all-targets --locked` is clean, but the `octet-ai`
-  test suite is **red and partly non-terminating** at this checkpoint following
-  the Codex websocket rewrite; this is being repaired.
+- See the final verification report for exact executed checks and unresolved
+  failures. An interrupted disk-full test run is not a pass; formatting and other
+  qualification failures are not waived by a successful compile.
 - Rows recorded as blocked name an exact missing primitive rather than a
   timeframe: the radius/`pi-messages` codec, `GOOGLE_CLOUD_API_KEY` for
-  vertex (ADC-only today), `--no-session` ephemeral mode pending an
-  accounting-only session backend, and the deferred additional-tools/tool-search
-  emit paths.
+  vertex (ADC-only today), deferred additional-tools/tool-search emit paths,
+  host-mediated extension services, and atomic live-session writer handover.
+  Ephemeral accounting and other partial contracts require their own behavioral
+  evidence, not a neighboring test's result.
 - Windows PowerShell execution evidence, native Firefox/Safari operation,
   physical terminal paint/scroll acceptance and the Serve/companion security
   audit are hardware-, human- or authority-gated and remain unqualified.

@@ -106,27 +106,21 @@ prompt. `/subagents inspect <name-or-id>` provides cached detail and
 
 ## Open the fleet in panes
 
-`/subagents open-all tmux` (or `herdr`) reopens the **parent session and every
-running worker** as separate interactive octet sessions, one pane/window per
-session — the escape hatch for orchestrating a worker independently of the
-read-only parent-controlled panel.
+**Partial — pane execution is blocked.** `/subagents open-all tmux` (or `herdr`)
+refreshes owner-bound `agent/list` and reports bounded plans using opaque
+`agent-session:<sha256>` handles. The host can resolve these handles, but even
+`launchable: true` with `live_task: false` is only a snapshot, not exclusive
+ownership. Every worker remains blocked with an explicit reason; otherwise-ready
+workers report **atomic host writer claim/settlement unavailable**. The current
+parent remains blocked because its calling process still owns it.
 
-It fails closed when the multiplexer is missing (octet never installs or
-downloads one), refuses above the eight-worker pane cap, passes every session id
-and path as a separate argv element, and never prints or argv-passes a credential
-or token. Panes are created one at a time; the first failure reports exactly what
-exists and destroys nothing. A worker's only host-published handle is the opaque
-`agent-session:<sha256>` reference, which `octet --resume` cannot resolve today
-(the session store knows only `<session-dir>/<id>.jsonl`, and the host's only
-resolver for the reference returns a read-only locked inspection session), so the
-worker argv is planned and validated but the pane is reported **blocked** with the
-exact missing primitive — a launchable child handle — instead of a fabricated
-resume; the parent pane opens normally. A worker that is still owned but detached
-from any run, or parked at the approval boundary, is deliberately not opened and
-is named in the report with the reattach/approve step (`skipped` rows), so no
-stale pane is opened and no live worker is hidden. See
-[`/subagents open-all`](REFERENCE.md#subagents-open-all-tmuxherdr) and
-[`docs/subagents.md`](../../docs/subagents.md).
+No pane is created or command submitted by product open-all, including repeated
+calls. Execution cannot be enabled until the host supplies atomic writer
+claim/settlement; operator coordination is not a substitute. The command never
+installs a multiplexer and retains the eight-worker plan cap. Low-level tmux and
+herdr adapters retain preflight, partial-failure reporting and direct stub tests;
+those tests are not product ownership or live-handover qualification.
+See [`/subagents open-all`](REFERENCE.md#subagents-open-all-tmuxherdr).
 
 ## Session-scoped delegation
 

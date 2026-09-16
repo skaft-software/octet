@@ -1243,8 +1243,9 @@ mod clipboard_read {
             );
 
             let empty = Helper {
-                program: "/bin/true".to_owned(),
-                args: Vec::new(),
+                // /bin/true is absent on macOS; use the portable shell builtin.
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "exit 0".to_owned()],
             };
             assert_eq!(run(&empty).await, Outcome::Empty);
 
@@ -1258,7 +1259,7 @@ mod clipboard_read {
             // holding the interactive loop.
             let wedged = Helper {
                 program: "/bin/sh".to_owned(),
-                args: vec!["-c".to_owned(), "sleep 30".to_owned()],
+                args: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
             };
             let started = std::time::Instant::now();
             assert_eq!(run(&wedged).await, Outcome::Failed);
@@ -1431,8 +1432,8 @@ where
 }
 
 /// Diagnostic names for silent startup work. They never render: the startup
-/// screen stays blank until one ready frame, and a name appears only in a
-/// worker-failure, cancellation, or shutdown diagnostic.
+/// composer stays typeable without branding until readiness; a name appears
+/// only in a worker-failure, cancellation, or shutdown diagnostic.
 const STARTUP_MODELS_OPERATION: &str = "model discovery";
 const STARTUP_APP_OPERATION: &str = "startup build";
 const STARTUP_SESSION_OPERATION: &str = "session open";
@@ -8521,7 +8522,7 @@ mod tests {
             session_path,
             model: scripted_model("http://127.0.0.1:1"),
             catalog: octet_ai::ModelCatalog::default(),
-            sessions: crate::session_store::SessionStore::new(dir, dir),
+            sessions: crate::session_store::SessionStore::for_directory(dir, dir),
             subagents_available: false,
             goal: Err(ActiveGoalError::UnaddressableSession),
         }

@@ -491,6 +491,10 @@ class Worker:
     generation: int = 0
     delivery_state: str = "host_managed"
     host_present: bool = True
+    # Launchability is a host observation, never inferred from lifecycle state.
+    launchable: bool = False
+    launch_blocked: Optional[str] = None
+    live_task: Optional[bool] = None
     # Per-worker orchestration selection. `provider`/`model`/`reasoning` are the
     # request; `effective_*` is what this process believes the worker runs with
     # (today: the parent's inherited selection, because API 0.2 `agent/spawn`
@@ -584,6 +588,9 @@ class Worker:
             "timeout_seconds": self.timeout_seconds,
             "deadline_at_ms": self.deadline_at_ms,
             "session": self.session,
+            "launchable": self.launchable,
+            "launch_blocked": self.launch_blocked,
+            "live_task": self.live_task,
             "export_reference": self.export_reference,
             "artifacts": [artifact.public() for artifact in self.artifacts],
             "current_tool": self.current_tool,

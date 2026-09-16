@@ -115,3 +115,92 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
     }
     assert!(!process.is_running());
 }
+
+#[tokio::test]
+async fn unimplemented_theme_selection_is_not_offered_and_returns_a_canonical_refusal() {
+    let directory = TempDir::new().unwrap();
+    let manifest_path = directory.path().join(EXTENSION_MANIFEST_FILENAME);
+    std::fs::write(
+        &manifest_path,
+        r#"name = "theme-probe"
+version = "0.1.0"
+api_version = "0.3"
+[entrypoint]
+command = "python3"
+args = ["probe.py"]
+[contributes]
+tools = ["probe"]
+"#,
+    )
+    .unwrap();
+    // This peer selects theme/select iff offered, then exercises the real
+    // reverse-request path. Before the fix it negotiated an unimplemented
+    // service and received a noncanonical legacy method-not-found response.
+    std::fs::write(
+        directory.path().join("probe.py"),
+        r#"import json, sys
+
+def send(value):
+    print(json.dumps(value, sort_keys=True, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        offer = request["params"]["contract"]
+        capabilities = offer["required_capabilities"][:]
+        methods = offer["required_methods"][:]
+        theme_offered = "theme_selection" in offer["optional_capabilities"]
+        method_offered = "theme/select" in offer["optional_methods"]
+        if theme_offered:
+            capabilities.append("theme_selection")
+        if method_offered:
+            methods.append("theme/select")
+        selection = {"schema": offer["schema"], "encoding": offer["encoding"],
+                     "capabilities": sorted(capabilities), "methods": sorted(methods),
+                     "limits": offer["limits"]}
+        send({"jsonrpc": "2.0", "id": request["id"], "result": {
+            "api_version": "0.3", "contract": selection,
+            "tools": [{"name": "probe", "description": "Probe theme availability",
+                       "parameters": {"type": "object", "properties": {}}}]}})
+    elif method == "tool/call":
+        call_id = request["id"]
+        send({"jsonrpc": "2.0", "id": "theme-probe", "method": "theme/select",
+              "params": {"namespace": "theme-probe", "theme_id": "dark",
+                         "role": "default", "scope": "extension"}})
+    elif request.get("id") == "theme-probe":
+        send({"jsonrpc": "2.0", "id": call_id, "result": {
+            "content": [{"type": "text", "text": "probe complete"}],
+            "is_error": False, "metadata": None,
+            "structured_content": {"theme_offered": theme_offered,
+                                   "method_offered": method_offered,
+                                   "response": request}}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": request["id"], "result": {"terminal": "shutdown"}})
+        break
+"#,
+    )
+    .unwrap();
+    let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    let mut config = ExtensionRuntimeConfig::new(directory.path());
+    config.request_timeout = Duration::from_secs(3);
+    config.shutdown_timeout = Duration::from_secs(1);
+    let process = ExtensionProcess::start(trusted_descriptor(manifest_path, manifest), config)
+        .await
+        .unwrap();
+    let output = process
+        .call_tool("probe", json!({}), process.current_context())
+        .await
+        .unwrap();
+    let evidence = output.structured_content.unwrap();
+    assert_eq!(evidence["theme_offered"], false);
+    assert_eq!(evidence["method_offered"], false);
+    assert_eq!(evidence["response"]["error"]["code"], -32601);
+    assert_eq!(
+        evidence["response"]["error"]["message"],
+        "unknown or unnegotiated method"
+    );
+    octet_agent::extension_api_v03::parse_json_rpc_envelope(evidence["response"].clone()).unwrap();
+    assert!(process.is_running());
+    assert!(process.shutdown().await);
+}

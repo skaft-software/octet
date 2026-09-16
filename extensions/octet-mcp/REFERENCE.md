@@ -127,7 +127,10 @@ connection after cancellation/deadline.
 
 `{"type": "static-bearer", "environment": "OCTET_MCP_<NAME>"}` is the only
 bundled static source. It must name exactly one environment variable inside this
-extension's own `OCTET_MCP_*` namespace; the bridge reads that name from the
+extension's own `OCTET_MCP_*` namespace; resolution is bound to that exact server
+ID and configured static variable. A different server's `bearer` broker reference
+never gains an environment fallback merely because a static server is present.
+The bridge reads that name from the
 process environment per request, so a rotated value is observed without
 retaining it, and it refuses any other name so a configuration cannot point the
 bridge at an unrelated ambient provider/cloud token. The value is never stored,

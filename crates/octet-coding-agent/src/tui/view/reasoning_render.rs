@@ -15,7 +15,7 @@ const ACTIVITY_LABEL_OFFSET: isize = 2;
 const ACTIVITY_MARKER_INDEX: isize = -ACTIVITY_LABEL_OFFSET;
 
 /// How far the sweep reaches on either side of its centre. The highlight is
-/// five cells wide (see [`ACTIVITY_SWEEP_FALLOFF`]) and symmetric, so a cell is
+/// nine cells wide (see [`ACTIVITY_SWEEP_FALLOFF`]) and symmetric, so a cell is
 /// lit exactly while `|index - center| <= ACTIVITY_SWEEP_HALF`.
 const ACTIVITY_SWEEP_HALF: isize = 4;
 
@@ -221,13 +221,9 @@ impl ActivityRamp {
         // function, on the label's sweep depth). `ActivityRamp::of` is still the
         // one place that maps a rendered label to its ramp, and the invariant
         // test pins the two labels to byte-identical accents.
-        let direction = match self {
-            Self::Working => 1.0,
-            Self::Thinking => -1.0,
-        };
         activity_accent_color(
             identity,
-            direction * ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step],
+            ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step],
             ACTIVITY_RAMP_SATURATION_STEPS[step],
             normal,
         )
@@ -387,7 +383,6 @@ fn activity_chromatic_weight(saturation: f64) -> f64 {
     if saturation <= ACTIVITY_NEUTRAL_SATURATION {
         return 0.0;
     }
-    return 1.0;
     ((saturation - ACTIVITY_NEUTRAL_SATURATION)
         / (ACTIVITY_CHROMATIC_SATURATION - ACTIVITY_NEUTRAL_SATURATION))
         .clamp(0.0, 1.0)
@@ -1120,6 +1115,64 @@ mod tests {
         assert!(!no_color[0].contains('\x1b'));
     }
 
+    /// When [`activity_shimmer_palette`] declines to animate - no animation, no
+    /// interactivity, or no colour at all - the status must fall back to the
+    /// *static* model foreground: one `bold(model_fg)` run, byte-identical on
+    /// every frame, with no ramp, no rainbow and no background cell. The
+    /// emphasis level must not change it either: the fallback is what a
+    /// non-animating terminal shows, and the rainbow lives inside the palette
+    /// branch above it.
+    #[test]
+    fn a_terminal_that_cannot_animate_falls_back_to_the_static_model_foreground() {
+        for capabilities in [
+            // No interactivity at all, and no colour at all: the two states
+            // `TerminalCapabilities::test` can produce which also switch
+            // animation off (`animation = interactive && color != None`).
+            TerminalCapabilities::test(false, true, ColorDepth::TrueColor),
+            TerminalCapabilities::test(false, true, ColorDepth::Ansi256),
+            TerminalCapabilities::test(true, true, ColorDepth::None),
+            // And animation switched off on its own, with colour and
+            // interactivity still available (`/animations off`-style profiles).
+            TerminalCapabilities {
+                animation: false,
+                ..TerminalCapabilities::test(true, true, ColorDepth::TrueColor)
+            },
+        ] {
+            let theme = theme::test_theme_with(capabilities);
+            for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba), None] {
+                let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
+                for label in ["Working", "Thinking"] {
+                    assert_eq!(
+                        activity_shimmer_palette(&theme, &reasoning),
+                        None,
+                        "{capabilities:?}/{lab:?}: this theme must not animate"
+                    );
+                    let expected = theme.bold(&theme.model_fg(lab, label));
+                    for frame in [0, 1, 7, 19] {
+                        let rendered = activity_shimmer_label(&theme, &reasoning, label, frame, 0);
+                        assert_eq!(
+                            rendered, expected,
+                            "{capabilities:?}/{lab:?}/{label}: the static fallback must not shimmer \
+                             (frame {frame})"
+                        );
+                        assert_eq!(
+                            activity_shimmer_label(&theme, &reasoning, label, frame, 100),
+                            rendered,
+                            "{capabilities:?}/{lab:?}/{label}: max/ultra must not tint a terminal \
+                             that cannot animate"
+                        );
+                        assert!(!rendered.contains(";48;2;"), "{rendered:?}");
+                    }
+                    assert_eq!(
+                        activity_shimmer_marker(&theme, &reasoning, 3, 100, "•"),
+                        theme.model_fg(lab, "•"),
+                        "{capabilities:?}/{lab:?}: the margin dot shares the static fallback"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn activity_shimmer_contrast_survives_light_and_dark_composite_surfaces() {
         for (background, surface) in [
@@ -1370,6 +1423,42 @@ mod tests {
                                      identity may only move in luminance"
                                 );
                             }
+                            // The whole animation, not just the centre frame: the
+                            // report was `Working` shimmering orange-yellow at
+                            // `high` *while it ran*, and a single frame cannot see
+                            // a tint that only appears on some ticks. Every cell of
+                            // every frame of the cycle must stay exactly as
+                            // achromatic as the resting colour - and meanwhile the
+                            // label must still move, otherwise the fix would have
+                            // bought neutrality by freezing the shimmer.
+                            let mut moved = false;
+                            for frame in 0..activity_cycle(label) {
+                                let frame_colors = rendered_foregrounds(&activity_shimmer_label(
+                                    &theme,
+                                    &reasoning,
+                                    label,
+                                    frame,
+                                    0,
+                                ));
+                                assert_eq!(frame_colors.len(), label.chars().count());
+                                for (index, color) in frame_colors.iter().enumerate() {
+                                    assert_eq!(
+                                        chroma(*color),
+                                        resting_chroma,
+                                        "{background:?}/{depth:?}/{lab:?} {label} frame {frame} cell \
+                                         {index}: {color:?} is chromatic; a neutral identity may \
+                                         never gain hue while it shimmers"
+                                    );
+                                    if *color != resting {
+                                        moved = true;
+                                    }
+                                }
+                            }
+                            assert!(
+                                moved,
+                                "{background:?}/{depth:?}/{label}: the neutral shimmer must still \
+                                 move in luminance"
+                            );
                         } else {
                             // No identity: every ramp entry must be an exact grey,
                             // whatever the hue rotation, so the highlight can only

@@ -23,6 +23,18 @@ from .extension import (
     text_content,
     tool_result,
 )
+from .event_bus import (
+    DEFAULT_LIMITS,
+    BusEnvelope,
+    BusError,
+    BusLimits,
+    BoundedQueue,
+    EventBusKernel,
+    FieldSpec,
+    HostEventBus,
+    TopicRegistry,
+    TopicSpec,
+)
 from .protocol import (
     DEFAULT_API_VERSION,
     DEFAULT_MAX_MESSAGE_BYTES,
@@ -34,6 +46,16 @@ from .protocol import (
 
 __all__ = [
     "API_V02_FEATURES",
+    "BusEnvelope",
+    "BusError",
+    "BusLimits",
+    "BoundedQueue",
+    "DEFAULT_LIMITS",
+    "EventBusKernel",
+    "FieldSpec",
+    "HostEventBus",
+    "TopicRegistry",
+    "TopicSpec",
     "LIFECYCLE_METHODS",
     "MAX_INPUT_PROMPT_BYTES",
     "MAX_INPUT_VALUE_BYTES",

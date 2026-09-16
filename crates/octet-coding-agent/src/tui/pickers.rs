@@ -450,6 +450,7 @@ where
             // Terminal groups start collapsed so finished workers cannot bury
             // live ones; ctrl+t toggles them back on.
             collapsed: true,
+            revealed_node: None,
             state_filter: None,
         }),
     });
@@ -516,6 +517,7 @@ where
                         node_ids: snapshot.node_ids,
                         groups: snapshot.groups,
                         collapsed: true,
+                        revealed_node: None,
                         state_filter: None,
                     },
                 );
@@ -1771,6 +1773,7 @@ mod tests {
 
     struct LivePickerRefresh {
         calls: usize,
+        refreshed: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
     fn refresh_live_picker(
@@ -1778,6 +1781,9 @@ mod tests {
     ) -> Pin<Box<dyn Future<Output = SubagentPickerSnapshot> + '_>> {
         Box::pin(async move {
             context.calls += 1;
+            if let Some(refreshed) = context.refreshed.take() {
+                let _ = refreshed.send(());
+            }
             SubagentPickerSnapshot {
                 title: "Subagents · refreshed".into(),
                 items: vec!["beta".into(), "gamma".into()],
@@ -1803,8 +1809,9 @@ mod tests {
     #[tokio::test]
     async fn live_subagent_picker_refreshes_and_keeps_the_stable_selection() {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (refreshed_tx, refreshed_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            refreshed_rx.await.expect("picker refreshed before confirmation");
             sender
                 .send(Ok(Event::Key(KeyEvent::new(
                     KeyCode::Enter,
@@ -1815,7 +1822,7 @@ mod tests {
         });
         let mut input = ReceiverStream::new(receiver);
         let mut shell = InteractiveShell::test_shell();
-        let mut refresh = LivePickerRefresh { calls: 0 };
+        let mut refresh = LivePickerRefresh { calls: 0, refreshed: Some(refreshed_tx) };
         let selected = subagent_picker(
             &mut shell,
             &mut input,

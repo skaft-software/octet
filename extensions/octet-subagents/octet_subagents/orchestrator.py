@@ -748,12 +748,10 @@ class Orchestrator:
             self._publish(publish)
             return {"text": text, "notifications": []}
         if verb == "open-all":
-            with self._lock:
-                workers = list(state.workers.values())
-            return self.open_all(
-                owner=state.owner,
-                workers=workers,
-                arguments=arguments[1:],
+            raise SubagentError(
+                "open-all requires an owner-bound command and a fresh agent/list; "
+                "the cached fallback cannot authorize a session launch",
+                code="owner_required",
             )
         if verb in {"wait", "reattach"} and len(arguments) <= 2:
             # The cached fallback holds no live agent_sessions client, so it can
@@ -829,6 +827,14 @@ class Orchestrator:
             "notifications": [],
         }
 
+    def open_all_owned(
+        self, client: Any, owner: Owner, arguments: Sequence[Any], cancellation: Any
+    ) -> Dict[str, Any]:
+        self.status(client, owner, {}, cancellation)
+        with self._lock:
+            workers = list(self._owners[owner.stable_key].workers.values())
+        return self.open_all(owner=owner, workers=workers, arguments=arguments)
+
     def open_all(
         self,
         *,
@@ -838,18 +844,16 @@ class Orchestrator:
         environment: Optional[Mapping[str, str]] = None,
         launcher: Optional[Callable[..., Any]] = None,
     ) -> Dict[str, Any]:
-        """Open one interactive octet pane per running worker plus the parent.
+        """Report blocked pane plans until atomic host writer ownership exists.
 
-        The escape hatch is deliberately read-only with respect to orchestration
-        state: it creates panes and never writes worker state, so the normal
-        read-only parent-controlled path is untouched and the command is safe to
-        re-run. Planning failures (a missing multiplexer, an unsafe identifier,
-        the pane cap) raise before anything is created.
+        The normal read-only parent-controlled path is untouched. Host launchability
+        cannot authorize execution. Planning failures (a missing multiplexer, an
+        unsafe identifier, the pane cap) raise before anything is created.
         """
         if len(arguments) > 1:
             raise SubagentError("Usage: /subagents open-all tmux|herdr")
         multiplexer = arguments[0] if arguments else None
-        running = [worker for worker in workers if worker.active]
+        candidates = [worker for worker in workers if worker.active or worker.launchable]
         # Session-owned workers that are not attached to any run get no pane, and
         # they are named in the report: opening a stale pane would target the
         # wrong session, and silently dropping the row would hide a worker that is
@@ -857,12 +861,12 @@ class Orchestrator:
         skipped = [
             skipped_worker_row(worker)
             for worker in workers
-            if worker.detached or worker.awaiting_approval
+            if worker not in candidates
         ]
         plan = plan_open_all(
             multiplexer=multiplexer,
             parent_session_id=owner.host_session_id,
-            workers=running,
+            workers=candidates,
             workspace=owner.workspace,
             environment=environment,
         )
@@ -875,10 +879,8 @@ class Orchestrator:
                     "level": "info",
                     "title": "Subagent open-all left session-owned workers unopened",
                     "message": (
-                        "%d worker(s) are still owned by this parent session but are "
-                        "not attached to any run (or are parked at the approval "
-                        "boundary), so no pane was opened for them. Reattach with "
-                        "/subagents wait, then re-run open-all." % len(skipped)
+                        "%d retained worker(s) were not opened; see their exact "
+                        "host refusal or reattach/approval reason." % len(skipped)
                     ),
                 }
             )
@@ -888,17 +890,17 @@ class Orchestrator:
                     "level": "warning",
                     "title": "Subagent open-all stopped early",
                     "message": "Some panes were not opened; nothing created was destroyed. "
-                    "Re-run the command after fixing the reported cause.",
+                    "Inspect existing panes before retrying to avoid duplicate writers.",
                 }
             )
         elif outcome.blocked:
             notifications.append(
                 {
                     "level": "warning",
-                    "title": "Subagent open-all is missing a host primitive",
+                    "title": "Subagent open-all has blocked panes",
                     "message": (
-                        "%d running worker pane(s) were planned but not opened: the "
-                        "extension only holds a path-free opaque session reference."
+                        "%d pane(s) were planned but not opened; see the per-pane "
+                        "ownership or host launchability reason."
                         % len(outcome.blocked)
                     ),
                 }
@@ -1108,6 +1110,9 @@ class Orchestrator:
             for agent_id in stale_ids:
                 worker = state.workers[agent_id]
                 worker.host_present = False
+                worker.launchable = False
+                worker.launch_blocked = None
+                worker.live_task = None
                 # A new owning run or host-side cleanup may retire the live
                 # record before the extension gets another list/wait call. Keep
                 # the last bounded summary/error and sibling roster as terminal
@@ -1210,6 +1215,10 @@ class Orchestrator:
         self, worker: Worker, record: Mapping[str, Any]
     ) -> None:
         worker.host_present = True
+        worker.launchable = record.get("launchable") is True
+        worker.live_task = record.get("live_task") if type(record.get("live_task")) is bool else None
+        blocked = record.get("launch_blocked")
+        worker.launch_blocked = sanitize_document(blocked, 512) if isinstance(blocked, str) and blocked else None
         # A detached worker whose record the host reports again has been
         # reattached by the owning session: clear the detachment, count it, and
         # drop exactly the diagnostic the extension wrote when it detached.
@@ -1301,6 +1310,7 @@ class Orchestrator:
         worker.started_at_ms = started_at_ms
         worker.completed_at_ms = completed_at_ms
         session = record.get("session")
+        worker.session = None
         if (
             isinstance(session, str)
             and session
