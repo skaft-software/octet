@@ -517,7 +517,8 @@ fn activity_linear_mix(source: Rgb, destination: Rgb, strength_percent: u16) -> 
     let channel = |source: u8, destination: u8| {
         activity_srgb_channel(
             activity_linear_channel(source)
-                + (activity_linear_channel(destination) - activity_linear_channel(source)) * strength,
+                + (activity_linear_channel(destination) - activity_linear_channel(source))
+                    * strength,
         )
     };
     (
@@ -699,7 +700,8 @@ fn activity_shimmer_color(
 }
 
 fn activity_shimmer_foreground(theme: &OctetTheme, color: Rgb, text: &str) -> String {
-    if theme.capabilities().color == ColorDepth::Ansi16 && color.0 == color.1 && color.1 == color.2 {
+    if theme.capabilities().color == ColorDepth::Ansi16 && color.0 == color.1 && color.1 == color.2
+    {
         // RGB-nearest across all sixteen entries can turn grey into magenta:
         // #a7a7a7 is closer to the nominal bright-magenta entry than either
         // neighbouring grey. A neutral activity must use only neutral entries.
@@ -1398,9 +1400,15 @@ mod tests {
                                     assert_eq!(chroma(colors[0]), 0.0, "{rendered:?}");
                                 }
                                 if frame.abs_diff(peak_frame) > ACTIVITY_SWEEP_HALF as usize {
-                                    assert_eq!(rendered, resting, "dot must rest outside the sweep");
+                                    assert_eq!(
+                                        rendered, resting,
+                                        "dot must rest outside the sweep"
+                                    );
                                 } else {
-                                    assert_ne!(rendered, resting, "dot must pulse inside the sweep");
+                                    assert_ne!(
+                                        rendered, resting,
+                                        "dot must pulse inside the sweep"
+                                    );
                                     assert!(
                                         (current - baseline_luminance).abs()
                                             <= (peak_luminance - baseline_luminance).abs(),
@@ -1413,7 +1421,10 @@ mod tests {
                             assert_eq!(render(cycle), resting);
                             // The dot peaks before the first letter, not on an
                             // independent spinner/breathing clock.
-                            assert_eq!(centre_frame(0) - peak_frame, ACTIVITY_LABEL_OFFSET as usize);
+                            assert_eq!(
+                                centre_frame(0) - peak_frame,
+                                ACTIVITY_LABEL_OFFSET as usize
+                            );
                         }
                     }
                 }
@@ -1468,7 +1479,10 @@ mod tests {
                         }
                         assert_eq!(
                             collapsed_reasoning_lines_at(
-                                &theme, &reasoning, activity_cycle(label) - 1, 0,
+                                &theme,
+                                &reasoning,
+                                activity_cycle(label) - 1,
+                                0,
                             ),
                             rest
                         );
@@ -1557,7 +1571,9 @@ mod tests {
                         assert!(!rendered.contains("48;"));
                         let foregrounds = codes(rendered);
                         assert!(
-                            foregrounds.iter().all(|code| matches!(code, 30 | 37 | 90 | 97)),
+                            foregrounds
+                                .iter()
+                                .all(|code| matches!(code, 30 | 37 | 90 | 97)),
                             "{background:?}/{label} frame {frame}: neutral activity emitted \
                              non-neutral ANSI16 codes {foregrounds:?} in {rendered:?}"
                         );
@@ -1669,7 +1685,11 @@ mod tests {
         // at least 0.30 * 0.84 = 0.25 of that separation even after the encoder.
         const MIN_LUMINANCE_FRACTION_OF_SEPARATION: f64 = 0.20;
 
-        let lab = crate::tui::theme::classify_model_identity("gpt-6-astra", "gpt-6-astra", "openai-codex");
+        let lab = crate::tui::theme::classify_model_identity(
+            "gpt-6-astra",
+            "gpt-6-astra",
+            "openai-codex",
+        );
         assert_eq!(
             lab,
             ModelLab::OpenAi,
@@ -1715,17 +1735,12 @@ mod tests {
                     // The most chromatic colour the plain (untinted) palette can
                     // show at any cell. An unknown identity's placeholder accent
                     // may be chromatic: the ramp is still forbidden to *add* any.
-                    let palette_chroma = chroma(quantized(&theme, baseline))
-                        .max(chroma(quantized(&theme, sweep)));
+                    let palette_chroma =
+                        chroma(quantized(&theme, baseline)).max(chroma(quantized(&theme, sweep)));
 
                     for label in ["Working", "Thinking"] {
-                        let rendered = activity_shimmer_label(
-                            &theme,
-                            &reasoning,
-                            label,
-                            centre_frame(0),
-                            0,
-                        );
+                        let rendered =
+                            activity_shimmer_label(&theme, &reasoning, label, centre_frame(0), 0);
                         let colors = rendered_foregrounds(&rendered);
                         assert_eq!(colors.len(), label.chars().count(), "{rendered:?}");
                         if lab == Some(ModelLab::OpenAi) {
@@ -1748,11 +1763,7 @@ mod tests {
                             let mut moved = false;
                             for frame in 0..activity_cycle(label) {
                                 let frame_colors = rendered_foregrounds(&activity_shimmer_label(
-                                    &theme,
-                                    &reasoning,
-                                    label,
-                                    frame,
-                                    0,
+                                    &theme, &reasoning, label, frame, 0,
                                 ));
                                 assert_eq!(frame_colors.len(), label.chars().count());
                                 for (index, color) in frame_colors.iter().enumerate() {
@@ -1779,7 +1790,8 @@ mod tests {
                             // take chroma away from the theme's placeholder accent.
                             let ramp = ActivityRamp::of(label).expect("status ramp");
                             for step in 0..ACTIVITY_RAMP_ENTRIES {
-                                let entry = ramp.accent(ActivityIdentity { color: None }, step, 0.5);
+                                let entry =
+                                    ramp.accent(ActivityIdentity { color: None }, step, 0.5);
                                 assert_eq!(
                                     chroma(entry),
                                     0.0,
@@ -1888,8 +1900,9 @@ mod tests {
                 }
                 let first_hue = hue_degrees(centres[0]);
                 let second_hue = hue_degrees(centres[1]);
-                let between =
-                    (first_hue - second_hue).abs().min(360.0 - (first_hue - second_hue).abs());
+                let between = (first_hue - second_hue)
+                    .abs()
+                    .min(360.0 - (first_hue - second_hue).abs());
                 assert!(
                     between <= HUE_TOLERANCE_DEGREES,
                     "{background:?}/{lab:?}: the two status labels must share one hue family - the \
@@ -1990,8 +2003,8 @@ mod tests {
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
                 background,
             );
-            let reasoning = AssistantBlock::streaming_reasoning("")
-                .with_model_lab(Some(ModelLab::OpenAi));
+            let reasoning =
+                AssistantBlock::streaming_reasoning("").with_model_lab(Some(ModelLab::OpenAi));
             let model = theme
                 .model_rgb(Some(ModelLab::OpenAi))
                 .expect("the custom theme resolves the lab colour");
@@ -2137,7 +2150,8 @@ mod tests {
                 );
                 assert!(
                     cycle
-                        >= label.width() + 2 * ACTIVITY_SWEEP_HALF as usize
+                        >= label.width()
+                            + 2 * ACTIVITY_SWEEP_HALF as usize
                             + ACTIVITY_SWEEP_REST_FRAMES,
                     "{label}: a {cycle}-frame cycle leaves no rest gap"
                 );
@@ -2447,8 +2461,7 @@ mod tests {
         assert_ne!(&colors[0], colors.last().expect("last shimmer colour"));
         assert!(!rendered.contains("\x1b[48;"), "{rendered:?}");
 
-        let thinking =
-            activity_shimmer_label(&theme, &reasoning, "Thinking", centre_frame(0), 0);
+        let thinking = activity_shimmer_label(&theme, &reasoning, "Thinking", centre_frame(0), 0);
         let thinking_colors = foreground_color_codes(&thinking);
         let expected = activity_blend(shadow, model, ACTIVITY_THINKING_SWEEP_DEPTH);
         assert_eq!(

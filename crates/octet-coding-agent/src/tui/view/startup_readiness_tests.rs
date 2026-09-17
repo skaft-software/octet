@@ -236,7 +236,9 @@ fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
                 assert_unbranded(&frame);
                 assert_eq!(frame.len(), usize::from(height));
                 assert!(frame.iter().any(|row| row.contains(CURSOR_MARKER)));
-                assert!(frame.iter().all(|row| visible_width(row) <= usize::from(width)));
+                assert!(frame
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
                 assert!(plain(&frame).contains(draft));
                 assert!(!plain(&frame).contains("extensions"));
                 assert!(!plain(&frame).contains("discovering"));

@@ -1,3 +1,7 @@
+//! Windows-only process-control qualification fixtures for `BashTool`.
+//!
+//! The fixtures are inert on non-Windows hosts: the whole crate is `cfg`-gated
+//! so a qualification run on another platform builds them as an empty target.
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};

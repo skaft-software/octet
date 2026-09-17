@@ -257,6 +257,86 @@ runs in this shell session; each target passes on a clean process table, and no
 product code path has been identified. It is recorded as an unresolved
 environment/harness interaction rather than a passing or failing claim.
 
+#### Wave-15 usage defects, roster repair and integration seams
+
+These reports came from running the candidate binary or from the wave's
+integration receipts under `/tmp/octet-final/`; each row states what is fixed in
+the tree at this reconciliation and what is not. **No wave-15 Rust compile or
+test run is green:** all four bounded checks (`w15-check.log`,
+`w15-check2.log`, `w15-check3.log`, `w15-check4.log`, 18:01–18:11Z) report at
+least one `101` exit at a crate/target they tested, and the wave-15 verification
+suite (`/tmp/octet-final/w15-verify-once.sh` → `w15-verify.status`) had not been
+run when this section was written.
+
+| Report | Root cause | Fix + state |
+| --- | --- | --- |
+| Two worker sessions ended at the subagent turn ceiling on 2026-09-16 | `extensions/octet-subagents/octet_subagents/model.py:21` caps `MAX_TURNS = 256` (advertised as the extension schema maximum; pre-existing since `afbc731e`, not introduced this wave). The kernel session had finished its scope when it stopped and left a complete report (`/tmp/octet-final/kernel.md`); the first extensions session produced **no report**, so its uncommitted leftovers were read, API-audited and kept by a replacement worker, which added one extension→host lease test (`/tmp/octet-final/extensions.md`). | **Not fixed** (the cap is the declared schema maximum). The authored replacements still need a parent Rust run; nothing in the wave-15 compile receipts covers them. |
+| The live subagent roster rendered twice: once as the transcript block and again as a pinned chrome strip | `ShellChrome.subagents` drew its own roster above the transcript, so the same workers appeared in two surfaces, and the chrome copy froze into native scrollback as immutable history | **Fixed in the tree.** `render_subagent_activity` and its plumbing (field, truncation, row accounting, startup initialiser) are deleted from `tui/view/shell_chrome.rs`; the transcript block is the single surface (`tui/view/transcript_render.rs` comment), and `native_scrollback.rs::pending_tool_tail` starts at `mutable_tail_start(state)` so an active roster is never committed as a native-history row. Authored coverage: `subagent_stability_tests.rs::live_strip_is_active_only_and_settles_in_the_original_transcript_block` (one `Subagents`/worker occurrence per frame, no roster rows in the composer chrome, also 80 notices later) and `an_active_roster_never_commits_into_native_history`. The tui report also named `a_rendered_frame_shows_the_roster_exactly_once`, which does **not** exist; the two named tests carry that assertion instead. |
+| A live roster froze when the reader scrolled back into history | The pinned chrome strip was committed into native scrollback, so scrolling back showed a stale roster and a live update could replay or relocate history | **Fixed in the tree.** The roster lives in the mutable tail and updates in place; `scroll_regressions.rs::worker_roster_is_transcript_material_at_the_live_tail_and_in_history` plus `subagent_stability_tests.rs::live_roster_rows_update_in_place_while_the_reader_reads_history` assert that a same-row update changes exactly one visible cell, a row-count change never sets `follow_tail`, and the reader's anchored row stays on screen. Unexecuted. |
+| `completed with warnings` reached the transcript | `RunOutcome::CompletedWithWarnings` rendered warning text for per-call tool failures that already own their own blocks | **Fixed in the tree.** `tui/view/outcome_render.rs` folds `CompletedWithWarnings` into `Completed` (same `✓`, same `completed · <duration> · <rate> tok/s`, same success role); `completion_with_warnings_text`/`warning_detail` are deleted; the selection/copy projection uses `completion_text`. Authored coverage: `completed_variants_render_byte_identically_and_never_warn`, `running_subagents_detail_appears_only_under_a_completed_turn`, and `view/tests.rs::failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcome`. |
+| Live workers disappeared behind a completed outcome | After warnings left the transcript, a completed turn with running children showed no pointer to them | **Replaced** by one subdued hanging-indent line under completed outcomes only: `subagents are running; inspect them in the /subagents menu.` (`SUBAGENTS_RUNNING_DETAIL`, `outcome_render.rs`), driven by `ShellState::subagents_running_for_outcome` and one `touch_outcome_for_roster_transition` per active↔settled transition. **Remaining limit:** plain/print mode still maps `CompletedWithWarnings` (`modes/plain.rs::outcome_text`), a different owner and deliberately untouched. |
+| `/subagents` header changed with live worker counts | The picker title was built from `status.label`, so it moved as workers came and went | **Fixed in the tree.** The extension presentation publishes a stable `SURFACE_TITLE = "Subagents"` (`extensions/octet-subagents/octet_subagents/presentation.py:51`), the fixture collection title is `Subagents`, and `modes/interactive.rs::subagent_view_entries_from_presentation` sources the header from the collection title (blank → `Subagents`); `subagent_panel_title` is deleted and counts stay in rows/status. |
+| The worker model id was truncated in the roster grid | `SUBAGENT_MODEL_MAX_WIDTH` plus a model ellipsis path shortened the model cell | **Fixed in the tree.** The constant and ellipsis are gone; worker/state/model are mandatory and untruncated, optional columns drop first, and the compact fallback line prints the full model. Authored coverage: `the_model_identifier_is_printed_in_full_and_never_ellipsized` and `grid_header_cells_align_with_the_worker_column_on_both_profiles` (the header prefix width was also corrected). |
+
+**Wave-15 compile seams (parent integration).** The first workspace check
+(`w15-check.log`, 18:01Z) failed with 14 errors: eight in the new untracked
+`sexy-tui-rs` modules and six in the `octet-ai` library. The parent fixed the
+six `octet-ai` seams, all verified present in the tree today:
+
+1. `crates/octet-ai/src/faux.rs:27` imported `Model` from `crate::types` → now `crate::catalog::Model`.
+2. `crates/octet-ai/src/protocol/openai_chat.rs`'s `Response` literal lacked the new `deferred` field → `deferred: None` at `:1455`.
+3. `crates/octet-ai/src/auth.rs::first_present_variable` needed an explicit `'a` lifetime tying `variables` to the returned `&str`.
+4. `crates/octet-ai/src/client.rs::sanitize_ai_error` needed an `AiError::Deferred(_)` arm (now at `:490`).
+5. `crates/octet-ai/src/protocol/anthropic.rs::build_request` borrowed `tools_opt` after the request literal moved it → the tools-present flag is captured before ownership (`:766-769`).
+6. `crates/octet-ai/src/protocol/pi_messages.rs::assistant_part_value`'s `drop_unsupported` closure needed `mut` (`let mut drop_unsupported`).
+
+**Misplaced Anthropic test module.** `crates/octet-ai/src/protocol/anthropic.rs`
+carries two test modules (`mod tests` at `:1374`, `mod fixture_tests` at
+`:2200`); `w15-check2.log` (18:07Z) reported 71 unresolved-item errors from
+`mod fixture_tests` (first at `anthropic.rs:2282`, e.g. `ToolChoice`, `Request`,
+`Message`, `make_test_model`) because that module had been moved without its
+imports. The module head now has explicit `use super::{bounded_refusal_explanation,
+decode_stream_event}`, `use super::MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES` and
+`use crate::types::{…}` imports, and the later checks no longer report them.
+
+**Three `octet-agent` library seams, fixed during integration.**
+`w15-check2.log` (18:07Z) reported `octet-agent` lib 8 errors / lib-test 9:
+
+1. `crates/octet-agent/src/agent.rs:72` asked `tools::deferred` for
+   `DeferredPollSource`, `DeferredRunResumed` and `DeferredRunSuspended`; the
+   source lives in `agent.rs` (`AiDeferredPollSource`) and the event payloads in
+   `events.rs` (`DeferredRunSuspended`/`DeferredRunResumed`). The import list no
+   longer names them.
+2. `crates/octet-agent/src/tools/deferred.rs::UnknownPollReplacement` lacked
+   `Serialize`/`Deserialize` for `DeferredPollIntent.discard_unknown_poll`; the
+   derives are present now.
+3. The error format/match sites (`agent.rs::{public_ai_error_diagnostic,
+   provider_failure_phase, …}`) were non-exhaustive for
+   `AiError::Deferred`/`AgentError::{Deferred, DeferredSuspended,
+   DeferredSuspensionRefused}`; arms now exist (`agent.rs:287-290`, `:579-596`,
+   `:606+`). The `model()` helper at `agent.rs:13201` also resolves the call the
+   log reported at `:14005`.
+
+All nine seams and the Anthropic module are **fixed during parent integration,
+not yet compile-verified**: the last two checks still report `ai exit=101` and
+`agent exit=101` for test targets (`w15-check3.log`, `w15-check4.log`), and no
+later workspace check exists.
+
+**Still red in the tree at this reconciliation (no later green check exists):**
+the new `sexy-tui-rs` modules reported in `w15-check.log` —
+`alt_screen.rs:61/142/180` (`last_size: Option<(u16, u16)>` compared to a
+`usize` height), `layout.rs:355/365` (`#[derive(Debug)]` on a state holding
+`Rc<dyn Fn()>`), `layout.rs:1190/1461/1513` (`Vec<&StackLayoutEntry>` passed
+where `&[StackLayoutEntry]` is declared), `mouse.rs:185/204` (`Debug` derive
+over `&dyn Component`, which does not implement `Debug`), plus the
+`layout.rs:1757`/`mouse.rs:543` borrows; and the test targets
+`octet-ai/tests/deferred.rs:311/323` (`&ModelSpec` where `&Model` is expected),
+`octet-agent/tests/tool_result_usage.rs:112` (missing the now-required
+`StreamEvent::ToolCallEnd.argument_error`) and
+`octet-agent/tests/deferred_runs.rs:15` (imports the private
+`octet_agent::agent::DeferredResumeIntent`). These are not fixed here; they need
+the build/test owners.
+
 ## Historical receipt boundary
 
 **Superseded rows in the historical passes below (do not read as current).**

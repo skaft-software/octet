@@ -1,12 +1,13 @@
 #![allow(missing_docs)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use octet_agent::tools::deferred::{DeferredRunLimits, DeferredRunRecord};
 use octet_agent::{EntryId, EntryValue, Session};
 use octet_ai::{EndpointId, Message, ModelId, Protocol, UserPart};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -116,6 +117,9 @@ pub(crate) struct SessionCatalogInspection {
     pub catalog: SessionCatalogEntry,
     pub usage_records: Vec<SessionUsageRecord>,
     pub usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
+    /// Replaceable deferred-run state replayed by the same validation normal
+    /// resume applies, in stable operation order.
+    pub deferred_run_records: Vec<DeferredRunRecord>,
 }
 
 /// Small user-owned metadata kept next to, but separate from, append-only
@@ -657,6 +661,9 @@ enum SummaryRecord {
     Usage {
         record: SummaryUsageRecord,
     },
+    DeferredRun {
+        record: DeferredRunRecord,
+    },
 }
 
 /// Derive the oldest user title on the active branch, if one exists.
@@ -1051,6 +1058,69 @@ struct TranscriptSummary {
     message_count: usize,
     usage_records: Vec<SessionUsageRecord>,
     usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
+    deferred_run_records: Vec<DeferredRunRecord>,
+}
+
+/// Replay of the deferred-run replaceable session state.
+///
+/// Mirrors `octet_agent::tools::deferred::DeferredRunStore::restore` (the
+/// validation `Session::open_read_only` applies) so the lightweight mirror
+/// cannot bless a file a normal resume rejects: every record is validated
+/// against the store's default hard bounds, a terminal record is never followed
+/// by another record for the same operation, and generations only move forward.
+/// The last record per operation is authoritative, exactly like the store, and
+/// retention is bounded by the store's own `max_runs` bound.
+#[derive(Default)]
+struct SummaryDeferredRuns {
+    records: BTreeMap<String, DeferredRunRecord>,
+    terminal: VecDeque<String>,
+    limits: DeferredRunLimits,
+}
+
+impl SummaryDeferredRuns {
+    fn restore(&mut self, record: DeferredRunRecord) -> Result<(), String> {
+        record
+            .validate(&self.limits)
+            .map_err(|error| error.to_string())?;
+        if let Some(existing) = self.records.get(&record.operation_id) {
+            if existing.is_terminal() {
+                return Err("a terminal deferred record may not be followed".to_owned());
+            }
+            if record.generation <= existing.generation {
+                return Err(format!(
+                    "deferred run {} generation regressed from {} to {}",
+                    record.operation_id, existing.generation, record.generation
+                ));
+            }
+        }
+        let operation_id = record.operation_id.clone();
+        let terminal = record.is_terminal();
+        if !self.records.contains_key(&operation_id) && self.records.len() >= self.limits.max_runs {
+            let mut evicted = false;
+            while let Some(oldest) = self.terminal.pop_front() {
+                if self.records.remove(&oldest).is_some() {
+                    evicted = true;
+                    break;
+                }
+            }
+            if !evicted {
+                return Err(format!(
+                    "{} deferred runs retained (limit {})",
+                    self.records.len(),
+                    self.limits.max_runs
+                ));
+            }
+        }
+        if terminal {
+            self.terminal.push_back(operation_id.clone());
+        }
+        self.records.insert(operation_id, record);
+        Ok(())
+    }
+
+    fn into_records(self) -> Vec<DeferredRunRecord> {
+        self.records.into_values().collect()
+    }
 }
 
 /// Replay only the graph metadata needed by the session picker and serve
@@ -1082,6 +1152,7 @@ fn summarize_session_with_usage(
     let mut checkpoints = Vec::<(EntryId, EntryId, usize)>::new();
     let mut usage_records = Vec::<SessionUsageRecord>::new();
     let mut usage_uncertainty_records = Vec::new();
+    let mut deferred_runs = SummaryDeferredRuns::default();
     let mut line_bytes = Vec::new();
     let mut observed_bytes = 0usize;
     let mut line_no = 0usize;
@@ -1310,6 +1381,14 @@ fn summarize_session_with_usage(
                     usage_uncertainty_records.push(record);
                 }
             }
+            SummaryRecord::DeferredRun { record } => {
+                // Replaceable state, not model-visible context: the record still
+                // has to be valid and monotonic, and the last one per operation
+                // wins, exactly as the durable store replays it.
+                deferred_runs
+                    .restore(record)
+                    .map_err(|message| corrupt_summary(line_no, message))?;
+            }
             SummaryRecord::Usage { record } => {
                 if let SummaryUsageKind::AssistantTurn { assistant } = &record.kind {
                     let valid_assistant = entries
@@ -1391,6 +1470,7 @@ fn summarize_session_with_usage(
         message_count,
         usage_records,
         usage_uncertainty_records,
+        deferred_run_records: deferred_runs.into_records(),
     })
 }
 
@@ -1482,7 +1562,9 @@ pub(crate) fn index_session_entries(path: &Path) -> anyhow::Result<Vec<IndexedEn
             .checked_add(bytes_read)
             .ok_or_else(|| anyhow::anyhow!("session read length overflow"))?;
         if observed_bytes > MAX_SESSION_FILE_BYTES {
-            anyhow::bail!("session exceeds the {MAX_SESSION_FILE_BYTES}-byte limit while being read");
+            anyhow::bail!(
+                "session exceeds the {MAX_SESSION_FILE_BYTES}-byte limit while being read"
+            );
         }
         line_no += 1;
         if line_no > MAX_SESSION_RECORDS {
@@ -1544,7 +1626,10 @@ fn indexed_entry_from_record(record: &serde_json::Value) -> Option<IndexedEntry>
             break;
         }
     }
-    let text = text.chars().take(MAX_INDEXED_ENTRY_CHARS).collect::<String>();
+    let text = text
+        .chars()
+        .take(MAX_INDEXED_ENTRY_CHARS)
+        .collect::<String>();
     if text.trim().is_empty() {
         return None;
     }
@@ -1748,7 +1833,9 @@ fn collect_ephemeral_accounting(
                 .saturating_add(record.session_cost_microdollars);
             total.has_uncertain_usage |= record.has_uncertain_usage;
             total.usage_records.extend(record.usage_records);
-            total.usage_uncertainty_records.extend(record.usage_uncertainty_records);
+            total
+                .usage_uncertainty_records
+                .extend(record.usage_uncertainty_records);
         } else {
             combined = Some(record);
         }
@@ -2025,7 +2112,10 @@ impl SessionStore {
             anyhow::bail!("ephemeral accounting ledger exceeds its byte limit");
         }
         if !existing.is_empty() && existing.last() != Some(&b'\n') {
-            let tail = existing.iter().rposition(|byte| *byte == b'\n').map_or(0, |i| i + 1);
+            let tail = existing
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |i| i + 1);
             if serde_json::from_slice::<EphemeralAccountingRecord>(&existing[tail..]).is_ok() {
                 file.write_all(b"\n")?;
                 existing.push(b'\n');
@@ -2035,7 +2125,10 @@ impl SessionStore {
             }
         }
         if let Some(id) = &record.accounting_id {
-            for prior in existing.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+            for prior in existing
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
                 let mut prior: EphemeralAccountingRecord = serde_json::from_slice(prior)?;
                 prior.retain_accounting_uncertainty();
                 if prior.accounting_id.as_ref() == Some(id) {
@@ -2091,9 +2184,12 @@ impl SessionStore {
             summary.usage_records += record.usage_records.len();
             summary.uncertainty_records += record.usage_uncertainty_records.len();
             for usage in &record.usage_records {
-                summary.input_tokens = summary.input_tokens.saturating_add(usage.usage.input_tokens);
-                summary.output_tokens =
-                    summary.output_tokens.saturating_add(usage.usage.output_tokens);
+                summary.input_tokens = summary
+                    .input_tokens
+                    .saturating_add(usage.usage.input_tokens);
+                summary.output_tokens = summary
+                    .output_tokens
+                    .saturating_add(usage.usage.output_tokens);
             }
         }
         Ok(summary)
@@ -2245,6 +2341,7 @@ impl SessionStore {
             },
             usage_records: transcript.usage_records,
             usage_uncertainty_records: transcript.usage_uncertainty_records,
+            deferred_run_records: transcript.deferred_run_records,
         })
     }
 
@@ -2619,9 +2716,11 @@ impl SessionStore {
             return Err(DelegatedHandleRefusal::MalformedHandle.into());
         }
         let delegation_directory = self.dir.join(DELEGATION_DIRECTORY);
-        let resolved =
-            octet_agent::delegation::resolve_launchable_child_session(&delegation_directory, handle)
-                .map_err(|error| anyhow::Error::from(classify_delegated_handle_error(&error)))?;
+        let resolved = octet_agent::delegation::resolve_launchable_child_session(
+            &delegation_directory,
+            handle,
+        )
+        .map_err(|error| anyhow::Error::from(classify_delegated_handle_error(&error)))?;
         if let Some(status) = live_worker_state(&resolved.status) {
             return Err(DelegatedHandleRefusal::LiveInOwningProcess { status }.into());
         }
@@ -2973,14 +3072,15 @@ mod tests {
                 content: vec![UserPart::Text("ephemeral prompt".into())],
             })))
             .unwrap();
-        session.append(EntryValue::Message(Message::Assistant(
-            octet_ai::AssistantMessage {
-                content: vec![octet_ai::AssistantPart::Text("ephemeral answer".into())],
-                model: ModelId("custom/model".into()),
-                protocol: Protocol::OpenAiChat,
-            },
-        )))
-        .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(
+                octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::Text("ephemeral answer".into())],
+                    model: ModelId("custom/model".into()),
+                    protocol: Protocol::OpenAiChat,
+                },
+            )))
+            .unwrap();
         session
             .record_terminal_gate_usage(
                 EndpointId("custom".into()),
@@ -2991,7 +3091,10 @@ mod tests {
                     total_tokens: 50,
                     ..octet_ai::Usage::default()
                 },
-                Some(octet_ai::Cost { total: 7, ..octet_ai::Cost::default() }),
+                Some(octet_ai::Cost {
+                    total: 7,
+                    ..octet_ai::Cost::default()
+                }),
                 Some(true),
             )
             .unwrap();
@@ -3055,7 +3158,10 @@ mod tests {
 
         let summary = store.ephemeral_accounting_summary().unwrap();
         assert_eq!(summary.runs, 2);
-        assert!(summary.has_uncertain_usage, "one uncertain run keeps the total uncertain");
+        assert!(
+            summary.has_uncertain_usage,
+            "one uncertain run keeps the total uncertain"
+        );
 
         // The transcript can now be discarded: accounting still answers.
         std::fs::remove_file(&transcript).unwrap();
@@ -3171,7 +3277,10 @@ mod tests {
             assert_eq!(record.usage_uncertainty_records.len(), 1);
             assert!(!transcript_root.exists());
             let summary = store.ephemeral_accounting_summary().unwrap();
-            assert_eq!(summary.runs, 1, "one invocation, not one record per RPC session");
+            assert_eq!(
+                summary.runs, 1,
+                "one invocation, not one record per RPC session"
+            );
             assert_eq!(summary.input_tokens, 40 * count as u64);
             assert_eq!(summary.usage_records, count);
         }
@@ -3189,18 +3298,35 @@ mod tests {
         write_ephemeral_transcript(&directory.join("first.jsonl"), true);
         write_ephemeral_transcript(&directory.join("second.jsonl"), false);
         // A directory in place of the ledger fails deterministically, even as root.
-        let ledger = store.dir().join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+        let ledger = store
+            .dir()
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
             .join(EPHEMERAL_ACCOUNTING_FILE);
         std::fs::create_dir_all(&ledger).unwrap();
-        begin_ephemeral_run(transcript_root.clone(), accounting_root.clone(), workspace.clone());
+        begin_ephemeral_run(
+            transcript_root.clone(),
+            accounting_root.clone(),
+            workspace.clone(),
+        );
         let error = finish_ephemeral_run().unwrap_err();
-        assert!(error.to_string().contains("accounting-only recovery retained"), "{error:#}");
-        assert!(error.chain().count() > 1, "original append failure must be retained");
-        assert!(!directory.exists(), "no conversation survives failed accounting");
+        assert!(
+            error
+                .to_string()
+                .contains("accounting-only recovery retained"),
+            "{error:#}"
+        );
+        assert!(
+            error.chain().count() > 1,
+            "original append failure must be retained"
+        );
+        assert!(
+            !directory.exists(),
+            "no conversation survives failed accounting"
+        );
         let recovery = transcript_root.join(EPHEMERAL_ACCOUNTING_RECOVERY);
-        let bytes = octet_agent::secure_fs::read_private_file_bounded(
-            &recovery, MAX_SESSION_FILE_BYTES,
-        ).unwrap();
+        let bytes =
+            octet_agent::secure_fs::read_private_file_bounded(&recovery, MAX_SESSION_FILE_BYTES)
+                .unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap();
         assert!(!text.contains("ephemeral prompt"));
         assert!(!text.contains("ephemeral answer"));
@@ -3685,16 +3811,29 @@ mod tests {
                 index_session_entries(path)
             })
             .unwrap();
-        assert_eq!(scans.get(), 2, "a cold index reads every session exactly once");
+        assert_eq!(
+            scans.get(),
+            2,
+            "a cold index reads every session exactly once"
+        );
         assert_eq!(cold.scanned_sessions, 2);
         assert!(cold.index_changed);
         assert_eq!(cold.hits.len(), 2);
         assert!(cold.hits.iter().any(|hit| hit.session_id == "one"));
-        assert!(cold.hits.iter().any(|hit| hit.text.contains("alpha needle")));
+        assert!(cold
+            .hits
+            .iter()
+            .any(|hit| hit.text.contains("alpha needle")));
 
         let mut watcher = SessionSearchWatcher::default();
-        assert!(watcher.observe(cold.revision), "the first observation is a change");
-        assert!(!watcher.observe(cold.revision), "an unchanged index is silent");
+        assert!(
+            watcher.observe(cold.revision),
+            "the first observation is a change"
+        );
+        assert!(
+            !watcher.observe(cold.revision),
+            "an unchanged index is silent"
+        );
 
         scans.set(0);
         let warm = store
@@ -3703,7 +3842,11 @@ mod tests {
                 index_session_entries(path)
             })
             .unwrap();
-        assert_eq!(scans.get(), 0, "a warm index must not re-read any transcript");
+        assert_eq!(
+            scans.get(),
+            0,
+            "a warm index must not re-read any transcript"
+        );
         assert!(!warm.index_changed);
         assert!(!watcher.observe(warm.revision));
 
@@ -3724,7 +3867,10 @@ mod tests {
             .unwrap();
         assert_eq!(scans.get(), 1, "only the changed session is re-read");
         assert!(delta.index_changed);
-        assert!(watcher.observe(delta.revision), "the change fires the notification");
+        assert!(
+            watcher.observe(delta.revision),
+            "the change fires the notification"
+        );
         assert_eq!(delta.hits.len(), 3);
     }
 
@@ -4269,6 +4415,154 @@ mod tests {
         );
     }
 
+    /// One durably parked deferred run, written through the session's own
+    /// deferred-run store so the record lands in the transcript exactly as a
+    /// real suspension would. The open session is returned so a test can drive
+    /// the next durable change through the same store.
+    fn park_deferred_run(path: &Path) -> (Session, DeferredRunRecord) {
+        use octet_agent::tools::deferred::{
+            DeferredHandle, DeferredResponseDeclaration, DeferredStopReason,
+            DeferredSuspendDecision, ModelIdentity,
+        };
+
+        let mut session = Session::create(path).unwrap();
+        let source = session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("parked prompt".into())],
+            })))
+            .unwrap();
+        let identity = ModelIdentity::new("provider", "model");
+        let declaration = DeferredResponseDeclaration {
+            stop_reason: DeferredStopReason::Deferred,
+            api: "anthropic_messages".into(),
+            handle: Some(DeferredHandle::new(
+                "provider",
+                "model",
+                "anthropic_messages",
+                "resp-1",
+            )),
+        };
+        let store = session.deferred_run_store();
+        assert!(matches!(
+            store
+                .suspend(&identity, "op-1", &source.0, declaration)
+                .unwrap(),
+            DeferredSuspendDecision::Suspended(_)
+        ));
+        let record = store.record("op-1").expect("the suspension is durable");
+        (session, record)
+    }
+
+    #[test]
+    fn deferred_run_records_round_trip_through_the_lightweight_mirror() {
+        use octet_agent::tools::deferred::{
+            DeferredResumeIntent, DeferredResumeStart, DeferredRunState,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deferred.jsonl");
+        let (session, parked) = park_deferred_run(&path);
+
+        // The parked leaf survives the mirror with its operation identity, grade
+        // and provider handle intact.
+        let mirrored = summarize_session(&path).unwrap();
+        assert_eq!(mirrored.deferred_run_records, vec![parked.clone()]);
+        let record = &mirrored.deferred_run_records[0];
+        assert_eq!(record.operation_id, "op-1");
+        assert_eq!(record.state_label(), "suspended");
+        assert_eq!(record.generation, 0);
+        let leaf = record.leaf().expect("a parked record keeps its leaf");
+        assert_eq!(leaf.poll, 0);
+        assert_eq!(leaf.handle.id, "resp-1");
+        assert_eq!(leaf.response_api, "anthropic_messages");
+
+        // A permitted poll replaces the leaf under a bumped generation before the
+        // provider runs; the mirror must keep the last authoritative state and
+        // never the abandoned one.
+        let DeferredResumeStart::Admitted(poll) = session
+            .deferred_run_store()
+            .begin_pass("op-1", "pass-1", DeferredResumeIntent::Poll, 0)
+            .unwrap()
+        else {
+            panic!("the first permitted poll must be admitted");
+        };
+        drop(session);
+
+        let mirrored = summarize_session(&path).unwrap();
+        assert_eq!(
+            mirrored.deferred_run_records,
+            vec![poll.effect_pending.clone()]
+        );
+        assert_eq!(
+            mirrored.deferred_run_records[0].state_label(),
+            "effect_pending"
+        );
+        assert!(matches!(
+            mirrored.deferred_run_records[0].state,
+            DeferredRunState::EffectPending { .. }
+        ));
+        assert_eq!(mirrored.deferred_run_records[0].generation, 1);
+
+        // A reopened session replays the same replaceable state, so the mirror
+        // and the authoritative store agree after a restart.
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(reopened.deferred_runs(), mirrored.deferred_run_records);
+    }
+
+    #[test]
+    fn lightweight_mirror_refuses_deferred_records_normal_resume_rejects() {
+        let directory = tempfile::tempdir().unwrap();
+
+        // A record replaying a generation the store already holds is refused by
+        // the durable store on reopen; the mirror must refuse it too.
+        let stale_path = directory.path().join("stale-deferred.jsonl");
+        let (session, parked) = park_deferred_run(&stale_path);
+        drop(session);
+        append_session_record(
+            &stale_path,
+            &octet_agent::SessionRecord::DeferredRun {
+                record: parked.clone(),
+            },
+        );
+        let error = summarize_session(&stale_path).unwrap_err();
+        assert!(
+            error.to_string().contains("generation regressed"),
+            "{error:#}"
+        );
+
+        // A terminal tombstone is authoritative: no later record may follow it.
+        let terminal_path = directory.path().join("terminal-deferred.jsonl");
+        let (session, parked) = park_deferred_run(&terminal_path);
+        drop(session);
+        append_session_record(
+            &terminal_path,
+            &octet_agent::SessionRecord::DeferredRun {
+                record: DeferredRunRecord::cancelled("op-1", parked.generation + 1),
+            },
+        );
+        append_session_record(
+            &terminal_path,
+            &octet_agent::SessionRecord::DeferredRun {
+                record: parked.clone(),
+            },
+        );
+        let error = summarize_session(&terminal_path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("terminal deferred record may not be followed"),
+            "{error:#}"
+        );
+    }
+
+    /// Append one already-built session record byte-for-byte, the way a torn or
+    /// hostile transcript would carry it.
+    fn append_session_record(path: &Path, record: &octet_agent::SessionRecord) {
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        serde_json::to_writer(&mut file, record).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+
     #[test]
     fn list_omits_empty_and_config_only_sessions() {
         let root = tempfile::tempdir().unwrap();
@@ -4624,7 +4918,12 @@ mod tests {
     /// The durable delegation roster exactly as the host writes it: one
     /// owner-only `fleet.json` in the session store's private delegation
     /// directory, whose record carries `session_path` in `status`.
-    fn write_roster(delegation: &Path, session_path: &Path, status: serde_json::Value, detached: bool) {
+    fn write_roster(
+        delegation: &Path,
+        session_path: &Path,
+        status: serde_json::Value,
+        detached: bool,
+    ) {
         let record = serde_json::json!({
             "agent_id": "agent-1",
             "agent_path": "/root/worker",
@@ -4763,7 +5062,12 @@ mod tests {
         // process-local liveness flag, so the live roster state is the
         // fail-closed signal, and one session has one writer.
         for state in ["pending", "running"] {
-            write_roster(&delegation, &child, serde_json::json!({ "state": state }), false);
+            write_roster(
+                &delegation,
+                &child,
+                serde_json::json!({ "state": state }),
+                false,
+            );
             assert_eq!(
                 refusal(&store.path_by_id(&handle).unwrap_err()),
                 DelegatedHandleRefusal::LiveInOwningProcess { status: state }
@@ -4863,10 +5167,7 @@ mod tests {
             "agent-session:team-alpha/0001-worker.jsonl".to_owned(),
             "agent-session:é".to_owned(),
         ];
-        malformed.push(format!(
-            "agent-session:{}",
-            "\u{0}".repeat(64)
-        ));
+        malformed.push(format!("agent-session:{}", "\u{0}".repeat(64)));
         for value in malformed {
             assert_eq!(
                 refusal(&store.path_by_id(&value).unwrap_err()),

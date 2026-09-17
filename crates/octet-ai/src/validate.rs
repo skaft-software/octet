@@ -482,6 +482,11 @@ pub(crate) fn validate_request(
                                         | Protocol::GoogleGenerativeAi => false,
                                         // No evidenced native Conversations tool-result media schema.
                                         Protocol::MistralConversations => false,
+                                        // Pi's `ImageContent` block carries inline bytes only;
+                                        // a URL or provider reference has no mapping.
+                                        Protocol::PiMessages => {
+                                            matches!(&image.source, ImageSource::Inline(_))
+                                        }
                                     },
                                     ToolResultPart::Media(Media::Audio(_)) => false,
                                 };
@@ -540,6 +545,13 @@ pub(crate) fn validate_request(
                                 });
                             }
                             if let Some(state) = &rp.state {
+                                // The pi-messages codec retains the provider's
+                                // opaque continuation payload as the canonical
+                                // signature carriers and stamps the state with
+                                // its own protocol/model, so this route must be
+                                // able to replay those kinds (see
+                                // `protocol::pi_messages::decode_stream_event`
+                                // and `assistant_part_value`).
                                 let kind_matches = matches!(
                                     (protocol, &state.kind),
                                     (
@@ -554,6 +566,10 @@ pub(crate) fn validate_request(
                                     ) | (
                                         Protocol::BedrockConverse,
                                         crate::types::ReasoningStateKind::AnthropicSignature { .. }
+                                    ) | (
+                                        Protocol::PiMessages,
+                                        crate::types::ReasoningStateKind::AnthropicSignature { .. }
+                                            | crate::types::ReasoningStateKind::AnthropicRedacted { .. }
                                     )
                                 );
                                 let empty_bedrock_signature = protocol == Protocol::BedrockConverse

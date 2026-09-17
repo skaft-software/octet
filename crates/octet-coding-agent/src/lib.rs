@@ -6,10 +6,10 @@ mod app;
 mod auth;
 mod batch;
 mod cli;
-mod commands;
 /// Codex context-window policy, deliberate clamp notices, and the explicit
 /// opt-in override entry point (`resolve_codex_context_window`).
 pub mod codex_context;
+mod commands;
 mod compaction;
 mod config;
 mod doctor;
@@ -38,6 +38,10 @@ pub mod provider {
         ProviderDefinitionError, ProviderDiagnostic, ProviderRouteDefinition,
     };
 }
+mod reexec;
+/// Poll-based live-reload supervisor: staleness sampling plus the idle-boundary
+/// apply policy shared by resources, extensions, and the host image.
+mod reload;
 mod resource_resolver;
 mod resources;
 mod session_catalog;
@@ -65,14 +69,25 @@ pub async fn run_cli() -> std::process::ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let args = std::env::args_os().collect::<Vec<_>>();
-    let (mut cli, extension_flag_values, parsed_cwd) = if cli::uses_runtime_extension_flag_parser(&args)
-    {
-        let cwd = std::env::current_dir()?;
-        let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
-        (cli, extension_flag_values, Some(cwd))
-    } else {
-        (cli::Cli::parse(), Default::default(), None)
-    };
+    // The internal re-exec probe is answered before clap, provider setup,
+    // extension activation, workspace access, networking, or the agent loop.
+    // This early return is the whole guarantee: no `App` can be constructed,
+    // no workspace is read, no extension process is started, and no request is
+    // made because nothing below this branch runs for a probe invocation.
+    if reexec::probe_requested(&args) {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(reexec::probe_payload().as_bytes());
+        let _ = std::io::stdout().flush();
+        return Ok(());
+    }
+    let (mut cli, extension_flag_values, parsed_cwd) =
+        if cli::uses_runtime_extension_flag_parser(&args) {
+            let cwd = std::env::current_dir()?;
+            let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
+            (cli, extension_flag_values, Some(cwd))
+        } else {
+            (cli::Cli::parse(), Default::default(), None)
+        };
     let top_level_command = cli.command.clone();
     let parity = cli.parity.clone();
     parity.validate()?;
@@ -146,7 +161,9 @@ async fn run() -> anyhow::Result<()> {
     }
     let invocation = if top_level_command.is_none() && parity.list_models.is_none() {
         cli::parity::prepare_input(&mut cli, &cwd)?
-    } else { Default::default() };
+    } else {
+        Default::default()
+    };
     let mut config = cli::build_config(cli, &cwd)?;
     config.extension_flag_values = extension_flag_values;
     if let Some(search) = parity.list_models.as_deref() {
@@ -184,7 +201,8 @@ async fn run() -> anyhow::Result<()> {
         name,
     }) = top_level_command
     {
-        return extensions::serve::run_with_session_name(config, port, no_open, web_root, name).await;
+        return extensions::serve::run_with_session_name(config, port, no_open, web_root, name)
+            .await;
     }
     parity.resolve_models(&mut config)?;
     parity.select_session(&mut config)?;
@@ -193,13 +211,21 @@ async fn run() -> anyhow::Result<()> {
     let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
     let result = match mode {
         config::Mode::Interactive if capabilities.interactive => {
-            modes::interactive::run_interactive_with_model_scope(config, parity.models.clone()).await
+            modes::interactive::run_interactive_with_model_scope(config, parity.models.clone())
+                .await
         }
         config::Mode::Interactive => {
             modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await
         }
         config::Mode::Print { prompt } => {
-            modes::print::run_invocation(app::bootstrap::bootstrap(config)?, prompt, invocation.remaining, invocation.media, invocation.json).await
+            modes::print::run_invocation(
+                app::bootstrap::bootstrap(config)?,
+                prompt,
+                invocation.remaining,
+                invocation.media,
+                invocation.json,
+            )
+            .await
         }
         config::Mode::Rpc => modes::rpc::run_rpc(app::bootstrap::bootstrap(config)?).await,
     };

@@ -12,25 +12,19 @@ use super::{
 
 const MAX_OUTCOME_DETAIL_BYTES: usize = 4 * 1024;
 
+/// Subdued detail under a completed turn whose delegated workers are still
+/// alive. The wording lives here rather than in `RunOutcome` because liveness
+/// is a render-time fact: the same settled outcome block stops showing the line
+/// the moment the roster settles.
+pub(super) const SUBAGENTS_RUNNING_DETAIL: &str =
+    "subagents are running; inspect them in the /subagents menu.";
+
 pub(super) fn completion_text(
     elapsed: Duration,
     separator: &str,
     tokens_per_second: Option<f64>,
 ) -> String {
     completion_status_text("completed", elapsed, separator, tokens_per_second)
-}
-
-pub(super) fn completion_with_warnings_text(
-    elapsed: Duration,
-    separator: &str,
-    tokens_per_second: Option<f64>,
-) -> String {
-    completion_status_text(
-        "completed with warnings",
-        elapsed,
-        separator,
-        tokens_per_second,
-    )
 }
 
 fn completion_status_text(
@@ -53,19 +47,19 @@ fn outcome_line(
 ) -> String {
     let separator = semantic_separator(theme);
     match outcome {
-        RunOutcome::Completed { elapsed, .. } => {
+        // `CompletedWithWarnings` deliberately renders exactly like
+        // `Completed`: the same success glyph, the same `completed · duration ·
+        // rate tok/s` text, the same success-led intro. Per-call tool failures
+        // are already rendered by their own tool blocks above this line, and the
+        // warning count stays in the model for exit status and telemetry. It is
+        // never transcript wording, so the two variants cannot drift apart.
+        RunOutcome::Completed { elapsed, .. }
+        | RunOutcome::CompletedWithWarnings { elapsed, .. } => {
             let text = subdued_text(
                 theme,
                 &completion_text(*elapsed, separator, tokens_per_second),
             );
             format!("{} {text}", theme.fg("success", theme.glyph("success")))
-        }
-        RunOutcome::CompletedWithWarnings { elapsed, .. } => {
-            let text = subdued_text(
-                theme,
-                &completion_with_warnings_text(*elapsed, separator, tokens_per_second),
-            );
-            format!("{} {text}", theme.fg("warning", theme.glyph("warning")))
         }
         RunOutcome::Failed { elapsed, .. } => format!(
             "{} {}",
@@ -91,15 +85,6 @@ fn outcome_line(
     }
 }
 
-pub(super) fn warning_detail(warnings: usize) -> String {
-    let calls = if warnings == 1 {
-        "tool call failed"
-    } else {
-        "tool calls failed"
-    };
-    format!("{warnings} {calls} during this run; inspect their results above.")
-}
-
 pub(super) fn bounded_outcome_detail(raw: &str) -> String {
     let mut safe = sanitize_for_terminal(raw);
     if safe.len() <= MAX_OUTCOME_DETAIL_BYTES {
@@ -119,6 +104,7 @@ pub(super) fn render_outcome(
     outcome: &OutcomeBlock,
     theme: &OctetTheme,
     width: u16,
+    subagents_running: bool,
 ) -> Vec<String> {
     let mut lines = vec![fit_line(
         &outcome_line(&outcome.outcome, outcome.tokens_per_second, theme),
@@ -129,9 +115,7 @@ pub(super) fn render_outcome(
         // Bound and terminal-sanitize them again at this presentation boundary.
         RunOutcome::Failed { reason, .. } => Some(("error", reason.clone())),
         RunOutcome::NeedsInput { prompt } => Some(("warning", prompt.clone())),
-        RunOutcome::CompletedWithWarnings { warnings, .. } => {
-            Some(("warning", warning_detail(*warnings)))
-        }
+        // A completed turn carries no warning detail.
         _ => None,
     };
     if let Some((role, detail)) = detail {
@@ -149,6 +133,22 @@ pub(super) fn render_outcome(
             ));
         }
     }
+    // A completed turn whose delegated workers are still alive says so in one
+    // subdued, informational line - never a warning and never a substitute for
+    // the delegated event's own transcript block. The flag is derived from the
+    // live roster at render time, so the line vanishes when the workers settle.
+    let completed = matches!(
+        &outcome.outcome,
+        RunOutcome::Completed { .. } | RunOutcome::CompletedWithWarnings { .. }
+    );
+    if completed && subagents_running {
+        lines.extend(wrap_hanging(
+            &subdued_text(theme, SUBAGENTS_RUNNING_DETAIL),
+            "  ",
+            "  ",
+            width,
+        ));
+    }
     finish_transcript_block(lines)
 }
 
@@ -163,94 +163,142 @@ mod tests {
     use crate::presentation::RunSummary;
 
     #[test]
-    fn renderer_covers_all_terminal_outcomes() {
+    fn completed_variants_render_byte_identically_and_never_warn() {
         let theme = crate::tui::theme::test_theme();
         let summary = RunSummary {
             files_changed: 2,
             tool_calls: 4,
             warnings: 0,
         };
-        let outcomes = [
-            (
-                RunOutcome::Completed {
-                    elapsed: Duration::from_millis(13700),
-                    summary: summary.clone(),
-                },
-                "completed · 13.7s",
-            ),
-            (
-                RunOutcome::CompletedWithWarnings {
-                    elapsed: Duration::from_millis(18200),
-                    warnings: 2,
-                    summary: RunSummary {
-                        warnings: 2,
-                        ..summary.clone()
-                    },
-                },
-                "completed with warnings · 18.2s",
-            ),
-            (
-                RunOutcome::Failed {
-                    elapsed: Duration::from_millis(9400),
-                    reason: "command exited 1".into(),
-                },
-                "failed",
-            ),
-            (
-                RunOutcome::Interrupted {
-                    elapsed: Duration::from_millis(6800),
-                },
-                "interrupted · 6.8s",
-            ),
-            (
-                RunOutcome::NeedsInput {
-                    prompt: "choose an implementation".into(),
-                },
-                "needs input",
-            ),
-        ];
-        for (outcome, expected) in outcomes {
-            let rendered = outcome_line(&outcome, None, &theme);
-            assert!(rendered.contains(expected), "{rendered:?}");
-            if matches!(outcome, RunOutcome::CompletedWithWarnings { .. }) {
-                assert!(
-                    strip_terminal_sequences(&rendered).starts_with('◇'),
-                    "completed-with-warnings should retain a warning signal: {rendered:?}"
-                );
-            }
-            assert!(
-                rendered.contains('✓')
-                    || rendered.contains('◇')
-                    || rendered.contains('×')
-                    || rendered.contains('■')
-            );
-        }
-    }
-
-    #[test]
-    fn warning_outcome_keeps_warning_status_and_final_throughput() {
-        let theme = crate::tui::theme::test_theme();
-        let outcome = RunOutcome::CompletedWithWarnings {
-            elapsed: Duration::from_secs(25 * 60 + 31),
+        let completed = RunOutcome::Completed {
+            elapsed: Duration::from_secs(60 + 23),
+            summary: summary.clone(),
+        };
+        let with_warnings = RunOutcome::CompletedWithWarnings {
+            elapsed: Duration::from_secs(60 + 23),
             warnings: 13,
             summary: RunSummary {
-                files_changed: 0,
-                tool_calls: 0,
+                files_changed: 1,
+                tool_calls: 9,
                 warnings: 13,
             },
         };
 
-        assert_eq!(
-            strip_terminal_sequences(&outcome_line(&outcome, Some(104.0), &theme)),
-            "◇ completed with warnings · 25m31s · 104 tok/s"
+        for rate in [None, Some(216.0)] {
+            assert_eq!(
+                outcome_line(&completed, rate, &theme),
+                outcome_line(&with_warnings, rate, &theme),
+                "the two completed variants must render byte-identically"
+            );
+        }
+        let line = strip_terminal_sequences(&outcome_line(&with_warnings, Some(216.0), &theme));
+        assert_eq!(line, "✓ completed · 1m23s · 216 tok/s");
+        assert!(!line.to_ascii_lowercase().contains("warning"), "{line}");
+
+        // The success glyph and role are the ones the completed line uses; the
+        // warning glyph and role never reach it.
+        let styled = outcome_line(&with_warnings, Some(216.0), &theme);
+        assert!(
+            styled.contains(&theme.fg("success", theme.glyph("success"))),
+            "{styled:?}"
         );
-        assert_eq!(
-            block_copy_text(&TranscriptBlock::Outcome(OutcomeBlock::new(
-                outcome,
-                Some(104.0),
-            ))),
-            "completed with warnings · 25m31s · 104 tok/s\n13 tool calls failed during this run; inspect their results above."
+        assert!(
+            !styled.contains(&theme.fg("warning", theme.glyph("warning"))),
+            "{styled:?}"
         );
+
+        // The whole block is identical too, and no line carries warning wording.
+        let block = |outcome: RunOutcome| OutcomeBlock::new(outcome, Some(216.0));
+        let rendered = |outcome: RunOutcome| {
+            render_outcome(&block(outcome), &theme, 80, false)
+                .into_iter()
+                .map(|line| strip_terminal_sequences(&line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let plain = rendered(with_warnings);
+        assert_eq!(plain, rendered(completed), "{plain:?}");
+        assert_eq!(plain, "✓ completed · 1m23s · 216 tok/s", "{plain:?}");
+        assert!(!plain.to_ascii_lowercase().contains("warning"), "{plain:?}");
+    }
+
+    #[test]
+    fn running_subagents_detail_appears_only_under_a_completed_turn() {
+        let theme = crate::tui::theme::test_theme();
+        let summary = RunSummary {
+            files_changed: 0,
+            tool_calls: 0,
+            warnings: 0,
+        };
+        let completed = OutcomeBlock::new(
+            RunOutcome::Completed {
+                elapsed: Duration::from_secs(1),
+                summary: summary.clone(),
+            },
+            None,
+        );
+        let with_warnings = OutcomeBlock::new(
+            RunOutcome::CompletedWithWarnings {
+                elapsed: Duration::from_secs(1),
+                warnings: 3,
+                summary: RunSummary {
+                    warnings: 3,
+                    ..summary.clone()
+                },
+            },
+            None,
+        );
+        let lines = |block: &OutcomeBlock, running: bool| {
+            render_outcome(block, &theme, 80, running)
+                .into_iter()
+                .map(|line| strip_terminal_sequences(&line))
+                .collect::<Vec<_>>()
+        };
+
+        for block in [&completed, &with_warnings] {
+            let idle = lines(block, false);
+            assert_eq!(idle, vec!["✓ completed · 1.0s"], "{idle:?}");
+            let live = lines(block, true);
+            assert_eq!(
+                live,
+                vec![
+                    "✓ completed · 1.0s",
+                    "  subagents are running; inspect them in the /subagents menu.",
+                ],
+                "{live:?}"
+            );
+        }
+
+        // The line wraps with the same two-space hanging indent in a narrow
+        // terminal, and never appears under a failed or interrupted turn.
+        let wrapped = render_outcome(&completed, &theme, 24, true)
+            .into_iter()
+            .map(|line| strip_terminal_sequences(&line))
+            .collect::<Vec<_>>();
+        assert!(wrapped.len() > 2, "{wrapped:?}");
+        assert!(
+            wrapped[1..].iter().all(|line| line.starts_with("  ")),
+            "{wrapped:?}"
+        );
+        for outcome in [
+            RunOutcome::Failed {
+                elapsed: Duration::from_secs(1),
+                reason: "command exited 1".into(),
+            },
+            RunOutcome::Interrupted {
+                elapsed: Duration::from_secs(1),
+            },
+            RunOutcome::NeedsInput {
+                prompt: "choose".into(),
+            },
+        ] {
+            let rendered = render_outcome(&OutcomeBlock::new(outcome, None), &theme, 80, true)
+                .into_iter()
+                .map(|line| strip_terminal_sequences(&line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!rendered.contains("subagents are running"), "{rendered:?}");
+        }
     }
 
     #[test]
@@ -282,7 +330,7 @@ mod tests {
             .chars()
             .all(|character| !character.is_control() || character == '\n'));
 
-        let rendered = render_outcome(&OutcomeBlock::new(outcome.clone(), None), &theme, 48)
+        let rendered = render_outcome(&OutcomeBlock::new(outcome.clone(), None), &theme, 48, false)
             .into_iter()
             .map(|line| strip_terminal_sequences(&line))
             .collect::<Vec<_>>()

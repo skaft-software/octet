@@ -1,0 +1,16 @@
+data: {"type":"start"}
+
+data: {"type":"thinking_start","contentIndex":0}
+
+data: {"type":"thinking_delta","contentIndex":0,"delta":"weighing "}
+
+data: {"type":"thinking_end","contentIndex":0,"content":"weighing options","contentSignature":"opaque-sig","redacted":false}
+
+data: {"type":"text_start","contentIndex":1}
+
+data: {"type":"text_delta","contentIndex":1,"delta":"answer"}
+
+data: {"type":"text_end","contentIndex":1,"content":"answer"}
+
+data: {"type":"done","reason":"stop","providerThinkingLevel":"high","rewrite":{"policyId":"gateway","policyVersion":2,"changed":true,"tokenCountChange":-1,"messageCountChange":0,"systemPromptChanged":false},"usage":{"input":9,"output":4,"cacheRead":0,"cacheWrite":1,"totalTokens":13}}
+

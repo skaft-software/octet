@@ -181,7 +181,10 @@ impl Client {
         ]
         .into_iter()
         .map(|(name, value)| {
-            CopilotDynamicHeader::new(HeaderName::from_static(name), HeaderValue::from_static(value))
+            CopilotDynamicHeader::new(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
         let session = CopilotSession::new(
@@ -279,7 +282,9 @@ async fn bounded_json<T: DeserializeOwned>(
     tokio::time::timeout(HTTP_TIMEOUT, async {
         let mut response = request.send().await.map_err(|_| ())?;
         if !response.status().is_success()
-            || response.content_length().is_some_and(|len| len > limit as u64)
+            || response
+                .content_length()
+                .is_some_and(|len| len > limit as u64)
         {
             return Err(());
         }

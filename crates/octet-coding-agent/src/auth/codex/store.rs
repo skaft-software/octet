@@ -1050,7 +1050,9 @@ mod tests {
 
         // Uncontended: even a zero wait takes the lock, because the deadline
         // bounds *waiting*, not the acquisition itself.
-        let immediate = store.lock_refresh_within(std::time::Duration::ZERO).unwrap();
+        let immediate = store
+            .lock_refresh_within(std::time::Duration::ZERO)
+            .unwrap();
         immediate.finish().unwrap();
 
         // Contended: the wait is bounded and the failure is explicit.

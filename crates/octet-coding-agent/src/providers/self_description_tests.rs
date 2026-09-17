@@ -202,14 +202,17 @@ fn explicit_context_aliases_are_never_overwritten_by_self_description() {
         ("context_window", |e| e["context_window"] = json!(12345)),
         ("context_length", |e| e["context_length"] = json!(12345)),
         ("max_model_len", |e| e["max_model_len"] = json!(12345)),
-        ("max_context_tokens", |e| e["max_context_tokens"] = json!(12345)),
+        ("max_context_tokens", |e| {
+            e["max_context_tokens"] = json!(12345)
+        }),
         ("limit/context", |e| e["limit"] = json!({"context": 12345})),
         ("meta/n_ctx", |e| e["meta"] = json!({"n_ctx": 12345})),
-        ("meta/n_ctx_train", |e| e["meta"] = json!({"n_ctx_train": 12345})),
-        (
-            "status",
-            |e| e["status"] = json!({"args": ["--max-model-len", "12345"]}),
-        ),
+        ("meta/n_ctx_train", |e| {
+            e["meta"] = json!({"n_ctx_train": 12345})
+        }),
+        ("status", |e| {
+            e["status"] = json!({"args": ["--max-model-len", "12345"]})
+        }),
     ];
     for (name, mutate) in aliases {
         let mut entry = entry(Protocol::OpenAiChat, "fixture");

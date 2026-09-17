@@ -45,6 +45,11 @@ STATE_LABEL = {
     "restarted": "restarted",
 }
 
+# Stable surface name. The presentation collection title is always exactly this
+# name so a picker header cannot change shape as workers come and go; live
+# counts stay in `status.label` (and in the text listing header).
+SURFACE_TITLE = "Subagents"
+
 
 def semantic_id(prefix: str, value: str) -> str:
     if value and len(value.encode("utf-8")) <= 900 and _ID_RE.fullmatch(value):
@@ -126,7 +131,7 @@ def compact_status(workers: Sequence[Worker]) -> Tuple[str, str, Optional[str]]:
     for key in ("running", "queued", "done", "limited", "failed", "detached", "stopped"):
         if value[key]:
             pieces.append("%d %s" % (value[key], key))
-    label = "Subagents" if not pieces else "Subagents · " + " · ".join(pieces)
+    label = SURFACE_TITLE if not pieces else SURFACE_TITLE + " · " + " · ".join(pieces)
     if value["failed"]:
         state = "degraded"
         detail = "One or more bounded workers failed or timed out."
@@ -189,7 +194,12 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
     pieces = [
         STATE_LABEL.get(worker.state, safe_label(worker.state)),
         human_duration(worker.elapsed_ms(now_ms)),
-        "%s/%s" % (worker.profile, worker.effective_model),
+        # The row is labelled as a model, so it must name a model and nothing
+        # else. The worker's profile is documented in the detail document
+        # (`Model/profile: <model> (inherited) / <profile>`), never spliced into
+        # the model string: `explore/deepseek/deepseek-flash` reads as a
+        # provider-qualified id that does not exist.
+        worker.effective_model,
     ]
     # Per-worker orchestration selection. `inherit` is the default and stays
     # absent (absence is never rendered as text); an explicit request is shown as
@@ -242,6 +252,12 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
             )
     if worker.recovered:
         pieces.append("restarted")
+    if worker.host_diagnostic and (worker.detached or worker.awaiting_approval):
+        # The host named why this worker is parked or was refused; a detached
+        # row without its reason is useless, and the reason is host-observed.
+        reason = bounded_text(safe_label(worker.host_diagnostic), 160).strip()
+        if reason:
+            pieces.append(reason)
     if worker.detached:
         # A detached worker is still owned by this session; say so, and say
         # whether it can be reattached, instead of rendering a terminal row.
@@ -371,6 +387,8 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Session: %s" % (worker.session or "not yet exposed by agent_sessions"),
         "Session ownership: %s" % ownership,
     ]
+    if worker.host_diagnostic and (worker.detached or worker.awaiting_approval):
+        lines.append("Host reattachment: %s" % worker.host_diagnostic)
     if worker.reattach_count:
         lines.append(
             "Reattachment: reattached %d time(s); last reattached at %s."
@@ -504,7 +522,9 @@ def build_snapshot(
         selected = ordered[-1]
     collection: Dict[str, Any] = {
         "kind": "tree",
-        "title": status_label,
+        # Stable surface name, never a live count: the header must not change
+        # shape as workers come and go. Counts stay in `status.label`.
+        "title": SURFACE_TITLE,
         "nodes": nodes,
     }
     if selected is not None:

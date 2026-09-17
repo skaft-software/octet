@@ -51,6 +51,8 @@ or an operation is unpriced.
 | Form | Contract |
 | --- | --- |
 | `--tools NAMES`, `--exclude-tools NAMES` | Final comma-separated allowlist/exclusions; e.g. `read,search`. Model schemas match the executable registry. |
+| `--powershell` | Additive opt-in for the Windows `powershell` tool; never replaces `bash`, conflicts with an exclusive `--tools`/`--no-tools` list, and reports itself inert on hosts without PowerShell. |
+| `--models PATTERNS` | Ordered, comma-separated model scope for selection and Ctrl+P cycling: `provider/*`, a literal `provider/model`, or a bare-id glob, each with an optional real `:level` suffix. The first requested match is the default for a new session; a miss warns without discarding the rest. `/scoped-models` persists the same ordered patterns. |
 | `--no-tools` | Disable tools; conflicts with `--tools`. |
 | `--no-edit` | Disable edit and write. |
 | `--no-write` | Disable complete-file write. |

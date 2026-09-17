@@ -197,6 +197,38 @@ pub struct ToolAttributes {
     pub name: String,
 }
 
+/// Start attributes for one deferred-run lifecycle boundary.
+///
+/// The typed deferred stop reason (or the durable decision that replaced it)
+/// reaches telemetry here: `stop_reason` is the normalized reason the provider
+/// reported, while `phase` is the durable leaf state the decision produced.
+/// Only host-selected identities and the provider's non-secret handle shape are
+/// recorded; the opaque handle payload is hashed out of telemetry entirely.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeferredRunAttributes {
+    /// Durable operation identity of the parked request.
+    pub operation_id: String,
+    /// Normalized provider stop reason that produced this boundary.
+    pub stop_reason: String,
+    /// Durable leaf state after this boundary.
+    pub phase: String,
+    /// Poll number at this boundary.
+    pub poll: u64,
+    /// Durable generation at this boundary.
+    pub generation: u64,
+    /// Whether the poll replaced an unknown-outcome `effect_pending` leaf.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovery: bool,
+    /// Number of redacted response diagnostics observed with the boundary.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub diagnostics: usize,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
 /// Optional completion attributes capturing reported provider usage.
 ///
 /// Buckets stay disjoint: `cache_write_1h_tokens` is a subset of
@@ -403,6 +435,8 @@ schema! {
     SummarySpan, "octet.agent.summary", EmptyAttributes;
     /// One delegated child run.
     DelegationSpan, "octet.agent.delegation", EmptyAttributes;
+    /// One deferred suspend/poll boundary for a parked provider request.
+    DeferredRunSpan, "octet.agent.deferred_run", DeferredRunAttributes;
 }
 
 /// The serializable schema for every agent and provider span boundary.
@@ -453,6 +487,7 @@ pub fn agent_telemetry_schema() -> TelemetrySchema {
         CompactionSpan::NAME,
         SummarySpan::NAME,
         DelegationSpan::NAME,
+        DeferredRunSpan::NAME,
     ] {
         let mut start_attributes = BTreeMap::new();
         if name == ProviderRequestSpan::NAME {
@@ -469,6 +504,49 @@ pub fn agent_telemetry_schema() -> TelemetrySchema {
                     AttributeType::String,
                     true,
                     "Registered tool name, never arguments",
+                ),
+            );
+        }
+        if name == DeferredRunSpan::NAME {
+            start_attributes.insert(
+                "operation_id".into(),
+                attribute(
+                    AttributeType::String,
+                    true,
+                    "Durable deferred-run operation identity",
+                ),
+            );
+            let mut stop_reason =
+                attribute(AttributeType::String, true, "Normalized provider stop reason");
+            stop_reason.values = ["deferred", "settled", "failed", "aborted", "waiting", "refused"]
+                .map(|s| AttributeValue::String(s.into()))
+                .into();
+            start_attributes.insert("stop_reason".into(), stop_reason);
+            let mut phase = attribute(AttributeType::String, true, "Durable leaf state");
+            phase.values = ["suspended", "effect_pending", "settled", "cancelled", "failed"]
+                .map(|s| AttributeValue::String(s.into()))
+                .into();
+            start_attributes.insert("phase".into(), phase);
+            for (field, description) in [
+                ("poll", "Poll number at this boundary"),
+                ("generation", "Durable generation at this boundary"),
+            ] {
+                start_attributes.insert(field.into(), attribute(AttributeType::Number, true, description));
+            }
+            start_attributes.insert(
+                "recovery".into(),
+                attribute(
+                    AttributeType::Boolean,
+                    false,
+                    "The poll replaced an unknown-outcome leaf",
+                ),
+            );
+            start_attributes.insert(
+                "diagnostics".into(),
+                attribute(
+                    AttributeType::Number,
+                    false,
+                    "Redacted response diagnostics observed at this boundary",
                 ),
             );
         }

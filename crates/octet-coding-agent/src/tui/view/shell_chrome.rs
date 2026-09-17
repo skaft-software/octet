@@ -10,7 +10,6 @@ use super::{fit_line, semantic_separator, wrap_hanging, ShellState};
 #[derive(Clone)]
 pub(super) struct ShellChrome {
     pub(super) header: Vec<String>,
-    pub(super) subagents: Vec<String>,
     pub(super) extension_above: Vec<String>,
     pub(super) composer: Vec<String>,
     pub(super) extension_below: Vec<String>,
@@ -140,36 +139,13 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
     (above, below)
 }
 
-fn render_subagent_activity(state: &ShellState, width: u16) -> Vec<String> {
-    // While reading history, changing live chrome must not shrink or move the
-    // semantic viewport. Worker updates remain in their transcript block;
-    // returning to the tail restores the live strip.
-    if !state.run.is_active() || !state.follow_tail {
-        return Vec::new();
-    }
-    let Some(view) = state.subagent_activity.as_ref() else {
-        return Vec::new();
-    };
-    let mut live = view.clone();
-    live.telemetry
-        .retain(|child| matches!(child.state.as_str(), "pending" | "running"));
-    live.activities.retain(|activity| {
-        matches!(
-            activity.state,
-            octet_agent::ExtensionPresentationState::Loading
-                | octet_agent::ExtensionPresentationState::Pending
-                | octet_agent::ExtensionPresentationState::Active
-                | octet_agent::ExtensionPresentationState::Running
-        )
-    });
-    if !super::subagent_activity_is_active(&live) {
-        return Vec::new();
-    }
-    // Reader filters apply to history, never hide currently active workers.
-    live.state_filter = None;
-    live.failure_reason = None;
-    super::subagent_activity_render_rows(&live, &state.theme, width, false)
-}
+// The delegation roster is a chronological transcript event, not pinned
+// chrome: `TranscriptBlock::Tool(panel)` with `panel.subagent_activity` is the
+// single live surface for a roster, rendered by `transcript_render` exactly
+// where the delegation happened. There is deliberately no strip above the
+// composer, so one frame can never show the roster twice; the block stays a
+// live, in-place-updating log entry while it is on screen and freezes once it
+// scrolls out of view or settles.
 
 pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> ShellChrome {
     let rows = usize::from(state.size.1.max(5));
@@ -240,7 +216,6 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
             composer,
             transcript_rows: remaining.saturating_sub(panel.len()),
             panel,
-            subagents: Vec::new(),
             extension_above: Vec::new(),
             extension_below: Vec::new(),
             pending: Vec::new(),
@@ -257,26 +232,15 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         composer.truncate(rows.saturating_sub(header.len() + 2));
         error.truncate(rows.saturating_sub(header.len() + composer.len() + 2));
     }
-    let mut subagents = if state.panel.is_none() {
-        render_subagent_activity(state, width)
-    } else {
-        Vec::new()
-    };
     let (mut extension_above, mut extension_below) = if state.panel.is_none() {
         render_extension_ui(state, width)
     } else {
         (Vec::new(), Vec::new())
     };
-    let subagent_limit = rows.saturating_sub(header.len() + error.len() + composer.len() + 1);
-    // The roster is bounded by the host's eight-concurrent-children cap, but
-    // each child renders several rows, so only the viewport bounds how much
-    // of the strip shows.
-    subagents.truncate(subagent_limit);
     let extension_limit = rows.saturating_sub(
         header
             .len()
             .saturating_add(error.len())
-            .saturating_add(subagents.len())
             .saturating_add(composer.len())
             .saturating_add(1),
     );
@@ -297,7 +261,6 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         header
             .len()
             .saturating_add(error.len())
-            .saturating_add(subagents.len())
             .saturating_add(extension_above.len())
             .saturating_add(composer.len())
             .saturating_add(extension_below.len()),
@@ -329,7 +292,6 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
 
     ShellChrome {
         header,
-        subagents,
         extension_above,
         composer,
         extension_below,
@@ -361,7 +323,6 @@ pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrom
     lines.extend(chrome.error);
     lines.extend(chrome.pending);
     lines.extend(chrome.panel);
-    lines.extend(chrome.subagents);
     lines.extend(chrome.extension_above);
     lines.extend(chrome.composer);
     lines.extend(chrome.suggestions);
@@ -388,7 +349,6 @@ pub(super) fn append_chrome(
     lines.extend(chrome.error);
     lines.extend(chrome.pending);
     lines.extend(chrome.panel);
-    lines.extend(chrome.subagents);
     lines.extend(chrome.extension_above);
     lines.extend(chrome.composer);
     // Keep autocomplete adjacent to the composer in terminal-owned mode as
@@ -401,7 +361,6 @@ pub(super) fn shell_chrome_rows(chrome: &ShellChrome) -> usize {
     chrome
         .header
         .len()
-        .saturating_add(chrome.subagents.len())
         .saturating_add(chrome.extension_above.len())
         .saturating_add(chrome.error.len())
         .saturating_add(chrome.pending.len())

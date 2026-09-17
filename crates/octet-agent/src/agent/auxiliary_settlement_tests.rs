@@ -66,6 +66,7 @@ fn once_finished(
         cost: Some(settled_cost()),
         response_id: None,
         responses_output: None,
+        deferred: None,
         diagnostics: Vec::new(),
     }))
 }

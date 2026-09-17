@@ -2,7 +2,7 @@
 // It implements only the public methods consumed by bridge.mjs. The aggregate
 // hooks deliberately model ordered source loading and one shared event bus.
 
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -44,6 +44,75 @@ let fixtureProviderSetupAbortObserved = false;
 let fixtureProviderLateIteratorClosed = false;
 let fixtureProviderActions = null;
 let fixtureProviderSetupMutationTriggered = false;
+// Bounded observation records for fixture behaviour that the assertions must
+// distinguish from its own timing: tool executions and marker-file effects.
+const fixtureExecutionLog = [];
+const FIXTURE_TOOL_USAGE = {
+  input: 11,
+  output: 7,
+  cacheRead: 3,
+  cacheWrite: 5,
+  cacheWrite1h: 2,
+  reasoning: 4,
+  totalTokens: 26,
+  // Pi encodes unpriced usage as all-zero cost; the bridge accepts it and
+  // carries the counters natively.
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+const FIXTURE_HOOK_USAGE = {
+  input: 1,
+  output: 2,
+  cacheRead: 0,
+  cacheWrite: 0,
+  reasoning: 0,
+  totalTokens: 3,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function fixtureUsageCase(name) {
+  switch (name) {
+    case "negative":
+      return { input: -1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+    case "missing":
+      return { input: 1, output: 2 };
+    case "unknown":
+      return { ...FIXTURE_TOOL_USAGE, extra: 1 };
+    case "cost-unknown":
+      return { ...FIXTURE_TOOL_USAGE, cost: { ...FIXTURE_TOOL_USAGE.cost, extra: 1 } };
+    case "cost-missing":
+      return {
+        ...FIXTURE_TOOL_USAGE,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+    case "cost-nan":
+      return { ...FIXTURE_TOOL_USAGE, cost: { ...FIXTURE_TOOL_USAGE.cost, total: Number.NaN } };
+    case "cost-negative":
+      return { ...FIXTURE_TOOL_USAGE, cost: { ...FIXTURE_TOOL_USAGE.cost, total: -0.5 } };
+    case "cost-not-a-number":
+      return { ...FIXTURE_TOOL_USAGE, cost: { ...FIXTURE_TOOL_USAGE.cost, total: "0.5" } };
+    case "cost-priced":
+      return { ...FIXTURE_TOOL_USAGE, cost: { ...FIXTURE_TOOL_USAGE.cost, total: 0.0004 } };
+    case "reasoning-exceeds":
+      return { ...FIXTURE_TOOL_USAGE, output: 3, reasoning: 4 };
+    case "cache-1h-exceeds":
+      return { ...FIXTURE_TOOL_USAGE, cacheWrite: 1, cacheWrite1h: 2 };
+    case "no-cost": {
+      const { cost, ...rest } = FIXTURE_TOOL_USAGE;
+      return rest;
+    }    default:
+      throw new Error(`unknown fixture usage case ${name}`);
+  }
+}
+
+function fixtureMarkerPath() {
+  return process.env.OCTET_PI_FIXTURE_MARKER ?? "";
+}
+
+function recordFixtureExecution(name, phase) {
+  fixtureExecutionLog.push({ name, phase, at: Date.now() });
+  if (fixtureExecutionLog.length > 64) fixtureExecutionLog.shift();
+}
+
 function fixtureModeForPath(path) {
   const value = String(path ?? "");
   if (value.endsWith("unsafe-provider-extension.mjs")) return "unsafe-provider";
@@ -374,6 +443,112 @@ export class ExtensionRunner {
         }),
       );
     }
+    if (this.fixtureMode === "result-contract") {
+      this.tools.push(
+        makeTool("fixture_usage", async () => ({
+          content: [{ type: "text", text: "usage result" }],
+          details: { fixture: "usage" },
+          usage: FIXTURE_TOOL_USAGE,
+        })),
+        makeTool("fixture_terminate", async () => ({
+          content: [{ type: "text", text: "terminate result" }],
+          details: { fixture: "terminate" },
+          terminate: true,
+        })),
+        makeTool("fixture_usage_terminate", async () => ({
+          content: [{ type: "text", text: "usage terminate result" }],
+          details: { fixture: "usage-terminate" },
+          usage: FIXTURE_TOOL_USAGE,
+          terminate: true,
+        })),
+        makeTool("fixture_usage_case", async (_id, input) => (input.value === "terminate-type"
+          ? {
+              content: [{ type: "text", text: "terminate type result" }],
+              details: { fixture: "terminate-type" },
+              terminate: "yes",
+            }
+          : input.value === "terminate-false"
+          ? {
+              content: [{ type: "text", text: "terminate false result" }],
+              details: { fixture: "terminate-false" },
+              terminate: false,
+            }
+          : {
+              content: [{ type: "text", text: "usage case result" }],
+              details: { fixture: "usage-case" },
+              usage: fixtureUsageCase(String(input.value ?? "")),
+            })),
+        makeTool("fixture_hook_result", async () => ({
+          content: [{ type: "text", text: "hook result" }],
+          details: { fixture: "hook-result" },
+        })),
+      );
+    }
+    if (this.fixtureMode === "zero-effect") {
+      const marker = (name) => async (_id, input) => {
+        recordFixtureExecution(name, "execute");
+        const target = fixtureMarkerPath();
+        if (target) appendFileSync(target, `${name} ${String(input.value ?? "")}\n`);
+        return { content: [{ type: "text", text: `${name} executed` }], details: { fixture: name } };
+      };
+      this.tools.push(
+        makeTool("fixture_marker_a", marker("fixture_marker_a")),
+        makeTool("fixture_marker_b", marker("fixture_marker_b")),
+      );
+      // Pi's declared preparation shim runs before validation: this fixture
+      // produces an invalid prepared object instead of a valid schema value.
+      const prepared = this.tools.find((tool) => tool.definition.name === "fixture_marker_a");
+      prepared.definition.prepareArguments = (args) => {
+        if (args?.raw === undefined) return args;
+        return args.raw === "invalid" ? { value: { invalid: true } } : { value: String(args.raw) };
+      };
+    }
+    if (this.fixtureMode === "projection") {
+      this.tools.push(
+        makeTool("fixture_snippet", async (_id, input) => ({
+          content: [{ type: "text", text: `snippet ${input.value ?? ""}` }],
+        })),
+        makeTool("fixture_sequential", async () => {
+          recordFixtureExecution("fixture_sequential", "start");
+          await sleep(80);
+          recordFixtureExecution("fixture_sequential", "end");
+          return { content: [{ type: "text", text: "sequential result" }] };
+        }),
+        makeTool("fixture_parallel_probe", async () => {
+          recordFixtureExecution("fixture_parallel_probe", "start");
+          await sleep(80);
+          recordFixtureExecution("fixture_parallel_probe", "end");
+          return { content: [{ type: "text", text: "parallel result" }] };
+        }),
+        makeTool("fixture_execution_log", async () => ({
+          content: [{ type: "text", text: JSON.stringify(fixtureExecutionLog) }],
+        })),
+      );
+      const snippetTool = this.tools.find((tool) => tool.definition.name === "fixture_snippet");
+      snippetTool.definition.description = "Snippet projection fixture";
+      snippetTool.definition.promptSnippet = "  Snippet  with\n  whitespace\tcollapse ";
+      snippetTool.definition.promptGuidelines = [
+        "  First guideline  ",
+        "",
+        "First guideline",
+        "Second guideline",
+      ];
+      const sequentialTool = this.tools.find((tool) => tool.definition.name === "fixture_sequential");
+      sequentialTool.definition.executionMode = "sequential";
+    }
+    if (this.fixtureMode.startsWith("sampling-")) {
+      const sampling = {
+        "sampling-prefer": { type: "json_schema", strict: "prefer" },
+        "sampling-require": { type: "json_schema", strict: "require" },
+        "sampling-grammar": { type: "grammar", variants: { openai_lark: "start: /[a-z]+/" } },
+        "sampling-unknown": { type: "json_schema_v2", strict: "prefer" },
+      }[this.fixtureMode];
+      const tool = makeTool("fixture_sampling", async () => ({
+        content: [{ type: "text", text: "sampling result" }],
+      }));
+      tool.definition.constrainedSampling = sampling;
+      this.tools.push(tool);
+    }
     if (this.fixtureMode === "provider") {
       this.tools.push(
         makeTool("fixture_provider_update", async () => {
@@ -448,8 +623,9 @@ export class ExtensionRunner {
     this.commandContext = context;
   }
 
-  setUIContext(ui) {
+  setUIContext(ui, mode) {
     this.ui = ui;
+    this.uiMode = mode;
   }
 
   onError(handler) {
@@ -493,6 +669,19 @@ export class ExtensionRunner {
           this.tools.push(makeTool("fixture_dynamic", async () => ({
             content: [{ type: "text", text: "dynamic" }],
           })));
+          this.actions.refreshTools();
+        },
+      },
+      {
+        name: "add-marker-tool",
+        description: "Add a dynamic tool that observes its own execution",
+        handler: async () => {
+          this.tools.push(makeTool("fixture_marker_c", async (_id, input) => {
+            recordFixtureExecution("fixture_marker_c", "execute");
+            const target = fixtureMarkerPath();
+            if (target) appendFileSync(target, `fixture_marker_c ${String(input.value ?? "")}\n`);
+            return { content: [{ type: "text", text: "fixture_marker_c executed" }] };
+          }));
           this.actions.refreshTools();
         },
       },
@@ -576,7 +765,9 @@ export class ExtensionRunner {
   async probeSurface(target, context) {
     if (!target) throw new Error("surface-probe requires AREA.SURFACE");
     const explicit = (action) => this.expectExplicit(target, action);
-    const bounded = () => this.ui.notify(`surface:${target}:bounded`);
+    const bounded = (value) => this.ui.notify(
+      `surface:${target}:bounded${value === undefined ? "" : `:${JSON.stringify(value)}`}`,
+    );
 
     if (target.startsWith("extension_api.")) {
       const name = target.slice("extension_api.".length);
@@ -597,7 +788,24 @@ export class ExtensionRunner {
         }
         return this.actions.exec("true");
       });
-      if (["getActiveTools", "getAllTools", "getCommands"].includes(name)) return bounded();
+      if (name === "getActiveTools") {
+        // Declared reduction: bridge-local Pi tools, never the octet policy.
+        const active = this.actions.getActiveTools();
+        const expected = this.tools.map((tool) => tool.definition.name).sort();
+        if (JSON.stringify([...active].sort()) !== JSON.stringify(expected)) {
+          throw new Error("getActiveTools must report the bridge-local Pi tools");
+        }
+        return bounded();
+      }
+      if (name === "getAllTools") {
+        const all = this.actions.getAllTools();
+        const expected = this.tools.map((tool) => tool.definition.name).sort();
+        if (JSON.stringify(all.map((tool) => tool.name).sort()) !== JSON.stringify(expected)) {
+          throw new Error("getAllTools must report the bridge-local Pi tool information");
+        }
+        return bounded();
+      }
+      if (name === "getCommands") return bounded();
       if (name === "setActiveTools") return explicit(() => this.actions.setActiveTools(["fixture_echo"]));
       if (name === "setModel") return explicit(() => this.actions.setModel("fixture"));
       if (name === "getThinkingLevel") return bounded();
@@ -665,7 +873,46 @@ export class ExtensionRunner {
 
     if (target.startsWith("context.")) {
       const name = target.slice("context.".length);
-      if (["ui", "mode", "hasUI", "cwd", "thinkingLevel", "isIdle", "isProjectTrusted", "signal", "getSystemPromptOptions", "waitForIdle"].includes(name)) {
+      // These rows declare a reduced read-only projection. Observe the reduced
+      // value itself so a drifting bridge fails this fixture instead of merely
+      // completing its probe.
+      if (name === "mode") {
+        if (context.mode !== "rpc") throw new Error(`ctx.mode must stay rpc, saw ${String(context.mode)}`);
+        return bounded();
+      }
+      if (name === "model") {
+        if (context.model !== undefined) throw new Error("ctx.model must not be reconstructed");
+        return bounded();
+      }
+      if (name === "scopedModels") {
+        if (!Array.isArray(context.scopedModels) || context.scopedModels.length !== 0) {
+          throw new Error("ctx.scopedModels must stay an empty read-only snapshot");
+        }
+        return bounded();
+      }
+      if (name === "getContextUsage") {
+        if (context.getContextUsage() !== undefined) throw new Error("ctx.getContextUsage must report unknown");
+        return bounded();
+      }
+      if (name === "isProjectTrusted") {
+        if (context.isProjectTrusted() !== false) throw new Error("ctx.isProjectTrusted must stay conservative");
+        return bounded();
+      }
+      if (name === "getSystemPromptOptions") {
+        const options = context.getSystemPromptOptions?.();
+        if (!options || Object.keys(options).some((key) => key !== "cwd")) {
+          throw new Error("ctx.getSystemPromptOptions must expose only the canonical cwd");
+        }
+        return bounded();
+      }
+      if (name === "isIdle") {
+        // Declared reduction: the bridged turn lifecycle is the only idleness
+        // signal the bridge observes, so the probe reports that value.
+        const idle = context.isIdle();
+        if (typeof idle !== "boolean") throw new Error("ctx.isIdle must report a boolean");
+        return bounded(idle);
+      }
+      if (["ui", "hasUI", "cwd", "thinkingLevel", "signal", "waitForIdle"].includes(name)) {
         if (name === "waitForIdle") await context.waitForIdle();
         return bounded();
       }
@@ -675,12 +922,9 @@ export class ExtensionRunner {
       // fixture; invoking it here would intentionally cancel this probe request.
       if (name === "abort") return bounded();
       const actions = {
-        model: () => this.contextActions.getModel(),
-        scopedModels: () => this.contextActions.getScopedModels(),
         abort: () => this.contextActions.abort(),
         hasPendingMessages: () => this.contextActions.hasPendingMessages(),
         shutdown: () => this.contextActions.shutdown(),
-        getContextUsage: () => this.contextActions.getContextUsage(),
         compact: () => this.contextActions.compact(),
         getSystemPrompt: () => this.contextActions.getSystemPrompt(),
         newSession: () => context.newSession(),
@@ -688,22 +932,38 @@ export class ExtensionRunner {
         navigateTree: () => context.navigateTree(),
         switchSession: () => context.switchSession(),
         reload: () => context.reload(),
-        "replacement.sendMessage": () => { throw new Error("Pi compatibility API is not supported by octet: ctx.replacement.sendMessage"); },
-        "replacement.sendUserMessage": () => { throw new Error("Pi compatibility API is not supported by octet: ctx.replacement.sendUserMessage"); },
+        // A replacement-session context exists only after newSession/fork/
+        // switchSession. Those operations are refused by the bridge, so these
+        // two rows are observed through the refusal that makes a replacement
+        // context unreachable rather than through a canned fixture error.
+        "replacement.sendMessage": () => context.newSession(),
+        "replacement.sendUserMessage": () => context.newSession(),
       };
       if (!actions[name]) throw new Error(`unknown context fixture ${name}`);
-      if (["model", "scopedModels", "getContextUsage"].includes(name)) return bounded(actions[name]());
       return explicit(actions[name]);
     }
     throw new Error(`unknown surface fixture ${target}`);
   }
 
   createContext() {
-    return { ui: this.ui };
+    // Model the public runtime's context assembly: the read-only surfaces the
+    // runtime exposes come from the bound bridge actions, so probing them
+    // observes the bridge rather than a fixture-invented value.
+    const actions = this.contextActions ?? {};
+    return {
+      ui: this.ui,
+      mode: this.uiMode ?? "tui",
+      model: actions.getModel?.(),
+      scopedModels: actions.getScopedModels?.(),
+      isProjectTrusted: () => actions.isProjectTrusted?.() === true,
+      getContextUsage: () => actions.getContextUsage?.(),
+      isIdle: () => actions.isIdle?.() === true,
+      ...(actions.getSystemPromptOptions ? { getSystemPromptOptions: () => actions.getSystemPromptOptions() } : {}),
+    };
   }
 
   createCommandContext() {
-    return { ...this.commandContext, ui: this.ui };
+    return { ...this.createContext(), ...this.commandContext, ui: this.ui };
   }
 
   async emitBeforeAgentStart(prompt) {
@@ -725,7 +985,9 @@ export class ExtensionRunner {
 
   async emitToolCall(event) {
     if (fixtureApiVersion === "0.2") this.ui?.notify("event:tool_call:start");
-    if (fixtureMode === "invalid-hook-input") event.input.value = { invalid: true };
+    if (fixtureMode === "invalid-hook-input" || event.input?.value === "hook-invalid") {
+      event.input.value = { invalid: true };
+    }
     if (event.input?.mutateNative) event.input.value = "mutated";
     const result = {
       block: false,
@@ -743,13 +1005,22 @@ export class ExtensionRunner {
       this.ui.notify("event:tool_result:start");
       this.ui.notify(`terminal:tool_result:${event.toolCallId}`);
     }
-    const result = event.input?.value === "transform"
+    const selector = event.input?.value;
+    if (this.fixtureMode === "result-contract") {
+      if (selector === "hook-usage") return { ...event, usage: FIXTURE_HOOK_USAGE };
+      if (selector === "hook-usage-passthrough") return { ...event };
+      if (selector === "hook-terminate") return { ...event, terminate: true };
+      if (selector === "hook-terminate-matching") return { ...event, terminate: false };
+      if (selector === "hook-details") return { ...event, details: { transformed: true } };
+      if (selector !== "transform") return undefined;
+    }
+    const result = selector === "transform"
       ? {
           ...event,
           content: [{ type: "text", text: "transformed" }],
           details: { transformed: true },
           isError: true,
-          usage: { input: 1, output: 2 },
+          usage: FIXTURE_HOOK_USAGE,
         }
       : undefined;
     if (this.fixtureMode === "default") this.ui.notify("event:tool_result:end");

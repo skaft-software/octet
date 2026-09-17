@@ -75,6 +75,9 @@ const API_0_3_OPTIONAL_CAPABILITIES = [
   "session_lifecycle",
   "theme_selection",
   "event_bus",
+  // Recognized only when the host offers them; see RESULT_CONTRACT_FEATURES.
+  "tool_result_termination",
+  "tool_result_usage",
 ];
 const API_0_3_PROVIDER_CAPABILITIES = ["provider_auth", "provider_catalog", "provider_stream"];
 const API_0_3_REQUIRED_METHODS = ["$/cancelRequest", "initialize", "shutdown", "tool/call"];
@@ -189,6 +192,34 @@ const SKIPPED_SOURCE_DIRECTORIES = new Set([
   "node_modules",
   "target",
 ]);
+// Pi declares `usage` and `terminate` on an executed tool result. Carrying them
+// is a host service, not a bridge convention: the kernel owns durable tool
+// usage accounting and the finalized-batch unanimous termination rule. Each
+// field therefore crosses the wire only under its own negotiated feature, and a
+// bridge that publishes them without that selection would be advertising host
+// authority it does not have. The same two names are used on API 0.2 optional
+// features and API 0.3 optional capabilities so one implementation serves both
+// wires.
+const RESULT_TERMINATION_FEATURE = "tool_result_termination";
+const RESULT_USAGE_FEATURE = "tool_result_usage";
+const RESULT_CONTRACT_FEATURES = [
+  RESULT_TERMINATION_FEATURE,
+  RESULT_USAGE_FEATURE,
+];
+// The negotiated usage record mirrors the kernel's native `octet_ai::Usage`
+// token counters one for one, so a host decoder maps it without invented fields.
+const TOOL_USAGE_COUNTER_FIELDS = [
+  ["input", "input_tokens"],
+  ["output", "output_tokens"],
+  ["cacheRead", "cache_read_tokens"],
+  ["cacheWrite", "cache_write_tokens"],
+  ["totalTokens", "total_tokens"],
+];
+const TOOL_USAGE_OPTIONAL_COUNTER_FIELDS = [
+  ["cacheWrite1h", "cache_write_1h_tokens"],
+  ["reasoning", "reasoning_tokens"],
+];
+const TOOL_USAGE_COST_FIELDS = ["input", "output", "cacheRead", "cacheWrite", "total"];
 const REQUIRED_FEATURES = ["request_cancellation", "content_parts"];
 const OPTIONAL_FEATURES = [
   "request_progress",
@@ -196,6 +227,8 @@ const OPTIONAL_FEATURES = [
   "lifecycle_events",
   "dynamic_tools",
   "runtime_commands",
+  RESULT_TERMINATION_FEATURE,
+  RESULT_USAGE_FEATURE,
   // Legacy feature selection only; not canonical API 0.3 authority.
   "semantic_ui",
   "editor_handoff",
@@ -2816,14 +2849,113 @@ function commandDefinitionToOctet(command) {
   };
 }
 
+// ── Pi tool definition projection ──────────────────────────────────────────
+// Pi declares prompt text, an execution mode, and a provider-side constrained
+// sampling request on a tool definition. The API 0.2 tool wire carries only
+// name/description/parameters (and an optional output schema), so the bridge
+// projects the prompt text into the model-facing description and enforces the
+// other two declarations itself. It never sends an undeclared wire field: the
+// host decodes the tool definition with an exact field set.
+
+function normalizePiPromptSnippet(value) {
+  if (typeof value !== "string") throw new Error("Pi tool promptSnippet must be a string");
+  // Pi collapses the snippet to one line before it reaches its system prompt.
+  return value.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizePiPromptGuidelines(value) {
+  if (!Array.isArray(value)) throw new Error("Pi tool promptGuidelines must be an array");
+  const seen = new Set();
+  const guidelines = [];
+  for (const guideline of value) {
+    if (typeof guideline !== "string") {
+      throw new Error("Pi tool promptGuidelines entries must be strings");
+    }
+    // Pi trims each guideline and drops empty and duplicate bullets.
+    const normalized = guideline.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    guidelines.push(normalized);
+  }
+  return guidelines;
+}
+
+function admitPiToolExecutionMode(definition) {
+  const mode = definition.executionMode;
+  if (mode === undefined) return false;
+  if (mode !== "sequential" && mode !== "parallel") {
+    throw new Error(`Pi tool ${definition.name} declares an unknown executionMode`);
+  }
+  return mode === "sequential";
+}
+
+function admitPiToolConstrainedSampling(definition) {
+  const sampling = definition.constrainedSampling;
+  if (sampling === undefined || sampling === false) return null;
+  if (!sampling || typeof sampling !== "object" || Array.isArray(sampling)) {
+    throw new Error(`Pi tool ${definition.name} declares an invalid constrainedSampling config`);
+  }
+  const fields = Object.keys(sampling);
+  if (sampling.type === "json_schema") {
+    if (!["prefer", "require"].includes(sampling.strict)) {
+      throw new Error(`Pi tool ${definition.name} constrainedSampling strict must be "prefer" or "require"`);
+    }
+    if (fields.some((field) => field !== "type" && field !== "strict")) {
+      throw new Error(`Pi tool ${definition.name} constrainedSampling has unknown fields`);
+    }
+    if (sampling.strict === "require") {
+      // Pi fails the request when a provider cannot honor `require`; the octet
+      // host owns provider requests and exposes no per-tool sampling contract,
+      // so this tool cannot be published truthfully.
+      throw new Error(
+        `Pi tool ${definition.name} requires provider JSON-schema constrained sampling, which the octet host does not serve`,
+      );
+    }
+    return `Pi tool ${definition.name} requests provider JSON-schema constrained sampling; the octet host does not serve per-tool sampling, so calls are produced unconstrained and validated before execution`;
+  }
+  if (sampling.type === "grammar") {
+    const variants = sampling.variants;
+    if (
+      !variants
+      || typeof variants !== "object"
+      || Array.isArray(variants)
+      || Object.keys(variants).some((key) => key !== "openai_lark" && key !== "openai_regex")
+      || Object.values(variants).some((value) => typeof value !== "string")
+    ) {
+      throw new Error(`Pi tool ${definition.name} declares invalid grammar constrainedSampling variants`);
+    }
+    throw new Error(
+      `Pi tool ${definition.name} requires provider grammar constrained sampling, which the octet host does not serve`,
+    );
+  }
+  throw new Error(`Pi tool ${definition.name} declares an unknown constrainedSampling type`);
+}
+
+function admitPiToolDefinition(definition) {
+  const sequential = admitPiToolExecutionMode(definition);
+  const samplingNotice = admitPiToolConstrainedSampling(definition);
+  if (samplingNotice) bridge.toolDiagnostics.add(samplingNotice);
+  return sequential;
+}
+
 function toolDefinitionToOctet(definition) {
   const parameters = definition.parameters ?? { type: "object", properties: {} };
   if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
     throw new Error(`Pi tool ${definition.name} has a non-object parameter schema`);
   }
+  const description = definition.description || definition.label || definition.name;
+  const projected = [];
+  if (definition.promptSnippet !== undefined) {
+    const snippet = normalizePiPromptSnippet(definition.promptSnippet);
+    if (snippet) projected.push(snippet);
+  }
+  if (definition.promptGuidelines !== undefined) {
+    const guidelines = normalizePiPromptGuidelines(definition.promptGuidelines);
+    if (guidelines.length) projected.push(guidelines.map((value) => `- ${value}`).join("\n"));
+  }
   return {
     name: definition.name,
-    description: definition.description || definition.label || definition.name,
+    description: projected.length ? `${description}\n\n${projected.join("\n\n")}` : description,
     parameters,
   };
 }
@@ -2849,6 +2981,11 @@ function apiV03PiToolDispatcher() {
 }
 
 function setCurrentTools(tools, revision) {
+  // Admission happens before any publication: a tool whose declaration the host
+  // cannot serve must never be advertised as working.
+  let sequential = false;
+  for (const tool of tools) sequential = admitPiToolDefinition(tool.definition) || sequential;
+  bridge.sequentialToolDeclared = sequential;
   bridge.tools = tools;
   bridge.catalogRevision = revision;
   bridge.toolNames = tools.map((tool) => tool.definition.name);
@@ -2900,6 +3037,7 @@ async function refreshPublishedTools() {
     const published = publishedByName.get(tool.definition.name);
     return !published || published !== tool || !sameToolDefinition(published, tool);
   });
+  for (const tool of changed) admitPiToolDefinition(tool.definition);
   if (changed.length) {
     const response = await requestHost("tools/register", {
       tools: changed.map((tool) => toolDefinitionToOctet(tool.definition)),
@@ -3227,6 +3365,17 @@ function selectV03Contract(params) {
   const providerContract = providerCapabilitiesOffered && providerMethodsOffered;
   const capabilities = [...API_0_3_REQUIRED_CAPABILITIES];
   const methods = [...API_0_3_REQUIRED_METHODS];
+  // Result-contract capabilities are selected one by one and only from the
+  // host's own offer. An offer the bridge does not implement never fails
+  // initialization here; an unimplemented selection would have been rejected as
+  // an unsupported capability above.
+  const resultContract = new Set();
+  for (const feature of RESULT_CONTRACT_FEATURES) {
+    if (optionalCapabilities.has(feature)) {
+      resultContract.add(feature);
+      capabilities.push(feature);
+    }
+  }
   if (providerContract) {
     capabilities.push(...API_0_3_PROVIDER_CAPABILITIES);
     methods.push(...API_0_3_PROVIDER_METHODS);
@@ -3234,6 +3383,7 @@ function selectV03Contract(params) {
   }
   return {
     providerContract,
+    resultContract,
     frameLimit: limits.max_frame_bytes,
     contract: {
       schema: API_0_3_SCHEMA,
@@ -3342,6 +3492,9 @@ async function loadBridge(params, v03Selection = undefined) {
     toolRefreshChain: Promise.resolve(),
     toolRefreshRequested: false,
     catalogRevision: 0,
+    toolDiagnostics: new Set(),
+    sequentialToolDeclared: false,
+    toolExecutionLane: Promise.resolve(),
     features: new Set(REQUIRED_FEATURES),
     uiSurfaces: new Set(params.contributes?.ui ?? []),
     uiGeneration: 0,
@@ -3361,6 +3514,7 @@ async function loadBridge(params, v03Selection = undefined) {
     frameLimit: API_0_3_MAX_FRAME_BYTES,
     v03Contract: v03Selection?.contract,
     providerContract: v03Selection?.providerContract === true,
+    resultContract: new Set(v03Selection?.resultContract ?? []),
     providers: new Map(),
     retiredProviders: new Set(),
     providerStreams: new Map(),
@@ -3515,6 +3669,8 @@ async function handleInitialize(message) {
       && providerCatalogCompletionSelected();
     bridge.initialized = true;
     diagnostic(`Pi compatibility profile ${bridge.piRuntimeVersion} initialized with API 0.3`);
+    diagnoseResultContract();
+    diagnoseToolProjections();
     return {
       api_version: API_VERSION_0_3,
       tools,
@@ -3540,6 +3696,8 @@ async function handleInitialize(message) {
     `Pi compatibility readiness profile=pi_aggregate bridge_api=${API_VERSION_0_2} evidence_api=0.3 sources=${bridge.extensionPaths.length} pinned=${args.strictIdentity ? "yes" : "legacy"}`,
   );
   diagnostic(`Pi compatibility profile ${bridge.piRuntimeVersion} initialized`);
+  diagnoseResultContract();
+  diagnoseToolProjections();
   return {
     api_version: API_VERSION_0_2,
     tools,
@@ -3593,6 +3751,143 @@ function dequeueByName(map, name) {
   return value;
 }
 
+// ── Pi tool-result contract ────────────────────────────────────────────────
+// Pi declares `usage` and `terminate` on an executed tool result. Carrying them
+// to the host kernel is a negotiated service, so every field below is admitted
+// only when its feature was selected. A field whose capability is absent is an
+// explicit protocol error: dropping it would silently change Pi's termination
+// rule or lose tool billing, and relabelling it as generic metadata would
+// advertise native accounting the host never received.
+
+function resultContractSelected(feature) {
+  if (isApiV03()) return bridge.resultContract?.has(feature) === true;
+  return bridge.features.has(feature);
+}
+
+function toolResultContractError(feature, detail) {
+  const message = `${detail} requires the negotiated ${feature} host contract`;
+  return isApiV03() ? v03ProtocolError("invalid_params", message) : new Error(message);
+}
+
+function presentToolResultField(value, field) {
+  return Object.hasOwn(value ?? {}, field) && value[field] !== undefined;
+}
+
+function admitToolResultField(feature, present, detail) {
+  if (present && !resultContractSelected(feature)) {
+    throw toolResultContractError(feature, detail);
+  }
+}
+
+function diagnoseResultContract() {
+  if (!bridge.tools.length && !isApiV03()) return;
+  const missing = RESULT_CONTRACT_FEATURES.filter((feature) => !resultContractSelected(feature));
+  if (missing.length === 0) {
+    diagnostic(
+      `Pi compatibility: tool-result usage and termination were negotiated (${RESULT_CONTRACT_FEATURES.join(", ")})`,
+    );
+    return;
+  }
+  // Startup visibility, not admission: a Pi execute result that carries a field
+  // whose capability was not selected fails the tool call explicitly instead of
+  // silently dropping or relabelling it.
+  diagnostic(
+    `Pi compatibility: ${missing.join(", ")} were not offered by the host; a Pi tool result that carries ${missing.length > 1 ? "either field" : "that field"} fails explicitly rather than being dropped`,
+  );
+}
+
+function diagnoseToolProjections() {
+  for (const notice of bridge.toolDiagnostics ?? []) diagnostic(`Pi compatibility: ${notice}`);
+}
+
+function toolUsageCounter(value, field) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Pi tool usage ${field} must be a nonnegative portable integer`);
+  }
+  return value;
+}
+
+async function awaitToolExecutionLane(signal, operation) {
+  // Pi serializes a whole tool batch when any sibling declares
+  // executionMode: "sequential". The bridge cannot see host batches, so while
+  // any registered Pi tool declares that mode it serializes bridged Pi tool
+  // executions instead: a tool that must not race shared state never overlaps
+  // another bridged Pi execution. Other host-owned tools in the same batch are
+  // outside this lane (the host already classifies extension tool calls as
+  // batch barriers).
+  if (!bridge.sequentialToolDeclared) return operation();
+  const previous = bridge.toolExecutionLane;
+  let release;
+  bridge.toolExecutionLane = new Promise((resolveLane) => {
+    release = resolveLane;
+  });
+  try {
+    await awaitWithCancellation(previous, signal);
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
+function piUsageToToolExecutionUsage(usage) {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
+    throw new Error("Pi tool usage must be a Usage record");
+  }
+  const allowed = new Set([
+    ...TOOL_USAGE_COUNTER_FIELDS.map(([piField]) => piField),
+    ...TOOL_USAGE_OPTIONAL_COUNTER_FIELDS.map(([piField]) => piField),
+    "cost",
+  ]);
+  for (const key of Object.keys(usage)) {
+    if (!allowed.has(key)) throw new Error(`Pi tool usage has unknown field ${JSON.stringify(key)}`);
+  }
+  const record = {};
+  const counters = {};
+  for (const [piField, wireField] of TOOL_USAGE_COUNTER_FIELDS) {
+    if (usage[piField] === undefined) throw new Error(`Pi tool usage is missing ${piField}`);
+    counters[piField] = toolUsageCounter(usage[piField], piField);
+    record[wireField] = counters[piField];
+  }
+  for (const [piField, wireField] of TOOL_USAGE_OPTIONAL_COUNTER_FIELDS) {
+    if (usage[piField] === undefined) continue;
+    const value = toolUsageCounter(usage[piField], piField);
+    if (piField === "reasoning" && value > counters.output) {
+      throw new Error("Pi tool usage reasoning tokens exceed reported output tokens");
+    }
+    if (piField === "cacheWrite1h" && value > counters.cacheWrite) {
+      throw new Error("Pi tool usage one-hour cache writes exceed reported cache writes");
+    }
+    record[wireField] = value;
+  }
+  if (usage.cost !== undefined) {
+    const cost = usage.cost;
+    if (!cost || typeof cost !== "object" || Array.isArray(cost)) {
+      throw new Error("Pi tool usage cost must be an object");
+    }
+    for (const key of Object.keys(cost)) {
+      if (!TOOL_USAGE_COST_FIELDS.includes(key)) {
+        throw new Error(`Pi tool usage cost has unknown field ${JSON.stringify(key)}`);
+      }
+    }
+    // The kernel's native tool usage carries token counters only. Pi reports USD
+    // cost on the same record, so a non-zero amount cannot be accounted and must
+    // fail explicitly instead of being silently discarded; an all-zero cost is
+    // Pi's own encoding for unpriced usage, where nothing is lost.
+    for (const field of TOOL_USAGE_COST_FIELDS) {
+      const value = cost[field];
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        throw new Error(`Pi tool usage cost ${field} must be a finite nonnegative USD number`);
+      }
+      if (value !== 0) {
+        throw new Error(
+          `Pi tool usage cost ${field} cannot be accounted: the host's native tool usage carries token counters only`,
+        );
+      }
+    }
+  }
+  return record;
+}
+
 async function callPiTool(message) {
   // A Pi command may have requested a catalog refresh immediately before the
   // host invokes the new tool revision. Wait for that transactional publish
@@ -3636,7 +3931,7 @@ async function callPiTool(message) {
   }
   let result;
   try {
-    result = await definition.execute(
+    result = await awaitToolExecutionLane(currentScope().signal, () => definition.execute(
       toolCallId,
       callEvent.input,
       currentScope().signal,
@@ -3652,7 +3947,7 @@ async function callPiTool(message) {
         });
       },
       bridge.runner.createContext(),
-    );
+    ));
   } catch (error) {
     throw error;
   }
@@ -3665,17 +3960,49 @@ async function callPiTool(message) {
     content: result?.content ?? [],
     details: result?.details,
     isError: result?.isError === true,
+    // Pi's ToolResultEvent declares the executed result's usage so a
+    // tool_result hook can observe and replace it.
+    ...(presentToolResultField(result, "usage") ? { usage: result.usage } : {}),
   };
   const transformed = (await bridge.runner.emitToolResult(toolResultEvent)) ?? toolResultEvent;
-  const finalContent = await lowerContent(transformed.content ?? result?.content);
-  let metadata = transformed.details;
-  if (transformed.usage !== undefined) {
-    metadata = { details: transformed.details ?? null, usage: transformed.usage };
+  // Termination belongs to the executed result only. Pi's ToolResultEventResult
+  // declares no termination mutation, so a hook that returns one is an
+  // unrepresentable mutation rather than an override to apply.
+  const resultTerminatePresent = presentToolResultField(result, "terminate");
+  const resultTerminate = result?.terminate;
+  if (resultTerminatePresent && typeof resultTerminate !== "boolean") {
+    throw new Error("Pi tool terminate must be a boolean");
   }
+  const hookTerminatePresent = presentToolResultField(transformed, "terminate");
+  if (hookTerminatePresent && typeof transformed.terminate !== "boolean") {
+    throw new Error("Pi tool terminate must be a boolean");
+  }
+  if (hookTerminatePresent && transformed.terminate !== (resultTerminate === true)) {
+    throw new Error("Pi tool_result hooks cannot mutate tool termination");
+  }
+  const terminatePresent = resultTerminatePresent || hookTerminatePresent;
+  const terminate = resultTerminate === true;
+  admitToolResultField(
+    RESULT_TERMINATION_FEATURE,
+    terminatePresent,
+    "Pi tool result terminate",
+  );
+  const usage = presentToolResultField(transformed, "usage")
+    ? transformed.usage
+    : presentToolResultField(result, "usage") ? result.usage : undefined;
+  const usagePresent = presentToolResultField(transformed, "usage") || presentToolResultField(result, "usage");
+  admitToolResultField(RESULT_USAGE_FEATURE, usagePresent, "Pi tool result usage");
+  const loweredUsage = usagePresent ? piUsageToToolExecutionUsage(usage) : undefined;
+  const finalContent = await lowerContent(transformed.content ?? result?.content);
+  // `details` keeps its original shape: native tool usage is a typed wire field
+  // now, never a `{details, usage}` metadata wrapper that only looks native.
+  const metadata = transformed.details;
   return {
     content: finalContent,
     is_error: transformed.isError === true,
     ...(isApiV03() ? { metadata: metadata ?? null } : metadata === undefined ? {} : { metadata }),
+    ...(terminatePresent ? { terminate } : {}),
+    ...(loweredUsage === undefined ? {} : { usage: loweredUsage }),
   };
 }
 

@@ -223,7 +223,8 @@ fn default_batch_endpoint(model: &Model) -> anyhow::Result<&'static str> {
         Protocol::AnthropicMessages => Ok("/v1/messages"),
         Protocol::BedrockConverse
         | Protocol::GoogleGenerativeAi
-        | Protocol::MistralConversations => {
+        | Protocol::MistralConversations
+        | Protocol::PiMessages => {
             anyhow::bail!("OpenRouter Batch API does not support the selected model protocol")
         }
     }

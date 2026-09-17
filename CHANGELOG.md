@@ -16,7 +16,28 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   Working/Thinking label now rests at a slightly greyed off-white (about #f9
   instead of #fd) and the light theme's rests at a soft near-black (about #16
   instead of #00), each with the sweep ceiling moved to keep the travelling band
-  and the margin dot's pulse at their previously pinned separations.
+  and the margin dot's pulse at their previously pinned separations. The light
+  bound is measured, not chosen: a 0.009 rest fails the pinned 1.7:1 worst-case
+  cell separation for a blue identity after ANSI256 quantization, so the rest
+  sits at 0.0085 and the light sweep ceiling moves 0.09 -> 0.095 to preserve the
+  pinned 0.08 relative-luminance travel.
+
+- Add the hidden `/debug` command (exact name only; absent from the popup and
+  `/help`). It writes an owner-private `~/.octet/octet-debug.log` with the
+  terminal size, every rendered line plus its visible width and the agent
+  messages as JSONL, then reports the path; an in-flight run is read through the
+  inspection snapshot, so the dump never disturbs the frame coalescer.
+
+- Add `/session`, reporting the session file, id, title, head, entry and
+  active-branch message counts, checkpoints, usage records, the token buckets
+  and exact cost, and marking unknown exposure as a known subtotal instead of
+  presenting it as exact.
+
+- Add `/settings` (defaults, theme, images and default model/reasoning; the
+  transport and editor padding are reported as read-only route/theme facts) and
+  `/scoped-models` (ordered Ctrl+P scope persisted as the user `models` key),
+  and `!command`/`!!command` local shell escapes that record their result as
+  model-visible or explicitly excluded from model context.
 
 - Withdraw the `/tree` and `/checkout` slash commands (maintainer decision) with
   their keybinding: the durable connector tree stays available through
@@ -54,6 +75,41 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   `inherited no ceiling` and every `?` placeholder are gone, elapsed and token
   counts are human-formatted, and no internal Rust API or operation id is
   printed into the transcript.
+- Add the interactive live-reload supervisor: the prompt samples the skill,
+  prompt, theme, context-file, keybinding, settings, and extension roots in use
+  plus the resolved executable (`current_exe()` re-resolved every poll) on a
+  bounded 1000 ms metadata poll, and applies a pass only at the idle prompt in
+  the fixed order resources → extensions → host. Saves are debounced (200 ms,
+  2 s hard ceiling) and coalesced; a pass is never admitted while a run owns the
+  session, so evidence queued behind a busy boundary is applied at the next idle
+  prompt. It is enabled by default and announces itself once (`live reload
+  armed: N watched paths, poll …`) with a per-layer report on every applied pass;
+  `reload`, `reload_poll_ms`, `reload_debounce_ms`, and `reload_max_files` are
+  user-level settings, `/reload --dry-run` previews a pass without changing
+  anything, and `/reload --force` takes one immediately while naming the four
+  losses (in-flight model call, in-flight tool call, an extension's in-flight
+  host request, a worker mid-call) and the durable records that survive. Plain
+  `/reload` keeps its existing transactional resource reload and re-exec path.
+- `/reload` now also reloads the **host binary**. When the executable on disk
+  changed, the candidate is validated first with a side-effect-free internal
+  probe (`--internal-reexec-probe`, which initializes no provider, extension,
+  workspace or network work) and its generation is re-stated immediately before
+  the jump, so a build replaced mid-probe is never executed. The reload happens
+  at an idle boundary only and refuses while a model turn, tool call, shell
+  child, effect approval or in-flight session write is live; live delegated
+  workers become an explicit opt-in that flushes their durable records and
+  detaches them for reattachment. The new image keeps the same PID and resumes
+  exactly the session that was running (`--resume <id>`), extension children are
+  stopped through the bounded path, session-lock descriptors are `CLOEXEC` so
+  the new image can re-lock its own session, and nothing ever locks the
+  executable — so several panes and a running `serve` reload independently.
+- Late `providers/register`, `providers/update` and `providers/unregister`
+  take effect in the running session without a reload, matching Pi. Credentials,
+  endpoints, headers, transports, callbacks and OAuth payloads stay host-owned;
+  a late registration never overrides a built-in the user did not opt into;
+  pricing and capability validation still run before a model becomes routable;
+  and an in-flight request is never mutated — the change applies at the next
+  request boundary.
 
 ### Codex subscription behaviour
 
@@ -79,6 +135,21 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 - Settle completed workers once into their owning transcript block, avoid replay
   on later turns, and preserve history anchors while live workers update.
+- Make the transcript block the single live roster surface: the duplicate pinned
+  chrome strip is deleted, an active roster stays in the mutable tail (never
+  committed as immutable native history) and updates in place while the reader
+  scrolls back, and the marker dot pulses while any child is live and resolves
+  to success/failure/stopped once the roster settles.
+- Stop truncating worker model ids: worker/state/model are mandatory columns
+  that never ellipsize, optional metrics drop first, and the compact fallback
+  line still prints the full model. The `/subagents` picker header is now the
+  stable surface name `Subagents`, with counts in rows/status rather than the
+  title.
+- Remove the `completed with warnings` state from the TUI: both completed
+  variants render the same `✓ completed · <duration> · <rate> tok/s` line and
+  the same success role, and the counts stay in the model for exit status and
+  telemetry. A completed turn with live workers now shows one subdued
+  `subagents are running; inspect them in the /subagents menu.` line.
 - Add bounded `/subagents open-all tmux|herdr` planning and multiplexer adapters.
   Product pane execution is disabled for all workers and the parent until the
   host provides atomic writer claim/settlement. An opaque handle or fresh
@@ -157,6 +228,11 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### CLI and sessions
 
+- Add `--powershell` (additive Windows `powershell` opt-in, reported inert on
+  other hosts, conflicting with an exclusive `--tools`/`--no-tools` list) and
+  ordered `--models` patterns that resolve a literal `provider/model`/bare-id
+  reference exactly before globs, preserve the requested order and keep each
+  `:level` reasoning suffix.
 - Add `--mode json` session-event JSONL, `--list-models` search,
   `--session-id`/`--name`, sequential positional prompts with bounded `@file`
   and media expansion, and piped stdin in every mode.

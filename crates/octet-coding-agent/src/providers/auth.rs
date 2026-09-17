@@ -76,9 +76,11 @@ pub(crate) fn resolve_environment(
 /// Anthropic OAuth/subscription tokens must be sent as `Authorization: Bearer`
 /// even on routes whose default presentation is a custom API-key header. This
 /// keys on the credential *variable*, never on a provider name, so a new
-/// provider reusing these variables inherits the behavior without a branch.
+/// provider reusing these variables inherits the behavior without a branch. The
+/// variable list itself is the shared `octet_ai` credential-alias declaration,
+/// not a second copy.
 fn bearer_token_variable(variable: &str) -> bool {
-    matches!(variable, "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_OAUTH_TOKEN")
+    octet_ai::ANTHROPIC_BEARER_TOKEN_VARIABLES.contains(&variable)
 }
 
 /// Build an endpoint auth strategy without copying the credential into a public
@@ -247,9 +249,8 @@ pub(crate) fn aws_bedrock_region() -> anyhow::Result<String> {
     Ok("us-east-1".to_owned())
 }
 
-type AwsCredentialsResolver = std::sync::Arc<
-    dyn Fn() -> anyhow::Result<Option<octet_ai::AwsCredentials>> + Send + Sync,
->;
+type AwsCredentialsResolver =
+    std::sync::Arc<dyn Fn() -> anyhow::Result<Option<octet_ai::AwsCredentials>> + Send + Sync>;
 
 struct AwsBedrockSigner {
     region: String,
@@ -615,10 +616,7 @@ const AWS_METADATA_ENDPOINT_MODE_VARIABLES: [&str; 2] = [
 ];
 
 /// First variable in `variables` that is set to a non-empty value.
-fn first_set_variable<R>(
-    read_env: &mut R,
-    variables: &[&str],
-) -> anyhow::Result<Option<String>>
+fn first_set_variable<R>(read_env: &mut R, variables: &[&str]) -> anyhow::Result<Option<String>>
 where
     R: FnMut(&str) -> anyhow::Result<Option<String>>,
 {
@@ -680,7 +678,10 @@ fn read_dmi_marker_from(reader: impl std::io::Read) -> Option<String> {
     use std::io::Read;
 
     let mut bytes = Vec::new();
-    reader.take(MAX_AWS_DMI_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    reader
+        .take(MAX_AWS_DMI_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     if bytes.len() > MAX_AWS_DMI_BYTES as usize {
         return None;
     }
@@ -793,9 +794,7 @@ pub(crate) fn aws_metadata_activation_from(
                 return AwsMetadataActivation::Enabled(AwsMetadataIndication::ProductOptIn);
             }
             "0" | "false" | "no" | "off" => {
-                return AwsMetadataActivation::Disabled(
-                    AwsMetadataSuppression::ExplicitlyDisabled,
-                );
+                return AwsMetadataActivation::Disabled(AwsMetadataSuppression::ExplicitlyDisabled);
             }
             _ => {
                 return AwsMetadataActivation::Disabled(
@@ -860,10 +859,7 @@ where
     let profile_values = read_profile(false)?;
     let profile_config = read_profile(true)?;
     let profile_value = |values: &Option<std::collections::BTreeMap<String, String>>, key: &str| {
-        values
-            .as_ref()
-            .and_then(|values| values.get(key))
-            .cloned()
+        values.as_ref().and_then(|values| values.get(key)).cloned()
     };
     Ok(AwsMetadataActivationInputs {
         ec2_metadata_disabled: read_env("AWS_EC2_METADATA_DISABLED")?,
@@ -885,7 +881,10 @@ where
         // suppress an intentional EC2/ECS-backed Bedrock profile.
         profile_credential_source: profile_value(&profile_config, "credential_source")
             .or_else(|| profile_value(&profile_values, "credential_source")),
-        profile_metadata_service_endpoint: profile_value(&profile_config, "ec2_metadata_service_endpoint"),
+        profile_metadata_service_endpoint: profile_value(
+            &profile_config,
+            "ec2_metadata_service_endpoint",
+        ),
         instance_identity: read_instance_identity(),
     })
 }
@@ -943,7 +942,9 @@ fn checked_aws_metadata_endpoint(value: &str) -> anyhow::Result<url::Url> {
 fn aws_metadata_host_is_link_local_or_loopback(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(address)) => address.is_loopback() || address.octets()[..2] == [169, 254],
+        Some(url::Host::Ipv4(address)) => {
+            address.is_loopback() || address.octets()[..2] == [169, 254]
+        }
         Some(url::Host::Ipv6(address)) => address.is_loopback(),
         None => false,
     }
@@ -1218,9 +1219,10 @@ fn checked_aws_role_session_name(name: &str) -> anyhow::Result<String> {
         || name
             .bytes()
             .any(|byte| byte.is_ascii_control() || byte == b' ')
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'=' | b',' | b'.' | b'@' | b'-' | b'_'))
+        || !name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'+' | b'=' | b',' | b'.' | b'@' | b'-' | b'_')
+        })
     {
         anyhow::bail!("invalid {AWS_ROLE_SESSION_NAME}");
     }
@@ -1293,9 +1295,9 @@ fn sts_assume_role_with_web_identity(
             .and_then(|body| xml_tag(&body, "Code"))
             .filter(|code| code.len() <= 64 && !code.chars().any(char::is_control));
         return Err(match code {
-            Some(code) => anyhow::anyhow!(
-                "AWS STS AssumeRoleWithWebIdentity failed with {status}: {code}"
-            ),
+            Some(code) => {
+                anyhow::anyhow!("AWS STS AssumeRoleWithWebIdentity failed with {status}: {code}")
+            }
             None => anyhow::anyhow!("AWS STS AssumeRoleWithWebIdentity failed with {status}"),
         });
     }
@@ -1342,7 +1344,9 @@ fn xml_tag(body: &str, tag: &str) -> Option<String> {
             ("&apos;", '\''),
         ]
         .into_iter()
-        .find_map(|(entity, decoded)| tail.starts_with(entity).then_some((decoded, entity.len())))?;
+        .find_map(|(entity, decoded)| {
+            tail.starts_with(entity).then_some((decoded, entity.len()))
+        })?;
         value.push(decoded);
         rest = &tail[consumed..];
     }
@@ -1367,12 +1371,8 @@ mod tests {
     };
 
     fn fixture_credentials(label: &str) -> octet_ai::AwsCredentials {
-        octet_ai::AwsCredentials::new(
-            format!("{label}-access"),
-            format!("{label}-secret"),
-            None,
-        )
-        .expect("fixture AWS credentials")
+        octet_ai::AwsCredentials::new(format!("{label}-access"), format!("{label}-secret"), None)
+            .expect("fixture AWS credentials")
     }
 
     #[test]
@@ -1624,8 +1624,7 @@ ignored key = ignored
         ))
         .is_err());
         assert!(credentials_from_metadata_body(
-            r#"{"AccessKeyId":"metadata\naccess","SecretAccessKey":"metadata-secret"}"#
-                .to_owned(),
+            r#"{"AccessKeyId":"metadata\naccess","SecretAccessKey":"metadata-secret"}"#.to_owned(),
         )
         .is_err());
     }
@@ -1699,8 +1698,7 @@ ignored key = ignored
             environment_auth(&ANTHROPIC.routes[0], &auth_token).unwrap(),
             Auth::BearerEnv { .. }
         ));
-        let headers =
-            environment_discovery_headers(&ANTHROPIC.routes[0], &auth_token).unwrap();
+        let headers = environment_discovery_headers(&ANTHROPIC.routes[0], &auth_token).unwrap();
         let authorization = &headers[http::header::AUTHORIZATION];
         assert_eq!(authorization.to_str().unwrap(), "Bearer token-value");
         assert!(authorization.is_sensitive());
@@ -1713,8 +1711,7 @@ ignored key = ignored
             environment_auth(&ANTHROPIC.routes[0], &api_key).unwrap(),
             Auth::HeaderEnv { .. }
         ));
-        let headers =
-            environment_discovery_headers(&ANTHROPIC.routes[0], &api_key).unwrap();
+        let headers = environment_discovery_headers(&ANTHROPIC.routes[0], &api_key).unwrap();
         assert_eq!(
             headers[http::HeaderName::from_static("x-api-key")],
             "key-value"
@@ -1886,9 +1883,7 @@ ignored key = ignored
         let credentials = aws_metadata_credentials_with(
             activation,
             None,
-            move |name| {
-                Ok((name == "AWS_METADATA_SERVICE_ENDPOINT").then(|| endpoint.clone()))
-            },
+            move |name| Ok((name == "AWS_METADATA_SERVICE_ENDPOINT").then(|| endpoint.clone())),
             metadata_credentials_from_url,
             ec2_metadata_credentials,
         )
@@ -2168,7 +2163,11 @@ ignored key = ignored
         let inputs = aws_metadata_activation_inputs_with(
             |_| Ok(None),
             move |config_file| {
-                Ok(if config_file { None } else { Some(profile.clone()) })
+                Ok(if config_file {
+                    None
+                } else {
+                    Some(profile.clone())
+                })
             },
             || None,
         )
@@ -2191,7 +2190,11 @@ ignored key = ignored
 
         let in_config = |values: BTreeMap<String, String>| {
             move |config_file: bool| {
-                Ok(if config_file { Some(values.clone()) } else { None })
+                Ok(if config_file {
+                    Some(values.clone())
+                } else {
+                    None
+                })
             }
         };
 
@@ -2326,7 +2329,10 @@ ignored key = ignored
         // `None` that lets the unrelated provider be skipped.
         let (base, requests) = metadata_fixture(vec![("/latest/api/token", "404 Not Found", "")]);
         let credentials = ec2_metadata_credentials(&base).unwrap();
-        assert!(credentials.is_none(), "an unavailable IMDS resolves to no credentials");
+        assert!(
+            credentials.is_none(),
+            "an unavailable IMDS resolves to no credentials"
+        );
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -2356,7 +2362,8 @@ ignored key = ignored
             "ftp://169.254.169.254/",
         ] {
             assert!(
-                aws_metadata_service_endpoint_with(|_| Ok(Some(rejected.to_owned())), None).is_err(),
+                aws_metadata_service_endpoint_with(|_| Ok(Some(rejected.to_owned())), None)
+                    .is_err(),
                 "metadata endpoint override must be rejected: {rejected}"
             );
             assert!(
@@ -2398,8 +2405,9 @@ ignored key = ignored
         .unwrap();
         assert_eq!(alias.as_str(), "http://127.0.0.1:2/alias/");
 
-        let profile = aws_metadata_service_endpoint_with(|_| Ok(None), Some("http://127.0.0.1:3/profile"))
-            .unwrap();
+        let profile =
+            aws_metadata_service_endpoint_with(|_| Ok(None), Some("http://127.0.0.1:3/profile"))
+                .unwrap();
         assert_eq!(profile.as_str(), "http://127.0.0.1:3/profile/");
     }
 
@@ -2421,14 +2429,18 @@ ignored key = ignored
                 r#"{"AccessKeyId":"fixture-access","SecretAccessKey":"fixture-secret","Token":"fixture-token"}"#,
             ),
         ]);
-        let inputs = aws_metadata_activation_inputs_with(|_| Ok(None), |config_file| {
-            Ok(config_file.then(|| {
-                std::collections::BTreeMap::from([(
-                    "ec2_metadata_service_endpoint".to_owned(),
-                    base.to_string(),
-                )])
-            }))
-        }, || None)
+        let inputs = aws_metadata_activation_inputs_with(
+            |_| Ok(None),
+            |config_file| {
+                Ok(config_file.then(|| {
+                    std::collections::BTreeMap::from([(
+                        "ec2_metadata_service_endpoint".to_owned(),
+                        base.to_string(),
+                    )])
+                }))
+            },
+            || None,
+        )
         .unwrap();
         assert_eq!(
             aws_metadata_activation_from(&inputs),
@@ -2541,7 +2553,9 @@ ignored key = ignored
         // DMI is optional (containers/ARM may not expose it); no network or
         // credential sources are consulted by this regression.
         let path = std::path::Path::new(AWS_EC2_DMI_MARKERS[0]);
-        let Ok(file) = std::fs::File::open(path) else { return };
+        let Ok(file) = std::fs::File::open(path) else {
+            return;
+        };
         let expected = read_dmi_marker_from(file);
         assert_eq!(read_dmi_marker(path), expected);
     }
@@ -2575,9 +2589,7 @@ ignored key = ignored
         let credentials = aws_metadata_credentials_with(
             activation,
             None,
-            move |name| {
-                Ok((name == "AWS_METADATA_SERVICE_ENDPOINT").then(|| endpoint.clone()))
-            },
+            move |name| Ok((name == "AWS_METADATA_SERVICE_ENDPOINT").then(|| endpoint.clone())),
             metadata_credentials_from_url,
             ec2_metadata_credentials,
         )
@@ -2653,7 +2665,8 @@ ignored key = ignored
         )
     }
 
-    const STS_SUCCESS_XML: &str = "<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult>\
+    const STS_SUCCESS_XML: &str =
+        "<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult>\
 <Credentials><AccessKeyId>fixture-access</AccessKeyId>\
 <SecretAccessKey>fixture-secret</SecretAccessKey>\
 <SessionToken>fixture-token</SessionToken>\
@@ -2664,10 +2677,12 @@ ignored key = ignored
     fn bedrock_api_key_takes_precedence_over_the_sigv4_chain() {
         let auth = aws_bedrock_auth_with(
             "us-east-1",
-            |name| {
-                Ok((name == AWS_BEDROCK_BEARER_VARIABLE).then(|| "bedrock-api-key".to_owned()))
+            |name| Ok((name == AWS_BEDROCK_BEARER_VARIABLE).then(|| "bedrock-api-key".to_owned())),
+            || {
+                panic!(
+                    "the SigV4 credential chain must not run when a Bedrock API key is configured"
+                )
             },
-            || panic!("the SigV4 credential chain must not run when a Bedrock API key is configured"),
         )
         .unwrap()
         .expect("the configured API key must select an auth strategy");
@@ -2697,9 +2712,11 @@ ignored key = ignored
 
     #[test]
     fn bedrock_without_any_credential_source_offers_no_auth() {
-        let auth =
-            aws_bedrock_auth_with("us-east-1", |_| Ok(None), || Ok(None)).unwrap();
-        assert!(auth.is_none(), "no credential source means no auth strategy");
+        let auth = aws_bedrock_auth_with("us-east-1", |_| Ok(None), || Ok(None)).unwrap();
+        assert!(
+            auth.is_none(),
+            "no credential source means no auth strategy"
+        );
     }
 
     #[test]
@@ -2796,8 +2813,14 @@ ignored key = ignored
             "{form}"
         );
         assert!(form.contains("RoleSessionName=octet"), "{form}");
-        assert!(form.contains("WebIdentityToken=fixture-oidc-token"), "{form}");
-        assert!(!form.contains("fixture-token"), "no response token in the request");
+        assert!(
+            form.contains("WebIdentityToken=fixture-oidc-token"),
+            "{form}"
+        );
+        assert!(
+            !form.contains("fixture-token"),
+            "no response token in the request"
+        );
     }
 
     #[test]
@@ -2866,12 +2889,18 @@ ignored key = ignored
         // closed instead of producing an approximate credential value.
         assert!(sts_credentials_from_xml(STS_SUCCESS_XML).is_ok());
 
-        let missing_token = STS_SUCCESS_XML.replace("<SessionToken>fixture-token</SessionToken>", "");
+        let missing_token =
+            STS_SUCCESS_XML.replace("<SessionToken>fixture-token</SessionToken>", "");
         let error = sts_credentials_from_xml(&missing_token).unwrap_err();
-        assert!(error.to_string().contains("incomplete credentials"), "{error}");
+        assert!(
+            error.to_string().contains("incomplete credentials"),
+            "{error}"
+        );
 
-        let empty_secret = STS_SUCCESS_XML
-            .replace("<SecretAccessKey>fixture-secret</SecretAccessKey>", "<SecretAccessKey></SecretAccessKey>");
+        let empty_secret = STS_SUCCESS_XML.replace(
+            "<SecretAccessKey>fixture-secret</SecretAccessKey>",
+            "<SecretAccessKey></SecretAccessKey>",
+        );
         assert!(sts_credentials_from_xml(&empty_secret).is_err());
 
         assert_eq!(
@@ -2917,10 +2946,16 @@ ignored key = ignored
             assert!(checked_aws_role_arn(rejected).is_err(), "{rejected}");
         }
         for accepted in ["octet", "octet-session_1@example.com"] {
-            assert!(checked_aws_role_session_name(accepted).is_ok(), "{accepted}");
+            assert!(
+                checked_aws_role_session_name(accepted).is_ok(),
+                "{accepted}"
+            );
         }
         for rejected in ["", "a", "two words", "control\u{7}"] {
-            assert!(checked_aws_role_session_name(rejected).is_err(), "{rejected:?}");
+            assert!(
+                checked_aws_role_session_name(rejected).is_err(),
+                "{rejected:?}"
+            );
         }
     }
 }

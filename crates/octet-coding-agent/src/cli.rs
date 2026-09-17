@@ -23,8 +23,8 @@ use crate::migrate::MigrationCommand;
 use crate::pi::PiCommand;
 use crate::session_commands::SessionCommand;
 
-mod config_diagnostics;
 pub(crate) mod catalog_publish;
+mod config_diagnostics;
 pub(crate) mod eval;
 pub(crate) mod parity;
 
@@ -327,6 +327,12 @@ pub struct Cli {
     /// Load only these tools (comma-separated).
     #[arg(long, value_name = "NAMES", value_delimiter = ',', num_args = 1..)]
     pub tools: Option<Vec<String>>,
+    /// Add the Windows PowerShell tool to the model-visible allowlist.
+    ///
+    /// Opt-in only, additive to the default allowlist, and never a `bash`
+    /// fallback: the entry stays inert on a host that cannot run it.
+    #[arg(long, conflicts_with_all = ["tools", "no_tools"])]
+    pub powershell: bool,
     /// Remove tools from the active set (comma-separated).
     #[arg(long, value_name = "NAMES", value_delimiter = ',', num_args = 1..)]
     pub exclude_tools: Vec<String>,
@@ -918,6 +924,10 @@ struct ConfigLayer {
     mouse: Option<String>,
     plain: Option<bool>,
     show_images: Option<bool>,
+    /// User-level `/scoped-models` pattern list. Interactive cycling scope
+    /// only; headless modes never consume it and a trusted project layer may
+    /// not override it.
+    models: Option<String>,
     allow_external_paths: Option<bool>,
     allow_edit: Option<bool>,
     allow_write: Option<bool>,
@@ -935,6 +945,13 @@ struct ConfigLayer {
     context_files: Option<bool>,
     offline: Option<bool>,
     strict_config: Option<bool>,
+    /// Live-reload policy. User level only: `merge_project` never copies these
+    /// keys, so a trusted project cannot arm automatic reload or change its
+    /// cadence on the user's behalf.
+    reload: Option<bool>,
+    reload_poll_ms: Option<u64>,
+    reload_debounce_ms: Option<u64>,
+    reload_max_files: Option<usize>,
     telemetry: Option<PathBuf>,
     enabled_extensions: Option<Vec<String>>,
     trusted_extensions: Option<Vec<String>>,
@@ -961,6 +978,7 @@ impl ConfigLayer {
         override_some!(mouse);
         override_some!(plain);
         override_some!(show_images);
+        override_some!(models);
         override_some!(allow_external_paths);
         override_some!(allow_edit);
         override_some!(allow_write);
@@ -977,6 +995,10 @@ impl ConfigLayer {
         override_some!(context_files);
         override_some!(offline);
         override_some!(strict_config);
+        override_some!(reload);
+        override_some!(reload_poll_ms);
+        override_some!(reload_debounce_ms);
+        override_some!(reload_max_files);
         override_some!(telemetry);
         override_some!(enabled_extensions);
         override_some!(trusted_extensions);
@@ -1093,12 +1115,16 @@ impl ConfigLayer {
             self.strict_config = Some(true);
         }
         // A trusted project may suggest activation, but executable trust is a
-        // user-level decision and can never be granted by project config.
+        // user-level decision and can never be granted by project config. The
+        // interactive cycling scope is likewise a user-level preference.
         let trusted_extensions = self.trusted_extensions.clone();
         project.trusted_extensions = None;
+        let scoped_models = self.models.clone();
+        project.models = None;
         tighten_effect_policy(&mut self.effect_policy, project.effect_policy.take());
         self.merge(project);
         self.trusted_extensions = trusted_extensions;
+        self.models = scoped_models;
     }
 }
 
@@ -1126,6 +1152,87 @@ pub fn persist_model(model: &str) -> anyhow::Result<()> {
         anyhow::anyhow!("cannot persist model: user home directory is unavailable")
     })?;
     persist_key_to_path("model", model, &path)
+}
+
+/// Persist the user-level interactive model scope as one comma-separated
+/// `--models` pattern list. `None` removes the key so the next launch cycles
+/// the complete catalog again.
+///
+/// This is the same structural, compare-and-swap writer every other user
+/// preference uses; a trusted project layer can never override the value.
+pub fn persist_scoped_models(patterns: Option<&str>) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist the model scope: user home directory is unavailable")
+    })?;
+    let patterns = patterns.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(patterns) = patterns {
+        if patterns.chars().any(char::is_control) {
+            anyhow::bail!("model scope patterns must not contain control characters");
+        }
+    }
+    match patterns {
+        Some(patterns) => persist_key_to_path("models", patterns, &path),
+        None => remove_key_from_path("models", &path),
+    }
+}
+
+/// Read the persisted interactive model scope without rebuilding a full
+/// configuration. Interactive-only by construction: headless frontends never
+/// consult it.
+pub fn persisted_scoped_models() -> Option<String> {
+    let path = global_config_path()?;
+    let layer = read_layer(&path, ConfigSourceKind::Global).ok()?;
+    layer
+        .values
+        .models
+        .map(|patterns| patterns.trim().to_owned())
+        .filter(|patterns| !patterns.is_empty())
+}
+
+/// Live-reload policy for the interactive frontend.
+///
+/// Read from the user level only (`reload`, `reload_poll_ms`,
+/// `reload_debounce_ms`, `reload_max_files`), because automatic reload and its
+/// cadence are user decisions a trusted project must not make on the user's
+/// behalf. Values are range-clamped, and a missing or unreadable file leaves
+/// the defaults in place — the same fail-open shape `persisted_scoped_models`
+/// uses, since `build_config` already reports a broken configuration.
+///
+/// Enabled by default: the interactive prompt arms the supervisor, announces
+/// itself once in the transcript, and applies reloads only at the idle prompt.
+/// `reload = false` disables it for good.
+pub fn live_reload_settings() -> crate::reload::ReloadSettings {
+    let Some(path) = global_config_path() else {
+        return crate::reload::ReloadSettings::default();
+    };
+    let Ok(layer) = read_layer(&path, ConfigSourceKind::Global) else {
+        return crate::reload::ReloadSettings::default();
+    };
+    let values = layer.values;
+    crate::reload::ReloadSettings {
+        enabled: values.reload.unwrap_or(true),
+        poll_interval: values
+            .reload_poll_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(crate::reload::DEFAULT_POLL_INTERVAL),
+        debounce: values
+            .reload_debounce_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(crate::reload::DEFAULT_DEBOUNCE),
+        max_inspections_per_poll: values
+            .reload_max_files
+            .unwrap_or(crate::reload::DEFAULT_MAX_INSPECTIONS_PER_POLL),
+    }
+    .sanitized()
+}
+
+/// Persist the opt-in inline-image rendering preference as a real TOML
+/// boolean, matching the `show_images: bool` configuration reader.
+pub fn persist_show_images(enabled: bool) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist image display: user home directory is unavailable")
+    })?;
+    persist_bool_key_to_path("show_images", enabled, &path)
 }
 
 pub fn persist_reasoning(reasoning: &str) -> anyhow::Result<()> {
@@ -1377,6 +1484,52 @@ fn persist_key_to_path(key: &str, value: &str, path: &std::path::Path) -> anyhow
     write_config_atomically(path, &new_content, original.as_deref())
 }
 
+/// Persist one structural user-config boolean. `toml_edit::value(&str)` would
+/// write a string, so boolean-valued settings must not reuse the string path.
+fn persist_bool_key_to_path(key: &str, value: bool, path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _config_lock = config_update_lock(path)?;
+
+    let original = match std::fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut document = original
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| {
+            anyhow::anyhow!("cannot update invalid config {}: {error}", path.display())
+        })?;
+    document[key] = toml_edit::value(value);
+    write_config_atomically(path, &document.to_string(), original.as_deref())
+}
+
+/// Remove one structural user-config key while retaining comments and layout.
+/// A missing file is already in the desired state.
+fn remove_key_from_path(key: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _config_lock = config_update_lock(path)?;
+
+    let original = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut document = original
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| {
+            anyhow::anyhow!("cannot update invalid config {}: {error}", path.display())
+        })?;
+    document.remove(key);
+    write_config_atomically(path, &document.to_string(), Some(&original))
+}
+
 #[cfg(test)]
 fn persist_model_to_path(model: &str, path: &std::path::Path) -> anyhow::Result<()> {
     persist_key_to_path("model", model, path)
@@ -1492,6 +1645,10 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         theme: env_value("OCTET_THEME"),
         color: env_value("OCTET_COLOR"),
         mouse: env_value("OCTET_MOUSE"),
+        // The interactive `/scoped-models` scope is a user-configuration
+        // concern: the environment layer deliberately provides none of it, so a
+        // headless run can never inherit an interactive selection by accident.
+        models: None,
         plain: env_parse("OCTET_PLAIN")?,
         show_images: env_parse("OCTET_SHOW_IMAGES")?,
         allow_external_paths: env_parse("OCTET_ALLOW_EXTERNAL_PATHS")?,
@@ -1512,6 +1669,13 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         offline: env_parse("OCTET_OFFLINE")?,
         strict_config: env_parse("OCTET_STRICT_CONFIG")?,
         telemetry: env_value("OCTET_TELEMETRY").map(PathBuf::from),
+        // Live reload is an interactive, user-level policy: `merge_project`
+        // never copies it and the environment layer never arms it, so a
+        // project or a stray variable cannot turn automatic reload on.
+        reload: None,
+        reload_poll_ms: None,
+        reload_debounce_ms: None,
+        reload_max_files: None,
         enabled_extensions: env_value("OCTET_EXTENSIONS").map(split_names),
         trusted_extensions: env_value("OCTET_TRUSTED_EXTENSIONS").map(split_names),
         system_prompt: env_value("OCTET_SYSTEM_PROMPT"),
@@ -1801,6 +1965,16 @@ fn build_config_with_global_path_and_diagnostics(
         None if cli.no_tools => ToolPolicy::only(Vec::new())?,
         None => ToolPolicy::default(),
     };
+    if cli.powershell {
+        // Additive opt-in: this registers one extra allowlist entry and never
+        // replaces or degrades `bash`. The tool itself remains Windows-gated.
+        tools.include("powershell")?;
+        if !cfg!(windows) {
+            crate::output::stderr_line(
+                "warning: --powershell is inert on this host; the PowerShell tool requires Windows",
+            );
+        }
+    }
     for name in &cli.exclude_tools {
         tools.exclude(name)?;
     }
@@ -1866,7 +2040,9 @@ fn build_config_with_global_path_and_diagnostics(
         },
         Some(value) if value.eq_ignore_ascii_case("interactive") => Mode::Interactive,
         Some(value) => {
-            anyhow::bail!("invalid frontend mode {value:?}; use interactive, json or rpc (or --print)")
+            anyhow::bail!(
+                "invalid frontend mode {value:?}; use interactive, json or rpc (or --print)"
+            )
         }
         None if cli.print => {
             let prompt = cli.message.clone().unwrap_or_default();
@@ -2021,6 +2197,7 @@ mod tests {
             safe_mode: false,
             effect_policy: None,
             tools: None,
+            powershell: false,
             exclude_tools: vec![],
             no_tools: false,
             no_edit: false,
@@ -2078,7 +2255,10 @@ mod tests {
         assert!(zero.parity.validate().is_err(), "zero must fail closed");
         let oversized =
             Cli::try_parse_from(["octet", "--codex-context-window", "2000000"]).unwrap();
-        assert!(oversized.parity.validate().is_err(), "above every entitlement must fail");
+        assert!(
+            oversized.parity.validate().is_err(),
+            "above every entitlement must fail"
+        );
         let unacknowledged =
             Cli::try_parse_from(["octet", "--codex-context-window", "500000"]).unwrap();
         let error = unacknowledged.parity.validate().unwrap_err();
@@ -3391,6 +3571,39 @@ max_output_bytes = 4096
 
         assert!(persist_extension_enabled_to_path("octet-ssh", true, &path).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
+    }
+
+    // --- persist_bool_key_to_path / remove_key_from_path ---
+
+    #[test]
+    fn bool_settings_persist_as_toml_booleans_and_removable_keys_disappear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        persist_bool_key_to_path("show_images", true, &path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let document = content.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            document["show_images"].as_bool(),
+            Some(true),
+            "boolean settings must not round-trip as strings: {content}"
+        );
+        persist_bool_key_to_path("show_images", false, &path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let document = content.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(document["show_images"].as_bool(), Some(false));
+
+        // A string-valued key round-trips, then removal restores the rest of
+        // the document untouched.
+        persist_key_to_path("models", "a:high,b", &path).unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("models = \"a:high,b\""));
+        remove_key_from_path("models", &path).unwrap();
+        let remaining = std::fs::read_to_string(&path).unwrap();
+        assert!(!remaining.contains("models"), "{remaining}");
+        assert!(remaining.contains("show_images = false"), "{remaining}");
+        // Removing a key from a missing file is already the desired state.
+        remove_key_from_path("models", &dir.path().join("absent.toml")).unwrap();
     }
 
     // --- persist_model_to_path ---

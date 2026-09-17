@@ -1,0 +1,8 @@
+data: {"type":"start"}
+
+data: {"type":"text_start","contentIndex":0}
+
+data: {"type":"text_delta","contentIndex":0,"delta":"partial"}
+
+data: {"type":"error","reason":"error","responseId":"resp_error","errorMessage":"provider-private request-private","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":4}}
+

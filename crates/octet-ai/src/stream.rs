@@ -225,6 +225,8 @@ pub(crate) struct ResponseBuilder {
     pub(crate) response_id: Option<String>,
     /// Authoritative terminal OpenAI Responses output, if supplied.
     pub(crate) responses_output: Option<crate::responses::ResponsesOutput>,
+    /// Deferred provider handle when the provider parked this turn.
+    pub(crate) deferred: Option<crate::deferred::DeferredHandle>,
     pub(crate) text_buffers: HashMap<usize, String>,
     pub(crate) reasoning_text_buffers: HashMap<usize, String>,
     pub(crate) reasoning_states: HashMap<usize, ReasoningState>,
@@ -302,6 +304,7 @@ impl ResponseBuilder {
             tool_definitions: None,
             response_id: None,
             responses_output: None,
+            deferred: None,
             text_buffers: HashMap::with_capacity(4),
             reasoning_text_buffers: HashMap::with_capacity(2),
             reasoning_states: HashMap::with_capacity(2),
@@ -574,6 +577,11 @@ impl ResponseBuilder {
         self.stop_reason = Some(reason);
     }
 
+    /// Sets the deferred handle describing a [`StopReason::Deferred`] terminal.
+    pub(crate) fn set_deferred(&mut self, deferred: crate::deferred::DeferredHandle) {
+        self.deferred = Some(deferred);
+    }
+
     /// Replaces retained reasoning continuation state within the response budget.
     /// A rejected replacement leaves both the prior state and accounting intact.
     pub(crate) fn set_reasoning_state(
@@ -831,6 +839,7 @@ impl ResponseBuilder {
             cost,
             response_id: self.response_id,
             responses_output: self.responses_output,
+            deferred: self.deferred,
             diagnostics: self.diagnostics,
         })
     }
@@ -897,6 +906,15 @@ impl CanonicalStreamAssembler {
     pub fn observe_transport_event(&mut self) -> Result<(), AiError> {
         self.ensure_open()?;
         self.builder.observe_provider_stream_event()
+    }
+
+    /// Sets the deferred handle for a provider-parked response.
+    ///
+    /// Callers pair this with [`Self::finish`] and [`StopReason::Deferred`]: the
+    /// handle is transport data and never becomes assistant content. The
+    /// host/kernel layer owns the durable suspension decision.
+    pub fn set_deferred(&mut self, deferred: crate::deferred::DeferredHandle) {
+        self.builder.set_deferred(deferred);
     }
 
     /// Validates and records a canonical event.
@@ -1778,6 +1796,7 @@ mod tests {
                 cost: None,
                 response_id: None,
                 responses_output: None,
+                deferred: None,
                 diagnostics: vec![],
             })),
             Ok(StreamEvent::TextStart { index: 0 }),

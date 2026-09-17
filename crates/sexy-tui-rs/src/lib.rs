@@ -6,9 +6,12 @@
 //! parsing and rendering, input sanitization, width measurement, theming, and
 //! terminal capability detection.
 
+pub mod alt_screen;
 pub mod capabilities;
 pub mod glyphs;
 pub mod images;
+pub mod layout;
+pub mod mouse;
 pub mod rich_text;
 pub mod sanitize;
 mod scrollback;
@@ -25,7 +28,19 @@ pub use capabilities::{
     CapabilityOverrides, CapabilityProbe, CellPixelSize, ColorDepth, SupportLevel,
     TerminalCapabilities, TerminalSize, MAX_CELL_PIXEL_DIMENSION,
 };
+pub use alt_screen::{
+    AltScreenOptions, AlternateScreen, BEGIN_SYNCHRONIZED_OUTPUT, DISABLE_AUTOWRAP,
+    DISABLE_MOUSE, ENABLE_ALL_MOTION_MOUSE, ENABLE_AUTOWRAP, ENABLE_BUTTON_MOTION_MOUSE,
+    END_SYNCHRONIZED_OUTPUT, ENTER_ALT_SCREEN, EXIT_ALT_SCREEN,
+};
 pub use glyphs::GlyphSet;
+pub use layout::{
+    allocate_stack_sizes, render_layout_frame, route_wheel_delta, scrollbar_geometry,
+    wheel_scroll_lines, HStack, LayoutBox, LayoutFrame, LayoutNode, LayoutRect, LayoutViewport,
+    Overscroll, ScrollLayoutNode, ScrollLayoutState, ScrollView, ScrollViewOptions, Scrollbar,
+    ScrollbarGeometry, StackAlign, StackBasis, StackEntryOptions, StackLayoutEntry,
+    StackLayoutNode, VStack, ALT_WHEEL_SCROLL_MULTIPLIER,
+};
 pub use images::{
     cell_rows_for_pixels, parse_terminal_image_reply, ImageAction, ImageAnchor, ImageCapabilities,
     ImageCapabilityOverrides, ImageCapabilityQuery, ImageDimensions, ImageError,
@@ -37,6 +52,12 @@ pub use images::{
     HARD_MAX_IMAGE_PIXELS, HARD_MAX_LIVE_IMAGES, HARD_MAX_PROTOCOL_CHUNKS,
     HARD_MAX_PROTOCOL_CHUNK_BYTES, HARD_MAX_QUERY_TIMEOUT, HARD_MAX_TERMINAL_REPLY_BYTES,
     MAX_IMAGE_CELL_COLUMNS, MAX_RESERVED_IMAGE_ROWS,
+};
+pub use mouse::{
+    component_identity, dispatch_mouse_event, link_at, MouseCapture, MouseOutcome, MouseRegion,
+    MouseRegionHandler, MouseRouting, MouseRouter, TuiMouseButton, TuiMouseDispatchResult,
+    TuiMouseDispatchTarget, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType,
+    DOUBLE_CLICK_INTERVAL_MS,
 };
 pub use rich_text::diff::{DiffLine, DiffLineKind, DiffRenderOptions, UnifiedDiff};
 pub use rich_text::markdown::parse as parse_markdown;
@@ -76,9 +97,10 @@ pub use tui::{
     CURSOR_MARKER, TUI,
 };
 pub use utils::{
-    apply_background_to_line, extract_ansi_code, extract_segments, is_punctuation_char,
-    is_whitespace_char, normalize_terminal_output, slice_by_column, slice_with_width,
-    strip_terminal_sequences, terminal_tokens, truncate_to_width, truncate_to_width_padded,
-    visible_width, wrap_text_with_ansi, AnsiCode, ColumnSlice, ExtractedSegments, TerminalToken,
+    apply_background_to_line, extract_ansi_code, extract_segments, hyperlink_at_column,
+    is_punctuation_char, is_whitespace_char, normalize_terminal_output, slice_by_column,
+    slice_with_width, strip_terminal_sequences, terminal_tokens, truncate_to_width,
+    truncate_to_width_padded, visible_width, wrap_text_with_ansi, AnsiCode, ColumnSlice,
+    ExtractedSegments, TerminalToken,
 };
 pub use width::{display_width, AmbiguousWidth, WidthPolicy};

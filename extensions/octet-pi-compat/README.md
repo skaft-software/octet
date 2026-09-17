@@ -74,14 +74,26 @@ The default API `0.2` bridge supports:
 The validator is resolved from the selected Pi installation's public `pi-ai`
 export, not an ambient workspace package or a vendored schema implementation.
 Pi's own coercions are retained (for example number-to-string); non-coercible or
-extra arguments fail before tool execution. API `0.3` also invokes Pi tool-call
-interception inside its fixed dispatcher.
+extra arguments fail before tool execution, and every published tool is covered by
+an adversarial fixture that observes the absence of its execute effect. API `0.3`
+also invokes Pi tool-call interception inside its fixed dispatcher.
 
-**Remaining tool-result gap:** hook-created usage is retained only as opaque
-metadata, not native usage accounting. Ordinary tool `usage` and `terminate`
-still need a negotiated host result wire, durable accounting, and finalized-batch
-termination integration. Do not treat these tools as accounting/termination parity.
-A busy `waitForIdle` now fails explicitly rather than pretending to wait.
+Tool definitions: `promptSnippet`/`promptGuidelines` are projected into the
+model-facing description with Pi's normalization, `executionMode: "sequential"` is
+enforced by a bridge execution lane, and a `constrainedSampling` requirement fails
+initialization explicitly while `strict: "prefer"` is accepted with a diagnostic.
+The bridge never sends an undeclared tool-definition field.
+
+**Tool-result usage and termination** cross the wire only under two independently
+negotiated optional features, `tool_result_usage` and `tool_result_termination`.
+When selected, a bridged result carries the kernel's native tool-usage token
+counters and/or `terminate`; when a host did not offer the matching feature, a Pi
+result field that carries it fails explicitly instead of being dropped or
+relabelled as generic metadata. A non-zero Pi cost also fails explicitly, because
+the kernel's typed tool usage has no monetary field yet. The shipped octet host
+offers neither feature, so this profile refuses those fields rather than claiming
+tool-usage accounting or batch termination parity. A busy `waitForIdle` fails
+explicitly rather than pretending to wait.
 
 Unknown Pi APIs fail closed. Session/tree mutation, compaction control, root-agent
 messaging, active-tool policy mutation, arbitrary terminal components, replacement

@@ -36,8 +36,8 @@ use crate::effect::{
 };
 use crate::events::{
     AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control,
-    DelegationTelemetrySnapshot, FinishReason, OutputChannel, QueueDeliveryMode,
-    ToolPolicyDecision,
+    DelegationTelemetrySnapshot, DeferredRunResumed, DeferredRunSuspended, FinishReason,
+    OutputChannel, QueueDeliveryMode, ToolPolicyDecision,
 };
 use crate::extension::{
     AssistantPersistenceContext, EventObserver, ExtensionHost, ProviderRetryAdvice,
@@ -48,14 +48,15 @@ use crate::extension_process::{ExtensionProcess, EXTENSION_FEATURE_AGENT_SESSION
 use crate::input::UserInput;
 use crate::sandbox::SandboxConfig;
 use crate::session::{
-    DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
+    now_unix_millis, DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
     ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, UsageRecordKind,
 };
 use crate::telemetry::{
     schema::{
-        CompactionSpan, CompletionAttributes, EmptyAttributes, ProviderOperation as SpanOperation,
-        ProviderRequestSpan, ProviderStreamSpan, RequestAttributes, RunSpan, SummarySpan,
-        ToolAttributes, ToolSpan, TurnSpan,
+        CompactionSpan, CompletionAttributes, DeferredRunAttributes, DeferredRunSpan,
+        EmptyAttributes, ProviderOperation as SpanOperation, ProviderRequestSpan,
+        ProviderStreamSpan, RequestAttributes, RunSpan, SummarySpan, ToolAttributes, ToolSpan,
+        TurnSpan,
     },
     spans::{SpanGuard, TelemetryContext},
 };
@@ -65,6 +66,17 @@ use crate::tool::{
     PreviewPublication, ReplaySafety, Tool, ToolConcurrency, ToolContext, ToolError, ToolOutput,
     ToolOutputContentPart, ToolOutputDetails, ToolOutputMediaKind, ToolProgress,
     ToolProgressDecoration, ToolProgressSink, ToolPromptContribution, PROGRESS_CHANNEL_CAPACITY,
+};
+/// Which permit one resume pass owns: exactly one poll, or observation only.
+///
+/// Re-exported here because [`Agent::resume_deferred_run`] is the public entry
+/// point that consumes it; the durable decision core owns the definition.
+pub use crate::tools::deferred::DeferredResumeIntent;
+use crate::tools::deferred::{
+    AdmittedDeferredPoll, DeferredHandle, DeferredPollCompletion, DeferredPollOutcome,
+    DeferredPollRefusal, DeferredResponseDeclaration, DeferredResumeStart, DeferredRunCancellation,
+    DeferredRunError, DeferredRunRecord, DeferredStopReason, DeferredSuspendDecision,
+    DeferredSuspendFailure, ModelIdentity, SuspendedRunObservation,
 };
 use crate::tools::durability::{synthesize_interruption, InvocationHandle};
 #[cfg(any(unix, windows))]
@@ -194,6 +206,33 @@ pub enum AgentError {
     /// Internal autonomous work was cancelled before its commit point.
     #[error("operation cancelled")]
     Cancelled,
+    /// A durable deferred-run mutation was refused (stale generation, unknown
+    /// operation, closed store, or a persisted leaf that cannot be trusted).
+    #[error("deferred run: {0}")]
+    Deferred(#[from] DeferredRunError),
+    /// The provider parked this request at a durable `deferred.suspended`
+    /// leaf. This is **not** an inference failure and must never be retried as
+    /// a generation request: a later permitted pass polls the recorded handle
+    /// under exactly one generation-owned permit.
+    #[error(
+        "run suspended at deferred operation {operation_id} (poll {poll}, generation {generation}); a permitted deferred poll resumes it"
+    )]
+    DeferredSuspended {
+        /// Durable operation identity of the parked request.
+        operation_id: String,
+        /// Poll number the parked leaf is at (`0` after the first suspension).
+        poll: u64,
+        /// Durable generation of the parked leaf.
+        generation: u64,
+    },
+    /// The provider returned a deferred stop reason whose handle could not be
+    /// trusted. The run failed closed instead of parking on an unvetted
+    /// handle.
+    #[error("deferred suspension refused: {diagnostic}")]
+    DeferredSuspensionRefused {
+        /// Diagnostic starting with Pi's exact invalid-handle wording.
+        diagnostic: String,
+    },
     /// A control message was sent after the run finished.
     #[error("the run has already finished")]
     RunEnded,
@@ -251,6 +290,15 @@ fn public_ai_error_diagnostic(error: &AiError, endpoint: &str, model: &str) -> S
     let context = |phase| provider_phase_diagnostic(endpoint, model, phase);
     match error {
         AiError::Http(http) => format_http_diagnostic(&context("HTTP response"), http),
+        // A deferred poll refusal never reaches a provider: it is decided from
+        // the durable permit/generation before any request work starts, so only
+        // the static refusal text is published.
+        AiError::Deferred(refusal) => {
+            let mut diagnostic = context("deferred poll refused");
+            append_provider_field(&mut diagnostic, "detail", Some(&refusal.to_string()));
+            truncate_public_diagnostic(&mut diagnostic);
+            diagnostic
+        }
         AiError::Provider(provider) | AiError::ResponsesFailed(provider) => {
             let mut diagnostic = context("response body (provider error)");
             append_provider_field(&mut diagnostic, "code", provider.code.as_deref());
@@ -549,6 +597,12 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         // Handled with an extra `reason=` field by `public_error_diagnostic`;
         // kept here so the phase table stays exhaustive.
         AgentError::IncompleteResponse { .. } => Some("response completion"),
+        // A durable-store refusal is a run-lifecycle failure, not a provider
+        // phase; a suspended run is control flow rather than a failure, and an
+        // invalid handle fails before the request is ever sent.
+        AgentError::Deferred(_) => Some("deferred run"),
+        AgentError::DeferredSuspensionRefused { .. } => Some("deferred suspension"),
+        AgentError::DeferredSuspended { .. } => None,
         AgentError::Session(_)
         | AgentError::DuplicateTool(_)
         | AgentError::ExtensionMetadataNamespace(_)
@@ -593,6 +647,9 @@ fn ai_error_phase(error: &AiError) -> &'static str {
         // actually ended the stream, so the UI shows e.g. "response
         // decoding", not an uninformative wrapper label.
         AiError::StreamFailure { inner, .. } => ai_error_phase(inner),
+        // Decided from the durable permit and generation, before any provider
+        // request work, so it is its own phase rather than "request preparation".
+        AiError::Deferred(_) => "deferred poll refused",
         AiError::Canceled => "request cancellation",
     }
 }
@@ -5987,6 +6044,242 @@ async fn open_provider_stream(
     }
 }
 
+/// One provider deferred-poll attempt requested from a [`DeferredPollSource`].
+#[derive(Debug)]
+pub enum DeferredPollReply {
+    /// The provider is still working; the returned handle parks the run again.
+    StillDeferred(DeferredHandle),
+    /// The provider finished the request.
+    Settled(Box<octet_ai::Response>),
+    /// The provider failed the poll. The diagnostic must be bounded and must
+    /// not contain provider payloads, credentials, or request content. The
+    /// admitted attempt may have been dispatched, so its usage is unknown.
+    Failed(String),
+    /// The poll was refused **before dispatch** (for example a transport permit
+    /// that was stale or already consumed). Nothing was billed, no exposure is
+    /// created, and the durable effect-pending leaf stays replaceable.
+    Refused(String),
+}
+
+/// Provider transport for the deferred-fetch half of a suspended run.
+///
+/// The agent owns the durable lifecycle (permit, effect-pending intent,
+/// generation fence, recovery, cancel); the source owns the provider request
+/// for one admitted poll. It is called only after the poll's effect-pending
+/// intent is durable and never more than once per permit. `permit` is the
+/// codec's one-shot transport permit, minted by the agent for this pass and
+/// consumed by the provider call; a source must not mint or reuse one.
+#[async_trait::async_trait]
+pub trait DeferredPollSource: Send + Sync {
+    /// Performs exactly one deferred poll against the provider.
+    async fn poll_deferred(
+        &self,
+        handle: &DeferredHandle,
+        permit: octet_ai::deferred::DeferredPollPermit,
+        leaf_generation: u64,
+    ) -> DeferredPollReply;
+}
+
+/// A [`DeferredPollSource`] that polls one configured [`AiClient`] route.
+///
+/// The client owns the transport permit fence: a stale, replayed, or missing
+/// permit is refused before any request is dispatched, which this source maps
+/// to [`DeferredPollReply::Refused`] so a purely local refusal never creates
+/// billing exposure. A transport that cannot park or poll fails closed for the
+/// same reason. Once a request is dispatched, any failure is reported as
+/// [`DeferredPollReply::Failed`] because its usage cannot be known.
+#[derive(Clone)]
+pub struct AiDeferredPollSource {
+    client: AiClient,
+    model: Model,
+    wait_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for AiDeferredPollSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiDeferredPollSource")
+            .field("endpoint", &self.model.endpoint.id.0)
+            .field("model", &self.model.spec.id.0)
+            .field("wait_ms", &self.wait_ms)
+            .finish()
+    }
+}
+
+impl AiDeferredPollSource {
+    /// Builds a poll source for one client/model route.
+    pub fn new(client: AiClient, model: Model) -> Self {
+        Self {
+            client,
+            model,
+            wait_ms: None,
+        }
+    }
+
+    /// Bounds the provider long-poll; `Some(0)` performs one status check.
+    pub fn with_wait_ms(mut self, wait_ms: Option<u64>) -> Self {
+        self.wait_ms = wait_ms;
+        self
+    }
+
+    fn refusal_or_failure(&self, error: AiError) -> DeferredPollReply {
+        match &error {
+            AiError::Deferred(refusal) => DeferredPollReply::Refused(refusal.to_string()),
+            AiError::Unsupported(octet_ai::UnsupportedError::Deferred) => {
+                DeferredPollReply::Refused(
+                    "deferred provider responses are unsupported on this transport".to_owned(),
+                )
+            }
+            _ => DeferredPollReply::Failed(public_error_diagnostic(
+                &AgentError::Ai(error),
+                &self.model.endpoint.id.0,
+                &self.model.spec.id.0,
+            )),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DeferredPollSource for AiDeferredPollSource {
+    async fn poll_deferred(
+        &self,
+        handle: &DeferredHandle,
+        permit: octet_ai::deferred::DeferredPollPermit,
+        leaf_generation: u64,
+    ) -> DeferredPollReply {
+        let codec_handle = octet_ai::deferred::DeferredHandle::from(handle.clone());
+        let mut stream = match self
+            .client
+            .fetch_deferred(
+                &self.model,
+                codec_handle,
+                permit,
+                leaf_generation,
+                self.wait_ms,
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => return self.refusal_or_failure(error),
+        };
+        loop {
+            match stream.next().await {
+                Some(Ok(StreamEvent::Finished(response))) => {
+                    if response.stop_reason == StopReason::Deferred {
+                        return match response.deferred.clone() {
+                            Some(handle) => {
+                                DeferredPollReply::StillDeferred(DeferredHandle::from(handle))
+                            }
+                            None => DeferredPollReply::Failed(
+                                "provider parked the poll without a deferred handle".to_owned(),
+                            ),
+                        };
+                    }
+                    return DeferredPollReply::Settled(Box::new(response));
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => return self.refusal_or_failure(error),
+                None => {
+                    return DeferredPollReply::Failed(
+                        "deferred poll stream ended without a terminal response".to_owned(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Result of one deferred resume pass.
+#[derive(Debug)]
+pub enum DeferredRunOutcome {
+    /// The durable record is terminal (settled, cancelled, or failed); nothing
+    /// may poll it again.
+    Finished {
+        /// Durable operation identity.
+        operation_id: String,
+        /// Terminal state label (`settled`, `cancelled`, or `failed`).
+        state: &'static str,
+    },
+    /// Observe-only pass: nothing was written and no provider work started.
+    Waiting(SuspendedRunObservation),
+    /// Fail closed: nothing was written and no provider work started.
+    Refused(Box<DeferredPollRefusal>),
+    /// The provider is still working; the run is parked again at
+    /// `deferred.suspended` with a bumped generation.
+    Suspended(SuspendedRunObservation),
+    /// The poll settled; these reserved durable ids name the commit slots for
+    /// the response entry and its usage record. The caller commits the response
+    /// exactly once; the durable tombstone already blocks a re-poll.
+    Settled {
+        /// The complete provider response.
+        response: Box<octet_ai::Response>,
+        /// Reserved durable response entry id.
+        response_id: String,
+        /// Reserved durable usage id.
+        usage_id: String,
+    },
+    /// Terminal failure; the run must not poll again.
+    Failed(Box<DeferredSuspendFailure>),
+    /// The admitted poll was refused before any provider work (for example a
+    /// transport permit that was already consumed). Nothing was billed and the
+    /// durable leaf stays replaceable for a later permitted pass.
+    PollRefused(String),
+}
+
+/// The durable model identity used to validate deferred provider handles.
+///
+/// Octet has no separate provider registry identity in a model spec, so the
+/// endpoint id is the durable provider and the model id is the provider-local
+/// model identity. A handle whose provider, model id, or api does not match the
+/// run's durable configuration or the response that carried it is a terminal
+/// failure, never a suspension.
+pub fn deferred_model_identity(model: &Model) -> ModelIdentity {
+    ModelIdentity::new(model.endpoint.id.0.clone(), model.spec.id.0.clone())
+}
+
+fn stop_reason_label(reason: DeferredStopReason) -> &'static str {
+    match reason {
+        DeferredStopReason::Deferred => "deferred",
+        DeferredStopReason::Settled => "settled",
+        DeferredStopReason::Failed => "failed",
+        DeferredStopReason::Aborted => "aborted",
+    }
+}
+
+fn refusal_stop_reason(refusal: &DeferredPollRefusal) -> &'static str {
+    match refusal.kind {
+        crate::tools::deferred::DeferredPollRefusalKind::ExpiredHandle { .. } => "aborted",
+        crate::tools::deferred::DeferredPollRefusalKind::StalePermit { .. }
+        | crate::tools::deferred::DeferredPollRefusalKind::AlreadyConsumed
+        | crate::tools::deferred::DeferredPollRefusalKind::ForeignHandle(_) => "refused",
+    }
+}
+
+fn bounded_deferred_label(value: &str) -> String {
+    const LIMIT: usize = 256;
+    if value.len() <= LIMIT {
+        return value.to_owned();
+    }
+    let mut end = LIMIT;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+/// Whether one provider turn reported any billable token bucket.
+///
+/// A parked request reports no billed work; recording a zero-token unpriced
+/// operation would falsely block hard cost ceilings.
+fn usage_is_billed(usage: &Usage) -> bool {
+    usage.input_tokens > 0
+        || usage.cache_read_tokens > 0
+        || usage.cache_write_tokens > 0
+        || usage.output_tokens > 0
+        || usage.reasoning_tokens > 0
+        || usage.total_tokens > 0
+}
+
 impl Agent {
     /// Creates a new agent: canonicalizes the sandbox workspace and validates
     /// the registered extensions (duplicate tool names are rejected).
@@ -6945,6 +7238,288 @@ impl Agent {
     /// Returns the selected provider service tier, if any.
     pub fn service_tier(&self) -> Option<ServiceTier> {
         self.service_tier
+    }
+
+    /// The durable model identity used to validate deferred provider handles.
+    ///
+    /// Octet has no separate provider registry identity in a model spec, so the
+    /// endpoint id is the durable provider and the model id is the provider-local
+    /// model identity. A handle whose provider, model id, or api does not match
+    /// the run's durable configuration is a terminal failure, never a
+    /// suspension.
+    pub fn deferred_model_identity(&self) -> ModelIdentity {
+        deferred_model_identity(&self.model)
+    }
+
+    /// Every durable deferred-run record in this session, including terminal
+    /// tombstones. These are auxiliary lifecycle records: never model-visible
+    /// context and never usage accounting.
+    pub fn deferred_runs(&self) -> Vec<DeferredRunRecord> {
+        self.session.deferred_runs()
+    }
+
+    /// Every non-terminal deferred run that may still be resumed.
+    pub fn parked_deferred_runs(&self) -> Vec<DeferredRunRecord> {
+        self.session.parked_deferred_runs()
+    }
+
+    /// Durable state of one deferred run, if any.
+    pub fn deferred_run(&self, operation_id: &str) -> Option<DeferredRunRecord> {
+        self.session.deferred_run(operation_id)
+    }
+
+    /// Parks one deferred provider response at the `deferred.suspended` leaf.
+    ///
+    /// Row 4.12: the decision core validates the handle against the run's
+    /// durable identity and the api of the response that carried it. A valid
+    /// handle becomes one durable, replaceable session record and emits
+    /// `run_suspend` to registered observers; anything else is a terminal
+    /// [`DeferredSuspendDecision::Failed`] with **no durable write** and no
+    /// claim that the request settled.
+    pub fn suspend_deferred_run(
+        &mut self,
+        operation_id: &str,
+        source_entry_id: &str,
+        declaration: DeferredResponseDeclaration,
+    ) -> Result<DeferredSuspendDecision, AgentError> {
+        let identity = self.deferred_model_identity();
+        let stop_reason = stop_reason_label(declaration.stop_reason);
+        let store = self.session.deferred_run_store();
+        let decision = store.suspend(&identity, operation_id, source_entry_id, declaration)?;
+        match &decision {
+            DeferredSuspendDecision::Suspended(leaf) => {
+                self.observe_deferred_boundary(
+                    &leaf.operation_id,
+                    "deferred",
+                    "suspended",
+                    leaf.poll,
+                    leaf.generation,
+                    false,
+                );
+                self.emit_run_suspend(leaf);
+            }
+            DeferredSuspendDecision::Settled => {
+                self.observe_deferred_boundary(operation_id, "settled", "settled", 0, 0, false);
+            }
+            DeferredSuspendDecision::Failed(_) => {
+                self.observe_deferred_boundary(operation_id, stop_reason, "failed", 0, 0, false);
+            }
+        }
+        Ok(decision)
+    }
+
+    /// Cancels one parked deferred run, fenced on its current generation.
+    ///
+    /// A cancelled leaf can never be polled, including after a restart. When
+    /// the cancelled leaf had an admitted poll whose outcome is unknown, the
+    /// abandoned attempt is recorded as sticky session exposure; no usage or
+    /// cost is invented and no second poll is made.
+    pub fn cancel_deferred_run(
+        &mut self,
+        operation_id: &str,
+        expected_generation: u64,
+    ) -> Result<DeferredRunCancellation, AgentError> {
+        let store = self.session.deferred_run_store();
+        let cancellation = store.cancel(operation_id, expected_generation)?;
+        self.observe_deferred_boundary(
+            operation_id,
+            "aborted",
+            "cancelled",
+            cancellation
+                .previous
+                .leaf()
+                .map(|leaf| leaf.poll)
+                .unwrap_or_default(),
+            cancellation.cancelled.generation,
+            false,
+        );
+        if cancellation.abandoned_unknown_poll() {
+            self.record_deferred_exposure();
+        }
+        Ok(cancellation)
+    }
+
+    /// Resumes one parked deferred run with exactly one poll permit.
+    ///
+    /// `intent` selects whether this pass owns a permit ([`DeferredResumeIntent::Poll`])
+    /// or merely observes. An admitted poll's `deferred.effect_pending` intent
+    /// is durable before the provider is called and `run_resume` is emitted
+    /// before the poll; the permit is consumed exactly once and a second call
+    /// with the same pass or an older generation is refused without provider
+    /// work. An admitted poll that fails records the accepted attempt as
+    /// exposure, because its usage cannot be known and re-polling would be a
+    /// second billable request for the same effect.
+    pub async fn resume_deferred_run(
+        &mut self,
+        operation_id: &str,
+        pass_id: impl Into<String>,
+        intent: DeferredResumeIntent,
+        source: &dyn DeferredPollSource,
+    ) -> Result<DeferredRunOutcome, AgentError> {
+        let pass_id = pass_id.into();
+        let store = self.session.deferred_run_store();
+        let now_ms = i64::try_from(now_unix_millis()).unwrap_or(i64::MAX);
+        let start = store.begin_pass(operation_id, pass_id.clone(), intent, now_ms)?;
+        match start {
+            DeferredResumeStart::Unknown => Err(DeferredRunError::UnknownOperation(operation_id.to_owned()).into()),
+            DeferredResumeStart::Finished(record) => Ok(DeferredRunOutcome::Finished {
+                operation_id: record.operation_id.clone(),
+                state: record.state_label(),
+            }),
+            DeferredResumeStart::Waiting(observation) => {
+                self.observe_deferred_boundary(operation_id, "deferred", "suspended", observation.poll, 0, false);
+                Ok(DeferredRunOutcome::Waiting(observation))
+            }
+            DeferredResumeStart::Refused(refusal) => {
+                let stop_reason = refusal_stop_reason(&refusal);
+                self.observe_deferred_boundary(operation_id, stop_reason, "failed", 0, 0, false);
+                Ok(DeferredRunOutcome::Refused(refusal))
+            }
+            DeferredResumeStart::Admitted(poll) => {
+                self.drive_admitted_deferred_poll(pass_id, *poll, source).await
+            }
+        }
+    }
+
+    async fn drive_admitted_deferred_poll(
+        &mut self,
+        pass_id: String,
+        poll: AdmittedDeferredPoll,
+        source: &dyn DeferredPollSource,
+    ) -> Result<DeferredRunOutcome, AgentError> {
+        let operation_id = poll.effect_pending.operation_id.clone();
+        let generation = poll.intent.generation;
+        let poll_number = poll.intent.poll;
+        let recovery = poll.intent.discard_unknown_poll.is_some();
+        // An abandoned unknown-outcome poll may already be accepted and billed;
+        // its exposure is sticky and is never cleared by a later success.
+        if recovery {
+            self.record_deferred_exposure();
+        }
+        let resume = DeferredRunResumed {
+            operation_id: operation_id.clone(),
+            pass_id: pass_id.clone(),
+            poll: poll_number,
+            generation,
+            recovery,
+        };
+        for observer in &self.extensions.observers {
+            observer.on_run_resume(&resume);
+        }
+        self.observe_deferred_boundary(&operation_id, "deferred", "effect_pending", poll_number, generation, recovery);
+        // The transport permit is minted for the same unique pass and leaf
+        // generation as the durable permit, and is consumed by the provider
+        // call before any request is dispatched.
+        let transport_permit = octet_ai::deferred::DeferredPollPermit::one(pass_id, generation);
+        let reply = source
+            .poll_deferred(&poll.intent.handle, transport_permit, generation)
+            .await;
+        let (outcome, settled) = match reply {
+            DeferredPollReply::StillDeferred(handle) => {
+                (DeferredPollOutcome::StillDeferred(handle), None)
+            }
+            DeferredPollReply::Settled(response) => (DeferredPollOutcome::Settled, Some(response)),
+            DeferredPollReply::Failed(message) => (
+                DeferredPollOutcome::Failed {
+                    message: bounded_deferred_label(&message),
+                },
+                None,
+            ),
+            DeferredPollReply::Refused(message) => {
+                // A refusal before dispatch is not a provider failure: nothing
+                // was billed, no exposure is created, and the effect-pending
+                // leaf stays replaceable for a later permitted pass.
+                self.observe_deferred_boundary(
+                    &operation_id,
+                    "refused",
+                    "effect_pending",
+                    poll_number,
+                    generation,
+                    recovery,
+                );
+                return Ok(DeferredRunOutcome::PollRefused(bounded_deferred_label(&message)));
+            }
+        };
+        let completion = self.session.deferred_run_store().complete_pass(&poll, outcome)?;
+        match completion {
+            DeferredPollCompletion::Suspended(observation) => {
+                self.observe_deferred_boundary(&operation_id, "deferred", "suspended", observation.poll, 0, recovery);
+                Ok(DeferredRunOutcome::Suspended(observation))
+            }
+            DeferredPollCompletion::Settled {
+                response_id,
+                usage_id,
+            } => {
+                let Some(response) = settled else {
+                    return Err(DeferredRunError::Corrupt(
+                        "a settled poll requires the provider response".into(),
+                    )
+                    .into());
+                };
+                self.observe_deferred_boundary(&operation_id, "settled", "settled", poll_number, generation, recovery);
+                Ok(DeferredRunOutcome::Settled {
+                    response,
+                    response_id,
+                    usage_id,
+                })
+            }
+            DeferredPollCompletion::Failed(failure) => {
+                // The admitted poll may have been accepted and billed; its
+                // usage is unknown, so record exposure rather than a fabricated
+                // cost or a second poll.
+                self.record_deferred_exposure();
+                self.observe_deferred_boundary(&operation_id, "failed", "failed", poll_number, generation, recovery);
+                Ok(DeferredRunOutcome::Failed(failure))
+            }
+        }
+    }
+
+    fn emit_run_suspend(&self, leaf: &crate::tools::deferred::DeferredSuspended) {
+        let suspension = DeferredRunSuspended {
+            operation_id: leaf.operation_id.clone(),
+            source_entry_id: leaf.source_entry_id.clone(),
+            stop_reason: crate::tools::deferred::DeferredStopReason::Deferred,
+            handle: leaf.handle.clone(),
+            poll: leaf.poll,
+            generation: leaf.generation,
+        };
+        for observer in &self.extensions.observers {
+            observer.on_run_suspend(&suspension);
+        }
+    }
+
+    /// One sticky exposure record for an accepted deferred attempt whose usage
+    /// cannot be known. Never invents usage or cost, and never clears earlier
+    /// exposure.
+    fn record_deferred_exposure(&mut self) {
+        if self.session.has_uncertain_usage() {
+            return;
+        }
+        let _ = self.session.record_usage_uncertainty(
+            self.model.endpoint.id.clone(),
+            self.model.spec.id.clone(),
+            "deferred_poll",
+        );
+    }
+
+    fn observe_deferred_boundary(
+        &self,
+        operation_id: &str,
+        stop_reason: &str,
+        phase: &str,
+        poll: u64,
+        generation: u64,
+        recovery: bool,
+    ) {
+        let _guard = self.telemetry.begin_typed::<DeferredRunSpan>(DeferredRunAttributes {
+            operation_id: bounded_deferred_label(operation_id),
+            stop_reason: stop_reason.to_owned(),
+            phase: phase.to_owned(),
+            poll,
+            generation,
+            recovery,
+            diagnostics: 0,
+        });
     }
 
     /// Enables durable partial-output checkpoints for live calls of `tool`.
@@ -8354,6 +8929,8 @@ impl Agent {
                 let stop_reason = response.stop_reason.clone();
                 let turn_usage = response.usage;
                 let raw_responses_output = response.responses_output.clone();
+                let deferred_handle = response.deferred.clone();
+                let deferred_diagnostics = response.diagnostics.clone();
                 let assistant = response.message;
                 let calls: Vec<ToolCall> = assistant
                     .content
@@ -8367,6 +8944,9 @@ impl Agent {
                 if auto_compaction_mode == AgentCompactionMode::NativeResponses
                     && model.spec.protocol == Protocol::OpenAiResponses
                     && raw_responses_output.is_none()
+                    // A parked request has no response output by definition;
+                    // it is a durable suspension, not a malformed native turn.
+                    && !matches!(stop_reason, StopReason::Deferred)
                 {
                     add_usage(&mut run_usage, &turn_usage);
                     let turn_cost = response.cost;
@@ -8398,6 +8978,103 @@ impl Agent {
                     &abort,
                 )
                 .await;
+
+                // ── Durable deferred park (rows 4.12 / 1e.1) ─────────────
+                // The provider did not finish this request. Retrying the
+                // generation request would be dishonest and could bill the same
+                // effect twice, so the turn is persisted with its deferred stop
+                // reason (Pi keeps that boundary in history) and the run parks
+                // at a durable `deferred.suspended` leaf. A later permitted
+                // pass polls the recorded handle; only a valid handle parks.
+                if matches!(stop_reason, StopReason::Deferred) {
+                    let deferred_usage_billed = usage_is_billed(&turn_usage);
+                    let assistant_entry = if deferred_usage_billed {
+                        match session.append_assistant_turn_with_metadata(
+                            assistant.clone(),
+                            model.endpoint.id.clone(),
+                            model.spec.id.clone(),
+                            turn_usage,
+                            response.cost,
+                            stop_reason.clone(),
+                            None,
+                            persistence_metadata.clone(),
+                        ) {
+                            Ok(entry) => entry,
+                            Err(error) => break 'run FinishReason::Failed(error.into()),
+                        }
+                    } else {
+                        // A parked request reports no billed usage. Recording a
+                        // zero-token unpriced operation would falsely block hard
+                        // cost ceilings, so the boundary is persisted without a
+                        // usage record; the settled poll's response carries the
+                        // authoritative usage for the whole request.
+                        match session.append_with_metadata(
+                            EntryValue::Message(Message::Assistant(assistant.clone())),
+                            persistence_metadata.clone(),
+                        ) {
+                            Ok(entry) => entry,
+                            Err(error) => break 'run FinishReason::Failed(error.into()),
+                        }
+                    };
+                    add_usage(&mut run_usage, &turn_usage);
+                    run_cost.add(response.cost);
+                    let operation_id = format!("{effect_run_id}:deferred:{completed_turns}");
+                    let declaration = DeferredResponseDeclaration {
+                        stop_reason: crate::tools::deferred::DeferredStopReason::Deferred,
+                        api: deferred_handle
+                            .as_ref()
+                            .map(|handle| handle.api.clone())
+                            .unwrap_or_default(),
+                        handle: deferred_handle.clone().map(DeferredHandle::from),
+                    };
+                    let identity = deferred_model_identity(&model);
+                    let store = session.deferred_run_store();
+                    match store.suspend(
+                        &identity,
+                        &operation_id,
+                        &assistant_entry.0,
+                        declaration,
+                    ) {
+                        Ok(DeferredSuspendDecision::Suspended(leaf)) => {
+                            let suspension = DeferredRunSuspended {
+                                operation_id: leaf.operation_id.clone(),
+                                source_entry_id: leaf.source_entry_id.clone(),
+                                stop_reason: crate::tools::deferred::DeferredStopReason::Deferred,
+                                handle: leaf.handle.clone(),
+                                poll: leaf.poll,
+                                generation: leaf.generation,
+                            };
+                            for observer in &observers.observers {
+                                observer.on_run_suspend(&suspension);
+                            }
+                            let _deferred_guard = telemetry.begin_typed::<DeferredRunSpan>(
+                                DeferredRunAttributes {
+                                    operation_id: bounded_deferred_label(&leaf.operation_id),
+                                    stop_reason: "deferred".to_owned(),
+                                    phase: "suspended".to_owned(),
+                                    poll: leaf.poll,
+                                    generation: leaf.generation,
+                                    recovery: false,
+                                    diagnostics: deferred_diagnostics.len(),
+                                },
+                            );
+                            break 'run FinishReason::Failed(AgentError::DeferredSuspended {
+                                operation_id: leaf.operation_id.clone(),
+                                poll: leaf.poll,
+                                generation: leaf.generation,
+                            });
+                        }
+                        Ok(DeferredSuspendDecision::Settled) => {}
+                        Ok(DeferredSuspendDecision::Failed(failure)) => {
+                            break 'run FinishReason::Failed(
+                                AgentError::DeferredSuspensionRefused {
+                                    diagnostic: failure.diagnostic.clone(),
+                                },
+                            );
+                        }
+                        Err(error) => break 'run FinishReason::Failed(error.into()),
+                    }
+                }
                 if let Err(error) = session.append_assistant_turn_with_metadata(
                     assistant.clone(),
                     model.endpoint.id.clone(),
@@ -8973,6 +9650,11 @@ impl Agent {
                             for (guard, entry) in
                                 wave_tool_guards.into_iter().zip(completed.iter())
                             {
+                                if let Ok(output) = &entry.execution.result {
+                                    if let Some(usage) = output.usage() {
+                                        CompletionAttributes::usage(usage).record(&guard.span);
+                                    }
+                                }
                                 guard.finish(tool_execution_failed(&entry.execution.result));
                             }
                             parallel_results.extend(completed);
@@ -9556,6 +10238,13 @@ impl Agent {
                             .with_is_error(is_error)),
                         Err(error) => Err(error),
                     };
+                    // Pi's per-tool-result usage is billed turn accounting, not
+                    // model context: it is added to the run's cumulative totals
+                    // below and never to `turn_usage` or a context estimate.
+                    let tool_usage = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|output| output.usage().copied());
                     let tool_failed = tool_execution_failed(&result);
                     let mut ev = AgentEvent::ToolFinished {
                         id: call.id.clone(),
@@ -9569,7 +10258,13 @@ impl Agent {
                         output.attach_owner_presentation_images(images);
                     }
                     yield ev;
+                    if let Some(usage) = &tool_usage {
+                        add_usage(&mut run_usage, usage);
+                    }
                     if let Some(guard) = tool_guard {
+                        if let Some(usage) = &tool_usage {
+                            CompletionAttributes::usage(usage).record(&guard.span);
+                        }
                         guard.finish(tool_failed);
                     }
                     call_index += 1;
@@ -9739,6 +10434,11 @@ impl Agent {
         let mut committed_text_len = 0usize;
         let mut committed_media_len = 0usize;
         let mut usage = Usage::default();
+        // Pi's per-tool-result usage is billed turn accounting, not model
+        // context. A tool batch that runs after the last `TurnFinished` (a run
+        // that ends on a tool call) is folded here so `RunOutput.usage` stays a
+        // complete billed subtotal without ever becoming a context estimate.
+        let mut trailing_tool_usage = Usage::default();
         let mut run_cost: u64 = 0;
         while let Some(event) = run.next().await {
             match event {
@@ -9762,12 +10462,20 @@ impl Agent {
                     text.truncate(committed_text_len);
                     media.truncate(committed_media_len);
                     usage = total;
+                    trailing_tool_usage = Usage::default();
                     run_cost = cost;
                 }
                 AgentEvent::SteeringDelivered { .. }
                 | AgentEvent::FollowUpDelivered { .. }
                 | AgentEvent::CompactionStarted { .. }
                 | AgentEvent::CompactionFinished { .. } => {}
+                AgentEvent::ToolFinished { result, .. } => {
+                    if let Ok(output) = result {
+                        if let Some(tool_usage) = output.usage() {
+                            add_usage(&mut trailing_tool_usage, tool_usage);
+                        }
+                    }
+                }
                 AgentEvent::TurnFinished {
                     usage: total,
                     run_cost_microdollars: cost,
@@ -9776,19 +10484,24 @@ impl Agent {
                     committed_text_len = text.len();
                     committed_media_len = media.len();
                     usage = total;
+                    trailing_tool_usage = Usage::default();
                     run_cost = cost;
                 }
                 AgentEvent::RunFinished { head, reason } => {
                     return match reason {
                         FinishReason::Failed(e) => Err(e),
-                        reason => Ok(RunOutput {
-                            text,
-                            media,
-                            usage,
-                            cost_microdollars: run_cost,
-                            head,
-                            reason,
-                        }),
+                        reason => {
+                            let mut total_usage = usage;
+                            add_usage(&mut total_usage, &trailing_tool_usage);
+                            Ok(RunOutput {
+                                text,
+                                media,
+                                usage: total_usage,
+                                cost_microdollars: run_cost,
+                                head,
+                                reason,
+                            })
+                        }
                     };
                 }
                 AgentEvent::ToolProgress { .. } => {}
@@ -12490,7 +13203,7 @@ mod inference_recovery_tests {
         }
     }
 
-    fn model() -> Model {
+    pub(super) fn model() -> Model {
         let mut model = octet_ai::ModelCatalog::builtin()
             .unwrap()
             .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
@@ -12830,6 +13543,10 @@ mod inference_recovery_tests {
 #[cfg(test)]
 mod sustained_network_recovery_tests {
     use super::*;
+    // The /fast tier-reservation test builds the same Codex model as the
+    // inference-recovery tests; share that one constructor rather than
+    // letting two copies drift.
+    use super::inference_recovery_tests::model;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct OfflineTransport {
@@ -12861,6 +13578,7 @@ mod sustained_network_recovery_tests {
                     cost: None,
                     response_id: None,
                     responses_output: None,
+                    deferred: None,
                     diagnostics: Vec::new(),
                 })),
             ])))
@@ -13300,6 +14018,151 @@ mod sustained_network_recovery_tests {
             }
         }
         assert_eq!(checked, 8640);
+    }
+
+    /// Row `/fast`: the worst-case reservation must hold across a restart, a
+    /// durable exact auxiliary cost, and a hard budget boundary. A selected
+    /// priority tier raises the pre-request reservation above the untiered
+    /// value; a cheaper provider echo cannot lower it because the reservation
+    /// helper has no echo input at all.
+    #[test]
+    fn tier_reservations_hold_across_restart_and_bound_the_hard_budget() {
+        use octet_ai::{Cost, Pricing, TokenRate};
+        let mut model = model();
+        Arc::make_mut(&mut model.spec).api_name = "gpt-5.5".into();
+        assert_eq!(
+            model.endpoint.runtime.responses_profile,
+            octet_ai::ResponsesRuntimeProfile::Codex
+        );
+        let pricing = Pricing {
+            input: TokenRate(2_000_000),
+            output: TokenRate(10_000_000),
+            cache_read: TokenRate(700_000),
+            cache_write_5m: TokenRate(3_000_000),
+            cache_write_1h: None,
+            reasoning: Some(TokenRate(13_000_000)),
+            tiers: Vec::new(),
+        };
+        let mut model = model;
+        Arc::make_mut(&mut model.spec).pricing = Some(pricing);
+        let input = 12_345u64;
+        let output = 4_096u64;
+        let base = worst_case_request_cost(&model, input, output, None).unwrap();
+        let priority =
+            worst_case_request_cost(&model, input, output, Some(ServiceTier::Priority)).unwrap();
+        assert!(
+            priority >= base.saturating_mul(2),
+            "the gpt-5.5 priority tariff must bound the reservation: base={base} priority={priority}"
+        );
+        // `auto` cannot be reserved at all; unknown metadata is never priced.
+        assert!(worst_case_request_cost(&model, input, output, Some(ServiceTier::Auto)).is_none());
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("restart-budget.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        // One durable, exactly priced auxiliary operation: local summaries do
+        // not carry the main request tier, and their known cost must still
+        // count against a later main-request reservation after a restart.
+        let durable_cost = Cost {
+            input: 400,
+            output: 600,
+            total: 1_000,
+            ..Cost::default()
+        };
+        session
+            .record_compaction_usage(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                Usage {
+                    input_tokens: 20,
+                    output_tokens: 30,
+                    total_tokens: 50,
+                    ..Usage::default()
+                },
+                Some(durable_cost),
+            )
+            .unwrap();
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(reopened.total_cost_microdollars(), 1_000);
+        assert!(!reopened.has_unpriced_usage());
+
+        // Exact boundary: current + the tier-aware reservation is allowed.
+        assert!(reserve_request_cost_with_tier(
+            &reopened,
+            &model,
+            input,
+            output,
+            Some(1_000 + priority),
+            Some(ServiceTier::Priority),
+        )
+        .is_ok());
+        // One microdollar tighter is refused with the same reservation.
+        assert!(matches!(
+            reserve_request_cost_with_tier(
+                &reopened,
+                &model,
+                input,
+                output,
+                Some(1_000 + priority - 1),
+                Some(ServiceTier::Priority),
+            ),
+            Err(AgentError::CostLimit {
+                current: 1_000,
+                reserved,
+                ..
+            }) if reserved == priority
+        ));
+        // The selected tier is load-bearing: the same budget admits the
+        // untiered reservation used by auxiliary operations, which is exactly
+        // why a priority main request must reserve the tier-aware amount.
+        assert!(reserve_request_cost(
+            &reopened,
+            &model,
+            input,
+            output,
+            Some(1_000 + priority - 1),
+        )
+        .is_ok());
+        // A cheap provider echo cannot reduce the reservation: the helper has
+        // no echo input and always prices the requested tier.
+        let reserved_again = worst_case_request_cost(
+            &model,
+            input,
+            output,
+            Some(ServiceTier::Priority),
+        )
+        .unwrap();
+        assert_eq!(reserved_again, priority);
+        // Restart does not erase exposure either: an unpriced durable record
+        // blocks the same hard budget on a reopened session.
+        let mut session = reopened;
+        session
+            .record_terminal_gate_usage(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                Usage {
+                    input_tokens: 1,
+                    total_tokens: 1,
+                    ..Usage::default()
+                },
+                None,
+                Some(true),
+            )
+            .unwrap();
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert!(matches!(
+            reserve_request_cost_with_tier(
+                &reopened,
+                &model,
+                input,
+                output,
+                Some(u64::MAX),
+                Some(ServiceTier::Priority),
+            ),
+            Err(AgentError::CostUnavailable { .. })
+        ));
     }
 }
 

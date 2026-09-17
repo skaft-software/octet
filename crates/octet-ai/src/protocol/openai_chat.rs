@@ -736,7 +736,8 @@ pub(crate) fn build_request(
                             }
                         }
                         AssistantPart::ToolCall(ref tc) => {
-                            let property = super::grammar::input_property(&req.tools, &tc.name)?;
+                            let property =
+                                super::grammar::input_property(&req.tools, &tc.name, super::grammar_tools_for(model))?;
                             let custom = property
                                 .as_deref()
                                 .map(|property| {
@@ -842,7 +843,9 @@ pub(crate) fn build_request(
         for (index, tool) in active_tools.iter().enumerate() {
             // Grammar-constrained tools are caller-opted OpenAI `custom` tools;
             // every other tool is a strict-resolved function tool.
-            if let Some(grammar) = crate::constrained_sampling::resolve_grammar(tool, true)? {
+            if let Some(grammar) =
+                crate::constrained_sampling::resolve_grammar(tool, super::grammar_tools_for(model))?
+            {
                 built.push(ChatTool::Custom(ChatCustomTool {
                     r#type: "custom",
                     custom: ChatCustomDef {
@@ -859,8 +862,10 @@ pub(crate) fn build_request(
                 }));
                 continue;
             }
-            let (parameters, strict) =
-                crate::constrained_sampling::function_tool_parameters(tool, true)?;
+            let (parameters, strict) = crate::constrained_sampling::function_tool_parameters(
+                tool,
+                super::strict_mode_for(model),
+            )?;
             built.push(ChatTool::Function(ChatFunctionTool {
                 r#type: "function",
                 function: ChatFunctionDef {
@@ -886,7 +891,7 @@ pub(crate) fn build_request(
             ToolChoice::Required => Some(serde_json::Value::String("required".to_string())),
             ToolChoice::None => Some(serde_json::Value::String("none".to_string())),
             ToolChoice::Named(name) => Some(
-                if super::grammar::input_property(&req.tools, name)?.is_some() {
+                if super::grammar::input_property(&req.tools, name, super::grammar_tools_for(model))?.is_some() {
                     serde_json::json!({"type": "custom", "custom": {"name": name}})
                 } else {
                     serde_json::json!({"type": "function", "function": {"name": name}})
@@ -1332,6 +1337,7 @@ fn decode_response_inner(
                     let property = super::grammar::input_property(
                         tool_definitions.unwrap_or_default(),
                         &custom.name,
+                        super::grammar_tools_for(model),
                     )?
                     .unwrap_or_else(|| "input".to_owned());
                     (
@@ -1446,6 +1452,7 @@ fn decode_response_inner(
         response_id: Some(resp.id),
         responses_output: None,
         diagnostics: Vec::new(),
+        deferred: None,
     })
 }
 
@@ -3048,7 +3055,13 @@ mod tests {
 
     #[test]
     fn completed_grammar_custom_call_uses_declared_property_and_schema_validation() {
-        let model = make_test_model(false, false, false, true, false, false);
+        // Pi admits grammar `custom` tools only on a route that declares
+        // `supportsOpenAIGrammarTools`; the decode side uses the same
+        // declaration to recover the tool's declared input property.
+        let mut model = make_test_model(false, false, false, true, false, false);
+        std::sync::Arc::make_mut(&mut model.spec)
+            .preset
+            .supports_openai_grammar_tools = Some(true);
         let tool = ToolDef {
             name: "language".to_owned(),
             description: "grammar".to_owned(),
@@ -3082,7 +3095,11 @@ mod tests {
     fn constrained_sampling_emits_strict_and_grammar_custom_tools() {
         use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict, GrammarVariants};
 
-        let model = make_test_model(false, false, false, true, false, false);
+        // The grammar `custom` shape is declaration-gated per route.
+        let mut model = make_test_model(false, false, false, true, false, false);
+        std::sync::Arc::make_mut(&mut model.spec)
+            .preset
+            .supports_openai_grammar_tools = Some(true);
         let request = Request {
             system: None,
             messages: vec![Message::User(UserMessage {

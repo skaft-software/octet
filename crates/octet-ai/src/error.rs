@@ -47,6 +47,9 @@ pub enum AiError {
     /// Request uses a capability unsupported by the model/protocol.
     #[error("Unsupported error: {0}")]
     Unsupported(#[from] UnsupportedError),
+    /// A deferred poll was refused before any provider work.
+    #[error("Deferred poll: {0}")]
+    Deferred(#[from] crate::deferred::DeferredPollRefusalKind),
     /// Non-2xx HTTP response from provider.
     #[error("HTTP error: {0}")]
     Http(#[from] HttpError),
@@ -349,6 +352,13 @@ pub enum UnsupportedError {
     /// dropping the caller's declaration.
     #[error("Responses computer use is unsupported on this route")]
     ComputerUse,
+    /// The selected transport cannot park or poll deferred provider responses.
+    ///
+    /// Failing closed is deliberate: a transport that cannot resume a
+    /// provider-parked turn must never fabricate a completed response or
+    /// silently re-send the generation request.
+    #[error("Deferred provider responses are unsupported on this transport")]
+    Deferred,
 }
 
 /// Configuration loading or resolution error.
@@ -369,6 +379,14 @@ pub enum ConfigError {
     /// Model resolution failure.
     #[error("Unknown model: {0:?}")]
     UnknownModel(crate::types::ModelId),
+    /// Image-generation model resolution failure.
+    #[error("Unknown image model: {provider}/{model}")]
+    UnknownImageModel {
+        /// Provider id the caller selected.
+        provider: String,
+        /// Image model id the caller selected.
+        model: String,
+    },
     /// Environment variable not set.
     #[error("Missing environment variable: {0}")]
     MissingEnv(String),
@@ -392,6 +410,9 @@ pub enum ConfigError {
     /// Invalid header name or value.
     #[error("Invalid header format: {0}")]
     InvalidHeader(String),
+    /// A runtime hook tried to touch a reserved authentication/framing header.
+    #[error("Reserved header cannot be transformed by a runtime hook: {0}")]
+    ReservedHeader(http::HeaderName),
     /// Base URL violates the absolute trailing-slash constraint.
     #[error("Invalid base URL: {0}")]
     InvalidBaseUrl(String),

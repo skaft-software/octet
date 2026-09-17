@@ -130,7 +130,10 @@ pub fn publish(
     if !checksum.eq_ignore_ascii_case(request.expected_checksum.trim()) {
         return refuse(
             PublishGate::Checksum,
-            format!("expected {}, computed {checksum}", request.expected_checksum),
+            format!(
+                "expected {}, computed {checksum}",
+                request.expected_checksum
+            ),
         );
     }
 
@@ -141,7 +144,10 @@ pub fn publish(
     if document.schema != CATALOG_SCHEMA {
         return refuse(
             PublishGate::Schema,
-            format!("document schema {:?}, expected {CATALOG_SCHEMA:?}", document.schema),
+            format!(
+                "document schema {:?}, expected {CATALOG_SCHEMA:?}",
+                document.schema
+            ),
         );
     }
 
@@ -160,7 +166,9 @@ pub fn publish(
         anyhow::anyhow!("catalog publish refused (minimum-client-version): {error}")
     })?;
     let current = semver::Version::parse(client_version).map_err(|error| {
-        anyhow::anyhow!("catalog publish refused (minimum-client-version): invalid client version: {error}")
+        anyhow::anyhow!(
+            "catalog publish refused (minimum-client-version): invalid client version: {error}"
+        )
     })?;
     if required > current {
         return refuse(
@@ -171,14 +179,20 @@ pub fn publish(
 
     // Gate: required providers. The declared set must match the request exactly
     // and every entry must be one this build can serve.
-    let declared = document.required_providers.iter().cloned().collect::<BTreeSet<_>>();
-    let expected = request.required_providers.iter().cloned().collect::<BTreeSet<_>>();
+    let declared = document
+        .required_providers
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let expected = request
+        .required_providers
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if declared != expected {
         return refuse(
             PublishGate::RequiredProvider,
-            format!(
-                "document declares {declared:?}, request requires {expected:?}"
-            ),
+            format!("document declares {declared:?}, request requires {expected:?}"),
         );
     }
     for provider in &declared {
@@ -195,7 +209,10 @@ pub fn publish(
     if entries != request.expected_count {
         return refuse(
             PublishGate::EntryCount,
-            format!("document has {entries} entries, expected {}", request.expected_count),
+            format!(
+                "document has {entries} entries, expected {}",
+                request.expected_count
+            ),
         );
     }
 
@@ -234,7 +251,9 @@ fn install_immutable(destination: &Path, bytes: &[u8]) -> anyhow::Result<()> {
             )
         }
     }
-    let parent = destination.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
     let parent = parent.unwrap_or_else(|| Path::new("."));
     if !parent.is_dir() {
         return refuse(
@@ -247,7 +266,10 @@ fn install_immutable(destination: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .and_then(|name| name.to_str())
         .unwrap_or("catalog");
     let suffix = TEMP_SUFFIX.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(".{file_name}.publish-{}-{suffix}", std::process::id()));
+    let temporary = parent.join(format!(
+        ".{file_name}.publish-{}-{suffix}",
+        std::process::id()
+    ));
 
     let write_result = (|| -> std::io::Result<()> {
         use std::io::Write as _;
@@ -425,7 +447,10 @@ mod tests {
         let providers = vec!["openai".to_owned()];
         let request = request(&source, &destination, "99.0.0", &providers, 1, &checksum);
         let error = publish(&request, &available(), "0.0.1").unwrap_err();
-        assert!(error.to_string().contains("minimum-client-version"), "{error}");
+        assert!(
+            error.to_string().contains("minimum-client-version"),
+            "{error}"
+        );
         assert!(!destination.exists());
     }
 
@@ -455,7 +480,10 @@ mod tests {
         let request = request(&source, &destination, "0.1.0", &providers, 1, &checksum);
         let error = publish(&request, &available(), "9.9.9").unwrap_err();
         assert!(error.to_string().contains("immutable-path"), "{error}");
-        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "previous catalog");
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "previous catalog"
+        );
     }
 
     #[test]

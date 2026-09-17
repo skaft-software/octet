@@ -18,8 +18,9 @@ use octet_agent::extension_process::{
     ExtensionSessionLifecycleRequest, MAX_EXTENSION_TERMINAL_INPUT_BYTES,
 };
 use octet_agent::{
-    analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EntryId,
-    GoalDecision, GoalStatus, GoalTurnSource, Run, RunControl, Session, ToolProgress,
+    analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EffectBroker,
+    EffectIntent, EntryId, GoalDecision, GoalStatus, GoalTurnSource, Run, RunControl, Session,
+    ToolEffect, ToolProgress, ToolProgressSink,
 };
 use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
@@ -36,7 +37,7 @@ use crate::commands::{self, Command};
 use crate::compaction::{
     attempt_compaction, context_window, estimate_next_request_tokens, CompactionOutcome,
 };
-use crate::config::{CompactionMode, Config, ThinkingLevel};
+use crate::config::{CompactionMode, Config, SandboxPolicy, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
 use crate::prompts::{render_and_record, RenderedPrompt};
@@ -198,6 +199,14 @@ pub enum PendingIdleAction {
     // the reported defect, so the queue cannot even represent it.
     /// Extension management that owns the application (menu, reload, actions).
     Extensions(commands::ExtensionsSubcommand),
+    /// `/settings` mutations that must own the application (theme, images,
+    /// default model/reasoning). Reports are rendered immediately instead.
+    Settings(commands::SettingsCommand),
+    /// `/scoped-models` mutations that must own the application catalog and the
+    /// shell's cycling list. Reports are rendered immediately instead.
+    ScopedModels(commands::ScopedModelsCommand),
+    /// Durable record of a shell escape that ran during an active run.
+    RecordShellEscape(commands::ShellEscapeRecord),
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
@@ -209,29 +218,31 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
         (
             Some(PendingIdleAction::ChangeModel(_)),
             PendingIdleAction::ChangeModel(_)
-        ) | (
-            Some(PendingIdleAction::Fast(_)),
-            PendingIdleAction::Fast(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinking(_)),
-            PendingIdleAction::ChangeThinking(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinking(_)),
-            PendingIdleAction::ChangeThinkingLevel(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinkingLevel(_)),
-            PendingIdleAction::ChangeThinking(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinkingLevel(_)),
-            PendingIdleAction::ChangeThinkingLevel(_)
-        ) | (
-            Some(
+        ) | (Some(PendingIdleAction::Fast(_)), PendingIdleAction::Fast(_))
+            | (
+                Some(PendingIdleAction::ChangeThinking(_)),
                 PendingIdleAction::ChangeThinking(_)
-                    | PendingIdleAction::ChangeThinkingLevel(_)
-                    | PendingIdleAction::CycleThinking
-            ),
-            PendingIdleAction::CycleThinking
-        )
+            )
+            | (
+                Some(PendingIdleAction::ChangeThinking(_)),
+                PendingIdleAction::ChangeThinkingLevel(_)
+            )
+            | (
+                Some(PendingIdleAction::ChangeThinkingLevel(_)),
+                PendingIdleAction::ChangeThinking(_)
+            )
+            | (
+                Some(PendingIdleAction::ChangeThinkingLevel(_)),
+                PendingIdleAction::ChangeThinkingLevel(_)
+            )
+            | (
+                Some(
+                    PendingIdleAction::ChangeThinking(_)
+                        | PendingIdleAction::ChangeThinkingLevel(_)
+                        | PendingIdleAction::CycleThinking
+                ),
+                PendingIdleAction::CycleThinking
+            )
     );
     if same_kind {
         let _ = queue.pop_back();
@@ -243,11 +254,16 @@ enum Idle {
     Submit(ComposedInput),
     Command(String),
     SessionLifecycle(ExtensionSessionLifecycleRequest),
+    /// The live-reload supervisor has stale layers past their debounce deadline.
+    /// `run_interactive_once` applies them in the fixed order resources →
+    /// extensions → host before the next prompt is drawn.
+    ReloadDue,
     GoalContinuation,
     CycleThinking,
     Quit,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_prompt<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -255,6 +271,9 @@ async fn wait_for_prompt<S>(
     extension_tick: &mut Interval,
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     goal_deadline: Option<Instant>,
+    reload_tick: &mut Interval,
+    reload_watcher: &crate::reload::ReloadWatcher,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<Idle>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -460,11 +479,65 @@ where
                 // request queued until the frontend returns to its prompt.
                 if !shell.has_panel() && !shell.has_overlay() {
                     if let Some(request) = executable_extensions.next_session_lifecycle_request() {
+                        if matches!(
+                            request.operation(),
+                            ExtensionSessionLifecycleOperation::Reload
+                        ) {
+                            // API 0.3 `session/reload` is a first-class reload
+                            // trigger (Pi's `ctx.reload()`), not only a file
+                            // change: mark resources and extensions stale and
+                            // let the idle boundary apply them in order.
+                            reload.request(
+                                std::time::Instant::now(),
+                                crate::reload::ReloadRequester::ExtensionSessionReload,
+                            );
+                        }
                         return Ok(Idle::SessionLifecycle(request));
                     }
                 }
                 if apply_extension_background(shell, executable_extensions) {
                     shell.render();
+                }
+            }
+            // Live reload: sample on the poll interval, then hand a due pass
+            // back to the caller. `begin` and the reloads themselves stay in
+            // the outer loop, which owns `&mut App`.
+            _ = reload_tick.tick() => {
+                let now = std::time::Instant::now();
+                if let Some(observed) =
+                    reload_watcher.poll(reload, &crate::reload::SystemMetadata, now)
+                {
+                    if observed.first_observation {
+                        shell.notice(reload_watcher.watches().arming_notice(reload.settings()));
+                        shell.render();
+                    }
+                    if let Some(notice) = observed.cap_notice() {
+                        shell.notice(notice);
+                        shell.render();
+                    }
+                    if observed.anything_changed() && !observed.due {
+                        // Queued evidence always carries a debounce deadline;
+                        // without one it would wait forever, so say so loudly
+                        // rather than silently never applying it.
+                        debug_assert!(
+                            reload.deadline().is_some(),
+                            "queued live-reload evidence must carry a debounce deadline"
+                        );
+                        shell.notice(format!(
+                            "live reload: {} changed path(s) in {}; queued until the idle prompt",
+                            observed.changed_paths,
+                            observed
+                                .queued_layers
+                                .iter()
+                                .map(|layer| layer.label())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        shell.render();
+                    }
+                }
+                if reload.is_due(now) {
+                    return Ok(Idle::ReloadDue);
                 }
             }
         }
@@ -552,10 +625,7 @@ impl GoalAccess {
     }
 
     fn arm_deadline(&self) -> anyhow::Result<Option<Instant>> {
-        match self
-            .driver
-            .turn_settled(GoalTurnSource::User, "", false)?
-        {
+        match self.driver.turn_settled(GoalTurnSource::User, "", false)? {
             GoalDecision::Wait { delay, .. } => Ok(Some(Instant::now() + delay)),
             _ => Ok(None),
         }
@@ -758,9 +828,9 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
         // `/goal` is applied the instant it is submitted, mid-run or idle. It
         // has no queued form: queueing it is exactly the reported defect, so an
         // attempt to queue one fails closed instead of deferring the command.
-        Command::Goal(_) => anyhow::bail!(
-            "`/goal` is applied immediately and is never queued as an idle action"
-        ),
+        Command::Goal(_) => {
+            anyhow::bail!("`/goal` is applied immediately and is never queued as an idle action")
+        }
         other => anyhow::bail!("{other:?} cannot be queued as an idle action"),
     };
     push_pending_action(queue, action);
@@ -1170,18 +1240,20 @@ mod clipboard_read {
             let programs: Vec<&str> = all.iter().map(|helper| helper.program.as_str()).collect();
             assert_eq!(
                 programs,
-                [
-                    "termux-clipboard-get",
-                    "wl-paste",
-                    "xclip",
-                    "xsel"
-                ]
+                ["termux-clipboard-get", "wl-paste", "xclip", "xsel"]
             );
             assert_eq!(
                 all[1].args,
-                ["--no-newline".to_owned(), "--type".to_owned(), "text".to_owned()]
+                [
+                    "--no-newline".to_owned(),
+                    "--type".to_owned(),
+                    "text".to_owned()
+                ]
             );
-            assert_eq!(all[2].args, ["-selection", "clipboard", "-out"].map(str::to_owned));
+            assert_eq!(
+                all[2].args,
+                ["-selection", "clipboard", "-out"].map(str::to_owned)
+            );
         }
 
         #[test]
@@ -1199,7 +1271,10 @@ mod clipboard_read {
             assert_eq!(helpers(Platform::MacOs, env(&[]))[0].program, "pbpaste");
             let windows = helpers(Platform::Windows, env(&[]));
             assert_eq!(windows[0].program, "powershell");
-            assert!(windows[0].args.iter().any(|arg| arg.contains("Get-Clipboard")));
+            assert!(windows[0]
+                .args
+                .iter()
+                .any(|arg| arg.contains("Get-Clipboard")));
             assert!(!windows[0].args.iter().any(|arg| arg.contains("clip\"")));
         }
 
@@ -1242,7 +1317,10 @@ mod clipboard_read {
                 program: "/bin/echo".to_owned(),
                 args: vec!["clipboard text".to_owned()],
             };
-            assert_eq!(run(&text).await, Outcome::Text(b"clipboard text\n".to_vec()));
+            assert_eq!(
+                run(&text).await,
+                Outcome::Text(b"clipboard text\n".to_vec())
+            );
             assert_eq!(
                 settle(Outcome::Text(b"clipboard text\n".to_vec())),
                 Ok(Some("clipboard text\n".to_owned()))
@@ -1754,6 +1832,12 @@ pub struct ActiveRunInspection {
     model: Model,
     catalog: octet_ai::ModelCatalog,
     sessions: crate::session_store::SessionStore,
+    /// The launch sandbox policy, so a local shell escape applies the same
+    /// process/shell gates and limits as the model `bash` tool.
+    sandbox: SandboxPolicy,
+    /// The launch effect policy, so a local shell escape takes the ordinary
+    /// process approval decision instead of inventing a second one.
+    effect_policy: octet_agent::EffectPolicy,
     subagents_available: bool,
     service_tier: Option<octet_ai::ServiceTier>,
     /// Durable goal state, or the typed reason the run cannot address it.
@@ -1762,6 +1846,10 @@ pub struct ActiveRunInspection {
     /// no borrow of the application, so `/goal` mutates durable state mid-run
     /// instead of being deferred to the next idle boundary.
     goal: Result<GoalAccess, ActiveGoalError>,
+    /// Effective `/settings` facts (defaults, theme, transport, images).
+    settings: commands::SettingsSurface,
+    /// The launch ordered cycling scope, rendered by `/scoped-models` mid-run.
+    model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
     /// Whether the catalog holds only the routes this launch proved it needs.
     ///
     /// A surface that enumerates every provider must complete the plan first
@@ -1784,11 +1872,15 @@ impl ActiveRunInspection {
             session_path: app.agent.session().path().to_path_buf(),
             model: app.model.clone(),
             catalog: app.catalog.clone(),
+            sandbox: app.config.sandbox.clone(),
+            effect_policy: app.config.effect_policy,
             catalog_is_narrowed: !app.readiness.is_fleet(),
             sessions: app.sessions.clone(),
             subagents_available: app.subagents_available(),
             service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
+            settings: commands::SettingsSurface::capture(app),
+            model_scope: app.model_scope.clone(),
         }
     }
 
@@ -2155,6 +2247,104 @@ where
                 shell.notice("thinking change queued for the next idle boundary");
             }
         }
+        Command::Settings(sub) => {
+            match sub {
+                commands::SettingsCommand::Show => shell.show_report_text(
+                    "Settings",
+                    "Effective display and default preferences",
+                    commands::settings_text(&inspection.settings),
+                ),
+                commands::SettingsCommand::Transport => shell.notice(format!(
+                    "transport {} (declared by the {} route; not a user preference)",
+                    inspection.settings.transport, inspection.settings.endpoint,
+                )),
+                commands::SettingsCommand::Padding => shell.notice(
+                    "editor padding is compiled into the active theme layout; octet persists no padding override"
+                        .to_owned(),
+                ),
+                mutation => {
+                    // Theme install, config writes and image rendering own the
+                    // application, so the mutation runs through the idle
+                    // dispatcher verbatim at the next boundary; the report
+                    // above never leaves the user with only a promise.
+                    push_pending_action(queue, PendingIdleAction::Settings(mutation));
+                    shell.notice("settings change queued for the next idle boundary");
+                }
+            }
+        }
+        Command::ScopedModels(sub) => {
+            let mut available = inspection
+                .catalog
+                .models()
+                .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+                .collect::<Vec<_>>();
+            available.sort();
+            match sub {
+                commands::ScopedModelsCommand::Show => shell.show_report_text(
+                    "Scoped models",
+                    "Ordered model cycling scope",
+                    commands::scoped_models_text(inspection.model_scope.as_deref(), &available),
+                ),
+                // Scope mutation owns the App's catalog-backed scope and the
+                // shell's cycling list, so it queues for the idle boundary but
+                // reports the decision immediately.
+                mutation => {
+                    push_pending_action(queue, PendingIdleAction::ScopedModels(mutation));
+                    shell.notice("model scope change queued for the next idle boundary");
+                }
+            }
+        }
+        Command::Bash(escape) => {
+            let prefix = if escape.excluded { "!!" } else { "!" };
+            if !inspection.sandbox.process_execution_allowed() {
+                shell.error("shell commands are disabled by --no-process/--no-shell".to_owned());
+            } else if escape.command.trim().is_empty() {
+                shell.notice(format!("usage: {prefix}<shell command>"));
+            } else if !matches!(
+                approve_shell_escape(shell, input, inspection.effect_policy, &escape.command)
+                    .await?,
+                ShellEscapeApproval::Approved
+            ) {
+                shell.error(format!("{prefix} command was not approved"));
+            } else {
+                shell.on_local_command_submitted(&format!("{prefix}{}", escape.command));
+                let outcome = run_local_shell(
+                    shell,
+                    input,
+                    &inspection.workspace,
+                    &inspection.sandbox,
+                    &escape.command,
+                )
+                .await?;
+                if outcome.shutting_down {
+                    // The drive loop owns the ordered shutdown (abort, drain,
+                    // process-group cleanup); the escape only requests it.
+                    shell.request_close();
+                } else if let Some(refusal) = outcome.refusal {
+                    shell.error(refusal);
+                } else {
+                    // The run owns the session writer, so the durable record is
+                    // appended by the idle owner without breaking tool-result
+                    // ordering; the context decision is fixed now.
+                    push_pending_action(
+                        queue,
+                        PendingIdleAction::RecordShellEscape(commands::ShellEscapeRecord::new(
+                            escape.command,
+                            outcome.output,
+                            outcome.exit_code,
+                            escape.excluded,
+                        )),
+                    );
+                    shell.notice(if escape.excluded {
+                        "shell result recorded at the next idle boundary; excluded from model context"
+                            .to_owned()
+                    } else {
+                        "shell result recorded at the next idle boundary; added to model context"
+                            .to_owned()
+                    });
+                }
+            }
+        }
         Command::Exit => *quit_requested = true,
         Command::Unknown(text) => shell.error(format!("unknown command: {text}")),
         command => match queue_command(command, queue) {
@@ -2164,6 +2354,50 @@ where
     }
     shell.render();
     Ok(())
+}
+
+/// Route one active-run submission through the shell-escape dispatcher when it
+/// is a `!`/`!!` command.
+///
+/// Returns `false` for an ordinary prompt, which then takes the existing queue
+/// or steer path unchanged. An escape is consumed here: it keeps the ordinary
+/// process gate, approval, bounded capture, and context decision instead of
+/// silently becoming model input.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_active_shell_escape<'r, S>(
+    composed: &ComposedInput,
+    run: &mut Run<'r>,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    executable_extensions: &mut crate::extensions::ExecutableExtensions,
+    inspection: &ActiveRunInspection,
+    goal_deadline: &mut Option<Instant>,
+    queue: &mut VecDeque<PendingIdleAction>,
+    quit_requested: &mut bool,
+) -> anyhow::Result<bool>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let Some(escape) = commands::BashEscape::parse(&composed.display_text) else {
+        return Ok(false);
+    };
+    let context = run.context_snapshot();
+    handle_active_command(
+        shell,
+        Command::Bash(escape),
+        inspection,
+        executable_extensions,
+        &context,
+        goal_deadline,
+        |principal: &str, reference: &str| {
+            run.open_delegated_session_reference(principal, reference)
+        },
+        input,
+        queue,
+        quit_requested,
+    )
+    .await?;
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2449,14 +2683,41 @@ where
                     InputAction::Queue(_) => {
                         if !aborting {
                             let composed = shell.drain_composed();
-                            shell.queue_follow_up(composed);
+                            if !dispatch_active_shell_escape(
+                                &composed,
+                                run,
+                                shell,
+                                input,
+                                executable_extensions,
+                                inspection,
+                                goal_deadline,
+                                pending_actions,
+                                quit_requested,
+                            )
+                            .await?
+                            {
+                                shell.queue_follow_up(composed);
+                            }
                         }
                         shell.render();
                     }
                     InputAction::Steer(_) => {
                         if !aborting {
                             let composed = shell.drain_composed();
-                            if !composed.is_empty() {
+                            if !composed.is_empty()
+                                && !dispatch_active_shell_escape(
+                                    &composed,
+                                    run,
+                                    shell,
+                                    input,
+                                    executable_extensions,
+                                    inspection,
+                                    goal_deadline,
+                                    pending_actions,
+                                    quit_requested,
+                                )
+                                .await?
+                            {
                                 shell.queue_steering(&composed);
                                 intents.push_back(ControlIntent::Steer(composed.into_user_input()));
                             }
@@ -3152,6 +3413,437 @@ async fn reload_resources(
     Ok(app)
 }
 
+/// `/reload` keeps its existing transactional resource reload, then re-execs
+/// only when the on-disk executable changed.
+///
+/// Returns `Some(plan)` when the caller must leave the TUI and call
+/// `plan.exec()` after the loop settles. `None` covers a resources-only reload
+/// and every refusal or validation failure, all of which leave this process
+/// fully live.
+async fn reload_resources_with_reexec(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    reexec: Option<&mut crate::reexec::ReexecController>,
+) -> anyhow::Result<(App, Option<crate::reexec::ReexecPlan>)> {
+    let mut app = reload_resources(app, shell, input).await?;
+    request_extension_ui(shell, &mut app);
+    let Some(reexec) = reexec else {
+        // A host that cannot report its own executable keeps the resource
+        // reload and never re-execs.
+        shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
+        return Ok((app, None));
+    };
+    let session_id = match crate::app::bootstrap::terminal_goal_session_id(app.agent.session()) {
+        Ok(id) => id,
+        Err(error) => {
+            shell.error(format!(
+                "reload: the active session cannot be resumed: {error}"
+            ));
+            return Ok((app, None));
+        }
+    };
+    reexec.set_session_id(session_id);
+    // Resolve the executable *now*. An update commonly retargets a symlink or
+    // swaps a version-pinned directory (Homebrew, npm, a pinned installer), so
+    // the path this process started from is not necessarily the path `/reload`
+    // must enter. The observation carries the resolved path into the probe, the
+    // exec, and the notice, and reports an update that is still in flight as its
+    // own blocked notice instead of an opaque error.
+    let observed = reexec.observe_generation();
+    let workers = active_subagent_workers(&app);
+    let safety = live_reexec_inputs(&workers);
+    let mut options = crate::reexec::ReexecOptions::refusing_workers();
+    let mut decision =
+        reexec_decision(&mut app, reexec, &observed, &safety, options, &workers).await;
+    // Live workers refuse the reload by default. The one explicit opt-in is the
+    // user's decision to detach them, and it is offered only when every worker
+    // that would be detached already resolves in this session's durable roster:
+    // extension shutdown detaches them, the replacement image reattaches them
+    // from that roster alone, and a worker without a durable record would be
+    // lost rather than detached.
+    let worker_refusal = detached_worker_refusal(&decision);
+    if let Some(count) = worker_refusal {
+        if workers.references.len() != count {
+            shell.error(format!(
+                "reload: {count} background workers are active and do not all disclose a durable session reference; detaching them could lose work, so the reload stays refused"
+            ));
+        } else if confirm_worker_detach(shell, input, count).await? {
+            options = crate::reexec::ReexecOptions::detaching_workers();
+            decision =
+                reexec_decision(&mut app, reexec, &observed, &safety, options, &workers).await;
+        }
+    }
+    match decision {
+        crate::reexec::ReexecDecision::ResourcesOnly => {
+            shell.notice(crate::reexec::notice::RESOURCES_ONLY);
+            Ok((app, None))
+        }
+        crate::reexec::ReexecDecision::Refused { notice, .. } => {
+            shell.notice(notice);
+            Ok((app, None))
+        }
+        crate::reexec::ReexecDecision::Blocked { notice, .. } => {
+            shell.error(notice);
+            Ok((app, None))
+        }
+        crate::reexec::ReexecDecision::Ready(plan) => {
+            // The detach warning comes first so both messages stay in the
+            // transcript, and it names the count that is being handed over.
+            if let Some(detach) = plan.detach_notice() {
+                shell.notice(detach);
+            }
+            shell.notice(plan.notice());
+            shell.render();
+            Ok((app, Some(plan)))
+        }
+        crate::reexec::ReexecDecision::ExecFailed { notice, .. } => {
+            // `exec` runs only after this function returns and the TUI is
+            // left; treat an unexpected failure as a blocked reload instead of
+            // panicking in the idle loop.
+            shell.error(notice);
+            Ok((app, None))
+        }
+    }
+}
+
+/// One `/reload` decision taken against the live session and extension manager.
+///
+/// The hooks borrow the session, the extension manager, and the worker
+/// references for the duration of the decision only; nothing below the validated
+/// `Ready` moves the application.
+async fn reexec_decision(
+    app: &mut App,
+    reexec: &crate::reexec::ReexecController,
+    observed: &crate::reexec::ExecutableObservation,
+    safety: &crate::reexec::LiveSafetyInputs,
+    options: crate::reexec::ReexecOptions,
+    workers: &ActiveWorkers,
+) -> crate::reexec::ReexecDecision {
+    let mut hooks = InteractiveReexecHooks {
+        session: app.agent.session(),
+        extensions: &mut app.executable_extensions,
+        worker_references: &workers.references,
+    };
+    reexec
+        .reexec_if_changed(observed, safety, options, &mut hooks)
+        .await
+}
+
+/// The worker count of one refusal, when that refusal is the detachable one.
+fn detached_worker_refusal(decision: &crate::reexec::ReexecDecision) -> Option<usize> {
+    match decision {
+        crate::reexec::ReexecDecision::Refused {
+            reason: crate::reexec::RefusalReason::BackgroundWorkers(count),
+            ..
+        } => Some(*count),
+        _ => None,
+    }
+}
+
+/// The explicit opt-in that lets one `/reload` detach live background workers.
+///
+/// Refusing is the default policy, and this prompt is the only path that turns
+/// the worker refusal into the detach warning. It names the count and states the
+/// consequence plainly: the workers keep their durable records and are
+/// reattachable in the new image. The suggested choice is to keep the current
+/// process.
+async fn confirm_worker_detach(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    count: usize,
+) -> anyhow::Result<bool> {
+    let request = octet_agent::extension_process::ConfirmationRequest {
+        parent_request_id: None,
+        prompt: format!(
+            "Reload into the newer binary and detach {count} background worker{}?",
+            if count == 1 { "" } else { "s" }
+        ),
+        detail: Some(crate::reexec::notice::detaching_workers(count)),
+        destructive: false,
+        default: false,
+    };
+    extension_confirmation_picker(shell, input, "octet", &request).await
+}
+
+/// Private delegation directory that owns this session's durable worker roster.
+///
+/// It mirrors the host's layout rather than inventing one: `app::bootstrap`
+/// enables V2 delegation with
+/// `DelegationConfig::new(session_parent.join(".delegation"))`, `session_store`
+/// owns the same private directory, and the roster itself is
+/// `<session dir>/.delegation/fleet.json`.
+const DELEGATION_DIRECTORY: &str = ".delegation";
+
+/// The approval boundary a worker detach must pass before it is offered.
+///
+/// The detach itself belongs to extension shutdown, which is why the ordering
+/// `crate::reexec` enforces matters: the durable-head hook runs first, and it is
+/// this function that makes every worker record durable *before* the workers are
+/// handed over. A worker whose durable roster record or transcript is missing
+/// fails the reload closed instead of being detached into nothing; the
+/// replacement image reattaches workers from that roster alone.
+fn verify_worker_records_are_durable(
+    session: &Session,
+    references: &[String],
+) -> anyhow::Result<()> {
+    if references.is_empty() {
+        return Ok(());
+    }
+    let directory = session.path().parent().map_or_else(
+        || PathBuf::from(DELEGATION_DIRECTORY),
+        |parent| parent.join(DELEGATION_DIRECTORY),
+    );
+    for reference in references {
+        octet_agent::delegation::resolve_launchable_child_session(&directory, reference).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "background worker {reference} has no durable record to reattach: {error}"
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Apply one admitted live-reload pass at the interactive idle boundary.
+///
+/// This is the only place a pass is applied, and it is reachable only from the
+/// idle prompt: `Idle::ReloadDue` is produced by `wait_for_prompt`, which runs
+/// before any `Run` exists, and the explicit `/reload --dry-run` /
+/// `/reload --force` text is handled in the same idle match arm. A run owns the
+/// session inside the `Idle::Submit` arm, which never reaches this function, so
+/// "never reload while a run owns the session" is enforced by where this is
+/// called from — and `ReloadBoundary::Idle`, which `ReloadSupervisor::begin`
+/// refuses to bend, is the checked half of the same rule.
+///
+/// The order is fixed: resources → extensions → host. A host re-exec supersedes
+/// the extension restart, because the replacement image rebuilds the children.
+async fn apply_live_reload_plan(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    reload: &mut crate::reload::ReloadSupervisor,
+    mut plan: crate::reload::ReloadPlan,
+    reexec: Option<&mut crate::reexec::ReexecController>,
+    pending_reexec: &mut Option<crate::reexec::ReexecPlan>,
+) -> anyhow::Result<App> {
+    use crate::reload::{LayerOutcome, ReloadLayer, SkipReason};
+
+    let mut app = app;
+    if plan.is_forced() {
+        shell.notice(format!(
+            "{}: taking a pass now over {}",
+            crate::reload::ReloadUserAction::Force.label(),
+            plan.layers()
+                .iter()
+                .map(|layer| layer.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let wants_resources = plan.contains(ReloadLayer::Resources);
+    let wants_extensions = plan.contains(ReloadLayer::Extensions);
+    let wants_host = plan.contains(ReloadLayer::Host);
+
+    if wants_resources || wants_host {
+        // `reload_resources_with_reexec` owns the transactional resource reload
+        // and the re-exec decision. The replacement image is started only after
+        // this function returns and the TUI is left.
+        let (next, host_plan) = reload_resources_with_reexec(app, shell, input, reexec).await?;
+        app = next;
+        if wants_resources {
+            plan.record_reload(ReloadLayer::Resources);
+        }
+        match host_plan {
+            Some(host_plan) => {
+                plan.record_reload(ReloadLayer::Host);
+                plan.record(
+                    ReloadLayer::Extensions,
+                    LayerOutcome::Skipped(SkipReason::NotSelected),
+                );
+                plan.note(
+                    ReloadLayer::Extensions,
+                    "restart handled by the host re-exec below",
+                );
+                *pending_reexec = Some(host_plan);
+            }
+            None if wants_host => {
+                // The refusal notice belongs to `crate::reexec` and was already
+                // printed above; the host layer stays unreloaded and says so.
+                plan.record(ReloadLayer::Host, LayerOutcome::Failed);
+            }
+            None => {}
+        }
+    }
+
+    if wants_extensions && pending_reexec.is_none() {
+        // The restart replaces exactly these children and the same manifests
+        // come back: that is the honest detached/reattached pair for the layer.
+        let names = app
+            .executable_extensions
+            .summaries()
+            .into_iter()
+            .map(|summary| summary.name)
+            .collect::<Vec<_>>();
+        let mut messages = await_lifecycle(shell, input, "reloading extensions…", async {
+            Ok(app.executable_extensions.reload().await)
+        })
+        .await?;
+        messages.extend(app.synchronize_extension_provider_catalog());
+        for message in messages {
+            plan.note(ReloadLayer::Extensions, message);
+        }
+        plan.detached(ReloadLayer::Extensions, names.clone());
+        plan.reattached(ReloadLayer::Extensions, names);
+        plan.record_reload(ReloadLayer::Extensions);
+        request_extension_ui(shell, &mut app);
+    }
+
+    if let Some(report) = reload.finish(plan) {
+        debug_assert!(
+            report.boundary_idle || report.forced,
+            "a live-reload pass is applied at the idle boundary"
+        );
+        debug_assert!(
+            !reload.is_in_flight(),
+            "finishing a pass always clears the in-flight plan"
+        );
+        let applied = report.reloaded_layers();
+        if !applied.is_empty() {
+            shell.notice(format!(
+                "live reload: applied {}",
+                applied
+                    .iter()
+                    .map(|layer| layer.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for notice in report.notices() {
+            shell.notice(notice);
+        }
+        if report.is_noop() {
+            shell.notice(report.summary());
+        }
+        update_status(shell, &app);
+        shell.render();
+    }
+    Ok(app)
+}
+
+/// The two caller-owned operations `crate::reexec` must not implement itself.
+struct InteractiveReexecHooks<'a> {
+    session: &'a Session,
+    extensions: &'a mut crate::extensions::ExecutableExtensions,
+    /// Durable session references of the workers this reload would detach. Empty
+    /// on every path except the detach opt-in, where they are the records the
+    /// replacement image reattaches from.
+    worker_references: &'a [String],
+}
+
+#[async_trait::async_trait(?Send)]
+impl crate::reexec::ReexecHooks for InteractiveReexecHooks<'_> {
+    async fn make_session_durable(&mut self) -> anyhow::Result<()> {
+        // Reuse the existing session store: every semantic record is
+        // `sync_data`d before its append reports success
+        // (`octet-agent/src/session_writer.rs`), so the durable head is made
+        // recoverable by observing it rather than by writing a second store.
+        // Re-opening replays the file with the same parser `--resume` will.
+        let head = self.session.head_ref().cloned();
+        let reopened = Session::open(self.session.path())?;
+        anyhow::ensure!(
+            reopened.head_ref() == head.as_ref(),
+            "the durable session head does not match the live head"
+        );
+        // Worker records before the detach, in this hook and nowhere later: the
+        // extension shutdown below is what detaches the running workers, so
+        // every one of them must already resolve durably by now.
+        verify_worker_records_are_durable(self.session, self.worker_references)
+    }
+
+    async fn shutdown_extensions(&mut self) -> anyhow::Result<()> {
+        // `ExecutableExtensions::shutdown` releases the current session
+        // binding and bounds each protocol plus the whole manager with its own
+        // hard deadline; no extension child is inherited by the replacement
+        // image. The caller can rebuild children after a failed exec.
+        self.extensions.shutdown().await;
+        Ok(())
+    }
+}
+
+/// The live delegated workers one `/reload` decision must account for.
+struct ActiveWorkers {
+    /// Every worker that still counts as live, whether or not its durable
+    /// session reference is visible.
+    count: usize,
+    /// Durable session references (`agent-session:<sha256>`) of those workers.
+    references: Vec<String>,
+}
+
+/// Live-state inputs for a re-exec decision taken by `/reload`.
+///
+/// `/reload` is dispatched only at the interactive idle boundary: the main
+/// loop drops the active `Run` before queued actions or idle commands run,
+/// idle shell escapes are awaited to completion before their outcome returns,
+/// every session append is synchronous, and effect approvals are admitted only
+/// inside the run pipeline. The five run-owned fields are therefore
+/// observations of this boundary rather than guesses. Delegated workers
+/// outlive the root run, so their count is read from live state.
+fn live_reexec_inputs(workers: &ActiveWorkers) -> crate::reexec::LiveSafetyInputs {
+    crate::reexec::LiveSafetyInputs {
+        model_turn_active: false,
+        tool_call_active: false,
+        shell_child_active: false,
+        pending_effect: false,
+        session_persistence_in_flight: false,
+        background_workers: workers.count,
+    }
+}
+
+/// Live delegated workers reported by the octet-subagents presentation view.
+///
+/// Only read-only presentation state is consulted: no extension command is
+/// dispatched and no worker is touched. A worker counts while it is not
+/// terminal (`pending`, `active`, `running`, `degraded`), and its durable session
+/// reference is collected when the extension disclosed one. A missing view means
+/// no worker state is visible at all, which counts as zero.
+fn active_subagent_workers(app: &App) -> ActiveWorkers {
+    let mut workers = ActiveWorkers {
+        count: 0,
+        references: Vec::new(),
+    };
+    let Some(view) = app
+        .executable_extensions
+        .presentation_views()
+        .into_iter()
+        .find(|view| view.extension == "octet-subagents")
+    else {
+        return workers;
+    };
+    let Some(collection) = view.snapshot.collection else {
+        return workers;
+    };
+    for node in &collection.nodes {
+        if !matches!(
+            node.state,
+            octet_agent::ExtensionPresentationState::Pending
+                | octet_agent::ExtensionPresentationState::Active
+                | octet_agent::ExtensionPresentationState::Running
+                | octet_agent::ExtensionPresentationState::Degraded
+        ) {
+            continue;
+        }
+        workers.count += 1;
+        if let Some(reference) = node.references.iter().find(|reference| {
+            reference.kind == octet_agent::ExtensionPresentationReferenceKind::Session
+        }) {
+            workers.references.push(reference.id.clone());
+        }
+    }
+    workers
+}
+
 #[derive(Clone, Debug)]
 struct InstalledExtensionChoice {
     name: String,
@@ -3643,7 +4335,9 @@ fn subagent_group_for(state: &str) -> (&'static str, u8, bool) {
 ///
 /// Only ordering changes here: every worker keeps its stable node id and its
 /// opaque session reference, and no session identifier enters the display text.
-fn order_subagent_entries(entries: Vec<SubagentViewEntry>) -> (Vec<SubagentViewEntry>, Vec<crate::tui::view::SubagentGroup>) {
+fn order_subagent_entries(
+    entries: Vec<SubagentViewEntry>,
+) -> (Vec<SubagentViewEntry>, Vec<crate::tui::view::SubagentGroup>) {
     let mut order: Vec<usize> = (0..entries.len()).collect();
     order.sort_by_key(|index| {
         let (_, priority, _) = subagent_group_for(&entries[*index].state);
@@ -3670,13 +4364,20 @@ fn order_subagent_entries(entries: Vec<SubagentViewEntry>) -> (Vec<SubagentViewE
 fn subagent_view_entries_from_presentation(
     view: crate::extensions::ExtensionPresentationView,
 ) -> Option<(String, Vec<SubagentViewEntry>)> {
-    let title = view
-        .snapshot
-        .status
-        .as_ref()
-        .map(|status| status.label.clone())
-        .unwrap_or_else(|| "Subagents".into());
+    // Panel titles are surface names only. Per-worker states live on the group
+    // rows and key affordances live in the picker's action footer, so the
+    // status label's counts stay in status/telemetry/notices instead of the
+    // header. A blank collection title falls back to the surface name rather
+    // than inventing chrome.
     let collection = view.snapshot.collection?;
+    let title = {
+        let declared = collection.title.trim();
+        if declared.is_empty() {
+            "Subagents".to_owned()
+        } else {
+            declared.to_owned()
+        }
+    };
     let detail = collection.detail;
     let entries = collection
         .nodes
@@ -3731,7 +4432,10 @@ fn subagent_picker_snapshot(
 ) -> SubagentPickerSnapshot {
     let (ordered, groups) = order_subagent_entries(entries.to_vec());
     SubagentPickerSnapshot {
-        title: subagent_panel_title(title, &groups),
+        // Surface name only: the rows carry the per-worker states and the
+        // picker chrome renders `picker_hints`/`panel_action_footer` for key
+        // affordances. Nothing may silently re-add hints or counts here.
+        title: title.to_owned(),
         items: ordered.iter().map(|entry| entry.label.clone()).collect(),
         descriptions: ordered
             .iter()
@@ -3741,32 +4445,6 @@ fn subagent_picker_snapshot(
         groups,
         notices,
     }
-}
-
-/// Panel title with the group counts the maintainer asked for, e.g.
-/// `Subagents · 8 running · 22 finished`. Counts come from the declared states,
-/// not from the row text.
-fn subagent_panel_title(title: &str, groups: &[crate::tui::view::SubagentGroup]) -> String {
-    let live: usize = groups
-        .iter()
-        .filter(|group| !group.collapsible)
-        .map(|group| group.indices.len())
-        .sum();
-    let finished: usize = groups
-        .iter()
-        .filter(|group| group.collapsible)
-        .map(|group| group.indices.len())
-        .sum();
-    let mut title = format!("{title} · Enter views transcript · Esc closes");
-    if groups.is_empty() {
-        return title;
-    }
-    let mut pieces = vec![format!("{live} live")];
-    if finished > 0 {
-        pieces.push(format!("{finished} finished"));
-    }
-    title.push_str(&format!(" · {}", pieces.join(" · ")));
-    title
 }
 
 struct SubagentRefreshContext<'a> {
@@ -3812,7 +4490,7 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
         match subagent_view_entries(context.extensions) {
             Some((title, entries)) => subagent_picker_snapshot(&title, &entries, notices),
             None => SubagentPickerSnapshot {
-                title: "Subagents · waiting for current state · Esc closes".into(),
+                title: "Subagents".into(),
                 items: Vec::new(),
                 descriptions: Vec::new(),
                 node_ids: Vec::new(),
@@ -4498,6 +5176,10 @@ async fn apply_pending_actions(
     input: &mut EventStream,
     pending_actions: &mut VecDeque<PendingIdleAction>,
     goal_deadline: &mut Option<Instant>,
+    // Reborrowed once per idle pass: the request must survive the loop without
+    // handing the controller away.
+    mut reexec: Option<&mut crate::reexec::ReexecController>,
+    pending_reexec: &mut Option<crate::reexec::ReexecPlan>,
 ) -> anyhow::Result<App> {
     while !shell.close_requested() {
         let Some(action) = pending_actions.pop_front() else {
@@ -4609,8 +5291,13 @@ async fn apply_pending_actions(
                 shell.show_context_report(crate::tui::context::ContextReport::capture(&app, &[]));
             }
             PendingIdleAction::ReloadResources => {
-                app = reload_resources(app, shell, input).await?;
-                shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
+                let (next, plan) =
+                    reload_resources_with_reexec(app, shell, input, reexec.as_deref_mut()).await?;
+                app = next;
+                if let Some(plan) = plan {
+                    *pending_reexec = Some(plan);
+                    break;
+                }
             }
             PendingIdleAction::PickModel => {
                 prepare_model_picker_surface(&mut app, shell);
@@ -4655,12 +5342,58 @@ async fn apply_pending_actions(
             PendingIdleAction::Extensions(sub) => {
                 // Reuse the idle dispatcher verbatim so the menu, reload, and
                 // action semantics never diverge from `/extensions` at idle.
-                match run_idle_command(app, shell, input, Command::Extensions(sub), goal_deadline)
-                    .await?
+                match run_idle_command(
+                    app,
+                    shell,
+                    input,
+                    Command::Extensions(sub),
+                    goal_deadline,
+                    None,
+                )
+                .await?
                 {
                     IdleCommandOutcome::Continue(next)
                     | IdleCommandOutcome::Quit(next)
-                    | IdleCommandOutcome::Submit { app: next, .. } => app = *next,
+                    | IdleCommandOutcome::Submit { app: next, .. }
+                    // `/extensions` dispatch never plans a re-exec; the arm
+                    // only keeps the match exhaustive.
+                    | IdleCommandOutcome::Reexec { app: next, .. } => app = *next,
+                }
+            }
+            PendingIdleAction::Settings(sub) => {
+                // Reuse the idle dispatcher verbatim so a queued mutation takes
+                // exactly the path an immediate `/settings` would.
+                match run_idle_command(
+                    app,
+                    shell,
+                    input,
+                    Command::Settings(sub),
+                    goal_deadline,
+                    None,
+                )
+                .await?
+                {
+                    IdleCommandOutcome::Continue(next)
+                    | IdleCommandOutcome::Quit(next)
+                    | IdleCommandOutcome::Submit { app: next, .. }
+                    // `/settings` dispatch never plans a re-exec; the arm only
+                    // keeps the match exhaustive.
+                    | IdleCommandOutcome::Reexec { app: next, .. } => app = *next,
+                }
+            }
+            PendingIdleAction::ScopedModels(sub) => {
+                apply_scoped_models_command(&mut app, shell, sub).await;
+                shell.notice("model scope change applied at the idle boundary");
+            }
+            PendingIdleAction::RecordShellEscape(record) => {
+                if let Err(error) = record_shell_escape(&mut app, &record) {
+                    shell.error(format!("shell result could not be recorded: {error}"));
+                } else {
+                    shell.notice(if record.excluded() {
+                        "shell result recorded; excluded from model context".to_owned()
+                    } else {
+                        "shell result recorded; added to model context".to_owned()
+                    });
                 }
             }
         }
@@ -4821,8 +5554,24 @@ async fn execute_skills_command(
 
 enum IdleCommandOutcome {
     Continue(Box<App>),
-    Submit { app: Box<App>, input: ComposedInput },
+    Submit {
+        app: Box<App>,
+        input: ComposedInput,
+    },
     Quit(Box<App>),
+    /// A validated re-exec: the caller leaves the TUI, then `plan.exec()`.
+    Reexec {
+        app: Box<App>,
+        plan: crate::reexec::ReexecPlan,
+    },
+}
+
+/// How one interactive process lifetime ended.
+enum InteractiveExit {
+    /// No process replacement was requested.
+    Finished,
+    /// The terminal was left and the wrapper above must `exec` the plan.
+    Reexec(crate::reexec::ReexecPlan),
 }
 
 fn prompt_templates_text(app: &App) -> String {
@@ -4929,8 +5678,12 @@ async fn write_debug_report_at(
 ) {
     let messages = session.context().unwrap_or_default();
     let report = commands::debug_report_text(terminal, rendered.as_deref(), &messages);
-    if let Err(error) = crate::auth::write_private_atomic(path, report.as_bytes(), ".octet-debug-") {
-        shell.error(format!("/debug could not write {}: {error}", path.display()));
+    if let Err(error) = crate::auth::write_private_atomic(path, report.as_bytes(), ".octet-debug-")
+    {
+        shell.error(format!(
+            "/debug could not write {}: {error}",
+            path.display()
+        ));
         return;
     }
     shell.notice(format!("debug log written: {}", path.display()));
@@ -4944,12 +5697,750 @@ fn prepare_model_picker_surface(app: &mut App, shell: &mut InteractiveShell) {
     shell.set_model_cycle(app.model_cycle());
 }
 
+/// Whether the active branch ends in an assistant tool call that has no
+/// durable result yet. Appending a user message in that state would place text
+/// between a tool call and its required result, so the shell record stays
+/// non-model-visible until the call is settled at the next run boundary.
+fn session_has_unresolved_tool_calls(session: &Session) -> bool {
+    let mut settled = std::collections::HashSet::new();
+    let mut cursor = session.head();
+    while let Some(id) = cursor {
+        let Some(entry) = session.entry(&id) else {
+            break;
+        };
+        match &entry.value {
+            octet_agent::EntryValue::Message(octet_ai::Message::Assistant(assistant)) => {
+                if assistant.content.iter().any(|part| {
+                    matches!(part, octet_ai::AssistantPart::ToolCall(call) if !settled.contains(&call.id))
+                }) {
+                    return true;
+                }
+            }
+            octet_agent::EntryValue::Message(octet_ai::Message::User(user)) => {
+                for part in &user.content {
+                    if let octet_ai::UserPart::ToolResult(result) = part {
+                        settled.insert(result.tool_call_id.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        cursor = entry.parent.clone();
+    }
+    false
+}
+
+/// Append one finished shell escape to the durable session.
+///
+/// `!command` results become ordinary user messages (model-visible).
+/// `!!command` results use a non-model-visible config envelope whose
+/// presentation metadata still retains the exact command, exit status, and
+/// output, so the execution is accounted for without entering model context.
+/// An unresolved tool call forces the excluded form even for `!command`, so a
+/// pending call can never be split from its result.
+fn record_shell_escape(app: &mut App, record: &commands::ShellEscapeRecord) -> anyhow::Result<()> {
+    let session = app.agent.session_mut();
+    if record.excluded() || session_has_unresolved_tool_calls(session) {
+        session.append_with_metadata(
+            octet_agent::EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            },
+            Some(octet_agent::EntryMetadata {
+                display_text: Some(record.transcript_text()),
+                ..octet_agent::EntryMetadata::default()
+            }),
+        )?;
+    } else {
+        session.append(octet_agent::EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text(record.context_text())],
+            },
+        )))?;
+    }
+    Ok(())
+}
+
+/// Ordinary process admission for one local shell escape.
+///
+/// This builds the same canonical `bash` intent the model tool would produce
+/// and lets the shared [`EffectBroker`] decide: `unsafe_host` admits it,
+/// `controlled` asks only for commands its shell-safety analysis flags, and
+/// `controlled_bash_approval` asks for every command. The confirmation is the
+/// same picker the model run uses; a denial is reported, never swallowed.
+enum ShellEscapeApproval {
+    Approved,
+    Denied(String),
+}
+
+async fn approve_shell_escape<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    policy: octet_agent::EffectPolicy,
+    command: &str,
+) -> anyhow::Result<ShellEscapeApproval>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let arguments = serde_json::json!({ "command": command });
+    let intent = match EffectIntent::new(
+        "local-shell",
+        "local-shell-escape",
+        0,
+        "local-shell-escape",
+        "bash",
+        ToolEffect::HostProcess,
+        &arguments,
+    ) {
+        Ok(intent) => intent,
+        Err(error) => {
+            return Ok(ShellEscapeApproval::Denied(format!(
+                "shell command could not be classified: {error}"
+            )));
+        }
+    };
+    let broker = EffectBroker::new(policy);
+    let (sink, mut progress) = ToolProgressSink::bounded_channel();
+    let mut authorization = Box::pin(broker.authorize(&intent, Some(&sink)));
+    let result = loop {
+        tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                shell.request_close();
+                return Ok(ShellEscapeApproval::Denied(
+                    "shell command stopped during shutdown".to_owned(),
+                ));
+            }
+            result = &mut authorization => break result,
+            update = progress.recv() => match update {
+                Some(ToolProgress::Confirmation(request)) => {
+                    let confirmed = confirmation_picker(shell, input, &request).await?;
+                    request.respond(confirmed);
+                }
+                Some(_) => {}
+                None => {}
+            },
+        }
+    };
+    match result {
+        Ok(_receipt) => Ok(ShellEscapeApproval::Approved),
+        Err(error) => Ok(ShellEscapeApproval::Denied(error.to_string())),
+    }
+}
+
+/// One finished local shell invocation.
+struct ShellEscapeOutcome {
+    /// Combined bounded stdout/stderr as rendered in the live transcript.
+    output: String,
+    exit_code: i32,
+    /// Set when the command never executed (spawn/prepare failure).
+    refusal: Option<String>,
+    /// The user interrupted it or it exceeded the product deadline.
+    stopped: bool,
+    /// The product is shutting down; the caller owns the exit.
+    shutting_down: bool,
+}
+
+/// Run one local shell escape with the product's bounded capture, deadline,
+/// interrupt handling, and process-group cleanup.
+///
+/// The approval decision is the caller's (it owns the picker); this function
+/// only executes an approved command under the launch sandbox limits.
+async fn run_local_shell<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    workspace: &Path,
+    sandbox: &SandboxPolicy,
+    command: &str,
+) -> anyhow::Result<ShellEscapeOutcome>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let shell_id = shell.append_shell_in_progress(command.to_owned());
+    shell.render();
+
+    // Spawn the child process with piped output.
+    let mut process = tokio::process::Command::new("sh");
+    process
+        .current_dir(workspace)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    process.process_group(0);
+    #[cfg(unix)]
+    let launch = match BashProcessLaunch::prepare(&mut process, command) {
+        Ok(launch) => launch,
+        Err(error) => {
+            let message = format!("failed to prepare lifecycle supervision: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(unix)]
+    process.arg("-c").arg(launch.source());
+    #[cfg(not(unix))]
+    process.arg("-c").arg(command);
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let message = format!("failed to spawn: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(unix)]
+    let (group_guard, handoff) = match launch.register(child.id()).await {
+        Ok(registered) => registered,
+        Err(error) => {
+            let _ = child.wait().await;
+            let message = format!("failed to register lifecycle supervision: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let output_budget = sandbox.max_output_bytes;
+    let stdout_budget = output_budget / 2;
+    let stderr_budget = output_budget.saturating_sub(stdout_budget);
+    let stdout = Arc::new(Mutex::new(BoundedShellOutput::new(stdout_budget)));
+    let stderr = Arc::new(Mutex::new(BoundedShellOutput::new(stderr_budget)));
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
+    let command_timeout = Duration::from_secs(sandbox.bash_timeout_secs);
+    #[cfg(unix)]
+    let command_started = tokio::time::Instant::now();
+    let stdout_capture = stdout.clone();
+    let stderr_capture = stderr.clone();
+    let stdout_updates = output_tx.clone();
+    let stderr_updates = output_tx;
+    let work = async {
+        #[cfg(unix)]
+        let (_, _, status) = tokio::join!(
+            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
+            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
+            wait_for_bash_process(&mut child, handoff),
+        );
+        #[cfg(not(unix))]
+        let (_, _, status) = tokio::join!(
+            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
+            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
+            child.wait(),
+        );
+        status
+    };
+    let mut work = Box::pin(work);
+    let deadline = tokio::time::sleep(command_timeout);
+    tokio::pin!(deadline);
+    let mut input_open = true;
+    let mut interrupted = false;
+    let mut timed_out = false;
+    let mut shutting_down = false;
+
+    let exit = loop {
+        tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                interrupted = true;
+                shutting_down = true;
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "command stopped during shutdown",
+                ));
+            }
+            status = &mut work => {
+                break status;
+            }
+            event = input.next(), if input_open => match event {
+                Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
+                    shell.request_close();
+                    interrupted = true;
+                    shutting_down = true;
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "command stopped during close",
+                    ));
+                }
+                Some(Ok(Event::Key(key)))
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                        && key.code == KeyCode::Char('c')
+                        && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    interrupted = true;
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "command cancelled",
+                    ));
+                }
+                Some(Ok(Event::Key(key)))
+                    if key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('o')
+                        && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    shell.toggle_disclosure();
+                    shell.render();
+                }
+                Some(Ok(Event::Resize(columns, rows))) => {
+                    shell.set_size(columns, rows);
+                    shell.render();
+                }
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => input_open = false,
+            },
+            _ = &mut deadline => {
+                timed_out = true;
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "command timed out",
+                ));
+            }
+            update = output_rx.recv() => {
+                if update.is_some() {
+                    // Collapse a burst into one bounded tail update. This keeps
+                    // the latest process lines visible without repainting once
+                    // per read syscall.
+                    while output_rx.try_recv().is_ok() {}
+                    shell.update_shell_output(
+                        &shell_id,
+                        rendered_shell_captures(&stdout, &stderr),
+                    );
+                    shell.render();
+                }
+            }
+        }
+    };
+
+    if shutting_down {
+        #[cfg(unix)]
+        {
+            let process_cleanup = octet_agent::extension_process::terminate_bash_process_groups(
+                Duration::from_millis(400),
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                tokio::join!(&mut work, process_cleanup)
+            })
+            .await;
+            group_guard.terminate_now();
+        }
+        drop(work);
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        let mut combined = rendered_shell_captures(&stdout, &stderr);
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("command stopped during shutdown");
+        shell.finalize_shell(&shell_id, combined.clone(), -1);
+        shell.render();
+        return Ok(ShellEscapeOutcome {
+            output: combined,
+            exit_code: -1,
+            refusal: None,
+            stopped: true,
+            shutting_down: true,
+        });
+    }
+
+    if interrupted || timed_out {
+        #[cfg(unix)]
+        {
+            group_guard.terminate_now();
+            // Retain output already in the pipes when ordinary descendants
+            // close promptly, but an escaped child must not defeat the
+            // execution deadline forever.
+            let _ = tokio::time::timeout(Duration::from_millis(500), &mut work).await;
+        }
+    } else {
+        #[cfg(unix)]
+        group_guard.supervise_bash_descendants(
+            command_timeout.saturating_sub(command_started.elapsed()),
+            Default::default(),
+        );
+    }
+    // Releasing the concurrent wait/drain future closes any descriptors
+    // retained by an escaped descendant.
+    drop(work);
+    #[cfg(not(unix))]
+    if interrupted || timed_out {
+        let _ = child.kill().await;
+    }
+
+    let exit_code = match exit {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(error) => {
+            let mut combined = rendered_shell_captures(&stdout, &stderr);
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            if interrupted {
+                combined.push_str("command cancelled");
+            } else if timed_out {
+                combined.push_str(&format!(
+                    "command exceeded the {}s execution limit",
+                    sandbox.bash_timeout_secs
+                ));
+            } else {
+                combined.push_str(&format!("process error: {error}"));
+            }
+            shell.finalize_shell(&shell_id, combined.clone(), -1);
+            shell.render();
+            return Ok(ShellEscapeOutcome {
+                output: combined,
+                exit_code: -1,
+                refusal: None,
+                stopped: interrupted || timed_out,
+                shutting_down: false,
+            });
+        }
+    };
+
+    let combined = rendered_shell_captures(&stdout, &stderr);
+    shell.finalize_shell(&shell_id, combined.clone(), exit_code);
+    shell.render();
+    Ok(ShellEscapeOutcome {
+        output: combined,
+        exit_code,
+        refusal: None,
+        stopped: false,
+        shutting_down: false,
+    })
+}
+
+/// `/settings` at the idle boundary. Reports render immediately; mutations
+/// persist through the shared configuration writer and apply in-session.
+async fn apply_settings_command(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    sub: commands::SettingsCommand,
+) -> anyhow::Result<()> {
+    use commands::SettingsCommand as Sub;
+    match sub {
+        Sub::Show => shell.show_report_text(
+            "Settings",
+            "Effective display and default preferences",
+            commands::settings_text(&commands::SettingsSurface::capture(app)),
+        ),
+        Sub::Transport => shell.notice(format!(
+            "transport {} (declared by the {} route; not a user preference)",
+            commands::transport_label(&app.model),
+            app.model.endpoint.id.0,
+        )),
+        Sub::Padding => shell.notice(
+            "editor padding is compiled into the active theme layout; octet persists no padding override"
+                .to_owned(),
+        ),
+        Sub::Theme(requested) => {
+            configure_terminal_theme(
+                shell,
+                input,
+                &mut app.config,
+                requested,
+                false,
+                Some(&mut app.executable_extensions),
+            )
+            .await?;
+        }
+        Sub::Images(requested) => {
+            let enabled = requested.unwrap_or(!app.config.show_images);
+            if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+                crate::cli::persist_show_images(enabled)
+            })
+            .await
+            {
+                shell.error(format!("failed to save the image display preference: {error}"));
+                return Ok(());
+            }
+            app.config.show_images = enabled;
+            shell.set_runtime_config(app.config.clone());
+            shell.notice(format!(
+                "inline tool-result images {}",
+                if enabled { "enabled" } else { "disabled" }
+            ));
+        }
+        Sub::DefaultModel(id) => match id {
+            None => shell.notice(format!(
+                "default model for new sessions: {}",
+                app.config
+                    .model
+                    .as_ref()
+                    .map(|model| model.0.as_str())
+                    .unwrap_or("(chosen at startup or by the session)")
+            )),
+            Some(id) => {
+                let model = ModelId(id);
+                if app.catalog.resolve(&model).is_err() {
+                    shell.error(format!(
+                        "unknown or unavailable model {:?}; /model lists the credential-scoped catalog",
+                        model.0
+                    ));
+                    return Ok(());
+                }
+                if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+                    crate::cli::persist_model(&model.0)
+                })
+                .await
+                {
+                    shell.error(format!("failed to save the default model: {error}"));
+                    return Ok(());
+                }
+                shell.notice(format!(
+                    "default model for new sessions: {} (use /model to switch this session now)",
+                    model.0
+                ));
+            }
+        },
+        Sub::DefaultReasoning(level) => match level {
+            None => shell.notice(format!(
+                "default reasoning: {}",
+                reasoning_label(&app.reasoning)
+            )),
+            Some(level) => match crate::config::parse_reasoning(&level) {
+                Ok(reasoning) => {
+                    let label = reasoning_label(&reasoning);
+                    if let Err(error) =
+                        persist_configuration(Some(&mut app.executable_extensions), || {
+                            crate::cli::persist_reasoning(&label)
+                        })
+                        .await
+                    {
+                        shell.error(format!("failed to save the default reasoning: {error}"));
+                        return Ok(());
+                    }
+                    shell.notice(format!(
+                        "default reasoning for new sessions: {label} (use /thinking to change this session now)"
+                    ));
+                }
+                Err(error) => shell
+                    .error(format!("invalid reasoning level {level:?}: {error}")),
+            },
+        },
+    }
+    Ok(())
+}
+
+/// One `/scoped-models` mutation against the App's ordered scope.
+///
+/// Returns the persistence decision (`None` = remove the key, `Some(patterns)`
+/// = write them) or a reportable error. Deliberately free of the shell and the
+/// config writer so the ordering rules are unit-testable without touching the
+/// user's real configuration.
+fn apply_scope_mutation(
+    app: &mut App,
+    sub: &commands::ScopedModelsCommand,
+) -> Result<Option<Option<String>>, String> {
+    use crate::cli::parity::ScopedModel;
+    use commands::ScopedModelsCommand as Sub;
+    let mut available = app
+        .catalog
+        .models()
+        .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+        .collect::<Vec<_>>();
+    // The catalog is a map, so sort before turning it into an order the user
+    // sees, cycles through, or persists; the result is stable across runs.
+    available.sort();
+    let materialized = || {
+        available
+            .iter()
+            .map(|(id, _)| ScopedModel {
+                id: ModelId(id.clone()),
+                pattern: id.clone(),
+                reasoning: None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Every mutation operates on an explicit ordered scope. An unrestricted
+    // scope is materialized from the current catalog first, so toggling one
+    // provider never silently changes every other model's membership.
+    if app.model_scope.is_none() && !matches!(sub, Sub::All | Sub::Clear) {
+        app.model_scope = Some(materialized());
+    }
+    match sub {
+        Sub::Show => Ok(None),
+        Sub::All => {
+            app.model_scope = Some(materialized());
+            // `*` re-selects every currently available model on the next
+            // interactive launch without pinning today's catalog contents.
+            Ok(Some(Some("*".to_owned())))
+        }
+        Sub::Clear => {
+            app.model_scope = None;
+            Ok(Some(None))
+        }
+        Sub::Enable(target) | Sub::Disable(target) => {
+            let enable = matches!(sub, Sub::Enable(_));
+            let scope = app
+                .model_scope
+                .as_mut()
+                .expect("a mutation scope is always materialized above");
+            commands::set_scope_target(scope, &available, target, enable)?;
+            Ok(Some(commands::scope_patterns_string(scope)))
+        }
+        Sub::Toggle(target) => {
+            let scope = app
+                .model_scope
+                .as_mut()
+                .expect("a mutation scope is always materialized above");
+            commands::toggle_scope_target(scope, &available, target)?;
+            Ok(Some(commands::scope_patterns_string(scope)))
+        }
+        Sub::Move { model, direction } => {
+            let scope = app
+                .model_scope
+                .as_mut()
+                .expect("a mutation scope is always materialized above");
+            commands::move_scope_model(scope, model, *direction)?;
+            Ok(Some(commands::scope_patterns_string(scope)))
+        }
+    }
+}
+
+/// `/scoped-models` at the idle boundary. The ordered scope applies to the
+/// live shell's cycling bindings immediately and persists as the exact ordered
+/// pattern list the next interactive launch reads back.
+async fn apply_scoped_models_command(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    sub: commands::ScopedModelsCommand,
+) {
+    if matches!(sub, commands::ScopedModelsCommand::Show) {
+        let mut available = app
+            .catalog
+            .models()
+            .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+            .collect::<Vec<_>>();
+        available.sort();
+        shell.show_report_text(
+            "Scoped models",
+            "Ordered model cycling scope",
+            commands::scoped_models_text(app.model_scope.as_deref(), &available),
+        );
+        return;
+    }
+    let persistence = match apply_scope_mutation(app, &sub) {
+        Ok(persistence) => persistence,
+        Err(error) => {
+            shell.error(error);
+            return;
+        }
+    };
+    // Report the decision from the resulting scope, so the notice can never
+    // disagree with what cycling actually follows. An unrestricted scope
+    // covers the whole catalog.
+    let count = app
+        .model_scope
+        .as_ref()
+        .map_or_else(|| app.catalog.models().count(), Vec::len);
+    shell.notice(format!(
+        "model scope now covers {count} model(s); /scoped-models lists the order"
+    ));
+    if let Some(patterns) = persistence {
+        if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+            crate::cli::persist_scoped_models(patterns.as_deref())
+        })
+        .await
+        {
+            shell.error(format!("failed to save the model scope: {error}"));
+        }
+    }
+    update_status(shell, app);
+}
+
+/// Idle dispatch for one local shell escape. The command keeps the ordinary
+/// process gates, the ordinary approval decision, the ordinary bounded
+/// capture/cleanup, and an explicit context decision.
+async fn run_idle_shell_escape(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    escape: commands::BashEscape,
+) -> anyhow::Result<IdleCommandOutcome> {
+    if !app.config.sandbox.process_execution_allowed() {
+        shell.error("shell commands are disabled by --no-process/--no-shell".to_owned());
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    let prefix = if escape.excluded { "!!" } else { "!" };
+    if escape.command.trim().is_empty() {
+        shell.notice(format!("usage: {prefix}<shell command>"));
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    if !matches!(
+        approve_shell_escape(shell, input, app.config.effect_policy, &escape.command).await?,
+        ShellEscapeApproval::Approved
+    ) {
+        shell.error(format!("{prefix} command was not approved"));
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    shell.on_local_command_submitted(&format!("{prefix}{}", escape.command));
+    let outcome = run_local_shell(
+        shell,
+        input,
+        &app.config.workspace,
+        &app.config.sandbox,
+        &escape.command,
+    )
+    .await?;
+    if outcome.shutting_down {
+        return Ok(IdleCommandOutcome::Quit(Box::new(app)));
+    }
+    if let Some(refusal) = outcome.refusal {
+        shell.error(refusal);
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    let record = commands::ShellEscapeRecord::new(
+        escape.command.clone(),
+        outcome.output,
+        outcome.exit_code,
+        escape.excluded,
+    );
+    if let Err(error) = record_shell_escape(&mut app, &record) {
+        shell.error(format!("shell result could not be recorded: {error}"));
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    let context_note = if escape.excluded {
+        "excluded from model context"
+    } else {
+        "added to model context"
+    };
+    shell.notice(if outcome.stopped {
+        format!("shell result recorded ({context_note}); the command was stopped")
+    } else {
+        format!("shell result {context_note}")
+    });
+    Ok(IdleCommandOutcome::Continue(Box::new(app)))
+}
+
 async fn run_idle_command(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     command: Command,
     goal_deadline: &mut Option<Instant>,
+    reexec: Option<&mut crate::reexec::ReexecController>,
 ) -> anyhow::Result<IdleCommandOutcome> {
     match command {
         Command::Changelog => shell.show_changelog(),
@@ -5284,9 +6775,14 @@ async fn run_idle_command(
             update_status(shell, &app);
         }
         Command::Reload => {
-            app = reload_resources(app, shell, input).await?;
-            request_extension_ui(shell, &mut app);
-            shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
+            let (next, plan) = reload_resources_with_reexec(app, shell, input, reexec).await?;
+            app = next;
+            if let Some(plan) = plan {
+                return Ok(IdleCommandOutcome::Reexec {
+                    app: Box::new(app),
+                    plan,
+                });
+            }
         }
         Command::Skills(commands::SkillsSubcommand::Load(id)) => {
             if let Err(error) = app.skills.load(&id) {
@@ -5308,6 +6804,15 @@ async fn run_idle_command(
         }
         Command::Goal(goal) => {
             apply_idle_goal_command(&app, shell, goal, goal_deadline)?;
+        }
+        Command::Settings(sub) => {
+            apply_settings_command(&mut app, shell, input, sub).await?;
+        }
+        Command::ScopedModels(sub) => {
+            apply_scoped_models_command(&mut app, shell, sub).await;
+        }
+        Command::Bash(escape) => {
+            return run_idle_shell_escape(app, shell, input, escape).await;
         }
         Command::Unknown(text) => {
             let (extension_name, extension_arguments) = split_prompt_invocation(&text)
@@ -5871,13 +7376,11 @@ async fn run_interactive_without_model(
     let workspace = boot.config.workspace.clone();
     let mut prepared = boot.take_prepared_session();
     let selection = launch.session;
-    let session = run_blocking_startup_lifecycle(
-        shell,
-        input,
-        STARTUP_SESSION_OPERATION,
-        move || crate::app::bootstrap::open_launch_session(&mut prepared, selection),
-    )
-    .await?;
+    let session =
+        run_blocking_startup_lifecycle(shell, input, STARTUP_SESSION_OPERATION, move || {
+            crate::app::bootstrap::open_launch_session(&mut prepared, selection)
+        })
+        .await?;
 
     let resume_command = resume_command_for_session(&session, &boot.config);
     shell.set_identity("", "", "");
@@ -5912,6 +7415,15 @@ async fn run_interactive_without_model(
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut extensions = crate::extensions::ExecutableExtensions::default();
+    // Model-less mode has no `App`, no agent, and no session, so there is
+    // nothing a pass could re-read. The supervisor stays disabled and can never
+    // report a due pass; keeping the same call shape means the idle loop has
+    // exactly one arm set.
+    let mut reload =
+        crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+    let reload_watcher = crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::new());
+    let mut reload_tick = tokio::time::interval(reload.settings().tick_interval());
+    reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         match wait_for_prompt(
@@ -5921,10 +7433,16 @@ async fn run_interactive_without_model(
             &mut extension_tick,
             &mut extensions,
             None,
+            &mut reload_tick,
+            &reload_watcher,
+            &mut reload,
         )
         .await?
         {
             Idle::Quit => return Ok(resume_command),
+            // Unreachable while the supervisor is disabled; kept explicit so the
+            // variant stays honest instead of silently ignored.
+            Idle::ReloadDue => {}
             Idle::CycleThinking => {
                 shell.notice("thinking is unavailable until a model is configured");
                 shell.render();
@@ -5980,8 +7498,15 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Theme(requested) => {
-                    configure_terminal_theme(shell, input, &mut boot.config, requested, false, None)
-                        .await?;
+                    configure_terminal_theme(
+                        shell,
+                        input,
+                        &mut boot.config,
+                        requested,
+                        false,
+                        None,
+                    )
+                    .await?;
                 }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
                     Ok("codex") => {
@@ -6085,11 +7610,18 @@ fn prepare_startup_input(
 }
 
 fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
-    // Local fast controls/status must not submit provider requests. The next
+    // Local controls/status must not submit provider requests. The next
     // normal request (including any later prewarm) reads the selected tier.
     if !matches!(
         command,
-        Command::Changelog | Command::Fast(_) | Command::Hotkeys | Command::Copy | Command::Session
+        Command::Changelog
+            | Command::Fast(_)
+            | Command::Hotkeys
+            | Command::Copy
+            | Command::Session
+            | Command::Settings(_)
+            | Command::ScopedModels(_)
+            | Command::Bash(_)
     ) {
         schedule_responses_prewarm(app);
     }
@@ -6573,15 +8105,57 @@ pub async fn run_interactive(config: Config) -> anyhow::Result<()> {
 
 /// Interactive launch retaining the ordered `--models` patterns, including
 /// reasoning suffixes that cannot be recovered from a list of bare ModelIds.
+///
+/// A `/reload` that finds a changed on-disk executable unwinds the TUI and
+/// re-execs into it. `exec` returns only on failure, so this wrapper rebuilds
+/// the TUI and extension children from the durable session head and keeps the
+/// current process usable.
 pub async fn run_interactive_with_model_scope(
-    mut config: Config,
+    config: Config,
     model_scope_patterns: Option<String>,
 ) -> anyhow::Result<()> {
+    let mut config = config;
+    loop {
+        match run_interactive_once(config.clone(), model_scope_patterns.clone()).await? {
+            InteractiveExit::Finished => return Ok(()),
+            InteractiveExit::Reexec(plan) => {
+                let session_id = plan.session_id().to_owned();
+                // `exec` returns only when the image was not replaced: either
+                // the platform call failed or the final probe→exec re-check
+                // found the binary changed again. Both recover the same way.
+                let notice = match plan.exec() {
+                    crate::reexec::ReexecDecision::ExecFailed { notice, .. } => notice,
+                    decision => match decision.notice() {
+                        Some(notice) => notice.to_owned(),
+                        None => continue,
+                    },
+                };
+                // The terminal was left before `exec`. Re-entering the loop
+                // rebuilds the TUI and extension children from the durable
+                // session head and resumes the exact session, so the process
+                // stays usable.
+                crate::output::stderr_line(notice);
+                config.initial_prompt = None;
+                config.resume = crate::config::ResumeSelector::Resume(Some(session_id));
+            }
+        }
+    }
+}
+
+/// One interactive process lifetime. Returns after the terminal was left.
+async fn run_interactive_once(
+    config: Config,
+    model_scope_patterns: Option<String>,
+) -> anyhow::Result<InteractiveExit> {
+    let mut config = config;
     let initial_prompt = config.initial_prompt.clone();
     let theme = load_theme(&config);
     let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
     let mut shell =
         InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
+    // Best-effort re-exec support: a host that cannot report its own executable
+    // keeps the resources-only `/reload`.
+    let mut reexec = crate::reexec::ReexecController::capture().ok();
     shell.set_runtime_config(config.clone());
     let _update_task = startup_update_task(
         config.offline,
@@ -6597,7 +8171,7 @@ pub async fn run_interactive_with_model_scope(
         configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None).await?;
         if shell.close_requested() {
             shell.leave();
-            return Ok(());
+            return Ok(InteractiveExit::Finished);
         }
     }
     // Cold/expired model inventories can require network discovery. Give the
@@ -6614,7 +8188,7 @@ pub async fn run_interactive_with_model_scope(
     .await?;
     if shell.close_requested() {
         shell.leave();
-        return Ok(());
+        return Ok(InteractiveExit::Finished);
     }
     // Offer setup only when bootstrap has no runnable provider inventory. An
     // explicit --model remains authoritative, and resumed provenance is still
@@ -6643,7 +8217,7 @@ pub async fn run_interactive_with_model_scope(
     let launch_result = resolve_launch_interactive(&boot, &mut shell, &mut input).await;
     let Some(launch) = startup_launch_outcome(&shell, launch_result)? else {
         shell.leave();
-        return Ok(());
+        return Ok(InteractiveExit::Finished);
     };
     if boot.is_modeless() {
         let result = run_interactive_without_model(boot, launch, &mut shell, &mut input).await;
@@ -6651,22 +8225,31 @@ pub async fn run_interactive_with_model_scope(
         return match result {
             Ok(resume_command) => {
                 print_resume_command(resume_command.as_deref());
-                Ok(())
+                Ok(InteractiveExit::Finished)
             }
             Err(error) => Err(error),
         };
     }
-    let mut app = run_blocking_startup_lifecycle(
-        &mut shell,
-        &mut input,
-        STARTUP_APP_OPERATION,
-        move || {
+    let mut app =
+        run_blocking_startup_lifecycle(&mut shell, &mut input, STARTUP_APP_OPERATION, move || {
             let system = compose_instructions(&boot.config)?;
             build_app(boot, launch, system)
-        },
-    )
-    .await?;
-    app.set_model_scope_patterns(model_scope_patterns.as_deref())?;
+        })
+        .await?;
+    // `--models` always wins. Without it, the interactive launch reads the
+    // user-level ordered scope persisted by `/scoped-models`; headless modes
+    // never consult it. A hand-edited invalid value warns instead of breaking
+    // startup, and the command line still fails closed on the same input.
+    match model_scope_patterns.clone() {
+        Some(patterns) => app.set_model_scope_patterns(Some(&patterns))?,
+        None => {
+            if let Some(persisted) = crate::cli::persisted_scoped_models() {
+                if let Err(error) = app.set_model_scope_patterns(Some(&persisted)) {
+                    shell.notice(format!("ignored the persisted model scope: {error}"));
+                }
+            }
+        }
+    }
     let mut startup_prompt = initial_prompt;
     if let Some(name) = app.config.prompt_template.clone() {
         let arguments = startup_prompt.take().unwrap_or_default();
@@ -6697,6 +8280,24 @@ pub async fn run_interactive_with_model_scope(
     let mut pending_actions = VecDeque::new();
     let mut goal_deadline = recovered_goal_deadline(&app)?;
     let mut next_prompt_source = GoalTurnSource::User;
+    // A validated re-exec: the loop breaks, the TUI is left, and the wrapper
+    // above replaces the process image (or recovers from a failed exec).
+    let mut pending_reexec: Option<crate::reexec::ReexecPlan> = None;
+    // Live-reload supervisor (`crates/octet-coding-agent/src/reload.rs`).
+    //
+    // Sampling is metadata-only, gated by the poll interval, and every pass is
+    // applied only at this idle boundary: a run owns the session inside the
+    // `Idle::Submit` arm below, which never reaches the supervisor. The
+    // `reload`, `reload_poll_ms`, `reload_debounce_ms`, and `reload_max_files`
+    // keys come from the user-level config layer, and `ReloadWatcher::poll`
+    // reads both the interval and the inspection budget from the supervisor, so
+    // exactly one `ReloadSettings` value is in play. The supervisor announces
+    // itself once, on its first observation.
+    let mut reload = crate::reload::ReloadSupervisor::new(crate::cli::live_reload_settings());
+    let reload_watcher =
+        crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::from_config(&app.config));
+    let mut reload_tick = tokio::time::interval(reload.settings().tick_interval());
+    reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     'interactive: loop {
         if shell.close_requested() {
             shutdown_for_exit(&mut app).await;
@@ -6718,6 +8319,9 @@ pub async fn run_interactive_with_model_scope(
                     &mut extension_tick,
                     &mut app.executable_extensions,
                     goal_deadline,
+                    &mut reload_tick,
+                    &reload_watcher,
+                    &mut reload,
                 )
                 .await?
             }
@@ -6737,6 +8341,27 @@ pub async fn run_interactive_with_model_scope(
                     // deadline target the discarded driver.
                     goal_deadline = recovered_goal_deadline(&app)?;
                     next_prompt_source = GoalTurnSource::User;
+                }
+            }
+            // The one place a live-reload pass is applied. Only idle-boundary
+            // code reaches this arm, and `begin` refuses anything but `Idle`.
+            Idle::ReloadDue => {
+                let now = std::time::Instant::now();
+                let Some(plan) = reload.begin(now, crate::reload::ReloadBoundary::Idle) else {
+                    continue;
+                };
+                app = apply_live_reload_plan(
+                    app,
+                    &mut shell,
+                    &mut input,
+                    &mut reload,
+                    plan,
+                    reexec.as_mut(),
+                    &mut pending_reexec,
+                )
+                .await?;
+                if pending_reexec.is_some() {
+                    break 'interactive;
                 }
             }
             Idle::GoalContinuation => {
@@ -6779,6 +8404,45 @@ pub async fn run_interactive_with_model_scope(
                     startup_input = Some(ComposedInput::from_text(command_input));
                     continue;
                 }
+                // The supervisor's explicit user actions. Plain `/reload` keeps
+                // its existing transactional path (`run_idle_command` below);
+                // only these two documented flags hand control to the
+                // live-reload supervisor, so a forced pass can never be
+                // triggered by the watcher noticing a file change.
+                if let Some(action) = crate::reload::ReloadUserAction::parse(&command_input) {
+                    let now = std::time::Instant::now();
+                    match action {
+                        crate::reload::ReloadUserAction::DryRun => {
+                            let report = reload.dry_run(now, crate::reload::ReloadBoundary::Idle);
+                            for notice in report.notices() {
+                                shell.notice(notice);
+                            }
+                            shell.notice(report.summary());
+                            shell.render();
+                        }
+                        crate::reload::ReloadUserAction::Force => {
+                            // Name every loss before the pass takes it.
+                            for loss in crate::reload::ReloadLoss::ALL {
+                                shell.notice(format!("reload --force: {}", loss.description()));
+                            }
+                            let plan = reload.force();
+                            app = apply_live_reload_plan(
+                                app,
+                                &mut shell,
+                                &mut input,
+                                &mut reload,
+                                plan,
+                                reexec.as_mut(),
+                                &mut pending_reexec,
+                            )
+                            .await?;
+                            if pending_reexec.is_some() {
+                                break 'interactive;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let command = commands::parse(&command_input);
                 match run_idle_command(
                     app,
@@ -6786,6 +8450,7 @@ pub async fn run_interactive_with_model_scope(
                     &mut input,
                     command.clone(),
                     &mut goal_deadline,
+                    reexec.as_mut(),
                 )
                 .await?
                 {
@@ -6797,6 +8462,11 @@ pub async fn run_interactive_with_model_scope(
                         app = *next;
                         schedule_responses_prewarm(&app);
                         startup_input = Some(input);
+                    }
+                    IdleCommandOutcome::Reexec { app: next, plan } => {
+                        app = *next;
+                        pending_reexec = Some(plan);
+                        break 'interactive;
                     }
                     IdleCommandOutcome::Quit(next) => {
                         app = *next;
@@ -6813,287 +8483,46 @@ pub async fn run_interactive_with_model_scope(
                     app.goal_driver.user_spoke();
                 }
                 // Shell escapes have the same authority as the model `bash`
-                // tool and executable extensions. Never let this local UX
-                // bypass the product-wide process gate.
-                // Active-run follow-ups are model input, never delayed local
-                // shell escapes that gain process authority on dispatch.
-                if let Some(command) = (!queued_submission)
-                    .then_some(composed.display_text.as_str())
-                    .and_then(|text| text.trim().strip_prefix('!'))
-                    .map(|s| s.trim().to_owned())
-                {
-                    if !app.config.sandbox.process_execution_allowed() {
-                        shell.error(
-                            "shell commands are disabled by --no-process/--no-shell".to_owned(),
-                        );
-                        shell.render();
-                        continue;
-                    }
-                    if command.is_empty() {
-                        shell.notice("usage: !<shell command>");
-                        shell.render();
-                        continue;
-                    }
-                    shell.on_local_command_submitted(&format!("!{command}"));
-                    let shell_id = shell.append_shell_in_progress(command.clone());
-                    shell.render();
-
-                    let workspace = app.config.workspace.clone();
-                    let cmd = command.clone();
-
-                    // Spawn the child process with piped output.
-                    let mut process = tokio::process::Command::new("sh");
-                    process
-                        .current_dir(&workspace)
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .stdin(std::process::Stdio::null())
-                        .kill_on_drop(true);
-                    #[cfg(unix)]
-                    process.process_group(0);
-                    #[cfg(unix)]
-                    let launch = match BashProcessLaunch::prepare(&mut process, &cmd) {
-                        Ok(launch) => launch,
-                        Err(error) => {
-                            shell.finalize_shell(
-                                &shell_id,
-                                format!("failed to prepare lifecycle supervision: {error}"),
-                                -1,
-                            );
-                            shell.render();
-                            continue;
-                        }
-                    };
-                    #[cfg(unix)]
-                    process.arg("-c").arg(launch.source());
-                    #[cfg(not(unix))]
-                    process.arg("-c").arg(&cmd);
-                    let mut child = match process.spawn() {
-                        Ok(child) => child,
-                        Err(error) => {
-                            shell.finalize_shell(
-                                &shell_id,
-                                format!("failed to spawn: {error}"),
-                                -1,
-                            );
-                            shell.render();
-                            continue;
-                        }
-                    };
-                    #[cfg(unix)]
-                    let (group_guard, handoff) = match launch.register(child.id()).await {
-                        Ok(registered) => registered,
-                        Err(error) => {
-                            let _ = child.wait().await;
-                            shell.finalize_shell(
-                                &shell_id,
-                                format!("failed to register lifecycle supervision: {error}"),
-                                -1,
-                            );
-                            shell.render();
-                            continue;
-                        }
-                    };
-
-                    let mut stdout_pipe = child.stdout.take();
-                    let mut stderr_pipe = child.stderr.take();
-                    let output_budget = app.config.sandbox.max_output_bytes;
-                    let stdout_budget = output_budget / 2;
-                    let stderr_budget = output_budget.saturating_sub(stdout_budget);
-                    let stdout = std::sync::Arc::new(std::sync::Mutex::new(
-                        BoundedShellOutput::new(stdout_budget),
-                    ));
-                    let stderr = std::sync::Arc::new(std::sync::Mutex::new(
-                        BoundedShellOutput::new(stderr_budget),
-                    ));
-                    let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
-                    let command_timeout = Duration::from_secs(app.config.sandbox.bash_timeout_secs);
-                    #[cfg(unix)]
-                    let command_started = tokio::time::Instant::now();
-                    let stdout_capture = stdout.clone();
-                    let stderr_capture = stderr.clone();
-                    let stdout_updates = output_tx.clone();
-                    let stderr_updates = output_tx;
-                    let work = async {
-                        #[cfg(unix)]
-                        let (_, _, status) = tokio::join!(
-                            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
-                            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
-                            wait_for_bash_process(&mut child, handoff),
-                        );
-                        #[cfg(not(unix))]
-                        let (_, _, status) = tokio::join!(
-                            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
-                            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
-                            child.wait(),
-                        );
-                        status
-                    };
-                    let mut work = Box::pin(work);
-                    let deadline = tokio::time::sleep(command_timeout);
-                    tokio::pin!(deadline);
-                    let mut input_open = true;
-                    let mut interrupted = false;
-                    let mut timed_out = false;
-                    let mut shutting_down = false;
-
-                    let exit = loop {
-                        tokio::select! {
-                            biased;
-                            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
-                                interrupted = true;
-                                shutting_down = true;
-                                break Err(std::io::Error::new(
-                                    std::io::ErrorKind::Interrupted,
-                                    "command stopped during shutdown",
-                                ));
-                            }
-                            status = &mut work => {
-                                break status;
-                            }
-                            event = input.next(), if input_open => match event {
-                                Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
-                                    shell.request_close();
-                                    interrupted = true;
-                                    shutting_down = true;
-                                    break Err(std::io::Error::new(
-                                        std::io::ErrorKind::Interrupted,
-                                        "command stopped during close",
-                                    ));
-                                }
-                                Some(Ok(Event::Key(key)))
-                                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                                        && key.code == KeyCode::Char('c')
-                                        && key.modifiers == KeyModifiers::CONTROL =>
-                                {
-                                    interrupted = true;
-                                    break Err(std::io::Error::new(
-                                        std::io::ErrorKind::Interrupted,
-                                        "command cancelled",
-                                    ));
-                                }
-                                Some(Ok(Event::Key(key)))
-                                    if key.kind == KeyEventKind::Press
-                                        && key.code == KeyCode::Char('o')
-                                        && key.modifiers == KeyModifiers::CONTROL =>
-                                {
-                                    shell.toggle_disclosure();
-                                    shell.render();
-                                }
-                                Some(Ok(Event::Resize(columns, rows))) => {
-                                    shell.set_size(columns, rows);
-                                    shell.render();
-                                }
-                                Some(Ok(_)) => {}
-                                Some(Err(_)) | None => input_open = false,
-                            },
-                            _ = &mut deadline => {
-                                timed_out = true;
-                                break Err(std::io::Error::new(
-                                    std::io::ErrorKind::TimedOut,
-                                    "command timed out",
-                                ));
-                            }
-                            update = output_rx.recv() => {
-                                if update.is_some() {
-                                    // Collapse a burst into one bounded tail update. This keeps
-                                    // the latest process lines visible without repainting once
-                                    // per read syscall.
-                                    while output_rx.try_recv().is_ok() {}
-                                    shell.update_shell_output(
-                                        &shell_id,
-                                        rendered_shell_captures(&stdout, &stderr),
-                                    );
-                                    shell.render();
-                                }
-                            }
-                        }
-                    };
-
-                    if shutting_down {
-                        #[cfg(unix)]
+                // tool and executable extensions. Never let this local UX bypass
+                // the product-wide process gate, the ordinary process approval,
+                // or bounded process cleanup. Active-run follow-ups are model
+                // input, never delayed local shell escapes that gain process
+                // authority on dispatch.
+                if !queued_submission {
+                    if let Some(escape) = commands::BashEscape::parse(&composed.display_text) {
+                        match run_idle_command(
+                            app,
+                            &mut shell,
+                            &mut input,
+                            Command::Bash(escape),
+                            &mut goal_deadline,
+                            None,
+                        )
+                        .await?
                         {
-                            let process_cleanup =
-                                octet_agent::extension_process::terminate_bash_process_groups(
-                                    Duration::from_millis(400),
-                                );
-                            let _ = tokio::time::timeout(Duration::from_millis(500), async {
-                                tokio::join!(&mut work, process_cleanup)
-                            })
-                            .await;
-                            group_guard.terminate_now();
-                        }
-                        drop(work);
-                        #[cfg(not(unix))]
-                        {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
-                        }
-                        let mut combined = rendered_shell_captures(&stdout, &stderr);
-                        if !combined.is_empty() {
-                            combined.push('\n');
-                        }
-                        combined.push_str("command stopped during shutdown");
-                        shell.finalize_shell(&shell_id, combined, -1);
-                        shell.render();
-                        shutdown_for_exit(&mut app).await;
-                        break 'interactive;
-                    }
-
-                    if interrupted || timed_out {
-                        #[cfg(unix)]
-                        {
-                            group_guard.terminate_now();
-                            // Retain output already in the pipes when ordinary
-                            // descendants close promptly, but an escaped child
-                            // must not defeat the execution deadline forever.
-                            let _ =
-                                tokio::time::timeout(Duration::from_millis(500), &mut work).await;
-                        }
-                    } else {
-                        #[cfg(unix)]
-                        group_guard.supervise_bash_descendants(
-                            command_timeout.saturating_sub(command_started.elapsed()),
-                            Default::default(),
-                        );
-                    }
-                    // Releasing the concurrent wait/drain future closes any
-                    // descriptors retained by an escaped descendant.
-                    drop(work);
-                    #[cfg(not(unix))]
-                    if interrupted || timed_out {
-                        let _ = child.kill().await;
-                    }
-
-                    let exit_code = match exit {
-                        Ok(status) => status.code().unwrap_or(-1),
-                        Err(error) => {
-                            let mut combined = rendered_shell_captures(&stdout, &stderr);
-                            if !combined.is_empty() {
-                                combined.push('\n');
+                            IdleCommandOutcome::Continue(next) => {
+                                app = *next;
+                                continue;
                             }
-                            if interrupted {
-                                combined.push_str("command cancelled");
-                            } else if timed_out {
-                                combined.push_str(&format!(
-                                    "command exceeded the {}s execution limit",
-                                    app.config.sandbox.bash_timeout_secs
-                                ));
-                            } else {
-                                combined.push_str(&format!("process error: {error}"));
+                            IdleCommandOutcome::Quit(next) => {
+                                app = *next;
+                                shutdown_for_exit(&mut app).await;
+                                break 'interactive;
                             }
-                            shell.finalize_shell(&shell_id, combined, -1);
-                            shell.render();
-                            continue;
+                            IdleCommandOutcome::Submit { app: next, input } => {
+                                app = *next;
+                                startup_input = Some(input);
+                                continue;
+                            }
+                            IdleCommandOutcome::Reexec { app: next, .. } => {
+                                // A bash escape cannot plan a re-exec; keep the
+                                // application and continue instead of dropping it.
+                                app = *next;
+                                continue;
+                            }
                         }
-                    };
-
-                    let combined = rendered_shell_captures(&stdout, &stderr);
-                    shell.finalize_shell(&shell_id, combined, exit_code);
-                    shell.render();
-                    continue;
+                    }
                 }
-
                 if let Some(message) = cost_limit_message(&app) {
                     shell.restore_composed(composed);
                     shell.error(message);
@@ -7328,15 +8757,23 @@ pub async fn run_interactive_with_model_scope(
                     &mut input,
                     &mut pending_actions,
                     &mut goal_deadline,
+                    reexec.as_mut(),
+                    &mut pending_reexec,
                 )
                 .await?;
+                if pending_reexec.is_some() {
+                    break 'interactive;
+                }
             }
         }
     }
     let resume_command = resume_command_for_session(app.agent.session(), &app.config);
     shell.leave();
     print_resume_command(resume_command.as_deref());
-    Ok(())
+    match pending_reexec {
+        Some(plan) => Ok(InteractiveExit::Reexec(plan)),
+        None => Ok(InteractiveExit::Finished),
+    }
 }
 
 #[cfg(test)]
@@ -7847,7 +9284,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(title, "1 worker");
+        // The picker header is the collection's stable surface name only: the
+        // per-worker states are on the rows and the key affordances are in the
+        // panel action footer, so no counts or hints may be composed into it.
+        assert_eq!(title, "Subagents");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].label, "test-review");
         assert!(entries[0].description.contains("running"));
@@ -7985,15 +9425,16 @@ mod tests {
 
         // A failed silent phase stays attributable without rendering: the
         // operation name is carried by the diagnostic alone.
-        let mut input = EventStream::from_stream(tokio_stream::iter(
-            Vec::<std::io::Result<Event>>::new(),
-        ));
-        let error =
-            run_blocking_startup_lifecycle(&mut shell, &mut input, STARTUP_MODELS_OPERATION, || -> anyhow::Result<()> {
-                anyhow::bail!("catalog unavailable")
-            })
-            .await
-            .expect_err("the failed startup phase surfaces");
+        let mut input =
+            EventStream::from_stream(tokio_stream::iter(Vec::<std::io::Result<Event>>::new()));
+        let error = run_blocking_startup_lifecycle(
+            &mut shell,
+            &mut input,
+            STARTUP_MODELS_OPERATION,
+            || -> anyhow::Result<()> { anyhow::bail!("catalog unavailable") },
+        )
+        .await
+        .expect_err("the failed startup phase surfaces");
         assert_eq!(
             error.to_string(),
             "model discovery failed: catalog unavailable"
@@ -8258,6 +9699,7 @@ mod tests {
         let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
         let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
         let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let (reload_watcher, mut reload, mut reload_tick) = test_reload();
 
         let idle = wait_for_prompt(
             &mut shell,
@@ -8266,6 +9708,9 @@ mod tests {
             &mut extension_tick,
             &mut extensions,
             None,
+            &mut reload_tick,
+            &reload_watcher,
+            &mut reload,
         )
         .await
         .unwrap();
@@ -8291,6 +9736,7 @@ mod tests {
         let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
         let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
         let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let (reload_watcher, mut reload, mut reload_tick) = test_reload();
         let idle = wait_for_prompt(
             &mut shell,
             &mut input,
@@ -8298,10 +9744,29 @@ mod tests {
             &mut extension_tick,
             &mut extensions,
             None,
+            &mut reload_tick,
+            &reload_watcher,
+            &mut reload,
         )
         .await
         .unwrap();
         (shell, idle)
+    }
+
+    /// A disabled live-reload supervisor for idle-loop tests: it samples
+    /// nothing and can never report a due pass, so the existing idle-loop
+    /// assertions keep their meaning unchanged.
+    fn test_reload() -> (
+        crate::reload::ReloadWatcher,
+        crate::reload::ReloadSupervisor,
+        tokio::time::Interval,
+    ) {
+        let reload =
+            crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+        let watcher = crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::new());
+        let mut tick = tokio::time::interval(reload.settings().tick_interval());
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        (watcher, reload, tick)
     }
 
     fn ctrl_key(character: char) -> Event {
@@ -8509,6 +9974,7 @@ mod tests {
             let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
             let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
             let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let (reload_watcher, mut reload, mut reload_tick) = test_reload();
             let idle = wait_for_prompt(
                 &mut shell,
                 &mut input,
@@ -8516,6 +9982,9 @@ mod tests {
                 &mut extension_tick,
                 &mut extensions,
                 None,
+                &mut reload_tick,
+                &reload_watcher,
+                &mut reload,
             )
             .await
             .unwrap();
@@ -8687,6 +10156,290 @@ mod tests {
         app = rebuild_app(app, None, None, None, None).unwrap();
         #[cfg(any(unix, windows))]
         assert!(app.agent.partial_output_checkpoint_stats().is_some());
+    }
+
+    /// 2d.11 — `!command` results enter model context; `!!command` results are
+    /// durably recorded but explicitly excluded from it.
+    #[test]
+    fn shell_escape_records_are_explicitly_included_or_excluded_from_context() {
+        let (_directory, mut app) = fast_test_app(scripted_codex_model("http://127.0.0.1:1"));
+        let included = commands::ShellEscapeRecord::new("printf hi", "hi", 0, false);
+        record_shell_escape(&mut app, &included).unwrap();
+        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
+        assert!(context.contains("printf hi"), "{context}");
+        assert!(context.contains("exit 0"), "{context}");
+
+        let excluded = commands::ShellEscapeRecord::new("printf secret", "secret-value", 1, true);
+        record_shell_escape(&mut app, &excluded).unwrap();
+        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
+        assert!(!context.contains("secret-value"), "{context}");
+        assert!(!context.contains("printf secret"), "{context}");
+        // The excluded execution is still durably accounted for, with an
+        // explicit exclusion marker and its exact command and output.
+        let head = app.agent.session().head().unwrap();
+        let entry = app.agent.session().entry(&head).unwrap();
+        let display = entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.display_text.as_deref())
+            .expect("the excluded record retains its presentation text");
+        assert!(
+            display.contains("[excluded from model context]"),
+            "{display}"
+        );
+        assert!(display.contains("printf secret"), "{display}");
+        assert!(display.contains("secret-value"), "{display}");
+    }
+
+    /// A pending tool call must never be split from its result by a shell
+    /// record, even for the context-including `!` form.
+    #[test]
+    fn an_unresolved_tool_call_keeps_an_included_record_out_of_context() {
+        let (_directory, mut app) = fast_test_app(scripted_codex_model("http://127.0.0.1:1"));
+        let model = app.model.spec.id.clone();
+        app.agent
+            .session_mut()
+            .append(octet_agent::EntryValue::Message(
+                octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        id: ToolCallId("call-1".into()),
+                        name: "bash".into(),
+                        arguments_json: "{\"command\":\"ls\"}".into(),
+                        argument_error: None,
+                    })],
+                    model,
+                    protocol: octet_ai::Protocol::AnthropicMessages,
+                }),
+            ))
+            .unwrap();
+        assert!(session_has_unresolved_tool_calls(app.agent.session()));
+        record_shell_escape(
+            &mut app,
+            &commands::ShellEscapeRecord::new("printf hi", "hi", 0, false),
+        )
+        .unwrap();
+        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
+        assert!(!context.contains("printf hi"), "{context}");
+    }
+
+    /// 2d.2 — the scope mutations materialize deterministically, toggle the
+    /// requested provider, reorder by request, and hand back the exact ordered
+    /// pattern list (with reasoning suffixes) the writer persists.
+    #[test]
+    fn scoped_models_mutations_materialize_toggle_reorder_and_persist() {
+        let mut model = scripted_codex_model("http://127.0.0.1:1");
+        std::sync::Arc::make_mut(&mut model.spec).id = ModelId("first".into());
+        std::sync::Arc::make_mut(&mut model.spec).api_name = "first".into();
+        let (_directory, mut app) = fast_test_app(model);
+        let mut second = (*app.model.spec).clone();
+        second.id = ModelId("second".into());
+        second.api_name = "second".into();
+        app.catalog.register_model(second).unwrap();
+
+        // `all` builds the explicit ordered scope from the complete catalog in
+        // a stable order and persists a re-selectable glob.
+        let persistence =
+            apply_scope_mutation(&mut app, &commands::ScopedModelsCommand::All).unwrap();
+        assert_eq!(persistence, Some(Some("*".to_owned())));
+        let all = app.model_cycle();
+        assert!(all.contains(&"first".to_owned()), "{all:?}");
+        assert!(all.contains(&"second".to_owned()), "{all:?}");
+        assert!(
+            all.windows(2).all(|pair| pair[0] < pair[1]),
+            "`all` must materialize a stable order: {all:?}"
+        );
+        // `clear` removes the restriction and the persisted key; unrestricted
+        // cycling follows the same stable catalog order.
+        assert_eq!(
+            apply_scope_mutation(&mut app, &commands::ScopedModelsCommand::Clear).unwrap(),
+            Some(None)
+        );
+        assert_eq!(app.model_cycle(), all);
+
+        // A narrow ordered scope exercises provider toggle and reorder exactly.
+        app.set_model_scope_patterns(Some("first:low,second"))
+            .unwrap();
+        assert_eq!(app.model_cycle(), vec!["first", "second"]);
+        // A provider toggle disables every model of that provider, then
+        // restores them in stable order.
+        assert_eq!(
+            apply_scope_mutation(
+                &mut app,
+                &commands::ScopedModelsCommand::Toggle("test/*".into())
+            )
+            .unwrap(),
+            Some(None)
+        );
+        assert!(app.model_cycle().is_empty());
+        assert_eq!(
+            apply_scope_mutation(
+                &mut app,
+                &commands::ScopedModelsCommand::Toggle("test/*".into())
+            )
+            .unwrap(),
+            Some(Some("first,second".to_owned()))
+        );
+        // Reorder follows the requested move; the untouched entry keeps the
+        // launch suffix in the persisted list.
+        app.set_model_scope_patterns(Some("first:low,second"))
+            .unwrap();
+        assert_eq!(
+            apply_scope_mutation(
+                &mut app,
+                &commands::ScopedModelsCommand::Move {
+                    model: "second".into(),
+                    direction: commands::ScopeMove::Top,
+                }
+            )
+            .unwrap(),
+            Some(Some("second,first:low".to_owned()))
+        );
+        assert_eq!(app.model_cycle(), vec!["second", "first"]);
+        // Unmatched targets and boundary moves are explicit errors.
+        assert!(apply_scope_mutation(
+            &mut app,
+            &commands::ScopedModelsCommand::Enable("nope/*".into())
+        )
+        .is_err());
+        assert!(apply_scope_mutation(
+            &mut app,
+            &commands::ScopedModelsCommand::Move {
+                model: "second".into(),
+                direction: commands::ScopeMove::Up,
+            }
+        )
+        .is_err());
+    }
+
+    /// 2d.1 / 2d.2 — the active-run path renders both reports immediately and
+    /// queues the mutations it cannot own mid-run.
+    #[tokio::test]
+    async fn settings_and_scoped_models_render_mid_run_and_queue_mutations() {
+        let directory = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(directory.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Settings(commands::SettingsCommand::Show),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit);
+        assert!(shell.has_overlay());
+        shell.close_overlay();
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Settings(commands::SettingsCommand::Images(Some(true))),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        assert!(matches!(
+            queue.back(),
+            Some(PendingIdleAction::Settings(
+                commands::SettingsCommand::Images(Some(true))
+            ))
+        ));
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::ScopedModels(commands::ScopedModelsCommand::Show),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit);
+        assert!(shell.has_overlay());
+        shell.close_overlay();
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::ScopedModels(commands::ScopedModelsCommand::All),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        assert!(matches!(
+            queue.back(),
+            Some(PendingIdleAction::ScopedModels(
+                commands::ScopedModelsCommand::All
+            ))
+        ));
+    }
+
+    /// 2d.11 active path: an approved escape runs immediately under the captured
+    /// sandbox, and its explicit context decision is queued for the idle owner
+    /// that owns the session writer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_shell_escape_runs_and_queues_its_context_decision() {
+        let directory = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(directory.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Bash(commands::BashEscape {
+                command: "printf octet-active-shell".into(),
+                excluded: false,
+            }),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        let Some(PendingIdleAction::RecordShellEscape(record)) = queue.back() else {
+            panic!("the active escape must queue its durable record: {queue:?}");
+        };
+        assert!(!record.excluded());
+        assert_eq!(record.exit_code(), 0);
+        assert!(record.output().contains("octet-active-shell"), "{record:?}");
+
+        // `!!` fixes the opposite decision without touching execution.
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Bash(commands::BashEscape {
+                command: "printf octet-excluded".into(),
+                excluded: true,
+            }),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        let Some(PendingIdleAction::RecordShellEscape(record)) = queue.back() else {
+            panic!("the excluded escape must still be accounted for: {queue:?}");
+        };
+        assert!(record.excluded());
+    }
+
+    /// The shared local-shell execution path keeps bounded capture, an exit
+    /// status, and no refusal for an ordinary command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_shell_escape_runs_through_the_bounded_capture_path() {
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let outcome = run_local_shell(
+            &mut shell,
+            &mut input,
+            Path::new("/"),
+            &SandboxPolicy::default(),
+            "printf octet-shell-test",
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        assert!(
+            outcome.output.contains("octet-shell-test"),
+            "{}",
+            outcome.output
+        );
+        assert!(outcome.refusal.is_none());
+        assert!(!outcome.stopped);
+        assert!(!outcome.shutting_down);
     }
 
     #[test]
@@ -9477,8 +11230,9 @@ mod tests {
     fn scripted_codex_model(uri: &str) -> octet_ai::Model {
         let mut model = scripted_model(uri);
         std::sync::Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
-        std::sync::Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
-            octet_ai::ResponsesRuntimeProfile::Codex;
+        std::sync::Arc::make_mut(&mut model.endpoint)
+            .runtime
+            .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
         model
     }
 
@@ -9494,7 +11248,9 @@ mod tests {
 
         let mut codex = scripted_codex_model("http://127.0.0.1:1");
         std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-6-astra".into());
-        std::sync::Arc::make_mut(&mut codex.spec).limits.context_window = 272_000;
+        std::sync::Arc::make_mut(&mut codex.spec)
+            .limits
+            .context_window = 272_000;
         let surface = codex_context_surface(&codex).expect("Codex route");
         assert_eq!(surface.effective_window(), 272_000);
         assert!(!surface.has_uncertain_usage());
@@ -9510,7 +11266,9 @@ mod tests {
         // An above-standard-tier route renders its accounting as uncertain and
         // never as an exact figure.
         std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-5.6-luna".into());
-        std::sync::Arc::make_mut(&mut codex.spec).limits.context_window = 372_000;
+        std::sync::Arc::make_mut(&mut codex.spec)
+            .limits
+            .context_window = 372_000;
         let uncertain = codex_context_surface(&codex).expect("Codex route");
         assert!(uncertain.has_uncertain_usage());
         assert!(pickers::codex_context_menu_row(&uncertain).contains("UNCERTAIN"));
@@ -9550,9 +11308,20 @@ mod tests {
                 model: scripted_model("http://127.0.0.1:1"),
                 catalog: octet_ai::ModelCatalog::default(),
                 sessions: crate::session_store::SessionStore::new(&missing, &missing),
+                sandbox: SandboxPolicy::default(),
+                effect_policy: octet_agent::EffectPolicy::UnsafeHost,
                 subagents_available: false,
                 service_tier: None,
                 goal: Err(ActiveGoalError::UnaddressableSession),
+                settings: commands::SettingsSurface {
+                    default_model: None,
+                    reasoning: "off".into(),
+                    theme: None,
+                    transport: "http",
+                    endpoint: "test-endpoint".into(),
+                    show_images: false,
+                },
+                model_scope: None,
                 catalog_is_narrowed: false,
             }
         })
@@ -9580,9 +11349,20 @@ mod tests {
             model: scripted_model("http://127.0.0.1:1"),
             catalog: octet_ai::ModelCatalog::default(),
             sessions: crate::session_store::SessionStore::for_directory(dir, dir),
+            sandbox: SandboxPolicy::default(),
+            effect_policy: octet_agent::EffectPolicy::UnsafeHost,
             subagents_available: false,
             service_tier: None,
             goal: Err(ActiveGoalError::UnaddressableSession),
+            settings: commands::SettingsSurface {
+                default_model: None,
+                reasoning: "off".into(),
+                theme: None,
+                transport: "http",
+                endpoint: "test-endpoint".into(),
+                show_images: false,
+            },
+            model_scope: None,
             catalog_is_narrowed: false,
         }
     }
@@ -10268,7 +12048,8 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
-                test_run_inspection(), &mut goal_deadline,
+                test_run_inspection(),
+                &mut goal_deadline,
             ),
         )
         .await
@@ -10356,7 +12137,8 @@ mod tests {
                     None,
                     &mut crate::extensions::ExecutableExtensions::default(),
                     &mut false,
-                    test_run_inspection(), &mut goal_deadline,
+                    test_run_inspection(),
+                    &mut goal_deadline,
                 ),
             )
             .await
@@ -10428,7 +12210,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(), &mut goal_deadline,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -10603,7 +12386,8 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
-                test_run_inspection(), &mut goal_deadline,
+                test_run_inspection(),
+                &mut goal_deadline,
             ),
         )
         .await
@@ -10686,7 +12470,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(), &mut goal_deadline,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -10789,7 +12574,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(), &mut goal_deadline,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -10858,7 +12644,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
-            test_run_inspection(), &mut goal_deadline,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -10890,9 +12677,8 @@ mod tests {
         octet_agent::GoalDriver,
         ActiveRunInspection,
     ) {
-        let store = Arc::new(
-            octet_agent::DurableGoalStore::open(dir).expect("durable goal store fixture"),
-        );
+        let store =
+            Arc::new(octet_agent::DurableGoalStore::open(dir).expect("durable goal store fixture"));
         let driver = octet_agent::GoalDriver::new(store.clone(), session_id);
         let inspection =
             test_run_inspection_with_goal(dir, store.clone(), driver.clone(), session_id);
@@ -11169,7 +12955,10 @@ mod tests {
         assert!(queue.is_empty(), "resume is never queued: {queue:?}");
         let resumed = store.get("goal-session").unwrap().unwrap();
         assert_eq!(resumed.status, octet_agent::GoalStatus::Active);
-        assert_eq!(resumed.objective, "stay coherent", "resume keeps the objective");
+        assert_eq!(
+            resumed.objective, "stay coherent",
+            "resume keeps the objective"
+        );
         assert!(resumed_deadline.is_some(), "resume re-arms the deadline");
         assert!(matches!(
             driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
@@ -11198,7 +12987,10 @@ mod tests {
         );
         let painted = shell.debug_snapshot();
         for expected in ["goal paused", "goal resumed", "goal cleared"] {
-            assert!(painted.contains(expected), "{expected:?} missing: {painted}");
+            assert!(
+                painted.contains(expected),
+                "{expected:?} missing: {painted}"
+            );
         }
         assert_eq!(paused_deadline.is_none(), true);
     }
@@ -11206,7 +12998,8 @@ mod tests {
     #[tokio::test]
     async fn unaddressable_active_goal_fails_closed_and_is_never_queued() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(octet_agent::DurableGoalStore::open(dir.path()).expect("store fixture"));
+        let store =
+            Arc::new(octet_agent::DurableGoalStore::open(dir.path()).expect("store fixture"));
         let driver = octet_agent::GoalDriver::new(store.clone(), "goal-session");
         assert!(matches!(
             GoalAccess::from_parts(store, driver, String::new()),
@@ -11249,7 +13042,10 @@ mod tests {
             &inspection,
         )
         .await;
-        assert!(queue.is_empty(), "a rejected goal is never queued: {queue:?}");
+        assert!(
+            queue.is_empty(),
+            "a rejected goal is never queued: {queue:?}"
+        );
         assert!(deadline.is_none(), "a rejected goal arms no deadline");
         assert!(
             store.get("goal-session").unwrap().is_none(),
@@ -11291,52 +13087,32 @@ mod tests {
         assert!(goal_deadline.is_some(), "idle /goal arms the deadline");
         assert!(shell.debug_snapshot().contains("goal set"));
 
-        apply_idle_goal_command(
-            &app,
-            &mut shell,
-            GoalCommand::Status,
-            &mut goal_deadline,
-        )
-        .expect("idle /goal status");
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Status, &mut goal_deadline)
+            .expect("idle /goal status");
         assert!(
             shell.has_overlay(),
             "idle /goal status opens the same report"
         );
         assert!(store.get(&session_id).unwrap().is_some());
 
-        apply_idle_goal_command(
-            &app,
-            &mut shell,
-            GoalCommand::Pause,
-            &mut goal_deadline,
-        )
-        .expect("idle /goal pause");
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Pause, &mut goal_deadline)
+            .expect("idle /goal pause");
         assert_eq!(
             store.get(&session_id).unwrap().unwrap().status,
             octet_agent::GoalStatus::Paused
         );
         assert!(goal_deadline.is_none());
 
-        apply_idle_goal_command(
-            &app,
-            &mut shell,
-            GoalCommand::Resume,
-            &mut goal_deadline,
-        )
-        .expect("idle /goal resume");
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Resume, &mut goal_deadline)
+            .expect("idle /goal resume");
         assert_eq!(
             store.get(&session_id).unwrap().unwrap().status,
             octet_agent::GoalStatus::Active
         );
         assert!(goal_deadline.is_some());
 
-        apply_idle_goal_command(
-            &app,
-            &mut shell,
-            GoalCommand::Clear,
-            &mut goal_deadline,
-        )
-        .expect("idle /goal clear");
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Clear, &mut goal_deadline)
+            .expect("idle /goal clear");
         assert!(store.get(&session_id).unwrap().is_none());
         assert!(goal_deadline.is_none());
     }

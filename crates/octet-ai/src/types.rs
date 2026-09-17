@@ -115,6 +115,12 @@ pub enum Protocol {
     GoogleGenerativeAi,
     /// Native Mistral Conversations HTTP/SSE protocol.
     MistralConversations,
+    /// Native `pi-messages` (Radius gateway) HTTP/SSE protocol.
+    ///
+    /// This is not an OpenAI alias: one `POST <base>/messages` carries Pi's own
+    /// `{ model, context, options }` document and the response is a stream of
+    /// serialized assistant-message events.
+    PiMessages,
 }
 
 /// Preferred transport for streaming provider responses.
@@ -1581,6 +1587,11 @@ pub struct Response {
     /// Complete opaque Responses output, when the provider supplied an
     /// authoritative terminal output snapshot.
     pub responses_output: Option<crate::responses::ResponsesOutput>,
+    /// Deferred provider handle when [`StopReason::Deferred`] parked the turn.
+    ///
+    /// This is transport data, not assistant content, and is never serialized
+    /// into model context.
+    pub deferred: Option<crate::deferred::DeferredHandle>,
     /// Lossy mode diagnostics. Empty in Strict mode.
     pub diagnostics: Vec<crate::error::Diagnostic>,
 }
@@ -1601,6 +1612,12 @@ pub enum StopReason {
     Refusal,
     /// Claude-style turn pause.
     PauseTurn,
+    /// Provider parked the request and returned a deferred handle.
+    ///
+    /// The handle that must be polled is carried on
+    /// [`Response::deferred`]; the host owns durable suspension and poll
+    /// scheduling. This variant never means "retry the generation request".
+    Deferred,
     /// Other custom/unknown reason.
     Other(String),
 }
@@ -1616,6 +1633,7 @@ impl StopReason {
             StopReason::StopSequence => "stop_sequence",
             StopReason::Refusal => "refusal",
             StopReason::PauseTurn => "pause_turn",
+            StopReason::Deferred => "deferred",
             StopReason::Other(s) => s,
         }
     }
@@ -1643,6 +1661,7 @@ impl<'de> serde::Deserialize<'de> for StopReason {
             "stop_sequence" => Ok(StopReason::StopSequence),
             "refusal" | "content_filter" => Ok(StopReason::Refusal),
             "pause_turn" => Ok(StopReason::PauseTurn),
+            "deferred" => Ok(StopReason::Deferred),
             _ => Ok(StopReason::Other(s)),
         }
     }
@@ -1967,6 +1986,9 @@ mod tests {
 
         let de_other: StopReason = serde_json::from_str("\"something_else\"").unwrap();
         assert_eq!(de_other, StopReason::Other("something_else".to_string()));
+
+        let de_deferred: StopReason = serde_json::from_str("\"deferred\"").unwrap();
+        assert_eq!(de_deferred, StopReason::Deferred);
     }
 
     #[test]
@@ -1977,6 +1999,7 @@ mod tests {
         assert_eq!(StopReason::StopSequence.as_canonical(), "stop_sequence");
         assert_eq!(StopReason::Refusal.as_canonical(), "refusal");
         assert_eq!(StopReason::PauseTurn.as_canonical(), "pause_turn");
+        assert_eq!(StopReason::Deferred.as_canonical(), "deferred");
         assert_eq!(
             StopReason::Other("network_error".to_string()).as_canonical(),
             "network_error"
@@ -1988,6 +2011,7 @@ mod tests {
             StopReason::StopSequence,
             StopReason::Refusal,
             StopReason::PauseTurn,
+            StopReason::Deferred,
             StopReason::Other("network_error".to_string()),
         ] {
             let serialized = serde_json::to_string(&stop).unwrap();

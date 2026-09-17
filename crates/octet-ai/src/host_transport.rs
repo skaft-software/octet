@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 
 use crate::catalog::Model;
-use crate::error::{AiError, Diagnostic};
+use crate::error::{AiError, Diagnostic, UnsupportedError};
 use crate::pricing::Pricing;
 use crate::stream::ResponseStream;
 use crate::types::{ModelId, Protocol, Request};
@@ -39,6 +39,12 @@ impl From<&Model> for HostStreamModel {
 /// Implementations must not retry an accepted request implicitly, and should
 /// use [`crate::CanonicalStreamAssembler`] for response construction. The
 /// transport receives neither endpoint configuration nor credential material.
+///
+/// Deferred methods are optional and default to a typed [`UnsupportedError`]:
+/// a transport that cannot park or poll a provider response must fail closed,
+/// never fake a suspension. A deferred poll is admitted only through
+/// [`crate::DeferredPollPermit`], which is consumed at most once; a transport
+/// must not poll again on its own.
 #[async_trait]
 pub trait HostStreamTransport: Send + Sync {
     /// Starts one canonical request and returns its bounded response stream.
@@ -48,4 +54,47 @@ pub trait HostStreamTransport: Send + Sync {
         request: Request,
         diagnostics: Vec<Diagnostic>,
     ) -> Result<ResponseStream, AiError>;
+
+    /// Starts one canonical request that may be parked by the provider.
+    ///
+    /// A parked provider returns a terminal response with
+    /// [`crate::StopReason::Deferred`] and a [`crate::DeferredHandle`].
+    /// `poll_after_ms` is the caller's request-local minimum delay before the
+    /// next poll, or `None` for the transport default.
+    async fn submit_deferred(
+        &self,
+        _model: HostStreamModel,
+        _request: Request,
+        _diagnostics: Vec<Diagnostic>,
+        _poll_after_ms: Option<u64>,
+    ) -> Result<ResponseStream, AiError> {
+        Err(UnsupportedError::Deferred.into())
+    }
+
+    /// Polls one deferred handle, at most once per admitted permit.
+    ///
+    /// `wait_ms` is the maximum provider long-poll duration; `Some(0)`
+    /// performs one status check and `None` uses the transport default. The
+    /// permit is validated and consumed by the client before this method is
+    /// called, so an implementation never needs to schedule a repeat poll.
+    async fn fetch_deferred(
+        &self,
+        _model: HostStreamModel,
+        _handle: crate::deferred::DeferredHandle,
+        _wait_ms: Option<u64>,
+    ) -> Result<ResponseStream, AiError> {
+        Err(UnsupportedError::Deferred.into())
+    }
+
+    /// Best-effort cancellation of one deferred handle.
+    ///
+    /// Cancellation does not retroactively un-send provider work; callers must
+    /// keep whatever usage/billing uncertainty the provider reports.
+    async fn cancel_deferred(
+        &self,
+        _model: HostStreamModel,
+        _handle: crate::deferred::DeferredHandle,
+    ) -> Result<(), AiError> {
+        Err(UnsupportedError::Deferred.into())
+    }
 }

@@ -33,7 +33,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
 | `/compact [instructions]` | Request compaction at the next safe boundary; bounded custom instructions apply to local summaries, not native Responses compact. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
-| `/reload` | Reload user keybindings, instructions, prompts, skills, and enabled extensions at a safe boundary. |
+| `/reload` | Reload user keybindings, instructions, prompts, skills, and enabled extensions at a safe boundary; when the executable on disk changed, safely re-exec into it with the active session resumed. Refused while a model turn, tool call, shell child, effect approval, in-flight session write, or delegated worker is active. |
 | `/login [provider]` | Sign in to a subscription provider. |
 | `/logout [provider]` | Remove its stored credential. |
 | `/status` | Active model, context, capabilities, and diagnostics. |
@@ -50,9 +50,24 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/prompt [name] [arguments]` | List/expand named templates; Pi-compatible `/<name> ...` invocation is also supported. |
 | `/skills ...` | List, search, inspect, load, unload, or reload skills; [activation](instructions.md#skills). |
 | `/extensions [status\|reload]` | Open installed-bundle enable/disable menu or inspect/reload state. |
+| `/settings [theme\|images on/off\|default model/reasoning\|transport\|padding]` | Show or change user-level display/default preferences. Defaults, theme, and images persist through the shared config writer; transport and editor padding are reported route/theme facts, and project trust is deliberately not a persisted setting. |
+| `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model cycling scope. Mutations apply to Ctrl+P immediately and persist as an exact ordered pattern list (`models` in the user config); `move <id> <up\|down\|top\|bottom>` reorders it. |
 | `/subagents` | With the trusted, enabled subagents package live, browse workers and read-only transcripts. |
 | `/help [command]` | Local command help and self-documentation. |
 | `/exit` | Exit octet. |
+
+### Local shell escapes
+
+A draft beginning with `!` is a **local** command, not model input: `!command`
+runs it through the product process gates, the ordinary process approval, and
+the bounded capture/cleanup path, then adds the result to model context as a
+user message. `!!command` takes the same path but durably records the result
+**excluded from model context**. Both work while idle and during a running turn
+(mid-run results are appended at the next idle boundary, after any pending tool
+call settles, so a call is never separated from its result). `--no-process` or
+`--no-shell` disables the escape; a denial is reported, never silently dropped.
+The capture is bounded by `max_output_bytes` and `bash_timeout_secs`; it is not
+a persistent shell session.
 
 `/theme` changes only the compiled terminal appearance selector; it does not
 load arbitrary theme files. [Theme status](themes.md).

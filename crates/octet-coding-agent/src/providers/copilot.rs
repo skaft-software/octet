@@ -1044,7 +1044,8 @@ mod tests {
         let provider = CopilotProvider::new(
             host.clone(),
             CopilotEndpoint::new(url::Url::parse("https://api.example.test/").unwrap()).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         provider.exchange().await.unwrap();
         assert!(provider.resolver.resolve().await.is_ok());
         (host, provider)
@@ -1062,7 +1063,10 @@ mod tests {
                 provider.exchange().await
             };
             assert!(result.is_err());
-            assert!(provider.resolver.session.lock().await.is_none(), "refresh={refresh}");
+            assert!(
+                provider.resolver.session.lock().await.is_none(),
+                "refresh={refresh}"
+            );
             assert!(provider.resolver.resolve().await.is_err());
         }
     }
@@ -1091,18 +1095,25 @@ mod tests {
                 } else {
                     let mut invalidation = Box::pin(provider.invalidate_session());
                     std::future::poll_fn(|cx| {
-                        assert!(std::future::Future::poll(invalidation.as_mut(), cx).is_pending(),
-                            "invalidation must serialize with the in-flight replacement");
+                        assert!(
+                            std::future::Future::poll(invalidation.as_mut(), cx).is_pending(),
+                            "invalidation must serialize with the in-flight replacement"
+                        );
                         std::task::Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     gate.release.notify_one();
                     let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
                         tokio::join!(replacement, invalidation)
-                    }).await.expect("replacement and invalidation must settle");
+                    })
+                    .await
+                    .expect("replacement and invalidation must settle");
                     result.unwrap();
                 }
-                assert!(provider.resolver.session.lock().await.is_none(),
-                    "refresh={refresh}, cancel={cancel}");
+                assert!(
+                    provider.resolver.session.lock().await.is_none(),
+                    "refresh={refresh}, cancel={cancel}"
+                );
             }
         }
     }

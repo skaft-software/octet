@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::session_writer::SessionWriter;
+use crate::tools::deferred::{DeferredRunRecord, DeferredRunStore};
 use crate::tools::durability::{
     DurableInvocationStore, InvocationHandle, InvocationRecord, InvocationScope,
 };
@@ -684,6 +685,13 @@ pub enum SessionRecord {
         /// The durable usage record.
         record: UsageRecord,
     },
+    /// Replaceable suspended/effect-pending deferred-run state. This never
+    /// changes the active head or model-visible context, and the last record
+    /// for one operation is authoritative on replay.
+    DeferredRun {
+        /// The durable deferred-run record, keyed by operation id.
+        record: DeferredRunRecord,
+    },
 }
 
 /// Borrowed serialization view used by append/checkout. Keeping the entry
@@ -924,13 +932,19 @@ pub struct Session {
     usage_records: Vec<UsageRecord>,
     /// Session-global exposure; checkout and compaction never clear it.
     usage_uncertainty_records: Vec<UsageUncertaintyRecord>,
+    /// Replaceable parked deferred-run leaves, keyed by operation id. The
+    /// store owns its own descriptor-bound append line so a durable change is
+    /// one synced record.
+    deferred_runs: Arc<DeferredRunStore>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         // A retained callback cannot keep writing after the owning session
-        // closes. Durable pending state remains for a newly opened session.
+        // closes. Durable pending state remains for a newly opened session;
+        // a parked deferred run is replayed by the next owning session.
         self.invocations.close();
+        self.deferred_runs.close();
     }
 }
 
@@ -985,11 +999,13 @@ impl Session {
         }
         let writer = Arc::new(SessionWriter::new(file.try_clone()?, 0, 0, true));
         let invocations = Arc::new(DurableInvocationStore::with_journal(Arc::clone(&writer)));
+        let deferred_runs = Arc::new(DeferredRunStore::with_journal(Arc::clone(&writer)));
         Ok(Self {
             path: path.into(),
             file,
             writer,
             invocations,
+            deferred_runs,
             entries: Vec::new(),
             index: HashMap::new(),
             head: None,
@@ -1136,6 +1152,7 @@ impl Session {
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut usage_uncertainty_records = Vec::new();
         let restored_invocations = DurableInvocationStore::new();
+        let restored_deferred_runs = DeferredRunStore::new();
 
         // Byte offset of the end of the last accepted record, so a torn tail
         // can be truncated away below. Only one physical line is buffered at a
@@ -1211,6 +1228,14 @@ impl Session {
                 SessionRecord::ToolInvocation { scope, record } => {
                     restored_invocations
                         .restore(scope, record)
+                        .map_err(|error| SessionError::Corrupt {
+                            line: line_no,
+                            message: error.to_string(),
+                        })?;
+                }
+                SessionRecord::DeferredRun { record } => {
+                    restored_deferred_runs
+                        .restore(record)
                         .map_err(|error| SessionError::Corrupt {
                             line: line_no,
                             message: error.to_string(),
@@ -1462,11 +1487,13 @@ impl Session {
             recover_tail,
         ));
         let invocations = Arc::new(restored_invocations.attach_journal(Arc::clone(&writer)));
+        let deferred_runs = Arc::new(restored_deferred_runs.attach_journal(Arc::clone(&writer)));
         Ok(Self {
             path,
             file,
             writer,
             invocations,
+            deferred_runs,
             entries,
             next_id,
             index,
@@ -1543,6 +1570,32 @@ impl Session {
         self.invocations
             .open(self.invocation_scope(call_index)?)
             .map_err(|e| SessionError::Limit(e.to_string()))
+    }
+
+    /// The durable store for suspended/effect-pending deferred runs.
+    ///
+    /// The store shares this session's descriptor-bound append line, so a
+    /// parked leaf, a poll admitted before provider work, and a terminal
+    /// tombstone are each one synced session record. It is replaceable state:
+    /// the last record for one operation is authoritative on replay, never
+    /// model-visible context and never usage accounting.
+    pub fn deferred_run_store(&self) -> Arc<DeferredRunStore> {
+        Arc::clone(&self.deferred_runs)
+    }
+
+    /// Durable state of one suspended deferred run, if any.
+    pub fn deferred_run(&self, operation_id: &str) -> Option<DeferredRunRecord> {
+        self.deferred_runs.record(operation_id)
+    }
+
+    /// Every durable deferred-run record, including terminal tombstones.
+    pub fn deferred_runs(&self) -> Vec<DeferredRunRecord> {
+        self.deferred_runs.records()
+    }
+
+    /// Every non-terminal deferred run that may still be resumed.
+    pub fn parked_deferred_runs(&self) -> Vec<DeferredRunRecord> {
+        self.deferred_runs.parked_records()
     }
 
     /// Recovery refusals may retain existing progress without allocating a
@@ -5615,6 +5668,7 @@ mod tests {
                 cost: None,
                 response_id: Some("resp-1".to_string()),
                 responses_output: None,
+                deferred: None,
                 diagnostics: Vec::new(),
             }))
             .unwrap()

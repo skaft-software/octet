@@ -1,0 +1,6 @@
+{
+  "output_modalities_filter": "image",
+  "provider": "openrouter",
+  "sha256": "677243e78f0d538c3a58d6a98719165441484aaa526acbd98eafd4cdc695f4be",
+  "url": "https://openrouter.ai/api/v1/models"
+}

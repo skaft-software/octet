@@ -47,6 +47,65 @@ class MetadataRefreshTests(unittest.TestCase):
         catalog["deepseek"]["models"]["example"]["reasoning"] = None
         self.assertIsNone(refresh.capabilities_snapshot(catalog)["deepseek/example"]["reasoning"])
 
+    def test_token_plan_and_coding_providers_keep_upstream_catalog_membership(self):
+        model = {
+            "name": "Example", "reasoning": True,
+            "limit": {"context": 262144, "output": 65536},
+            "modalities": {"input": ["text", "image"], "output": ["text"]},
+            "tool_call": True, "cost": {"input": 0.2, "output": 1.2},
+        }
+        catalog = {
+            "baseten": {"models": {
+                "zai-org/GLM-5.2": model,
+                "zai-org/GLM-5.2-Fast": model,
+                "retired/model": {**model, "status": "deprecated"},
+            }},
+            "alibaba-token-plan": {"models": {
+                "qwen3.7-max": model,
+                "qwen3.8-max-preview": model,
+                "text-completion-only": {**model, "tool_call": False},
+            }},
+            "alibaba-token-plan-cn": {"models": {"qwen3.7-max": model}},
+            "zhipuai-coding-plan": {"models": {
+                "glm-5.2": {**model, "cost": None},
+                "text-completion-only": {**model, "tool_call": False},
+            }},
+            "zai": {"models": {"glm-5.2": {"cost": {"input": 0.5, "output": 3.0}}}},
+        }
+        capabilities = refresh.capabilities_snapshot(catalog)
+        # Deprecated Baseten routes and non-tool token-plan routes stay out.
+        self.assertNotIn("baseten/retired/model", capabilities)
+        self.assertNotIn("qwen-token-plan/text-completion-only", capabilities)
+        self.assertNotIn("qwen-token-plan-cn/text-completion-only", capabilities)
+        self.assertNotIn("zai-coding-cn/text-completion-only", capabilities)
+        # The retired Alibaba alias is excluded from every variant.
+        self.assertNotIn("qwen-token-plan/qwen3.8-max-preview", capabilities)
+        self.assertNotIn("qwen-token-plan-cn/qwen3.8-max-preview", capabilities)
+        # The Individual subscription is narrowed to the documented allowlist.
+        self.assertIn("qwen-token-plan-individual/qwen3.7-max", capabilities)
+        self.assertNotIn("qwen-token-plan-individual/text-completion-only", capabilities)
+        # Baseten's rename-based GLM-5.2 routes are corrected to text-only.
+        self.assertEqual(
+            capabilities["baseten/zai-org/GLM-5.2"]["modalities"]["input"], ["text"])
+        self.assertEqual(
+            capabilities["baseten/zai-org/GLM-5.2-Fast"]["modalities"]["input"], ["text"])
+        self.assertEqual(
+            capabilities["qwen-token-plan/qwen3.7-max"]["modalities"]["input"],
+            ["text", "image"])
+        # Coding-plan pricing falls back to the equivalent `zai` reference rate.
+        pricing = refresh.snapshot(catalog)
+        self.assertEqual(pricing["zai-coding-cn/glm-5.2"]["input"], 500000)
+        self.assertEqual(pricing["zai-coding-cn/glm-5.2"]["output"], 3000000)
+        self.assertEqual(pricing["qwen-token-plan/qwen3.7-max"]["input"], 200000)
+        self.assertNotIn("baseten/retired/model", pricing)
+
+    def test_pricing_stays_absent_when_no_reference_rate_exists(self):
+        model = {"tool_call": True, "cost": None}
+        catalog = {"zhipuai-coding-plan": {"models": {"glm-5.2": model}}}
+        self.assertEqual(refresh.snapshot(catalog), {})
+        self.assertEqual(refresh.pinned_cost(
+            catalog, "zai-coding-cn", "zhipuai-coding-plan", "glm-5.2", model), None)
+
     def test_pricing_remains_exact_and_unverified_schedule_stays_unknown(self):
         result = refresh.snapshot(self.fixture())
         self.assertNotIn("deepseek/example", result)

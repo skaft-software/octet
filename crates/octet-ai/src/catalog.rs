@@ -401,6 +401,12 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
             Protocol::BedrockConverse => reasoning.control == ReasoningControl::TokenBudget,
             // This codec does not yet map native reasoning controls or content.
             Protocol::MistralConversations => false,
+            // Pi's `thinkingLevel` is an effort control; a token budget has no
+            // native field and fails closed in the codec.
+            Protocol::PiMessages => matches!(
+                reasoning.control,
+                ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle
+            ),
         };
         let chat_mode_matches = reasoning.openai_chat_mode == OpenAiChatReasoningMode::Standard
             || (spec.protocol == Protocol::OpenAiChat

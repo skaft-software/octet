@@ -161,6 +161,9 @@ pub(super) fn render_block_planned(
         spinner_frame,
         status_shimmer_frame,
         0,
+        // Document/measurement projections have no live roster; only the
+        // retained transcript cache passes the render-time liveness flag.
+        false,
     )
 }
 
@@ -176,6 +179,7 @@ pub(super) fn render_block_planned_with_rainbow(
     spinner_frame: usize,
     status_shimmer_frame: usize,
     rainbow_strength: u16,
+    subagents_running: bool,
 ) -> RenderedTranscriptBlock {
     let plan = compile_surface_plan(previous, block, theme, outer_width);
     let width = plan.geometry.content_width;
@@ -220,6 +224,10 @@ pub(super) fn render_block_planned_with_rainbow(
             rainbow_strength,
         ),
         TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
+            // Single surface: this transcript block is the only place a
+            // delegation roster is rendered. It stays a live, in-place-updating
+            // log entry while any child is active and freezes once it settles,
+            // so there is deliberately no roster strip in `shell_chrome`.
             finish_transcript_block(render_subagent_activity_panel(
                 panel,
                 theme,
@@ -314,7 +322,9 @@ pub(super) fn render_block_planned_with_rainbow(
             append_nested_tool_output(&mut lines, output_lines, theme, width);
             finish_transcript_block(lines)
         }
-        TranscriptBlock::Outcome(outcome) => render_outcome(outcome, theme, width),
+        TranscriptBlock::Outcome(outcome) => {
+            render_outcome(outcome, theme, width, subagents_running)
+        }
         TranscriptBlock::UpdateAvailable(version) => finish_transcript_block(
             super::startup_update::render_update_notice(version, rich_renderer, theme, width),
         ),

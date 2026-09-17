@@ -280,6 +280,29 @@ pub trait Component {
         self.handle_input(data);
     }
 
+    /// Pi-compatible constrained layout descriptor.
+    ///
+    /// A component that returns a node here (`VStack`, `HStack`, `ScrollView`,
+    /// or a product wrapper that delegates to one) is sized by
+    /// [`crate::layout::render_layout_frame`] instead of being treated as a
+    /// leaf. The default keeps every existing component a leaf.
+    fn layout_node(&self) -> Option<crate::layout::LayoutNode<'_>> {
+        None
+    }
+
+    /// Pi-compatible normalized mouse handler.
+    ///
+    /// Returning a result makes this component the dispatch target for the
+    /// event; the default declines, so an event travels outward along the
+    /// hit path resolved from the last rendered frame. [`crate::mouse::MouseRegion`]
+    /// wraps a component that has no mouse handling of its own.
+    fn handle_mouse<'a>(
+        &'a self,
+        _event: &crate::mouse::TuiMouseEvent,
+    ) -> Option<crate::mouse::MouseOutcome<'a>> {
+        None
+    }
+
     /// If true, component receives key release events (Kitty protocol).
     fn wants_key_release(&self) -> bool {
         false
@@ -370,6 +393,12 @@ pub struct TUI<'a> {
     /// Nested renderer helpers share one synchronized-output transaction so
     /// cursor placement becomes visible atomically with the frame.
     synchronized_output_depth: usize,
+    /// Opt-in fullscreen session. When this is `Some`, the renderer owns a
+    /// fixed alternate-screen viewport and restores the final document to the
+    /// main screen on exit (Pi's `TuiAltScreen`).
+    alternate_screen_session: Option<crate::alt_screen::AlternateScreen>,
+    /// Replay the rendered document onto the main screen when the session ends.
+    restore_transcript_on_exit: bool,
 }
 
 impl<'a> TUI<'a> {
@@ -408,7 +437,49 @@ impl<'a> TUI<'a> {
             inline_surface_active: false,
             inline_surface_window: Vec::new(),
             synchronized_output_depth: 0,
+            alternate_screen_session: None,
+            restore_transcript_on_exit: true,
         }
+    }
+
+    /// Opt into Pi's fullscreen alternate-screen session.
+    ///
+    /// The session owns a fixed viewport: autowrap is disabled while it is
+    /// active, every frame paints absolute viewport rows instead of scrolling
+    /// native history, and leaving it restores the final document to the main
+    /// screen. Inline scrollback is a primary-screen compatibility path, so it
+    /// is disabled with the opt-in.
+    /// The opt-in takes effect at [`TUI::start`]; the session owns entering
+    /// and leaving the alternate screen for its whole lifetime.
+    pub fn set_alternate_screen(&mut self, enabled: bool) {
+        self.inline_scrollback = false;
+        let synchronized_output = self.capabilities.synchronized_output;
+        self.alternate_screen_session = if enabled {
+            Some(crate::alt_screen::AlternateScreen::new(
+                crate::alt_screen::AltScreenOptions {
+                    // Mouse reporting stays with the backend that enabled it.
+                    mouse: false,
+                    all_motion_mouse: false,
+                    synchronized_output,
+                },
+            ))
+        } else {
+            None
+        };
+    }
+
+    /// Whether the final document is replayed onto the main screen when the
+    /// alternate-screen session ends. `false` keeps Pi's `preserveScreen`
+    /// behaviour instead (the main screen is restored untouched).
+    pub fn set_restore_transcript_on_exit(&mut self, restore: bool) {
+        self.restore_transcript_on_exit = restore;
+    }
+
+    /// Whether the renderer currently owns the alternate screen.
+    pub fn alternate_screen_active(&self) -> bool {
+        self.alternate_screen_session
+            .as_ref()
+            .is_some_and(crate::alt_screen::AlternateScreen::is_active)
     }
 
     /// Opt into inline scrollback rendering (see the field's invariants).
@@ -509,6 +580,9 @@ impl<'a> TUI<'a> {
             self.hardware_cursor_row = 0;
             self.max_lines_rendered = 0;
             self.previous_viewport_top = 0;
+            if let Some(session) = self.alternate_screen_session.as_mut() {
+                session.invalidate();
+            }
         }
         if self.running {
             self.render_frame();
@@ -520,6 +594,14 @@ impl<'a> TUI<'a> {
         self.running = true;
         if self.capabilities.interactive {
             self.terminal.hide_cursor();
+        }
+        // A terminal that cannot address the cursor stays on the primary
+        // screen; the session reports that refusal and paints nothing.
+        if let Some(mut session) = self.alternate_screen_session.take() {
+            if session.enter(&mut *self.terminal) {
+                session.invalidate();
+                self.alternate_screen_session = Some(session);
+            }
         }
 
         // Perform first render
@@ -535,6 +617,20 @@ impl<'a> TUI<'a> {
             return;
         }
         self.running = false;
+        if let Some(mut session) = self.alternate_screen_session.take() {
+            // Pi's fullscreen teardown: leave the alternate screen and restore
+            // the complete rendered document to the *main* screen, so the
+            // reader's terminal keeps the transcript after the session ends.
+            // Autowrap returns to the terminal inside the session's exit.
+            let document = std::mem::take(&mut self.previous_frame);
+            session.exit(
+                &mut *self.terminal,
+                &document,
+                !self.restore_transcript_on_exit,
+            );
+            self.terminal.stop();
+            return;
+        }
         if self.uses_pi_renderer() {
             // Pi clears the editor's inverted fake cursor, moves to the line
             // after the complete logical frame, and only then restores the
@@ -639,11 +735,62 @@ impl<'a> TUI<'a> {
     /// normative differential algorithm; plain output and the explicit legacy
     /// inline extension retain their separate compatibility contracts.
     fn render_frame(&mut self) {
-        if self.uses_pi_renderer() {
+        if self.alternate_screen_session.is_some() {
+            self.render_alternate_frame();
+        } else if self.uses_pi_renderer() {
             self.render_pi_frame();
         } else {
             self.render_extended_frame();
         }
+    }
+
+    /// Paint one fixed-viewport alternate-screen frame.
+    ///
+    /// The complete document is rendered exactly as the primary-screen Pi
+    /// renderer renders it and retained as [`TUI::rendered_frame`], so the
+    /// hidden `/debug` frame seam and the exit handoff both see the whole
+    /// logical transcript. Only the visible tail window is painted, at absolute
+    /// viewport rows; the session diffs it against the previous window, so a
+    /// status tick repaints its own row and nothing else.
+    fn render_alternate_frame(&mut self) {
+        let width_u16 = self.terminal.columns().max(1);
+        let height_u16 = self.terminal.rows().max(1);
+        let height = usize::from(height_u16);
+        let mut rendered = self.root_render(width_u16);
+        let logical_cursor_position = extract_logical_cursor_position_from(&mut rendered, 0);
+        for line in &mut rendered {
+            if !is_image_line(line) {
+                *line = format!(
+                    "{}{}",
+                    crate::utils::normalize_terminal_output(line),
+                    PI_LINE_RESET
+                );
+            }
+        }
+        let window_top = rendered.len().saturating_sub(height);
+        let window = rendered[window_top..].to_vec();
+        let cursor = logical_cursor_position
+            .filter(|cursor| cursor.row >= window_top)
+            .map(|cursor| (cursor.row - window_top, cursor.column));
+        if let Some(session) = self.alternate_screen_session.as_mut() {
+            session.paint(
+                &mut *self.terminal,
+                &window,
+                width_u16,
+                height_u16,
+                cursor,
+                self.show_hardware_cursor,
+            );
+        }
+        self.logical_cursor_position = logical_cursor_position;
+        self.cursor_row = logical_cursor_position
+            .map_or(rendered.len().saturating_sub(1), |cursor| cursor.row);
+        self.hardware_cursor_row = self.cursor_row;
+        self.max_lines_rendered = rendered.len();
+        self.previous_viewport_top = window_top;
+        self.previous_frame = rendered;
+        self.previous_size = Some((width_u16, height_u16));
+        self.first_render = false;
     }
 
     /// Rust port of Pi TUI's `doRender()` at revision
@@ -4705,5 +4852,78 @@ mod tests {
             "\x1b[3;1H\x1b[0m\x1b]8;;\x1b\\",
             "shutdown must leave the caller below the complete inline frame"
         );
+    }
+
+    #[test]
+    fn alternate_screen_enters_disables_autowrap_and_restores_the_document() {
+        let size = Rc::new(Cell::new((24, 4)));
+        let capabilities = crate::capabilities::TerminalCapabilities::interactive(
+            crate::capabilities::ColorDepth::Ansi16,
+            false,
+        );
+        let (terminal, _, _, stops, _, writes) = recording_terminal(size, capabilities);
+        let mut tui = TUI::new(Box::new(terminal));
+        tui.set_alternate_screen(true);
+        tui.set_show_hardware_cursor(false);
+        tui.add_child(Box::new(MutableLines(Rc::new(RefCell::new(vec![
+            "alpha".to_owned(),
+            "beta".to_owned(),
+            "gamma".to_owned(),
+            "delta".to_owned(),
+            "epsilon".to_owned(),
+        ])))));
+        tui.start();
+        let entered = writes.borrow().join("");
+        assert!(entered.starts_with("\x1b[?1049h\x1b[?7l"), "{entered:?}");
+        assert!(
+            entered.contains("\x1b[1;1H\x1b[2Kbeta"),
+            "the fixed viewport paints the tail window at absolute rows: {entered:?}"
+        );
+        assert!(entered.contains("\x1b[4;1H\x1b[2Kepsilon"), "{entered:?}");
+        assert!(!entered.contains("\x1b[?7h"), "autowrap stays off while active");
+        assert!(tui.alternate_screen_active());
+        assert_eq!(
+            tui.rendered_frame().len(),
+            5,
+            "the retained frame is the complete document for /debug and the exit handoff"
+        );
+
+        writes.borrow_mut().clear();
+        tui.stop();
+
+        assert_eq!(stops.get(), 1);
+        assert!(!tui.alternate_screen_active());
+        let output = writes.borrow().join("");
+        assert!(output.starts_with("\x1b[?1049l"), "{output:?}");
+        assert!(
+            output.contains("\r\x1b[2Kalpha") && output.contains("\r\x1b[2Kepsilon"),
+            "the final document is restored to the main screen: {output:?}"
+        );
+        assert!(output.contains("\x1b[?7h"), "autowrap returns to the terminal: {output:?}");
+        assert!(output.contains("\x1b[?25h"), "{output:?}");
+    }
+
+    #[test]
+    fn alternate_screen_stays_on_the_primary_screen_without_cursor_addressing() {
+        let size = Rc::new(Cell::new((24, 4)));
+        let mut capabilities = crate::capabilities::TerminalCapabilities::interactive(
+            crate::capabilities::ColorDepth::Ansi16,
+            false,
+        );
+        capabilities.cursor_addressing = false;
+        let (terminal, _, _, _, _, writes) = recording_terminal(size, capabilities);
+        let mut tui = TUI::new(Box::new(terminal));
+        tui.set_alternate_screen(true);
+        tui.add_child(Box::new(MutableLines(Rc::new(RefCell::new(vec![
+            "primary".to_owned(),
+        ])))));
+        tui.start();
+        let output = writes.borrow().join("");
+        assert!(
+            !output.contains("\x1b[?1049h"),
+            "no alternate-screen escape without cursor addressing: {output:?}"
+        );
+        assert!(!tui.alternate_screen_active());
+        assert!(output.contains("primary"), "{output:?}");
     }
 }

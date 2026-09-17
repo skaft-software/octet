@@ -17,8 +17,8 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::providers::{
-    CopilotAvailabilityError as Error, CopilotDeviceLogin, CopilotDeviceLoginStatus, CopilotEndpoint,
-    CopilotHost, CopilotModel, CopilotProvider, CopilotSession,
+    CopilotAvailabilityError as Error, CopilotDeviceLogin, CopilotDeviceLoginStatus,
+    CopilotEndpoint, CopilotHost, CopilotModel, CopilotProvider, CopilotSession,
 };
 
 pub use store::{default_path, CredentialStore};
@@ -67,7 +67,9 @@ pub async fn login_with_host(host: &dyn CopilotHost, headless: bool) -> Result<(
                 crate::output::stdout_line("Signed in to GitHub Copilot.");
                 return Ok(());
             }
-            CopilotDeviceLoginStatus::Expired => return Err(Error::DeviceAuthorizationExpired.into()),
+            CopilotDeviceLoginStatus::Expired => {
+                return Err(Error::DeviceAuthorizationExpired.into())
+            }
             CopilotDeviceLoginStatus::Denied => return Err(Error::DeviceAuthorizationDenied.into()),
         }
     }
@@ -143,7 +145,9 @@ pub(crate) fn register_available_models_with_host_blocking(
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|_| anyhow::anyhow!("GitHub Copilot discovery runtime is unavailable"))?;
+                    .map_err(|_| {
+                        anyhow::anyhow!("GitHub Copilot discovery runtime is unavailable")
+                    })?;
                 runtime.block_on(host.register_available_models(catalog, false))
             })
             .map_err(|_| anyhow::anyhow!("GitHub Copilot discovery thread is unavailable"))?
@@ -278,7 +282,12 @@ impl CopilotCodingHost {
             }
             error
         })?;
-        self.check_snapshot(state.credential_bytes.as_deref().expect("loaded credential"))?;
+        self.check_snapshot(
+            state
+                .credential_bytes
+                .as_deref()
+                .expect("loaded credential"),
+        )?;
         if state
             .origin
             .as_ref()

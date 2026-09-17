@@ -63,7 +63,9 @@ impl RpcOutput {
     }
 
     fn send(&mut self, mut value: Value) -> anyhow::Result<()> {
-        if self.delta_only { compact_json_event(&mut value); }
+        if self.delta_only {
+            compact_json_event(&mut value);
+        }
         serde_json::to_writer(&mut self.stdout, &value)?;
         self.stdout.write_all(b"\n")?;
         self.stdout.flush()?;
@@ -110,8 +112,14 @@ impl RpcOutput {
 /// Pi's JSON mode removes cumulative snapshots from delta records. Native
 /// session persistence and authoritative message_end records remain unchanged.
 fn compact_json_event(value: &mut Value) {
-    if value["type"] != "message_update" { return; }
-    let message = value.as_object_mut().expect("event object").remove("message").unwrap_or(Value::Null);
+    if value["type"] != "message_update" {
+        return;
+    }
+    let message = value
+        .as_object_mut()
+        .expect("event object")
+        .remove("message")
+        .unwrap_or(Value::Null);
     value["usage"] = message["usage"].clone();
     let event = &mut value["assistantMessageEvent"];
     if event["type"] == "toolcall_start" {
@@ -121,7 +129,9 @@ fn compact_json_event(value: &mut Value) {
             event["toolName"] = content["name"].clone();
         }
     }
-    if let Some(object) = event.as_object_mut() { object.remove("partial"); }
+    if let Some(object) = event.as_object_mut() {
+        object.remove("partial");
+    }
 }
 
 /// Reuse the RPC semantic projection, without its command/response protocol.
@@ -145,30 +155,42 @@ impl JsonEventStream {
     pub(crate) fn new(app: &App, input: &UserInput) -> Self {
         let mut output = RpcOutput::new();
         output.delta_only = true;
-        Self { output, translator: EventTranslator::new(app, user_input_value(input)), queue: QueueState::default() }
+        Self {
+            output,
+            translator: EventTranslator::new(app, user_input_value(input)),
+            queue: QueueState::default(),
+        }
     }
 
     pub(crate) fn start(&mut self, input: &UserInput) -> anyhow::Result<()> {
         self.output.send(json!({"type": "agent_start"}))?;
         self.output.send(json!({"type": "turn_start"}))?;
         let message = user_input_value(input);
-        self.output.send(json!({"type": "message_start", "message": message}))?;
-        self.output.send(json!({"type": "message_end", "message": message}))
+        self.output
+            .send(json!({"type": "message_start", "message": message}))?;
+        self.output
+            .send(json!({"type": "message_end", "message": message}))
     }
 
     pub(crate) fn observe(&mut self, event: AgentEvent) -> anyhow::Result<Option<HostRunOutcome>> {
-        self.translator.observe(event, &mut self.output, &mut self.queue)
+        self.translator
+            .observe(event, &mut self.output, &mut self.queue)
     }
 
     pub(crate) fn finish(&mut self, outcome: &HostRunOutcome) -> anyhow::Result<()> {
         // observe(RunFinished) already settles the translator. Abnormal host
         // termination must close an unfinished message explicitly as well.
-        if matches!(outcome, HostRunOutcome::StreamLost | HostRunOutcome::Shutdown) {
+        if matches!(
+            outcome,
+            HostRunOutcome::StreamLost | HostRunOutcome::Shutdown
+        ) {
             self.translator.settle(outcome.clone(), &mut self.output)?;
         }
         self.output.send(json!({"type": "agent_end", "messages": self.translator.run_messages, "willRetry": false,
             "usageUncertain": self.translator.usage_uncertain}))?;
-        if let Some(event) = self.translator.pending_retry_end.take() { self.output.send(event)?; }
+        if let Some(event) = self.translator.pending_retry_end.take() {
+            self.output.send(event)?;
+        }
         Ok(())
     }
 }
@@ -465,6 +487,7 @@ fn protocol_name(protocol: &Protocol) -> &'static str {
         Protocol::BedrockConverse => "bedrock-converse",
         Protocol::GoogleGenerativeAi => "google-generative-ai",
         Protocol::MistralConversations => "mistral-conversations",
+        Protocol::PiMessages => "pi-messages",
     }
 }
 
@@ -572,7 +595,17 @@ fn pi_stop_reason(reason: &StopReason) -> &'static str {
         StopReason::EndTurn | StopReason::StopSequence => "stop",
         StopReason::MaxTokens => "length",
         StopReason::ToolUse => "toolUse",
-        StopReason::Refusal | StopReason::PauseTurn | StopReason::Other(_) => "error",
+        // A deferred response parked the run instead of finishing the turn. Pi's
+        // RPC vocabulary has no completed-turn value for it, and the durable
+        // suspension is reported through the run failure
+        // (`AgentError::DeferredSuspended`) and the `run_suspend` observer, never
+        // as a settled assistant turn.
+        StopReason::Deferred
+        | StopReason::Refusal
+        | StopReason::PauseTurn
+        | StopReason::Other(_) => "error",
+        // `StopReason` is non-exhaustive, so a future variant must keep the
+        // existing conservative projection until it is mapped deliberately.
         _ => "error",
     }
 }
@@ -1272,7 +1305,8 @@ impl EventTranslator {
             last_assistant_text: String::new(),
             retry_attempt: None,
             pending_retry_end: None,
-            usage_uncertain: (app.agent.session().has_uncertain_usage() || app.agent.session().has_unpriced_usage()),
+            usage_uncertain: (app.agent.session().has_uncertain_usage()
+                || app.agent.session().has_unpriced_usage()),
         }
     }
 
@@ -2875,10 +2909,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unpriced.jsonl");
         let mut session = octet_agent::Session::create(&path).unwrap();
-        session.record_compaction_usage(
-            octet_ai::EndpointId("codex".into()), ModelId("codex/gpt-5.5".into()),
-            Usage { input_tokens: 10, total_tokens: 10, ..Usage::default() }, None,
-        ).unwrap();
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("codex".into()),
+                ModelId("codex/gpt-5.5".into()),
+                Usage {
+                    input_tokens: 10,
+                    total_tokens: 10,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
         assert!(!session.has_uncertain_usage());
         assert!(session.has_unpriced_usage());
         let current = session_stats_for_session(&session);
@@ -2896,54 +2938,127 @@ mod tests {
         struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
         impl std::io::Write for Capture {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes); Ok(bytes.len())
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
             }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
-        let settled = Cost { input: 5, output: 2, total: 7, total_picodollars_remainder: 250_123, ..Cost::default() };
+        let settled = Cost {
+            input: 5,
+            output: 2,
+            total: 7,
+            total_picodollars_remainder: 250_123,
+            ..Cost::default()
+        };
         for turn_cost in [Some(settled), None, Some(Cost::default())] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("rpc-cost.jsonl");
-            let mut model = octet_ai::ModelCatalog::builtin().unwrap().resolve(&ModelId("gpt-4o-mini".into())).unwrap();
+            let mut model = octet_ai::ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&ModelId("gpt-4o-mini".into()))
+                .unwrap();
             let pricing = Arc::make_mut(&mut model.spec).pricing.as_mut().unwrap();
             pricing.input = octet_ai::TokenRate(900_000_000);
             pricing.output = octet_ai::TokenRate(900_000_000);
-            let usage = Usage { input_tokens: 10, output_tokens: 2, total_tokens: 12, ..Usage::default() };
+            let usage = Usage {
+                input_tokens: 10,
+                output_tokens: 2,
+                total_tokens: 12,
+                ..Usage::default()
+            };
             assert_ne!(octet_ai::pricing::cost_of(pricing, &usage).ok(), turn_cost);
-            let message = AssistantMessage { model: model.spec.id.clone(), protocol: model.spec.protocol, content: vec![AssistantPart::Text("settled".into())] };
+            let message = AssistantMessage {
+                model: model.spec.id.clone(),
+                protocol: model.spec.protocol,
+                content: vec![AssistantPart::Text("settled".into())],
+            };
             let mut session = octet_agent::Session::create(&path).unwrap();
-            session.append_assistant_turn(message.clone(), model.endpoint.id.clone(), model.spec.id.clone(), usage, turn_cost, StopReason::EndTurn, None).unwrap();
+            session
+                .append_assistant_turn(
+                    message.clone(),
+                    model.endpoint.id.clone(),
+                    model.spec.id.clone(),
+                    usage,
+                    turn_cost,
+                    StopReason::EndTurn,
+                    None,
+                )
+                .unwrap();
             drop(session);
             let reopened = octet_agent::Session::open(&path).unwrap();
             let record = &reopened.usage_records()[0];
             assert_eq!(record.cost, turn_cost);
-            let durable = assistant_value(&message, &model.endpoint.id.0, &record.usage, record.cost, &StopReason::EndTurn, record.completed_at_unix_ms);
+            let durable = assistant_value(
+                &message,
+                &model.endpoint.id.0,
+                &record.usage,
+                record.cost,
+                &StopReason::EndTurn,
+                record.completed_at_unix_ms,
+            );
             let mut translator = EventTranslator {
-                endpoint: model.endpoint.id.0.clone(), api: protocol_name(&model.spec.protocol).into(), model,
-                partial_text: String::new(), partial_reasoning: String::new(), channels: Vec::new(),
-                message_started: false, message_timestamp: 0, turn_open: true, pending_turn: None,
-                pending_tool_results: Vec::new(), expected_tools: 0, tools: HashMap::new(),
-                messages: Vec::new(), run_messages: Vec::new(), last_assistant_text: String::new(),
-                retry_attempt: None, pending_retry_end: None, usage_uncertain: false,
+                endpoint: model.endpoint.id.0.clone(),
+                api: protocol_name(&model.spec.protocol).into(),
+                model,
+                partial_text: String::new(),
+                partial_reasoning: String::new(),
+                channels: Vec::new(),
+                message_started: false,
+                message_timestamp: 0,
+                turn_open: true,
+                pending_turn: None,
+                pending_tool_results: Vec::new(),
+                expected_tools: 0,
+                tools: HashMap::new(),
+                messages: Vec::new(),
+                run_messages: Vec::new(),
+                last_assistant_text: String::new(),
+                retry_attempt: None,
+                pending_retry_end: None,
+                usage_uncertain: false,
             };
             let capture = Capture::default();
-            let mut output = RpcOutput { delta_only: false, stdout: Box::new(capture.clone()) };
-            translator.observe(AgentEvent::TurnFinished {
-                message, stop_reason: StopReason::EndTurn, turn_usage: usage, turn_cost, usage,
-                session_cost_microdollars: turn_cost.map(|cost| cost.total),
-                // Deliberately includes unrelated auxiliary spend; never derive a turn cost from it.
-                run_cost_microdollars: 999_999,
-            }, &mut output, &mut QueueState::default()).unwrap();
+            let mut output = RpcOutput {
+                delta_only: false,
+                stdout: Box::new(capture.clone()),
+            };
+            translator
+                .observe(
+                    AgentEvent::TurnFinished {
+                        message,
+                        stop_reason: StopReason::EndTurn,
+                        turn_usage: usage,
+                        turn_cost,
+                        usage,
+                        session_cost_microdollars: turn_cost.map(|cost| cost.total),
+                        // Deliberately includes unrelated auxiliary spend; never derive a turn cost from it.
+                        run_cost_microdollars: 999_999,
+                    },
+                    &mut output,
+                    &mut QueueState::default(),
+                )
+                .unwrap();
             let bytes = capture.0.lock().unwrap();
-            let frames: Vec<Value> = serde_json::Deserializer::from_slice(&bytes).into_iter().collect::<Result<_,_>>().unwrap();
-            let live = &frames.iter().find(|value| value["type"] == "message_end").unwrap()["message"];
+            let frames: Vec<Value> = serde_json::Deserializer::from_slice(&bytes)
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let live = &frames
+                .iter()
+                .find(|value| value["type"] == "message_end")
+                .unwrap()["message"];
             assert_eq!(live["usage"], durable["usage"]);
             assert_eq!(translator.usage_uncertain, turn_cost.is_none());
             match turn_cost {
                 Some(cost) => {
-                    let expected = dollars(cost.total) + f64::from(cost.total_picodollars_remainder) / 1e12;
+                    let expected =
+                        dollars(cost.total) + f64::from(cost.total_picodollars_remainder) / 1e12;
                     assert_eq!(live["usage"]["cost"]["total"], json!(expected));
-                    if cost.total_picodollars_remainder != 0 { assert_ne!(live["usage"]["cost"]["total"], json!(dollars(cost.total))); }
+                    if cost.total_picodollars_remainder != 0 {
+                        assert_ne!(live["usage"]["cost"]["total"], json!(dollars(cost.total)));
+                    }
                 }
                 None => assert!(live["usage"]["cost"].is_null()),
             }

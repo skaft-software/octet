@@ -3,9 +3,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::presentation::{format_duration, RunOutcome};
 
-use super::outcome_render::{
-    bounded_outcome_detail, completion_text, completion_with_warnings_text, warning_detail,
-};
+use super::outcome_render::{bounded_outcome_detail, completion_text};
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{bounded_tool_failure_reason, looks_like_diff};
 use super::{subagent_activity_copy_text, ShellState, TranscriptBlock};
@@ -91,16 +89,13 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             sanitize_for_terminal(&format!("$ {} [{status}]", shell.command))
         }
         TranscriptBlock::Outcome(outcome) => match &outcome.outcome {
-            RunOutcome::Completed { elapsed, .. } => {
+            // Both completed variants copy as `completed`: the warning wording is
+            // transcript-invisible by decision, so a copy cannot reintroduce it.
+            // The warning count stays in the model for exit status and telemetry.
+            RunOutcome::Completed { elapsed, .. }
+            | RunOutcome::CompletedWithWarnings { elapsed, .. } => {
                 completion_text(*elapsed, " · ", outcome.tokens_per_second)
             }
-            RunOutcome::CompletedWithWarnings {
-                elapsed, warnings, ..
-            } => format!(
-                "{}\n{}",
-                completion_with_warnings_text(*elapsed, " · ", outcome.tokens_per_second),
-                warning_detail(*warnings),
-            ),
             RunOutcome::Failed { elapsed, reason } => format!(
                 "failed · {}\n{}",
                 format_duration(*elapsed),

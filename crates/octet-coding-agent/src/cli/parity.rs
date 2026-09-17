@@ -53,7 +53,9 @@ impl ParityOptions {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.no_session {
             if self.name.is_some() {
-                anyhow::bail!("--no-session cannot name a session because no transcript is persisted");
+                anyhow::bail!(
+                    "--no-session cannot name a session because no transcript is persisted"
+                );
             }
         }
         if let Some(patterns) = &self.models {
@@ -61,7 +63,9 @@ impl ParityOptions {
         }
         if let Some(name) = &self.name {
             if name.trim().is_empty() || name.chars().any(char::is_control) || name.len() > 256 {
-                anyhow::bail!("--name requires a non-empty name without controls (at most 256 bytes)");
+                anyhow::bail!(
+                    "--name requires a non-empty name without controls (at most 256 bytes)"
+                );
             }
         }
         if let Some(tokens) = self.codex_context_window {
@@ -87,9 +91,7 @@ impl ParityOptions {
                 "--codex-context-window {tokens} is above the {CODEX_PRO_CONTEXT_WINDOW}-token maximum any Codex model is entitled to"
             );
         }
-        if tokens > CODEX_CONTEXT_WINDOW_CAP
-            && !self.codex_context_window_acknowledge_cost_cliff
-        {
+        if tokens > CODEX_CONTEXT_WINDOW_CAP && !self.codex_context_window_acknowledge_cost_cliff {
             anyhow::bail!(
                 "--codex-context-window {tokens} is above the deliberate {CODEX_CONTEXT_WINDOW_CAP}-token Codex cap: {} Re-run with --codex-context-window-acknowledge-cost-cliff to accept the cost cliff and the websocket-drop risk",
                 crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING
@@ -237,10 +239,8 @@ impl ParityOptions {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let transcript_root = std::env::temp_dir().join(format!(
-            "octet-no-session-{}-{nonce}",
-            std::process::id()
-        ));
+        let transcript_root =
+            std::env::temp_dir().join(format!("octet-no-session-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&transcript_root)?;
         config.session_dir = transcript_root.clone();
         config.resume = ResumeSelector::New;
@@ -275,7 +275,10 @@ pub fn model_patterns(value: &str) -> anyhow::Result<Vec<String>> {
     if patterns.is_empty() {
         anyhow::bail!("--models requires at least one non-empty comma-separated pattern");
     }
-    if patterns.iter().any(|pattern| pattern.chars().any(char::is_control)) {
+    if patterns
+        .iter()
+        .any(|pattern| pattern.chars().any(char::is_control))
+    {
         anyhow::bail!("--models patterns must not contain control characters");
     }
     Ok(patterns)
@@ -293,16 +296,52 @@ fn is_reasoning_suffix(value: &str) -> bool {
     crate::config::parse_reasoning(value).is_ok()
 }
 
+/// Whether one `--models` / `/scoped-models` pattern selects a model: the bare
+/// model id or the provider-qualified `provider/model` form, case-insensitively,
+/// with `*`/`?` globs. A trailing `:level` suffix never participates.
+pub fn model_pattern_matches(pattern: &str, id: &str, provider: &str) -> bool {
+    let (head, _) = split_pattern(pattern);
+    glob_match(head, id) || glob_match(head, &format!("{provider}/{id}"))
+}
+
+/// The unique available model a literal reference names, mirroring the
+/// reference's `findExactModelReferenceMatch`: `provider/model` or the bare id,
+/// case-insensitively. `None` when the reference is empty, globbed, unmatched,
+/// or ambiguous across providers, so the caller can fall back to glob matching.
+pub fn exact_model_reference<'a>(
+    reference: &str,
+    available: &'a [(String, String)],
+) -> Option<&'a (String, String)> {
+    let (head, _) = split_pattern(reference);
+    let head = head.trim();
+    if head.is_empty() || head.contains(['*', '?']) {
+        return None;
+    }
+    let matches = available
+        .iter()
+        .filter(|(id, provider)| {
+            id.eq_ignore_ascii_case(head) || format!("{provider}/{id}").eq_ignore_ascii_case(head)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
 /// Resolve `--models` patterns against the credential-filtered catalog.
 ///
-/// Reference semantics (`pi` `resolveModelScopeFromModels`): a pattern matches
-/// `"provider/model"` or the bare model id, case-insensitively, with `*`/`?`
+/// Reference semantics (`pi` `resolveModelScopeFromModels`): a literal
+/// `provider/model` or bare-id reference resolves exactly before glob matching,
+/// otherwise the pattern matches either form case-insensitively with `*`/`?`
 /// globs; an optional trailing `:level` suffix is only stripped when it names a
-/// real reasoning level; matches keep first-seen order and are deduplicated. A
-/// pattern that matches nothing is a warning, not a failure, so one typo cannot
-/// discard the rest of the scope.
+/// real reasoning level; matches keep first-seen pattern order and are
+/// deduplicated. A pattern that matches nothing is a warning, not a failure, so
+/// one typo cannot discard the rest of the scope.
 ///
-/// `available` is `(model id, provider id)` per catalog model.
+/// `available` is `(model id, provider id)` per catalog model. The resolved
+/// order is exactly the requested pattern order, so an explicit ordered scope
+/// (and its per-model reasoning suffixes) survives round-tripping.
 pub fn select_scoped_models(
     patterns: &[String],
     available: &[(String, String)],
@@ -310,11 +349,23 @@ pub fn select_scoped_models(
     let mut scope: Vec<ScopedModel> = Vec::new();
     for pattern in patterns {
         let (head, reasoning) = split_pattern(pattern);
+        // A literal reference resolves exactly, so a requested order is never
+        // re-sorted by a broader glob and an id containing glob characters
+        // still resolves as itself.
+        if let Some((id, _)) = exact_model_reference(pattern, available) {
+            let candidate = ScopedModel {
+                id: ModelId(id.clone()),
+                pattern: pattern.clone(),
+                reasoning: reasoning.map(str::to_owned),
+            };
+            if !scope.iter().any(|existing| existing.id == candidate.id) {
+                scope.push(candidate);
+            }
+            continue;
+        }
         let mut matched = available
             .iter()
-            .filter(|(id, provider)| {
-                glob_match(head, id) || glob_match(head, &format!("{provider}/{id}"))
-            })
+            .filter(|(id, provider)| model_pattern_matches(head, id, provider))
             .map(|(id, _)| ScopedModel {
                 id: ModelId(id.clone()),
                 pattern: pattern.clone(),
@@ -375,18 +426,30 @@ pub(crate) struct InvocationInput {
 /// RPC retains sole ownership of stdin. Other redirected frontends consume one
 /// bounded UTF-8 prompt, not a sequence of physical lines.
 pub(crate) fn prepare_input(cli: &mut Cli, cwd: &Path) -> anyhow::Result<InvocationInput> {
-    let json = cli.mode.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("json"));
-    let rpc = cli.mode.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("rpc"));
+    let json = cli
+        .mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("json"));
+    let rpc = cli
+        .mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("rpc"));
     let mut args: Vec<String> = cli.message.take().into_iter().collect();
     args.append(&mut cli.additional_messages);
     if rpc {
         if !args.is_empty() {
-            anyhow::bail!("RPC input must be sent as JSONL prompt commands on stdin, not positional prompts");
+            anyhow::bail!(
+                "RPC input must be sent as JSONL prompt commands on stdin, not positional prompts"
+            );
         }
         return Ok(InvocationInput::default());
     }
     let piped = !std::io::stdin().is_terminal();
-    let stdin = if piped { read_text(std::io::stdin().lock(), MAX_INPUT_BYTES)? } else { String::new() };
+    let stdin = if piped {
+        read_text(std::io::stdin().lock(), MAX_INPUT_BYTES)?
+    } else {
+        String::new()
+    };
     let mut input = expand_input(&args, &stdin, cwd)?;
     input.json = json;
     cli.message = input.remaining.first().cloned();
@@ -409,12 +472,17 @@ pub(crate) fn prepare_input(cli: &mut Cli, cwd: &Path) -> anyhow::Result<Invocat
 fn read_text(reader: impl Read, limit: u64) -> anyhow::Result<String> {
     let mut bytes = Vec::new();
     reader.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit { anyhow::bail!("prompt input exceeds {limit} bytes"); }
+    if bytes.len() as u64 > limit {
+        anyhow::bail!("prompt input exceeds {limit} bytes");
+    }
     Ok(String::from_utf8(bytes)?)
 }
 
 fn escape_attribute(text: &str) -> String {
-    text.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn expand_input(args: &[String], stdin: &str, cwd: &Path) -> anyhow::Result<InvocationInput> {
@@ -423,38 +491,79 @@ fn expand_input(args: &[String], stdin: &str, cwd: &Path) -> anyhow::Result<Invo
     let mut messages = Vec::new();
     let mut total_bytes = stdin.len() as u64;
     for arg in args {
-        let Some(path) = arg.strip_prefix('@') else { messages.push(arg.clone()); continue; };
+        let Some(path) = arg.strip_prefix('@') else {
+            messages.push(arg.clone());
+            continue;
+        };
         let path = if let Some(tail) = path.strip_prefix("~/") {
-            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("home directory unavailable"))?.join(tail)
-        } else { cwd.join(path) };
-        let path = path.canonicalize().map_err(|error| anyhow::anyhow!("@file {}: {error}", path.display()))?;
-        let bytes = octet_agent::secure_fs::read_regular_file_bounded(&path, MAX_FILE_BYTES as usize)?;
+            dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("home directory unavailable"))?
+                .join(tail)
+        } else {
+            cwd.join(path)
+        };
+        let path = path
+            .canonicalize()
+            .map_err(|error| anyhow::anyhow!("@file {}: {error}", path.display()))?;
+        let bytes =
+            octet_agent::secure_fs::read_regular_file_bounded(&path, MAX_FILE_BYTES as usize)?;
         total_bytes += bytes.len() as u64;
-        if total_bytes > MAX_INPUT_BYTES { anyhow::bail!("combined @file/stdin input exceeds {MAX_INPUT_BYTES} bytes"); }
-        if bytes.is_empty() { continue; }
-        let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some("image/png") }
-            else if bytes.starts_with(b"\xff\xd8\xff") { Some("image/jpeg") }
-            else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some("image/gif") }
-            else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") { Some("image/webp") }
-            else { None };
+        if total_bytes > MAX_INPUT_BYTES {
+            anyhow::bail!("combined @file/stdin input exceeds {MAX_INPUT_BYTES} bytes");
+        }
+        if bytes.is_empty() {
+            continue;
+        }
+        let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            Some("image/png")
+        } else if bytes.starts_with(b"\xff\xd8\xff") {
+            Some("image/jpeg")
+        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            Some("image/gif")
+        } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+            Some("image/webp")
+        } else {
+            None
+        };
         let label = escape_attribute(&path.to_string_lossy());
         if let Some(mime) = mime {
-            if media.len() >= 8 { anyhow::bail!("at most 8 @file images may be attached"); }
+            if media.len() >= 8 {
+                anyhow::bail!("at most 8 @file images may be attached");
+            }
             media.push(Media::image_bytes(bytes.into(), mime.parse()?));
             text.push_str(&format!("<file name=\"{label}\"></file>\n"));
         } else {
-            let content = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("@file {} is neither UTF-8 text nor a supported image", path.display()))?;
-            text.push_str(&format!("<file name=\"{label}\">\n{}\n</file>\n", content.trim_start_matches('\u{feff}')));
+            let content = String::from_utf8(bytes).map_err(|_| {
+                anyhow::anyhow!(
+                    "@file {} is neither UTF-8 text nor a supported image",
+                    path.display()
+                )
+            })?;
+            text.push_str(&format!(
+                "<file name=\"{label}\">\n{}\n</file>\n",
+                content.trim_start_matches('\u{feff}')
+            ));
         }
     }
-    if !messages.is_empty() { text.push_str(&messages.remove(0)); }
-    if !text.is_empty() || !media.is_empty() { messages.insert(0, text); }
-    Ok(InvocationInput { json: false, media, remaining: messages })
+    if !messages.is_empty() {
+        text.push_str(&messages.remove(0));
+    }
+    if !text.is_empty() || !media.is_empty() {
+        messages.insert(0, text);
+    }
+    Ok(InvocationInput {
+        json: false,
+        media,
+        remaining: messages,
+    })
 }
 
 pub(crate) fn list_models(config: &Config, search: &str) -> anyhow::Result<()> {
     let catalog = crate::app::bootstrap::model_catalog_with_offline(config.offline)?;
-    let mut models = catalog.models().filter(|spec| fuzzy_match(search, &format!("{} {}", spec.endpoint.0, spec.id.0))).collect::<Vec<_>>();
+    let mut models = catalog
+        .models()
+        .filter(|spec| fuzzy_match(search, &format!("{} {}", spec.endpoint.0, spec.id.0)))
+        .collect::<Vec<_>>();
     models.sort_by(|a, b| (&a.endpoint.0, &a.id.0).cmp(&(&b.endpoint.0, &b.id.0)));
     if models.is_empty() {
         crate::output::stdout_line("No matching available models.");
@@ -463,10 +572,18 @@ pub(crate) fn list_models(config: &Config, search: &str) -> anyhow::Result<()> {
     crate::output::stdout_table_line("PROVIDER\tMODEL\tCONTEXT\tMAX-OUT\tTHINKING\tIMAGES");
     for model in models {
         let terminal = crate::output::stdout_is_terminal();
-        crate::output::stdout_table_line(format!("{}\t{}\t{}\t{}\t{}\t{}",
-            crate::output::table_field(&model.endpoint.0, terminal), crate::output::table_field(&model.id.0, terminal),
-            model.limits.context_window, model.limits.max_output_tokens,
-            model.capabilities.reasoning.is_some(), model.capabilities.input_modalities.contains(Modality::Image)));
+        crate::output::stdout_table_line(format!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            crate::output::table_field(&model.endpoint.0, terminal),
+            crate::output::table_field(&model.id.0, terminal),
+            model.limits.context_window,
+            model.limits.max_output_tokens,
+            model.capabilities.reasoning.is_some(),
+            model
+                .capabilities
+                .input_modalities
+                .contains(Modality::Image)
+        ));
     }
     Ok(())
 }
@@ -475,7 +592,10 @@ fn fuzzy_match(query: &str, value: &str) -> bool {
     let value = value.to_lowercase();
     query.split_whitespace().all(|token| {
         let mut chars = value.chars();
-        token.to_lowercase().chars().all(|needle| chars.by_ref().any(|ch| ch == needle))
+        token
+            .to_lowercase()
+            .chars()
+            .all(|needle| chars.by_ref().any(|ch| ch == needle))
     })
 }
 
@@ -487,7 +607,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "\u{feff}context").unwrap();
         std::fs::write(dir.path().join("a.png"), b"\x89PNG\r\n\x1a\n").unwrap();
-        let input = expand_input(&["@a.txt".into(), "first".into(), "@a.png".into(), "second".into()], "piped\n", dir.path()).unwrap();
+        let input = expand_input(
+            &[
+                "@a.txt".into(),
+                "first".into(),
+                "@a.png".into(),
+                "second".into(),
+            ],
+            "piped\n",
+            dir.path(),
+        )
+        .unwrap();
         assert_eq!(input.media.len(), 1);
         assert_eq!(input.remaining.len(), 2);
         assert!(input.remaining[0].starts_with("piped\n<file"));
@@ -518,8 +648,8 @@ mod tests {
         let bare = select_scoped_models(&["*alpha*".to_owned()], &available).unwrap();
         assert_eq!(bare.len(), 1);
         assert_eq!(bare[0].id.0, "custom/alpha-model");
-        let qualified = select_scoped_models(&["custom-openai/custom/alpha-*".to_owned()], &available)
-            .unwrap();
+        let qualified =
+            select_scoped_models(&["custom-openai/custom/alpha-*".to_owned()], &available).unwrap();
         assert_eq!(qualified[0].id.0, "custom/alpha-model");
         let provider = select_scoped_models(&["openai/gpt-*".to_owned()], &available).unwrap();
         assert_eq!(provider[0].id.0, "gpt-6-astra");
@@ -534,5 +664,67 @@ mod tests {
         assert_eq!(mixed[0].id.0, "gpt-6-astra");
         assert_eq!(model_patterns("a, b").unwrap(), vec!["a", "b"]);
         assert!(model_patterns(" ,").is_err());
+    }
+
+    /// 5.7 — a literal reference resolves exactly before glob matching, so an
+    /// explicit ordered scope keeps the requested order and each model keeps its
+    /// requested reasoning suffix across a persistence round-trip.
+    #[test]
+    fn literal_references_preserve_requested_order_and_reasoning_suffixes() {
+        let available = vec![
+            ("custom/alpha-model".to_owned(), "custom-openai".to_owned()),
+            ("gpt-6-astra".to_owned(), "openai".to_owned()),
+            ("gpt-6-luna".to_owned(), "openai".to_owned()),
+        ];
+        // Requested order is the pattern order, not the catalog order.
+        let ordered = select_scoped_models(
+            &[
+                "gpt-6-luna:high".to_owned(),
+                "custom-openai/custom/alpha-model:low".to_owned(),
+                "gpt-6-astra".to_owned(),
+            ],
+            &available,
+        )
+        .unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|scoped| (scoped.id.0.as_str(), scoped.reasoning.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("gpt-6-luna", Some("high")),
+                ("custom/alpha-model", Some("low")),
+                ("gpt-6-astra", None),
+            ]
+        );
+        // The persisted id list round-trips through the same resolver.
+        let persisted = ordered
+            .iter()
+            .map(|scoped| match &scoped.reasoning {
+                Some(level) => format!("{}:{level}", scoped.id.0),
+                None => scoped.id.0.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let parsed = model_patterns(&persisted).unwrap();
+        let round_tripped = select_scoped_models(&parsed, &available).unwrap();
+        assert_eq!(
+            round_tripped
+                .iter()
+                .map(|scoped| (scoped.id.0.as_str(), scoped.reasoning.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("gpt-6-luna", Some("high")),
+                ("custom/alpha-model", Some("low")),
+                ("gpt-6-astra", None),
+            ]
+        );
+        // An ambiguous bare id falls back to glob matching instead of guessing.
+        let ambiguous = vec![
+            ("shared".to_owned(), "one".to_owned()),
+            ("shared".to_owned(), "two".to_owned()),
+        ];
+        assert!(exact_model_reference("shared", &ambiguous).is_none());
+        assert!(model_pattern_matches("shared", "shared", "one"));
     }
 }

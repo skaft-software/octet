@@ -304,7 +304,10 @@ pub(crate) fn build_request(
             // and sets Bedrock's per-tool `strict` flag; otherwise the canonical
             // schema is sent unchanged.
             let (parameters, strict) =
-                crate::constrained_sampling::function_tool_parameters(tool, true)?;
+                crate::constrained_sampling::function_tool_parameters(
+                    tool,
+                    super::strict_mode_for(model),
+                )?;
             let input_schema = if strict {
                 parameters
             } else {

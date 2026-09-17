@@ -448,10 +448,10 @@
       "surface": "tool_result",
       "status": "safe_divergence",
       "behavioral_fixture": "events:tool_result",
-      "behavior": "Pi-tool content/details/error/usage transforms are preserved; native mutation fails.",
+      "behavior": "Pi-tool content/details/error transforms are preserved and hook usage applies; executed usage/termination cross only under their negotiated result features, and an unnegotiated result field fails explicitly instead of being dropped.",
       "safe_divergence": {
         "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Pi-tool content/details/error/usage transforms are preserved; native mutation fails."
+        "reason": "Pi-tool content/details/error transforms are preserved and hook usage applies; executed usage/termination cross only under their negotiated result features, and an unnegotiated result field fails explicitly instead of being dropped."
       }
     },
     {
@@ -472,10 +472,10 @@
       "surface": "registerTool",
       "status": "safe_divergence",
       "behavioral_fixture": "extension_api:registerTool",
-      "behavior": "Initial tool registration and execution use the public Pi runner.",
+      "behavior": "Initial tool registration and execution use the public Pi runner; promptSnippet/promptGuidelines are projected into the model-facing description, executionMode: \"sequential\" is enforced by a bridge execution lane, and a constrainedSampling requirement fails closed.",
       "safe_divergence": {
         "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Initial tool registration and execution use the public Pi runner."
+        "reason": "Initial tool registration and execution use the public Pi runner; promptSnippet/promptGuidelines are projected into the model-facing description, executionMode: \"sequential\" is enforced by a bridge execution lane, and a constrainedSampling requirement fails closed."
       }
     },
     {

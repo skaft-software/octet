@@ -3,20 +3,29 @@
 // Verify that all public API re-exports are accessible and compile.
 #[allow(unused_imports)]
 use octet_ai::{
-    reduce_assistant_message_frames, AiClient, AiError, AssistantMessage, AssistantMessageFrame,
-    AssistantMessageFrameEncoder, AssistantPart, AudioFormat, AudioMedia, AudioOutputOptions,
-    AudioPayload, AudioVoice, Auth, AuthConfig, AuthError, Capabilities, CatalogConfig,
-    CompatibilityMode, ConfigError, Cost, CredentialResolver, CredentialResolverRegistry,
-    CredentialScheme, DecodeError, Diagnostic, Endpoint, EndpointConfig, EndpointId, HttpError,
-    ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message, Mime, Modality,
-    ModalitySet, Model, ModelCatalog, ModelConfig, ModelId, ModelLimits, ModelSpec, OutputFormat,
-    OutputModalities, Pricing, PricingError, PricingTier, Protocol, ProviderError, ProviderMediaRef,
-    ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort, ReasoningEffortBudgets,
-    ReasoningPart, ReasoningState, ReasoningStateKind, Request, RequestBodyEncoding, RequestRuntime,
-    ResolvedCredential, Response, ResponseStream, ResponsesRuntimeProfile, Secret, StopReason,
-    StreamEvent, StreamProtocolError, TokenRate, ToolCall, ToolCallId, ToolChoice, ToolDef,
-    ToolResult, ToolResultPart, TransportError, TransportPhase, UnsupportedError, Usage, UserMessage,
-    UserPart, ValidationError,
+    anthropic_bearer_auth, environment_variable_present, first_present_variable,
+    reduce_assistant_message_frames, select_vertex_credential, vertex_api_key_auth, AiClient,
+    AiError, AssistantMessage, AssistantMessageFrame, AssistantMessageFrameEncoder, AssistantPart,
+    AudioFormat, AudioMedia, AudioOutputOptions, AudioPayload, AudioVoice, Auth, AuthConfig,
+    AuthError, Capabilities, CatalogConfig, CompatibilityMode, ConfigError, Cost,
+    CredentialResolver, CredentialResolverRegistry, CredentialScheme, DecodeError,
+    DeferredHandle, DeferredHandleRejection, DeferredPollPermit, DeferredPollRefusalKind,
+    Diagnostic, Endpoint, EndpointConfig, EndpointId, FauxDeferredStatus, FauxMessage, FauxOptions,
+    FauxProvider, FauxResponse, FauxState, FauxToolCall, GeneratedImage, HeaderTransform,
+    HookModelContext, HostRequestOptions, HttpError, ImageApi, ImageCancellation, ImageDetail,
+    ImageGenerationOptions,
+    ImageGenerationRequest, ImageGenerationResponse, ImageInput, ImageMedia, ImageModel,
+    ImageModelCatalog, ImageModelSpec, ImageModality, ImageOutput, ImagePricing, ImageSource,
+    ImageStopReason, JsonSchemaFormat, Media, Message, Mime, Modality, ModalitySet, Model,
+    ModelCatalog, ModelConfig, ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities,
+    PayloadHook, Pricing, PricingError, PricingTier, Protocol, ProviderError, ProviderMediaRef,
+    ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
+    ReasoningEffortBudgets, ReasoningPart, ReasoningState, ReasoningStateKind, Request,
+    RequestBodyEncoding, RequestOverrides, RequestRuntime, ResolvedCredential, Response,
+    ResponseHook, ResponseStream, ResponsesRuntimeProfile, Secret, StopReason, StreamEvent,
+    StreamProtocolError, TokenRate, ToolCall, ToolCallId, ToolChoice, ToolDef, ToolResult,
+    ToolResultPart, TransportError, TransportPhase, UnsupportedError, Usage, UserMessage, UserPart,
+    ValidationError, VertexCredential,
 };
 
 // A compile-time proof that every public re-export above is nameable. Referencing
@@ -26,6 +35,15 @@ const _: fn() = || {
     fn assert_exported<T>() {}
     assert_exported::<ReasoningStateKind>();
     assert_exported::<ReasoningState>();
+    assert_exported::<DeferredHandle>();
+    assert_exported::<DeferredPollPermit>();
+    assert_exported::<VertexCredential>();
+    assert_exported::<HookModelContext>();
+    assert_exported::<HostRequestOptions>();
+    assert_exported::<ImageModelCatalog>();
+    assert_exported::<ImageGenerationResponse>();
+    assert_exported::<ImageCancellation>();
+    assert_exported::<FauxProvider>();
 };
 
 #[test]

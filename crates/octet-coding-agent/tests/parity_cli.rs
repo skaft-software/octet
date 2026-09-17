@@ -1005,6 +1005,155 @@ fn models_patterns_scope_the_catalog_and_warn_on_a_miss() {
     );
 }
 
+/// 5.7 — the scope is ordered: the first requested pattern becomes the default
+/// even when a later pattern sorts earlier, a literal reference resolves
+/// exactly, and a `:level` suffix is accepted without changing the selection.
+#[test]
+fn models_scope_preserves_the_requested_order_and_literal_references() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+
+    // Custom-endpoint catalog ids are provider-qualified (`custom/probe`),
+    // while the wire model is the endpoint's api name (`probe`). The first
+    // requested pattern must win the default in both cases.
+    let probe_first = fixture.run(&[
+        "--models",
+        "custom/probe,custom/alpha-model",
+        "--print",
+        "hello",
+    ]);
+    assert_success(&probe_first);
+    assert!(
+        stderr_of(&probe_first).contains("Model scope selected custom/probe"),
+        "the first requested pattern selects the default: {}",
+        stderr_of(&probe_first)
+    );
+    assert_eq!(api.chat_requests()[0]["model"], "probe");
+
+    // Reversing the request reverses the default, so the order — not catalog
+    // order or alphabetical order — decides the selection; the suffix rides
+    // along in the reported pattern.
+    let alpha_first = fixture.run(&[
+        "--models",
+        "custom/alpha-model:low,custom/probe",
+        "--print",
+        "hello",
+    ]);
+    assert_success(&alpha_first);
+    assert!(
+        stderr_of(&alpha_first).contains("Model scope selected custom/alpha-model"),
+        "literal reference report: {}",
+        stderr_of(&alpha_first)
+    );
+    assert!(
+        stderr_of(&alpha_first).contains("custom/alpha-model:low"),
+        "the requested `:level` suffix must survive into the selected pattern: {}",
+        stderr_of(&alpha_first)
+    );
+    assert_eq!(api.chat_requests()[1]["model"], "alpha-model");
+}
+
+/// 2d.2 / 5.7 — the persisted `/scoped-models` list is an interactive cycling
+/// scope. A headless launch must never consume it (it does not configure a
+/// model and cannot become the default), while an explicit `--models` list
+/// keeps its documented headless default-selection behavior.
+#[test]
+fn persisted_model_scope_is_never_consumed_by_headless_modes() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    std::fs::write(
+        fixture.home.join(".octet/config.toml"),
+        "models = \"custom/vision-probe\"\n",
+    )
+    .unwrap();
+
+    // No `--model`/`--models`: the persisted interactive key must not turn
+    // into a headless default, so the standard missing-model diagnostic is
+    // the only acceptable outcome and no request may be submitted.
+    let unscoped = fixture.run(&["--print", "hello"]);
+    assert!(
+        !unscoped.status.success(),
+        "a persisted interactive scope must not configure a headless launch: {}",
+        stderr_of(&unscoped)
+    );
+    assert!(
+        stderr_of(&unscoped).contains("no model configured"),
+        "{}",
+        stderr_of(&unscoped)
+    );
+    assert!(
+        api.chat_requests().is_empty(),
+        "the persisted scope must not submit a request"
+    );
+
+    // The explicit CLI contract is unchanged: `--models` still selects exactly
+    // the requested default for a new headless session.
+    let explicit = fixture.run(&["--models", "custom/vision-probe", "--print", "hello"]);
+    assert_success(&explicit);
+    assert!(
+        stderr_of(&explicit).contains("Model scope selected custom/vision-probe"),
+        "{}",
+        stderr_of(&explicit)
+    );
+    assert_eq!(api.chat_requests()[0]["model"], "vision-probe");
+}
+
+/// 4.6 — the coding product owns an additive, explicit PowerShell opt-in. It is
+/// never a `bash` replacement, it cannot be combined with an exclusive
+/// allowlist, and off Windows it says plainly that the entry is inert.
+#[test]
+fn powershell_opt_in_is_additive_and_reports_an_inert_host() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    // The shared fixture always passes `--no-tools`, which deliberately
+    // conflicts with an additive opt-in; exercise the real default allowlist.
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_octet"))
+            .current_dir(&fixture.workspace)
+            .env_clear()
+            .env("HOME", &fixture.home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("PWD", &fixture.workspace)
+            .env("TERM", "dumb")
+            .env("LANG", "C.UTF-8")
+            .args(["--offline", "--no-context-files", "--color", "never"])
+            .arg("--workspace")
+            .arg(&fixture.workspace)
+            .arg("--session-dir")
+            .arg(&fixture.sessions)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run octet")
+    };
+    let enabled = run(&["--powershell", "--list-models"]);
+    assert_success(&enabled);
+    if !cfg!(windows) {
+        assert!(
+            stderr_of(&enabled).contains("--powershell is inert on this host"),
+            "an unavailable opt-in must be named: {}",
+            stderr_of(&enabled)
+        );
+    }
+    // The opt-in adds one tool; it never replaces the default allowlist.
+    let excluded = run(&[
+        "--powershell",
+        "--exclude-tools",
+        "powershell",
+        "--list-models",
+    ]);
+    assert_success(&excluded);
+    // An exclusive `--tools` list already fixes the whole allowlist.
+    let conflict = run(&["--powershell", "--tools", "bash", "--list-models"]);
+    assert!(
+        !conflict.status.success(),
+        "--powershell must not combine with an exclusive --tools list"
+    );
+    // And it cannot tunnel through `--no-tools` either.
+    let no_tools = run(&["--powershell", "--no-tools", "--list-models"]);
+    assert!(!no_tools.status.success());
+}
+
 /// 5.1 — RPC keeps exclusive ownership of stdin: positional prompts are refused
 /// rather than silently mixed with the JSONL command stream.
 #[test]
