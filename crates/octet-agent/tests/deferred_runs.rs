@@ -441,11 +441,38 @@ async fn an_admitted_poll_replays_as_effect_pending_and_is_replaced_with_fresh_i
         (abandoned_response.clone(), abandoned_usage.clone())
     );
 
-    let replacement = store
+    // A plain permitted pass may not spend a second billable poll on an
+    // unknown outcome: the leaf stays parked and the refusal writes nothing.
+    let refused = store
         .begin_pass(
             "run:1:deferred:1",
             "pass-b",
             DeferredResumeIntent::Poll,
+            0,
+        )
+        .unwrap();
+    match refused {
+        DeferredResumeStart::Refused(refusal) => {
+            assert_eq!(
+                refusal.kind,
+                DeferredPollRefusalKind::UnknownPollOutcome { poll: 1 }
+            );
+        }
+        other => panic!("a plain poll must not auto-replace an unknown outcome, got {other:?}"),
+    }
+    assert_eq!(
+        store.record("run:1:deferred:1").unwrap().state_label(),
+        "effect_pending",
+        "a refused replacement must leave the unknown-outcome leaf durable"
+    );
+
+    // Only the explicit replacement intent admits the recovery poll, under a
+    // fresh permit at the same poll number.
+    let replacement = store
+        .begin_pass(
+            "run:1:deferred:1",
+            "pass-c",
+            DeferredResumeIntent::ReplaceUnknownPoll,
             0,
         )
         .unwrap();
@@ -660,16 +687,36 @@ async fn a_refused_before_dispatch_poll_is_replaceable_under_fresh_ids_and_bills
         other => panic!("the refused poll must leave the leaf replaceable, got {other:?}"),
     };
 
-    // A later permitted pass replaces the abandoned reservation under fresh ids
-    // instead of reusing the pair the refused attempt reserved.
+    // A later pass may replace the abandoned reservation under fresh ids
+    // instead of reusing the pair the refused attempt reserved, but only after
+    // the explicit replacement decision: the durable leaf alone cannot prove
+    // the refused poll was never accepted.
     let replacement_source = ScriptedPollSource::new(vec![DeferredPollReply::Settled(Box::new(
         settled_response(&model),
     ))]);
+    let refused_without_consent = agent
+        .resume_deferred_run(
+            &operation_id,
+            "pass-replacement-refused",
+            DeferredResumeIntent::Poll,
+            &replacement_source,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        refused_without_consent,
+        DeferredRunOutcome::Refused(refusal)
+            if matches!(
+                refusal.kind,
+                DeferredPollRefusalKind::UnknownPollOutcome { .. }
+            )
+    ));
+    assert_eq!(replacement_source.polls.load(Ordering::SeqCst), 0);
     let replacement = agent
         .resume_deferred_run(
             &operation_id,
             "pass-replacement",
-            DeferredResumeIntent::Poll,
+            DeferredResumeIntent::ReplaceUnknownPoll,
             &replacement_source,
         )
         .await

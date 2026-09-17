@@ -101,7 +101,7 @@ fn style_log(theme: &OctetTheme, line: &str) -> String {
         theme.fg("model_accent", &line)
     } else if line.starts_with("[failed]") || line.contains(" failed") {
         theme.fg("error", &line)
-    } else if line.starts_with("[needs input]") || line.starts_with("[completed with warnings]") {
+    } else if line.starts_with("[needs input]") {
         theme.fg("warning", &line)
     } else {
         line
@@ -156,7 +156,14 @@ fn present_prompt(
 
 fn outcome_text(outcome: &RunOutcome) -> String {
     match outcome {
-        RunOutcome::Completed { elapsed, summary } => {
+        // `CompletedWithWarnings` deliberately renders exactly like
+        // `Completed`: the same `[completed]` prefix, duration, and
+        // files-changed detail. Per-call tool failures are already rendered by
+        // their own lines above this one, and the warning count stays in the
+        // model for exit status and telemetry. It is never transcript wording,
+        // so the two variants cannot drift apart.
+        RunOutcome::Completed { elapsed, summary }
+        | RunOutcome::CompletedWithWarnings { elapsed, summary, .. } => {
             let mut parts = vec![format!("[completed] {}", format_duration(*elapsed))];
             if summary.files_changed > 0 {
                 parts.push(format!(
@@ -167,14 +174,6 @@ fn outcome_text(outcome: &RunOutcome) -> String {
             }
             parts.join(" - ")
         }
-        RunOutcome::CompletedWithWarnings {
-            elapsed, warnings, ..
-        } => format!(
-            "[completed with warnings] {} warning{} - {}",
-            warnings,
-            if *warnings == 1 { "" } else { "s" },
-            format_duration(*elapsed)
-        ),
         RunOutcome::Failed { elapsed, reason } => {
             format!("[failed] {reason} - {}", format_duration(*elapsed))
         }
@@ -815,6 +814,33 @@ mod tests {
             reason: "command exited 1".into(),
         });
         assert_eq!(failed, "[failed] command exited 1 - 2.0s");
+    }
+
+    #[test]
+    fn completed_with_warnings_prints_the_completed_family() {
+        // The TUI renders `CompletedWithWarnings` exactly like `Completed`
+        // (`tui/view/outcome_render.rs`); plain mode must not invent a second
+        // `[completed with warnings]` prefix, which the review pass falsified
+        // as attack #7.
+        let with_warnings = outcome_text(&RunOutcome::CompletedWithWarnings {
+            elapsed: Duration::from_millis(1200),
+            warnings: 3,
+            summary: RunSummary {
+                files_changed: 2,
+                tool_calls: 1,
+                warnings: 3,
+            },
+        });
+        assert_eq!(with_warnings, "[completed] 1.2s - 2 files changed");
+        assert!(with_warnings.is_ascii());
+        assert!(!with_warnings.contains("warning"));
+
+        let theme = crate::tui::theme::test_theme();
+        assert_eq!(
+            style_log(&theme, &with_warnings),
+            with_warnings,
+            "the completed family is never styled as a warning"
+        );
     }
 
     #[test]

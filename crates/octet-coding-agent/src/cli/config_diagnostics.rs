@@ -88,6 +88,7 @@ const CONFIG_KEYS: &[&str] = &[
     "reload_poll_ms",
     "reload_debounce_ms",
     "reload_max_files",
+    "reload_host",
     "telemetry",
     "enabled_extensions",
     "trusted_extensions",

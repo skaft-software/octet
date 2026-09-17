@@ -43,6 +43,14 @@
 //! resource path, so theme auto-reload falls out of the resources layer
 //! without wiring a second watcher.
 //!
+//! The **host** layer is the one layer that is off by default: resources and
+//! extensions auto-reload from [`ReloadSettings::default`], but an executable
+//! change is only planned when the user opted in with
+//! [`ReloadSettings::host_enabled`] (`reload_host = true`), and `/reload
+//! --force` can always take a host pass now. A changed binary is otherwise
+//! observed into the baseline and reported as nothing, because executing a
+//! replaced image is a decision one generic `reload = true` must never make.
+//!
 //! # What a reload loses (honest limits)
 //!
 //! Nothing here is lossless. At an idle boundary:
@@ -290,6 +298,11 @@ impl ReloadLoss {
 pub struct ReloadSettings {
     /// Whether sampling and applying happen at all.
     pub enabled: bool,
+    /// Whether an executable change may queue the host layer for an automatic
+    /// re-exec. Off by default: the resources and extensions layers stay
+    /// automatic, but replacing the process image needs its own explicit
+    /// opt-in (`reload_host = true`) or `/reload --force`.
+    pub host_enabled: bool,
     /// Interval between filesystem samples.
     pub poll_interval: Duration,
     /// Save-burst debounce.
@@ -302,6 +315,10 @@ impl Default for ReloadSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            // Host re-exec is never armed by the generic live-reload default:
+            // one bool (`reload = true`) must not be able to `execve` a
+            // replaced `current_exe`.
+            host_enabled: false,
             poll_interval: DEFAULT_POLL_INTERVAL,
             debounce: DEFAULT_DEBOUNCE,
             max_inspections_per_poll: DEFAULT_MAX_INSPECTIONS_PER_POLL,
@@ -322,6 +339,7 @@ impl ReloadSettings {
     pub fn sanitized(self) -> Self {
         Self {
             enabled: self.enabled,
+            host_enabled: self.host_enabled,
             poll_interval: clamp_duration(self.poll_interval, MIN_POLL_INTERVAL, MAX_POLL_INTERVAL),
             debounce: if self.debounce > MAX_DEBOUNCE {
                 MAX_DEBOUNCE
@@ -708,7 +726,9 @@ impl ReloadWatchSet {
     /// Counts and durations only: the wording is secret-free, bounded, and is
     /// what makes the live-reload default visible without opening a config
     /// file. `dropped` is named rather than hidden, because a watch set over
-    /// the target cap is watching less than it was asked to.
+    /// the target cap is watching less than it was asked to. The host layer is
+    /// named explicitly, because "live reload armed" must never imply that a
+    /// replaced binary will be executed on its own.
     pub fn arming_notice(&self, settings: ReloadSettings) -> String {
         if !settings.enabled {
             return "live reload: disabled (set reload = true to arm it)".to_owned();
@@ -718,9 +738,14 @@ impl ReloadWatchSet {
         } else {
             format!(", {} over the target cap", self.dropped)
         };
+        let host = if settings.host_enabled {
+            "host re-exec armed by reload_host = true".to_owned()
+        } else {
+            "host re-exec off (use /reload --force or reload_host = true)".to_owned()
+        };
         sanitize_note(&format!(
             "live reload armed: {} watched paths{dropped}, poll {} ms, debounce {} ms, applied at \
-             the idle prompt; /reload --dry-run previews a pass, /reload --force takes one now",
+             the idle prompt; {host}; /reload --dry-run previews a pass",
             self.targets.len(),
             settings.poll_interval.as_millis(),
             settings.debounce.as_millis()
@@ -1521,9 +1546,11 @@ impl ReloadPlan {
 /// 4. Nothing is admitted while `boundary` is [`ReloadBoundary::Busy`] or a
 ///    pass is already in flight; the evidence stays queued.
 /// 5. An explicit request (`/reload`, API 0.3 `session/reload`) marks the
-///    resources and extensions layers stale immediately; the host layer still
+///    resources and extensions layers stale immediately; the host layer is off
+///    entirely unless `reload_host = true` armed it, and even then it still
 ///    requires a real executable change, because a re-exec is only ever
-///    justified by evidence.
+///    justified by evidence. `/reload --force` is the one path that takes every
+///    layer now.
 /// 6. `force` supersedes queued and in-flight passes (generation bump) and
 ///    names every loss, because it may be taken while a run owns the session.
 /// 7. `dry_run` reports what a pass would do and changes nothing.
@@ -1693,7 +1720,14 @@ impl ReloadSupervisor {
                 None => None,
             };
             if let Some(path) = executable_change {
-                changed.entry(ReloadLayer::Host).or_default().push(path);
+                // The host layer is only queued when the user armed it. A
+                // changed binary is still fingerprinted into the baseline (above
+                // and here), so a later `/reload --force` or an opt-in flip has
+                // the right starting point, but a generic `reload = true` can
+                // never queue an `execve` of a replaced `current_exe`.
+                if self.settings.host_enabled {
+                    changed.entry(ReloadLayer::Host).or_default().push(path);
+                }
             }
         } else if let Some(current) = scan.executable() {
             self.baseline_executable = Some(current.clone());
@@ -1718,8 +1752,9 @@ impl ReloadSupervisor {
     ///
     /// Resources and extensions are marked stale immediately; the host layer is
     /// deliberately not, because only a real executable change can justify
-    /// replacing the process image. An explicit request is not debounced, but
-    /// it is still admitted only at an idle boundary.
+    /// replacing the process image — and only when `reload_host = true` armed
+    /// that layer (or `/reload --force` takes it directly). An explicit request
+    /// is not debounced, but it is still admitted only at an idle boundary.
     pub fn request(&mut self, now: Instant, requester: ReloadRequester) {
         if !self.settings.enabled {
             return;
@@ -1996,6 +2031,18 @@ mod tests {
         Instant::now()
     }
 
+    /// Settings that arm the host layer, for tests about the opt-in path.
+    ///
+    /// The product default is [`ReloadSettings::default`] with the host layer
+    /// off; those defaults are pinned by
+    /// `default_settings_never_plan_the_host_layer`.
+    fn host_settings() -> ReloadSettings {
+        ReloadSettings {
+            host_enabled: true,
+            ..ReloadSettings::default()
+        }
+    }
+
     fn file_fingerprint(len: u64) -> FileFingerprint {
         FileFingerprint {
             present: true,
@@ -2209,10 +2256,48 @@ mod tests {
         assert!(notice.contains("debounce 200 ms"), "{notice}");
         assert!(notice.contains("over the target cap"), "{notice}");
         assert!(notice.contains("/reload --dry-run"), "{notice}");
+        assert!(
+            notice.contains("host re-exec off"),
+            "the notice must never imply an automatic re-exec: {notice}"
+        );
         assert!(notice.len() <= MAX_NOTE_BYTES, "{}", notice.len());
+
+        let armed = watches.arming_notice(host_settings());
+        assert!(armed.contains("host re-exec armed"), "{armed}");
 
         let disabled = watches.arming_notice(ReloadSettings::disabled());
         assert!(disabled.contains("disabled"), "{disabled}");
+    }
+
+    #[test]
+    fn default_settings_never_plan_the_host_layer() {
+        let start = base();
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let watcher = watcher(&[]);
+        let mut source = Fake::new();
+        source.exe("/opt/octet/1.2/octet", 100);
+        baseline(&mut supervisor, &watcher, &source, start);
+
+        // The binary is replaced on disk. With the default settings the host
+        // layer is observed but never queued, so nothing can execve it.
+        source.exe("/opt/octet/1.3/octet", 200);
+        let scan = watcher.scan(&source);
+        let summary = supervisor.observe(start + Duration::from_secs(1), &scan);
+        assert!(
+            summary.changed_layers.is_empty(),
+            "a host-only change must not queue under the defaults: {summary:?}"
+        );
+        assert!(!supervisor.is_queued());
+        assert!(supervisor
+            .begin(start + Duration::from_secs(2), ReloadBoundary::Idle)
+            .is_none());
+
+        // `/reload --force` still takes every layer, host included, without any
+        // opt-in: it is the explicit user decision.
+        let plan = supervisor.force();
+        assert_eq!(plan.layers(), ReloadLayer::ORDER.to_vec());
+        assert!(plan.is_forced());
+        assert!(supervisor.finish(plan).is_some());
     }
 
     #[test]
@@ -2349,7 +2434,9 @@ mod tests {
     #[test]
     fn only_stale_layers_are_selected_and_the_order_is_fixed() {
         let start = base();
-        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        // Host-armed settings: this test is about layer selection order, and
+        // the default-off host layer is pinned separately.
+        let mut supervisor = ReloadSupervisor::new(host_settings());
         let watcher = watcher(&[
             ("/skills", ReloadLayer::Resources),
             ("/extensions", ReloadLayer::Extensions),
@@ -2460,7 +2547,9 @@ mod tests {
     #[test]
     fn the_executable_is_re_resolved_and_a_move_is_a_host_change() {
         let start = base();
-        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        // The host layer is armed here: this pins what the opt-in observes, not
+        // the product default (see `default_settings_never_plan_the_host_layer`).
+        let mut supervisor = ReloadSupervisor::new(host_settings());
         let watcher = watcher(&[]);
         let mut source = Fake::new();
         source.exe("/opt/octet/1.2/octet", 100);
@@ -2813,7 +2902,7 @@ mod tests {
 
         // A host pass justified by a real executable change carries no
         // extension-restart loss: the replacement image rebuilds them.
-        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let mut supervisor = ReloadSupervisor::new(host_settings());
         let watcher = watcher(&[]);
         let mut source = Fake::new();
         source.exe("/opt/octet/1.0/octet", 10);
@@ -2881,6 +2970,7 @@ mod tests {
     fn settings_are_clamped_and_a_disabled_supervisor_stays_inert() {
         let settings = ReloadSettings {
             enabled: true,
+            host_enabled: false,
             poll_interval: Duration::from_secs(9_000),
             debounce: Duration::from_secs(60),
             max_inspections_per_poll: usize::MAX,

@@ -15,11 +15,15 @@
 //!    to [`ReexecController::reexec_if_changed`].
 //! 2. An unchanged generation returns [`ReexecDecision::ResourcesOnly`] with the
 //!    notice `resources reloaded · binary unchanged`.
-//! 3. A changed generation is validated before anything is torn down. The
-//!    candidate is probed through `--internal-reexec-probe` in a subprocess with
-//!    a hard timeout, the probed generation is pinned, and live-state refusal
-//!    checks run. Any failure returns `Blocked` or `Refused` and leaves the
-//!    current process fully running.
+//! 3. A changed generation is validated before anything is torn down. A
+//!    **retargeted** image — one that no longer shares the startup image's file
+//!    identity (a moved path or a replaced inode) — first returns
+//!    [`ReexecDecision::ConfirmationRequired`] without spawning anything; only
+//!    after the caller confirms ([`ReexecOptions::redirect_confirmed`]) is the
+//!    candidate probed through `--internal-reexec-probe` in a subprocess with a
+//!    hard timeout, the probed generation pinned, and live-state refusal checks
+//!    run. Any failure returns `Blocked` or `Refused` and leaves the current
+//!    process fully running.
 //! 4. [`ReexecHooks::make_session_durable`] commits the session head through the
 //!    existing session persistence path, then
 //!    [`ReexecHooks::shutdown_extensions`] stops extension children inside the
@@ -32,6 +36,17 @@
 //! 6. `exec` never returns on success. If it returns,
 //!    [`ReexecDecision::ExecFailed`] tells the caller to re-enter the TUI,
 //!    rebuild extension processes, and leave the terminal usable.
+//!
+//! # Trust: only a confirmed image is ever executed
+//!
+//! A re-exec has two executions of the candidate image: the probe subprocess and
+//! the `exec` itself. The probe runs first, so it is the candidate's first
+//! execution, and it is treated as one: it is spawned only after the live-state
+//! refusals passed and only for an image the caller is willing to enter.
+//! `/reload` cannot reach this module at all (it is resources-only); the two
+//! paths that can are an explicit `/reload --force`, which is itself the user's
+//! confirmation, and the `reload_host = true` watcher, which confirms a
+//! retargeted image through the interactive picker before the probe starts.
 //!
 //! # Which executable, and when
 //!
@@ -59,8 +74,11 @@
 //! descriptor would therefore let the replacement image contend with — or block
 //! forever on — the session it already owns, and an inherited append line could
 //! interleave two images into one transcript. [`ReexecPlan::exec`] therefore
-//! sweeps every descriptor above stdio and confirms `FD_CLOEXEC` on each one
-//! ([`seal_process_descriptors`]) immediately before the image is replaced. The
+//! enumerates every descriptor this process owns above stdio (`/dev/fd` on
+//! macOS/BSD, `/proc/self/fd` on Linux; a fixed numeric cap could miss
+//! descriptors above it) and confirms `FD_CLOEXEC` on each one
+//! ([`seal_process_descriptors`]) immediately before the image is replaced. A
+//! listing that cannot be read fails the reload closed. The
 //! only descriptors the replacement inherits on purpose are stdin, stdout, and
 //! stderr.
 //!
@@ -135,10 +153,13 @@ pub(crate) const SESSION_FORMAT_VERSION: u32 = 1;
 
 /// User-facing notice strings, in one place so they can be pinned by tests.
 pub(crate) mod notice {
-    use super::{BlockedReason, RefusalReason};
+    use super::{BlockedReason, ExecutableRedirect, RefusalReason};
 
     /// The exact `/reload` notice when the running image is still on disk.
     pub(crate) const RESOURCES_ONLY: &str = "resources reloaded · binary unchanged";
+
+    /// Prefix of the notice that asks the user to confirm a retargeted image.
+    pub(crate) const CONFIRMATION_PREFIX: &str = "reload needs confirmation · ";
 
     /// Prefix of the notice presented just before the caller unwinds the TUI.
     pub(crate) const RELOADING_PREFIX: &str = "reloading into build ";
@@ -186,6 +207,22 @@ pub(crate) mod notice {
     /// The exact notice for one unsafe live state.
     pub(crate) fn refused(reason: RefusalReason) -> String {
         format!("{REFUSED_PREFIX}{}", refused_detail(reason))
+    }
+
+    /// The exact notice for a retargeted image that needs confirmation before
+    /// it may even be probed.
+    pub(crate) fn confirmation(redirect: &ExecutableRedirect) -> String {
+        match redirect {
+            ExecutableRedirect::Moved { from, to } => format!(
+                "{CONFIRMATION_PREFIX}the executable moved from {} to {}; confirm to probe and enter it",
+                from.display(),
+                to.display()
+            ),
+            ExecutableRedirect::Replaced { path } => format!(
+                "{CONFIRMATION_PREFIX}the image at {} was replaced (new file identity); confirm to probe and enter it",
+                path.display()
+            ),
+        }
     }
 
     /// The exact recovery notice after `exec` returned instead of replacing
@@ -310,6 +347,27 @@ impl BinaryGeneration {
         Ok(Self::from_metadata(path, &metadata))
     }
 
+    /// Whether this generation names the same on-disk file identity as `other`.
+    ///
+    /// On Unix the device and inode are compared, so a file rewritten in place
+    /// (same inode, new contents — a plain `cp` over the running binary) shares
+    /// the identity while a swapped-in image or a retargeted symlink does not.
+    /// Elsewhere no inode exists, so only the path is compared: every same-path
+    /// rewrite then counts as the same identity. That fallback is weaker and is
+    /// documented rather than implied; hot re-exec itself is Unix-only
+    /// ([`platform_exec`]).
+    fn shares_identity_with(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.identity.device == other.identity.device
+                && self.identity.inode == other.identity.inode
+        }
+        #[cfg(not(unix))]
+        {
+            self.path == other.path
+        }
+    }
+
     fn from_metadata(path: &Path, metadata: &std::fs::Metadata) -> Self {
         Self {
             path: path.to_path_buf(),
@@ -377,6 +435,36 @@ fn capture_executable_image(path: &Path) -> Result<BinaryGeneration, ExecutableD
         return Err(ExecutableDefect::NotExecutable);
     }
     Ok(BinaryGeneration::from_metadata(path, &metadata))
+}
+
+/// How the image a re-exec would enter differs from the image this process
+/// started from.
+///
+/// A *redirect* is an image whose file identity no longer matches the startup
+/// capture: the resolved path moved (a retargeted `Homebrew` symlink, a swapped
+/// versioned directory, an npm launcher re-point) or the same path now names a
+/// different inode (a package replaced the file). A plain in-place rewrite of
+/// the same inode is *not* a redirect: it is the same file the process is
+/// already executing.
+///
+/// A redirect is never probed or entered without an explicit confirmation from
+/// the caller ([`ReexecOptions::redirect_confirmed`]), because the probe is the
+/// candidate image's first execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ExecutableRedirect {
+    /// Resolution now names a different path than the one this process started
+    /// from.
+    Moved {
+        /// The startup path.
+        from: PathBuf,
+        /// The resolved path a re-exec would enter.
+        to: PathBuf,
+    },
+    /// The path is unchanged, but the file behind it is a different inode.
+    Replaced {
+        /// The path whose identity changed.
+        path: PathBuf,
+    },
 }
 
 /// One resolved observation of the executable a re-exec would enter.
@@ -756,10 +844,22 @@ pub(crate) struct ReexecOptions {
     /// them from their durable records; the warning that names the count comes
     /// from [`notice::detaching_workers`].
     pub(crate) detach_background_workers: bool,
+    /// The caller explicitly confirmed entering an image whose file identity no
+    /// longer matches the startup image (a retargeted symlink, a swapped inode,
+    /// or a different resolved path).
+    ///
+    /// Without this, [`ReexecController::reexec_if_changed`] returns
+    /// [`ReexecDecision::ConfirmationRequired`] **before spawning the probe**,
+    /// so an untrusted replacement is never executed as a subprocess just to be
+    /// validated. The interactive caller sets it only after the user answered
+    /// the confirmation; an explicit `/reload --force` is that user decision,
+    /// while the automatic `reload_host = true` path asks first.
+    pub(crate) redirect_confirmed: bool,
 }
 
 impl ReexecOptions {
-    /// The default policy: a live worker refuses the reload.
+    /// The default policy: a live worker refuses the reload, and a retargeted
+    /// image needs an explicit confirmation before it is probed.
     pub(crate) fn refusing_workers() -> Self {
         Self::default()
     }
@@ -768,6 +868,27 @@ impl ReexecOptions {
     pub(crate) fn detaching_workers() -> Self {
         Self {
             detach_background_workers: true,
+            ..Self::default()
+        }
+    }
+
+    /// The same consent, widened to detach live workers.
+    ///
+    /// Used when the caller already confirmed a retarget and is now answering
+    /// the worker prompt, so the retarget consent is not lost between the two
+    /// decisions.
+    pub(crate) fn with_detaching_workers(self) -> Self {
+        Self {
+            detach_background_workers: true,
+            ..self
+        }
+    }
+
+    /// The explicit opt-in that confirms a retargeted image for this decision.
+    pub(crate) fn confirming_redirect(self) -> Self {
+        Self {
+            redirect_confirmed: true,
+            ..self
         }
     }
 }
@@ -888,6 +1009,15 @@ pub(crate) enum ReexecDecision {
         reason: RefusalReason,
         notice: String,
     },
+    /// The image on disk no longer shares the startup image's identity (a moved
+    /// path or a replaced inode) and the caller did not confirm entering it.
+    /// **Nothing was spawned**: the candidate was not probed, and the current
+    /// process is fully live.
+    ConfirmationRequired {
+        /// How the image moved away from the startup image.
+        redirect: ExecutableRedirect,
+        notice: String,
+    },
     /// Everything validated. The caller unwinds the TUI, then calls
     /// [`ReexecPlan::exec`].
     Ready(ReexecPlan),
@@ -911,6 +1041,11 @@ impl ReexecDecision {
         Self::Refused { reason, notice }
     }
 
+    pub(crate) fn confirmation(redirect: ExecutableRedirect) -> Self {
+        let notice = notice::confirmation(&redirect);
+        Self::ConfirmationRequired { redirect, notice }
+    }
+
     pub(crate) fn exec_failed(source: std::io::Error) -> Self {
         let notice = notice::exec_failed(&source);
         Self::ExecFailed { notice, source }
@@ -923,6 +1058,7 @@ impl ReexecDecision {
             Self::ResourcesOnly => Some(notice::RESOURCES_ONLY),
             Self::Blocked { notice, .. } => Some(notice),
             Self::Refused { notice, .. } => Some(notice),
+            Self::ConfirmationRequired { notice, .. } => Some(notice),
             Self::ExecFailed { notice, .. } => Some(notice),
             Self::Ready(_) => None,
         }
@@ -1159,10 +1295,13 @@ impl ReexecController {
     /// unchanged image at the startup path returns
     /// [`ReexecDecision::ResourcesOnly`]. Anything else re-pins the observed
     /// candidate, runs candidate validation, live-state refusal under
-    /// `options`, the durable-head hook, the bounded extension-shutdown hook, and
-    /// the canonical argv build, in that order; nothing is torn down before the
-    /// candidate validates, and no probe result is exec'd into before the pinned
-    /// generation was re-checked.
+    /// `options`, the redirect confirmation gate, the durable-head hook, the
+    /// bounded extension-shutdown hook, and the canonical argv build, in that
+    /// order; nothing is torn down before the candidate validates, no probe
+    /// result is exec'd into before the pinned generation was re-checked, and a
+    /// retargeted image (moved path or replaced inode) is never probed until
+    /// [`ReexecOptions::redirect_confirmed`] says the caller confirmed entering
+    /// it.
     pub(crate) async fn reexec_if_changed(
         &self,
         observed: &ExecutableObservation,
@@ -1204,6 +1343,15 @@ impl ReexecController {
         if !session_identity_is_usable(session_id) {
             return ReexecDecision::refused(RefusalReason::NoSessionIdentity);
         }
+        // Trust gate before the probe: the probe is the candidate image's first
+        // execution, so a retargeted image (a different path or a replaced
+        // inode) is never spawned as a subprocess just to be validated. The
+        // caller must confirm entering it first.
+        if let Some(redirect) = self.redirect(&candidate, &probed) {
+            if !options.redirect_confirmed {
+                return ReexecDecision::confirmation(redirect);
+            }
+        }
         let payload = match self.probe_candidate(&candidate) {
             Ok(payload) => payload,
             Err(reason) => return ReexecDecision::blocked(reason),
@@ -1244,6 +1392,26 @@ impl ReexecController {
             } else {
                 0
             },
+        })
+    }
+
+    /// How `candidate`/`probed` differs from the image this process started
+    /// from, if it does.
+    ///
+    /// A different resolved path is a move; the same path with a different file
+    /// identity is a replacement. A same-path in-place rewrite of the same inode
+    /// is not a redirect and needs no confirmation.
+    fn redirect(&self, candidate: &Path, probed: &BinaryGeneration) -> Option<ExecutableRedirect> {
+        if candidate != self.startup_exe {
+            return Some(ExecutableRedirect::Moved {
+                from: self.startup_exe.clone(),
+                to: candidate.to_path_buf(),
+            });
+        }
+        (!probed.shares_identity_with(&self.startup_generation)).then(|| {
+            ExecutableRedirect::Replaced {
+                path: candidate.to_path_buf(),
+            }
         })
     }
 
@@ -1302,17 +1470,56 @@ pub(crate) fn platform_exec(exe: &Path, argv: &[OsString]) -> std::io::Error {
 #[cfg(unix)]
 const FIRST_SEALED_DESCRIPTOR: libc::c_int = 3;
 
-/// Highest descriptor number [`seal_process_descriptors`] examines, whatever the
-/// process limit is.
+/// Directory the sweep lists to discover every descriptor this process owns.
 ///
-/// Session and lock descriptors are low-numbered, and the sweep must stay
-/// bounded on a host that raises `RLIMIT_NOFILE` into the millions.
+/// `fdescfs` on macOS/BSD and `procfs` on Linux both expose one numeric entry
+/// per open descriptor, including duplicates and numbers far above any fixed
+/// cap. Enumeration is the point: the previous numeric sweep stopped at 4096,
+/// so a descriptor above that cap (a raised `RLIMIT_NOFILE`, an extension pipe
+/// numbered late) would have been silently inherited by the replacement image.
 #[cfg(unix)]
-const DESCRIPTOR_SCAN_CAP: u64 = 4096;
+fn descriptor_directory() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    }
+}
 
-/// Highest descriptor number examined when the process limit cannot be read.
+/// Every descriptor number this process currently owns, sorted and deduplicated.
+///
+/// A listing that cannot be read, or that contains an entry this code cannot
+/// name, is an error: a descriptor that cannot be listed cannot be proven
+/// close-on-exec, and the reload must fail closed rather than hand it to the
+/// replacement image.
 #[cfg(unix)]
-const DESCRIPTOR_SCAN_FALLBACK_BOUND: libc::c_int = 1023;
+fn open_descriptor_numbers() -> std::io::Result<Vec<libc::c_int>> {
+    let directory = descriptor_directory();
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        std::io::Error::other(format!(
+            "cannot list descriptors in {directory}: {error}"
+        ))
+    })?;
+    let mut descriptors = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            std::io::Error::other(format!("cannot read a {directory} entry: {error}"))
+        })?;
+        let name = entry.file_name();
+        let parsed = name
+            .to_str()
+            .and_then(|name| name.parse::<libc::c_int>().ok());
+        let Some(descriptor) = parsed else {
+            return Err(std::io::Error::other(format!(
+                "cannot enumerate descriptors: {directory} contains the non-numeric entry {name:?}"
+            )));
+        };
+        descriptors.push(descriptor);
+    }
+    descriptors.sort_unstable();
+    descriptors.dedup();
+    Ok(descriptors)
+}
 
 /// Verify that one octet-owned descriptor is close-on-exec, setting the flag
 /// when it is not.
@@ -1358,11 +1565,19 @@ pub(crate) fn ensure_close_on_exec(
 /// This is the invariant [`ReexecPlan::verify_before_exec`] enforces: the process
 /// that is about to be replaced must not hand the image that inherits its PID a
 /// single octet-owned session, session-lock, log, or extension descriptor. The
-/// sweep repairs rather than trusts: every open descriptor above stdio is
-/// examined, `FD_CLOEXEC` is set when it is missing, and the flag is read back to
-/// confirm it. A descriptor that vanishes mid-sweep was closed by another thread
-/// and can no longer be inherited, so it is not an error; a descriptor that is
-/// open and still not close-on-exec after the set fails the reload.
+/// sweep repairs rather than trusts: every descriptor listed by
+/// [`open_descriptor_numbers`] above stdio is examined, `FD_CLOEXEC` is set when
+/// it is missing, and the flag is read back to confirm it. A descriptor that
+/// vanishes mid-sweep was closed by another thread and can no longer be
+/// inherited, so it is not an error; a descriptor that is open and still not
+/// close-on-exec after the set fails the reload. A listing that cannot be read
+/// fails the reload as well: an fd the sweep cannot see cannot be proven sealed.
+///
+/// Two listing passes are made, so a descriptor opened while the first pass ran
+/// is still seen and sealed (the second pass finds it; descriptors already seen
+/// are re-verified, and a `None` read-back means it vanished). There is no
+/// numeric upper bound to miss: the listing is the process's actual descriptor
+/// table, not a guess from `RLIMIT_NOFILE`.
 ///
 /// Nothing is written, no lock is taken, and no descriptor is closed: only this
 /// process's own descriptor flags change. That is what keeps a reload private to
@@ -1371,31 +1586,51 @@ pub(crate) fn ensure_close_on_exec(
 /// serialize (and deadlock) the independent reloaders.
 #[cfg(unix)]
 pub(crate) fn seal_process_descriptors() -> std::io::Result<()> {
-    let bound = descriptor_scan_bound();
-    let mut descriptor = FIRST_SEALED_DESCRIPTOR;
-    while descriptor <= bound {
-        match descriptor_close_on_exec_state(descriptor)? {
-            // Not open.
-            None => {}
-            // Already sealed.
-            Some(true) => {}
-            Some(false) => {
-                if seal_raw_descriptor(descriptor)? {
-                    match descriptor_close_on_exec_state(descriptor)? {
-                        Some(true) => {}
-                        // Closed between the set and the read-back: nothing is
-                        // left to inherit.
-                        None => {}
-                        Some(false) => {
-                            return Err(std::io::Error::other(format!(
-                                "descriptor {descriptor} is open and still not close-on-exec"
-                            )))
-                        }
+    let mut seen = std::collections::BTreeSet::new();
+    // The pass after the last newly-seen descriptor only re-verifies; two
+    // iterations are the common case, and the third bounds a thread that keeps
+    // opening descriptors while the sweep runs.
+    for _ in 0..3 {
+        let mut fresh = false;
+        for descriptor in open_descriptor_numbers()? {
+            if descriptor < FIRST_SEALED_DESCRIPTOR {
+                continue;
+            }
+            // A new number must be sealed; a number already seen must still be
+            // sealed (it may have been closed and reopened in between).
+            fresh |= seen.insert(descriptor);
+            seal_one_descriptor(descriptor)?;
+        }
+        if !fresh {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Seal one already-listed descriptor and prove the seal held.
+#[cfg(unix)]
+fn seal_one_descriptor(descriptor: libc::c_int) -> std::io::Result<()> {
+    match descriptor_close_on_exec_state(descriptor)? {
+        // Not open (or closed by another thread since listing).
+        None => {}
+        // Already sealed.
+        Some(true) => {}
+        Some(false) => {
+            if seal_raw_descriptor(descriptor)? {
+                match descriptor_close_on_exec_state(descriptor)? {
+                    Some(true) => {}
+                    // Closed between the set and the read-back: nothing is
+                    // left to inherit.
+                    None => {}
+                    Some(false) => {
+                        return Err(std::io::Error::other(format!(
+                            "descriptor {descriptor} is open and still not close-on-exec"
+                        )))
                     }
                 }
             }
         }
-        descriptor += 1;
     }
     Ok(())
 }
@@ -1405,27 +1640,6 @@ pub(crate) fn seal_process_descriptors() -> std::io::Result<()> {
 #[cfg(not(unix))]
 pub(crate) fn seal_process_descriptors() -> std::io::Result<()> {
     Ok(())
-}
-
-/// The highest descriptor number one sweep examines.
-#[cfg(unix)]
-fn descriptor_scan_bound() -> libc::c_int {
-    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
-    // SAFETY: `getrlimit` writes exactly one `rlimit` into the storage it is
-    // given and reads nothing else.
-    let result = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) };
-    if result != 0 {
-        return DESCRIPTOR_SCAN_FALLBACK_BOUND;
-    }
-    // SAFETY: the call succeeded, so `getrlimit` initialized the value.
-    let limit = unsafe { limit.assume_init() };
-    // `RLIMIT_NOFILE` is one past the highest usable descriptor number.
-    let highest = (limit.rlim_cur as u64)
-        .saturating_sub(1)
-        .min(DESCRIPTOR_SCAN_CAP);
-    libc::c_int::try_from(highest)
-        .unwrap_or(DESCRIPTOR_SCAN_FALLBACK_BOUND)
-        .max(FIRST_SEALED_DESCRIPTOR)
 }
 
 /// `Ok(None)` when the descriptor is not open at all, `Ok(Some(flag))` when it is.
@@ -2201,11 +2415,42 @@ mod tests {
             "resolution must name the installed image, not the startup path"
         );
         let mut hooks = TestHooks::default();
-        let decision = controller
+        // A moved image is a retarget: without the caller's confirmation the
+        // decision must ask and must not execute (probe) the candidate.
+        let unconfirmed = controller
             .reexec_if_changed(
                 &observed,
                 &LiveSafetyInputs::default(),
                 ReexecOptions::default(),
+                &mut hooks,
+            )
+            .await;
+        match unconfirmed {
+            ReexecDecision::ConfirmationRequired {
+                redirect: ExecutableRedirect::Moved { from: seen_from, to: seen_to },
+                notice,
+            } => {
+                assert_eq!(seen_from, startup);
+                assert_eq!(seen_to, moved);
+                assert!(
+                    notice.starts_with(notice::CONFIRMATION_PREFIX),
+                    "{notice}"
+                );
+            }
+            other => panic!("a moved image must ask before it is probed, got {other:?}"),
+        }
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the candidate must not be spawned before the confirmation"
+        );
+        assert_eq!(hooks.counters.durable.load(Ordering::SeqCst), 0);
+        assert_eq!(hooks.counters.shutdown.load(Ordering::SeqCst), 0);
+
+        let decision = controller
+            .reexec_if_changed(
+                &observed,
+                &LiveSafetyInputs::default(),
+                ReexecOptions::default().confirming_redirect(),
                 &mut hooks,
             )
             .await;
@@ -2270,11 +2515,41 @@ mod tests {
             "the link path still resolves, but to a different image"
         );
         let mut hooks = TestHooks::default();
-        let decision = controller
+        // A same-path inode swap (the symlink now points at a different file)
+        // is a retarget: it needs the explicit confirmation before the probe.
+        let unconfirmed = controller
             .reexec_if_changed(
                 &observed,
                 &LiveSafetyInputs::default(),
                 ReexecOptions::default(),
+                &mut hooks,
+            )
+            .await;
+        match unconfirmed {
+            ReexecDecision::ConfirmationRequired {
+                redirect: ExecutableRedirect::Replaced { path },
+                notice,
+            } => {
+                assert_eq!(path, link);
+                assert!(
+                    notice.starts_with(notice::CONFIRMATION_PREFIX),
+                    "{notice}"
+                );
+            }
+            other => panic!("a retargeted symlink must ask before it is probed, got {other:?}"),
+        }
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the candidate must not be spawned before the confirmation"
+        );
+        assert_eq!(hooks.counters.durable.load(Ordering::SeqCst), 0);
+        assert_eq!(hooks.counters.shutdown.load(Ordering::SeqCst), 0);
+
+        let decision = controller
+            .reexec_if_changed(
+                &observed,
+                &LiveSafetyInputs::default(),
+                ReexecOptions::default().confirming_redirect(),
                 &mut hooks,
             )
             .await;
@@ -3289,6 +3564,60 @@ mod tests {
             descriptor_close_on_exec_state(file.as_raw_fd()).unwrap(),
             Some(true),
             "the sweep must leave every open descriptor above stdio close-on-exec"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_sweep_seals_a_descriptor_above_the_old_numeric_cap() {
+        use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+
+        // The previous sweep stopped at the fixed 4096 cap, so this fixture
+        // must own a descriptor above it. Raising the soft limit is the only
+        // way to allocate one; a host that cannot raise it cannot host the
+        // fixture, and says so instead of claiming the cap is unreachable.
+        const ABOVE_CAP: libc::c_int = 4097;
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit/setrlimit read and write exactly one `rlimit`.
+        let raised = unsafe {
+            libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && {
+                limit.rlim_cur = limit.rlim_max.min(20_000).max(ABOVE_CAP as u64);
+                libc::setrlimit(libc::RLIMIT_NOFILE, &limit) == 0
+            }
+        };
+        if !raised {
+            eprintln!(
+                "skipping: cannot raise RLIMIT_NOFILE to own a descriptor above {ABOVE_CAP}"
+            );
+            return;
+        }
+
+        let file = tempfile::tempfile().unwrap();
+        // SAFETY: F_DUPFD duplicates this one open descriptor onto a number at
+        // or above `ABOVE_CAP` and clears FD_CLOEXEC, which is exactly the leak
+        // the sweep exists to repair.
+        let high = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, ABOVE_CAP) };
+        assert!(
+            high >= ABOVE_CAP,
+            "the fixture must own a descriptor above the old 4096 cap: {high}"
+        );
+        // SAFETY: `high` is a fresh descriptor this test now owns.
+        let owned = unsafe { OwnedFd::from_raw_fd(high) };
+        clear_close_on_exec(owned.as_fd());
+        assert_eq!(
+            descriptor_close_on_exec_state(high).unwrap(),
+            Some(false),
+            "the fixture must start without close-on-exec"
+        );
+
+        seal_process_descriptors().unwrap();
+        assert_eq!(
+            descriptor_close_on_exec_state(high).unwrap(),
+            Some(true),
+            "the sweep must seal a descriptor above the old numeric cap"
         );
     }
 

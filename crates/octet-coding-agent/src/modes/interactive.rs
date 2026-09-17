@@ -3413,8 +3413,25 @@ async fn reload_resources(
     Ok(app)
 }
 
+/// How one `/reload`-family caller wants the host layer handled.
+///
+/// The host layer is the only layer that executes a replacement image, so which
+/// caller selected it decides what consent exists: plain `/reload` and the
+/// queued/extension request path are resources-only, a typed `/reload --force`
+/// is its own explicit confirmation, and the automatic `reload_host = true`
+/// watcher must ask before probing a retargeted image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostPass {
+    /// Resources only: never probe, never re-exec.
+    ResourcesOnly,
+    /// The host layer was selected. `redirect_confirmed` is true when the
+    /// caller's own explicit user action already confirmed a retargeted image.
+    Allowed { redirect_confirmed: bool },
+}
+
 /// `/reload` keeps its existing transactional resource reload, then re-execs
-/// only when the on-disk executable changed.
+/// only when the on-disk executable changed *and* the caller selected the host
+/// layer.
 ///
 /// Returns `Some(plan)` when the caller must leave the TUI and call
 /// `plan.exec()` after the loop settles. `None` covers a resources-only reload
@@ -3425,6 +3442,7 @@ async fn reload_resources_with_reexec(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     reexec: Option<&mut crate::reexec::ReexecController>,
+    host: HostPass,
 ) -> anyhow::Result<(App, Option<crate::reexec::ReexecPlan>)> {
     let mut app = reload_resources(app, shell, input).await?;
     request_extension_ui(shell, &mut app);
@@ -3434,6 +3452,13 @@ async fn reload_resources_with_reexec(
         shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
         return Ok((app, None));
     };
+    if host == HostPass::ResourcesOnly {
+        // Plain `/reload` never probes or replaces the process image. The host
+        // layer needs `/reload --force` or `reload_host = true`; without that a
+        // binary change is not even resolved here.
+        shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
+        return Ok((app, None));
+    }
     let session_id = match crate::app::bootstrap::terminal_goal_session_id(app.agent.session()) {
         Ok(id) => id,
         Err(error) => {
@@ -3453,27 +3478,61 @@ async fn reload_resources_with_reexec(
     let observed = reexec.observe_generation();
     let workers = active_subagent_workers(&app);
     let safety = live_reexec_inputs(&workers);
+    // The two consents a host pass can need. A typed `/reload --force` already
+    // carries the retarget consent; every other host pass must ask before a
+    // retargeted image is probed.
     let mut options = crate::reexec::ReexecOptions::refusing_workers();
-    let mut decision =
-        reexec_decision(&mut app, reexec, &observed, &safety, options, &workers).await;
+    if matches!(
+        host,
+        HostPass::Allowed {
+            redirect_confirmed: true
+        }
+    ) {
+        options = options.confirming_redirect();
+    }
     // Live workers refuse the reload by default. The one explicit opt-in is the
     // user's decision to detach them, and it is offered only when every worker
     // that would be detached already resolves in this session's durable roster:
     // extension shutdown detaches them, the replacement image reattaches them
     // from that roster alone, and a worker without a durable record would be
-    // lost rather than detached.
-    let worker_refusal = detached_worker_refusal(&decision);
-    if let Some(count) = worker_refusal {
-        if workers.references.len() != count {
-            shell.error(format!(
-                "reload: {count} background workers are active and do not all disclose a durable session reference; detaching them could lose work, so the reload stays refused"
-            ));
-        } else if confirm_worker_detach(shell, input, count).await? {
-            options = crate::reexec::ReexecOptions::detaching_workers();
-            decision =
-                reexec_decision(&mut app, reexec, &observed, &safety, options, &workers).await;
+    // lost rather than detached. A retargeted image is confirmed the same way
+    // *before* it is probed, because the probe is its first execution.
+    let decision = loop {
+        let decision =
+            reexec_decision(&mut app, reexec, &observed, &safety, options, &workers).await;
+        match decision {
+            crate::reexec::ReexecDecision::ConfirmationRequired { redirect, .. }
+                if !options.redirect_confirmed =>
+            {
+                if confirm_binary_retarget(shell, input, &redirect).await? {
+                    options = options.confirming_redirect();
+                    continue;
+                }
+                shell.notice(
+                    "reload cancelled · the replaced binary was not probed or entered; this process is unchanged",
+                );
+                return Ok((app, None));
+            }
+            crate::reexec::ReexecDecision::Refused {
+                reason: crate::reexec::RefusalReason::BackgroundWorkers(count),
+                notice,
+            } if !options.detach_background_workers => {
+                if workers.references.len() != count {
+                    shell.error(format!(
+                        "reload: {count} background workers are active and do not all disclose a durable session reference; detaching them could lose work, so the reload stays refused"
+                    ));
+                    return Ok((app, None));
+                }
+                if confirm_worker_detach(shell, input, count).await? {
+                    options = options.with_detaching_workers();
+                    continue;
+                }
+                shell.notice(notice);
+                return Ok((app, None));
+            }
+            other => break other,
         }
-    }
+    };
     match decision {
         crate::reexec::ReexecDecision::ResourcesOnly => {
             shell.notice(crate::reexec::notice::RESOURCES_ONLY);
@@ -3504,6 +3563,13 @@ async fn reload_resources_with_reexec(
             shell.error(notice);
             Ok((app, None))
         }
+        crate::reexec::ReexecDecision::ConfirmationRequired { notice, .. } => {
+            // Unreachable with the loop above, which answers a confirmation
+            // before this match; fail closed if a future edit ever lets one
+            // through.
+            shell.error(notice);
+            Ok((app, None))
+        }
     }
 }
 
@@ -3530,15 +3596,37 @@ async fn reexec_decision(
         .await
 }
 
-/// The worker count of one refusal, when that refusal is the detachable one.
-fn detached_worker_refusal(decision: &crate::reexec::ReexecDecision) -> Option<usize> {
-    match decision {
-        crate::reexec::ReexecDecision::Refused {
-            reason: crate::reexec::RefusalReason::BackgroundWorkers(count),
-            ..
-        } => Some(*count),
-        _ => None,
-    }
+/// Ask the user to confirm entering a replaced or moved binary.
+///
+/// The probe executes the candidate image, so a retargeted image is never
+/// probed before this answer. The suggested choice is to keep the current
+/// process, and a denied confirmation leaves the binary unexecuted.
+async fn confirm_binary_retarget(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    redirect: &crate::reexec::ExecutableRedirect,
+) -> anyhow::Result<bool> {
+    let detail = "The new image has not been probed or executed yet. Approving runs it once as a \
+                  probe and then replaces this process image.";
+    let prompt = match redirect {
+        crate::reexec::ExecutableRedirect::Moved { from, to } => format!(
+            "The octet binary moved from {} to {}. Reload into it?",
+            from.display(),
+            to.display()
+        ),
+        crate::reexec::ExecutableRedirect::Replaced { path } => format!(
+            "The octet binary at {} was replaced (new file identity). Reload into it?",
+            path.display()
+        ),
+    };
+    let request = octet_agent::extension_process::ConfirmationRequest {
+        parent_request_id: None,
+        prompt,
+        detail: Some(detail.to_owned()),
+        destructive: false,
+        default: false,
+    };
+    extension_confirmation_picker(shell, input, "octet", &request).await
 }
 
 /// The explicit opt-in that lets one `/reload` detach live background workers.
@@ -3645,12 +3733,23 @@ async fn apply_live_reload_plan(
     let wants_resources = plan.contains(ReloadLayer::Resources);
     let wants_extensions = plan.contains(ReloadLayer::Extensions);
     let wants_host = plan.contains(ReloadLayer::Host);
+    // A forced pass is the user's explicit confirmation of whatever the
+    // executable now is; an automatic host pass must ask before a retargeted
+    // image is probed.
+    let host_pass = if wants_host {
+        HostPass::Allowed {
+            redirect_confirmed: plan.is_forced(),
+        }
+    } else {
+        HostPass::ResourcesOnly
+    };
 
     if wants_resources || wants_host {
         // `reload_resources_with_reexec` owns the transactional resource reload
         // and the re-exec decision. The replacement image is started only after
         // this function returns and the TUI is left.
-        let (next, host_plan) = reload_resources_with_reexec(app, shell, input, reexec).await?;
+        let (next, host_plan) =
+            reload_resources_with_reexec(app, shell, input, reexec, host_pass).await?;
         app = next;
         if wants_resources {
             plan.record_reload(ReloadLayer::Resources);
@@ -5291,8 +5390,14 @@ async fn apply_pending_actions(
                 shell.show_context_report(crate::tui::context::ContextReport::capture(&app, &[]));
             }
             PendingIdleAction::ReloadResources => {
-                let (next, plan) =
-                    reload_resources_with_reexec(app, shell, input, reexec.as_deref_mut()).await?;
+                let (next, plan) = reload_resources_with_reexec(
+                    app,
+                    shell,
+                    input,
+                    reexec.as_deref_mut(),
+                    HostPass::ResourcesOnly,
+                )
+                .await?;
                 app = next;
                 if let Some(plan) = plan {
                     *pending_reexec = Some(plan);
@@ -6775,7 +6880,17 @@ async fn run_idle_command(
             update_status(shell, &app);
         }
         Command::Reload => {
-            let (next, plan) = reload_resources_with_reexec(app, shell, input, reexec).await?;
+            // Plain `/reload` is resources-only: it never probes or replaces
+            // the process image. `/reload --force` is handled before
+            // `commands::parse` and is the explicit host path.
+            let (next, plan) = reload_resources_with_reexec(
+                app,
+                shell,
+                input,
+                reexec,
+                HostPass::ResourcesOnly,
+            )
+            .await?;
             app = next;
             if let Some(plan) = plan {
                 return Ok(IdleCommandOutcome::Reexec {

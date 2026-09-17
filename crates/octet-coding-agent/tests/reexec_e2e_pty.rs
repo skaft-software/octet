@@ -883,7 +883,7 @@ fn real_octet_reload_reexecs_a_changed_binary_in_place_and_resumes_the_same_sess
     // The on-disk image changes under the running process: the pane must probe
     // the candidate (through the wrapper) before it may replace itself.
     pane.install_marker_wrapper(&image, &marker);
-    pane.pty.write_input(b"/reload\r");
+    pane.pty.write_input(b"/reload --force\r");
 
     await_probe_record(&mut pane, &marker, STEP_TIMEOUT);
     let reexec = await_resume_record(&mut pane, &marker, STEP_TIMEOUT);
@@ -978,7 +978,7 @@ fn real_octet_reload_with_an_unchanged_binary_stays_in_place_and_reports_it() {
         "the pane must start without a resume command: {before_argv}"
     );
 
-    pane.pty.write_input(b"/reload\r");
+    pane.pty.write_input(b"/reload --force\r");
     pane.wait_for(b"binary unchanged", STEP_TIMEOUT);
     assert!(
         contains_bytes(&pane.pty.output, b"resources reloaded"),
@@ -1062,7 +1062,7 @@ fn real_octet_reload_of_one_pane_leaves_the_other_pane_and_session_healthy() {
 
     // Reload pane A exactly as in (2), with the changed-binary wrapper.
     pane_a.install_marker_wrapper(&image_a, &marker_a);
-    pane_a.pty.write_input(b"/reload\r");
+    pane_a.pty.write_input(b"/reload --force\r");
     await_probe_record(&mut pane_a, &marker_a, STEP_TIMEOUT);
     let reexec = await_resume_record(&mut pane_a, &marker_a, STEP_TIMEOUT);
     let resume_index = reexec
