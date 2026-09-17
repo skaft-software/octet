@@ -74,8 +74,7 @@ pub const CODEX_CONTEXT_OVERRIDE_ENV: &str = "OCTET_CODEX_CONTEXT_WINDOW";
 /// Environment variable carrying the explicit above-standard-tier
 /// acknowledgement. Fail-closed: absent, empty, or unparseable means "not
 /// acknowledged".
-pub const CODEX_CONTEXT_ACKNOWLEDGE_ENV: &str =
-    "OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF";
+pub const CODEX_CONTEXT_ACKNOWLEDGE_ENV: &str = "OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF";
 
 /// `Session::record_usage_uncertainty` operation identifier for accepted Codex
 /// attempts whose effective window is above the standard 272K tier, where the
@@ -167,7 +166,11 @@ impl CodexContextOverride {
                 std::env::set_var(CODEX_CONTEXT_OVERRIDE_ENV, tokens.to_string());
                 std::env::set_var(
                     CODEX_CONTEXT_ACKNOWLEDGE_ENV,
-                    if self.acknowledge_cost_cliff { "1" } else { "0" },
+                    if self.acknowledge_cost_cliff {
+                        "1"
+                    } else {
+                        "0"
+                    },
                 );
             }
             None => {
@@ -228,10 +231,7 @@ fn normalize(value: Option<&str>) -> Option<&str> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodexContextWindowError {
     /// The requested window is too small for a Codex session.
-    OverrideBelowMinimum {
-        requested: u64,
-        minimum: u64,
-    },
+    OverrideBelowMinimum { requested: u64, minimum: u64 },
     /// The requested window is above what the model is entitled to.
     OverrideAboveEntitlement {
         model_id: String,
@@ -636,7 +636,10 @@ mod tests {
     fn deliberate_cap_is_kept_and_reported_as_a_clamp() {
         let resolved = ctx();
         assert_eq!(resolved.context_window, CODEX_CONTEXT_WINDOW_CAP);
-        assert_eq!(resolved.advertised_context_window, CODEX_ASTRA_MAX_CONTEXT_WINDOW);
+        assert_eq!(
+            resolved.advertised_context_window,
+            CODEX_ASTRA_MAX_CONTEXT_WINDOW
+        );
         assert_eq!(resolved.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
         assert!(
             !resolved.has_uncertain_usage,

@@ -513,6 +513,10 @@ class Worker:
     detached_at_ms: Optional[int] = None
     reattach_count: int = 0
     last_reattached_at_ms: Optional[int] = None
+    # Bounded host diagnostic carried by the record itself. It names why a
+    # detached worker was not reattached, or why it is parked at the approval
+    # boundary, and is never inferred by this process.
+    host_diagnostic: Optional[str] = None
 
     @property
     def terminal(self) -> bool:
@@ -602,6 +606,7 @@ class Worker:
             "detached_at_ms": self.detached_at_ms,
             "reattach_count": self.reattach_count,
             "last_reattached_at_ms": self.last_reattached_at_ms,
+            "host_diagnostic": self.host_diagnostic,
             "delivery": self.delivery_state,
         }
         if include_summary:

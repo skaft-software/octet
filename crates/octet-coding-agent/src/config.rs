@@ -196,6 +196,25 @@ impl ToolPolicy {
         Ok(())
     }
 
+    /// Add one validated tool name to the allowlist.
+    ///
+    /// This is the additive opt-in path (`--powershell`): unlike
+    /// [`Self::only`] it preserves every default entry, and it deliberately
+    /// leaves `requested` untouched so an additive grant is never reported as
+    /// an `--tools` allowlist request.
+    pub fn include(&mut self, name: &str) -> anyhow::Result<()> {
+        let name = name.trim().to_ascii_lowercase();
+        if !valid_tool_name(&name) {
+            anyhow::bail!(
+                "invalid tool name {name:?}; built-ins: {}",
+                SUPPORTED_TOOL_NAMES.join(", ")
+            );
+        }
+        self.excluded.remove(&name);
+        self.enabled.insert(name);
+        Ok(())
+    }
+
     /// Whether a schema and implementation may be registered.
     pub fn enabled(&self, name: &str) -> bool {
         self.enabled.contains(name)
@@ -651,6 +670,22 @@ mod tests {
     fn default_compaction_uses_only_the_fixed_reserve() {
         assert_eq!(CompactionPolicy::default().threshold_fraction, 1.0);
         assert_eq!(CompactionPolicy::default().max_active_tokens, None);
+    }
+
+    #[test]
+    fn powershell_opt_in_is_additive_and_removable_again() {
+        let mut policy = ToolPolicy::default();
+        assert!(!policy.enabled("powershell"));
+        policy.include("powershell").unwrap();
+        // The opt-in never replaces the default allowlist and is not an
+        // `--tools` request, so startup diagnostics do not claim one.
+        for name in ["read", "edit", "write", "bash", "powershell"] {
+            assert!(policy.enabled(name), "{name}");
+        }
+        assert!(policy.explicit_names().is_none());
+        assert!(policy.include("not a tool").is_err());
+        policy.exclude("powershell").unwrap();
+        assert!(!policy.enabled("powershell"));
     }
 
     #[test]

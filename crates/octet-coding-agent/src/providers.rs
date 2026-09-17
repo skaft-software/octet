@@ -52,4 +52,4 @@ pub(crate) use contract::{
 #[cfg(test)]
 pub(crate) use contract::{OPENAI, OPENCODE, OPENROUTER};
 pub(crate) use pricing::pricing_for;
-pub(crate) use vertex::resolve_application_default_credentials;
+pub(crate) use vertex::resolve_vertex_configuration;

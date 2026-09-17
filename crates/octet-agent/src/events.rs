@@ -10,6 +10,7 @@ use crate::effect::{EffectAuthorization, ToolEffect, ToolPolicyDenialCode};
 use crate::sandbox::EffectiveToolPolicy;
 use crate::session::EntryId;
 use crate::tool::{ToolError, ToolOutput, ToolProgress};
+use crate::tools::deferred::{DeferredHandle, DeferredStopReason};
 
 /// Whether a delegated child inherited an orchestration setting or supplied a
 /// host-admitted child-session override.
@@ -429,6 +430,49 @@ pub enum AgentEvent {
         /// How the run ended.
         reason: FinishReason,
     },
+}
+
+/// `run_suspend`: one provider response durably parked a deferred run.
+///
+/// This is a host-lifecycle notification rather than a frontend stream event:
+/// the parked run does no provider work until a later permitted pass polls it,
+/// and the durable leaf is the authority across a restart. It carries only
+/// host-selected identities and the provider's own handle; it is never
+/// model-visible context and never usage accounting.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DeferredRunSuspended {
+    /// Durable operation identity of the parked request.
+    pub operation_id: String,
+    /// Assistant entry whose response most recently carried the handle.
+    pub source_entry_id: String,
+    /// Normalized stop reason that parked the run.
+    pub stop_reason: DeferredStopReason,
+    /// Provider handle the next permitted pass must poll.
+    pub handle: DeferredHandle,
+    /// Poll number the parked leaf is at (`0` after the first suspension).
+    pub poll: u64,
+    /// Durable generation of the parked leaf.
+    pub generation: u64,
+}
+
+/// `run_resume`: one admitted poll durably resumed a parked deferred run.
+///
+/// Exactly one permit was consumed for this driving pass, and the poll's
+/// effect-pending intent was durable before this notification. `recovery` is
+/// true when the admitted poll replaced an unknown-outcome
+/// `deferred.effect_pending` leaf under fresh reserved ids.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DeferredRunResumed {
+    /// Durable operation identity of the parked request.
+    pub operation_id: String,
+    /// Unique driving pass that owned the single poll permit.
+    pub pass_id: String,
+    /// Poll number being polled (unchanged from the parked leaf).
+    pub poll: u64,
+    /// Generation the permit was minted for.
+    pub generation: u64,
+    /// Whether the poll replaced an unknown-outcome poll.
+    pub recovery: bool,
 }
 
 /// Reason an autonomous run compacted its active context.

@@ -923,6 +923,50 @@ pub fn is_punctuation_char(character: char) -> bool {
     )
 }
 
+/// Return the OSC 8 hyperlink target covering one visible cell of a rendered
+/// row, if any.
+///
+/// Escape sequences are style state, not cells: the scan advances a column
+/// counter over visible graphemes with [`visible_width`] semantics (a tab counts
+/// as three cells), tracks the innermost active `OSC 8` target, and reports the
+/// target whose own cells contain `column`. A row carries its own hyperlink
+/// state, so a link opened on a previous row is never resolved from this row.
+pub fn hyperlink_at_column(line: &str, column: usize) -> Option<String> {
+    let mut active: Option<String> = None;
+    let mut current = 0usize;
+    let mut cursor = 0usize;
+    while cursor < line.len() {
+        if let Some(ansi) = extract_ansi_code(line, cursor) {
+            if let Some(body) = ansi.code.strip_prefix("\x1b]8;") {
+                let body = body
+                    .strip_suffix('\x07')
+                    .or_else(|| body.strip_suffix("\x1b\\"));
+                if let Some(body) = body {
+                    if let Some((_params, url)) = body.split_once(';') {
+                        active = (!url.is_empty()).then(|| url.to_owned());
+                    }
+                }
+            }
+            cursor += ansi.length;
+            continue;
+        }
+        let next = (cursor + 1..=line.len())
+            .find(|offset| {
+                line.is_char_boundary(*offset) && extract_ansi_code(line, *offset).is_some()
+            })
+            .unwrap_or(line.len());
+        for grapheme in line[cursor..next].graphemes(true) {
+            let width = visible_width(grapheme);
+            if active.is_some() && column >= current && column < current.saturating_add(width) {
+                return active;
+            }
+            current = current.saturating_add(width);
+        }
+        cursor = next;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,5 +1037,33 @@ mod tests {
         assert_eq!(strip_terminal_sequences("before\x1b�after"), "before�after");
         assert_eq!(strip_terminal_sequences("\x1b🙂界"), "🙂界");
         assert_eq!(strip_terminal_sequences("a\x1b(Bb"), "ab");
+    }
+
+    #[test]
+    fn hyperlinks_resolve_by_visible_cell() {
+        let row = "plain \x1b]8;;https://example.test/docs\x07docs\x1b]8;;\x07 tail";
+        assert_eq!(hyperlink_at_column(row, 0), None);
+        assert_eq!(
+            hyperlink_at_column(row, 6).as_deref(),
+            Some("https://example.test/docs")
+        );
+        assert_eq!(
+            hyperlink_at_column(row, 9).as_deref(),
+            Some("https://example.test/docs")
+        );
+        assert_eq!(hyperlink_at_column(row, 10), None);
+        // A link closed on the previous row is not inherited.
+        assert_eq!(hyperlink_at_column("no link here", 2), None);
+        // Wide and accented cells keep their own boundaries.
+        let wide = "\x1b]8;;https://wide.test\x07審査\x1b]8;;\x07x";
+        assert_eq!(
+            hyperlink_at_column(wide, 1).as_deref(),
+            Some("https://wide.test")
+        );
+        assert_eq!(
+            hyperlink_at_column(wide, 3).as_deref(),
+            Some("https://wide.test")
+        );
+        assert_eq!(hyperlink_at_column(wide, 4), None);
     }
 }

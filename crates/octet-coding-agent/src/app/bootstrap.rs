@@ -495,8 +495,13 @@ struct ProviderInventoryCache {
 }
 
 enum ProviderInventoryResponse {
-    Modified { body: serde_json::Value, etag: Option<String> },
-    NotModified { etag: Option<String> },
+    Modified {
+        body: serde_json::Value,
+        etag: Option<String>,
+    },
+    NotModified {
+        etag: Option<String>,
+    },
 }
 
 enum CachedProviderInventory {
@@ -594,11 +599,13 @@ fn load_provider_inventory_cache(
     inventory_url: &str,
     credential_fingerprint: &str,
 ) -> anyhow::Result<Option<CachedProviderInventory>> {
-    Ok(load_provider_inventory_record(path, provider_id, inventory_url, credential_fingerprint)?
-        .map(|cache| match cache.body {
-            Some(body) => CachedProviderInventory::Available(body),
-            None => CachedProviderInventory::Unavailable,
-        }))
+    Ok(
+        load_provider_inventory_record(path, provider_id, inventory_url, credential_fingerprint)?
+            .map(|cache| match cache.body {
+                Some(body) => CachedProviderInventory::Available(body),
+                None => CachedProviderInventory::Unavailable,
+            }),
+    )
 }
 
 fn load_provider_inventory_record(
@@ -666,10 +673,14 @@ fn provider_inventory_cache_is_stale(path: &std::path::Path) -> bool {
 }
 
 fn inventory_etag(value: Option<&str>) -> Option<String> {
-    value.filter(|value| {
-        !value.is_empty() && value.len() <= 4096 && value.is_ascii()
-            && http::HeaderValue::from_str(value).is_ok()
-    }).map(str::to_owned)
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 4096
+                && value.is_ascii()
+                && http::HeaderValue::from_str(value).is_ok()
+        })
+        .map(str::to_owned)
 }
 
 fn fetch_provider_inventory(
@@ -681,12 +692,17 @@ fn fetch_provider_inventory(
         .headers(headers)
         .send()
         .map_err(|_| anyhow::anyhow!("model discovery request failed"))?;
-    let etag = inventory_etag(response.headers().get(http::header::ETAG)
-        .and_then(|value| value.to_str().ok()));
+    let etag = inventory_etag(
+        response
+            .headers()
+            .get(http::header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+    );
     match response.status() {
         http::StatusCode::NOT_MODIFIED => Ok(ProviderInventoryResponse::NotModified { etag }),
         http::StatusCode::OK => Ok(ProviderInventoryResponse::Modified {
-            body: bounded_discovery_json(response, "model discovery")?, etag,
+            body: bounded_discovery_json(response, "model discovery")?,
+            etag,
         }),
         _ => anyhow::bail!("model discovery request was rejected"),
     }
@@ -707,8 +723,12 @@ fn schedule_provider_inventory_refresh(
         .name(format!("octet-{provider_id}-catalog-refresh"))
         .spawn(move || {
             let _ = refresh_provider_inventory_with(
-                &path, provider_id, inventory_url, headers,
-                &credential_fingerprint, fetch_provider_inventory,
+                &path,
+                provider_id,
+                inventory_url,
+                headers,
+                &credential_fingerprint,
+                fetch_provider_inventory,
             );
         });
 }
@@ -726,18 +746,27 @@ where
 {
     // Validators are scoped to the same provider, URL and credential as the body.
     // A corrupt/foreign cache must never send its validator to another endpoint.
-    let cached = load_provider_inventory_record(path, provider_id, &inventory_url,
-        credential_fingerprint).ok().flatten();
-    let validator = cached.as_ref().filter(|cache| cache.body.is_some())
+    let cached =
+        load_provider_inventory_record(path, provider_id, &inventory_url, credential_fingerprint)
+            .ok()
+            .flatten();
+    let validator = cached
+        .as_ref()
+        .filter(|cache| cache.body.is_some())
         .and_then(|cache| inventory_etag(cache.etag.as_deref()));
     let mut headers = headers;
     headers.remove(http::header::IF_NONE_MATCH);
     if let Some(etag) = &validator {
-        headers.insert(http::header::IF_NONE_MATCH, http::HeaderValue::from_str(etag)?);
+        headers.insert(
+            http::header::IF_NONE_MATCH,
+            http::HeaderValue::from_str(etag)?,
+        );
     }
     let fetched = fetch(inventory_url.clone(), headers).and_then(|response| {
         let (body, etag) = match response {
-            ProviderInventoryResponse::Modified { body, etag } => (body, inventory_etag(etag.as_deref())),
+            ProviderInventoryResponse::Modified { body, etag } => {
+                (body, inventory_etag(etag.as_deref()))
+            }
             ProviderInventoryResponse::NotModified { etag } => {
                 let Some(cache) = cached.filter(|_| validator.is_some()) else {
                     anyhow::bail!("model discovery returned 304 without a scoped validator");
@@ -751,12 +780,18 @@ where
             provider_id: provider_id.to_owned(),
             inventory_url: inventory_url.clone(),
             credential_fingerprint: credential_fingerprint.to_owned(),
-            body: Some(body.clone()), etag, checked_at: Some(inventory_checked_at()),
+            body: Some(body.clone()),
+            etag,
+            checked_at: Some(inventory_checked_at()),
         };
         if let Err(error) = crate::auth::write_private_atomic(
-            path, &serde_json::to_vec(&cache)?, ".provider-models-",
+            path,
+            &serde_json::to_vec(&cache)?,
+            ".provider-models-",
         ) {
-            crate::output::stderr!("warning: could not persist {provider_id} model metadata: {error}");
+            crate::output::stderr!(
+                "warning: could not persist {provider_id} model metadata: {error}"
+            );
         }
         Ok(body)
     });
@@ -860,22 +895,50 @@ where
 
 #[cfg(test)]
 fn fetch_and_cache_provider_inventory_with<F>(
-    path: &std::path::Path, provider_id: &'static str, inventory_url: String,
-    headers: http::HeaderMap, fingerprint: &str, fetch: F,
+    path: &std::path::Path,
+    provider_id: &'static str,
+    inventory_url: String,
+    headers: http::HeaderMap,
+    fingerprint: &str,
+    fetch: F,
 ) -> anyhow::Result<serde_json::Value>
-where F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value> {
-    refresh_provider_inventory_with(path, provider_id, inventory_url, headers, fingerprint,
-        |url, headers| fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None }))
+where
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+{
+    refresh_provider_inventory_with(
+        path,
+        provider_id,
+        inventory_url,
+        headers,
+        fingerprint,
+        |url, headers| {
+            fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None })
+        },
+    )
 }
 
 #[cfg(test)]
 fn cached_provider_inventory_with_fetch<F>(
-    path: PathBuf, provider_id: &'static str, inventory_url: String,
-    headers: http::HeaderMap, credential: &str, fetch: F,
+    path: PathBuf,
+    provider_id: &'static str,
+    inventory_url: String,
+    headers: http::HeaderMap,
+    credential: &str,
+    fetch: F,
 ) -> anyhow::Result<Option<serde_json::Value>>
-where F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value> {
-    cached_provider_inventory_with_response_fetch(path, provider_id, inventory_url, headers, credential,
-        |url, headers| fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None }))
+where
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+{
+    cached_provider_inventory_with_response_fetch(
+        path,
+        provider_id,
+        inventory_url,
+        headers,
+        credential,
+        |url, headers| {
+            fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None })
+        },
+    )
 }
 
 fn cached_provider_inventory_offline(
@@ -1762,7 +1825,12 @@ fn api_models_from_response_for(
         let described = declaration
             .and_then(|d| d.route_for_model(id))
             .map(|route| {
-                self_described_entry(entry, EndpointId(route.endpoint_id.into()), id, route.protocol)
+                self_described_entry(
+                    entry,
+                    EndpointId(route.endpoint_id.into()),
+                    id,
+                    route.protocol,
+                )
             })
             .transpose()?
             .flatten();
@@ -1826,7 +1894,11 @@ fn api_models_from_response_for(
             // supplies its documented window instead of a generic placeholder.
             // A partially asserting endpoint keeps independent leaves and is
             // never mixed with snapshot values.
-            .or_else(|| (!limits_asserted).then(|| pinned_limit(snapshot.as_ref(), "context")).flatten()),
+            .or_else(|| {
+                (!limits_asserted)
+                    .then(|| pinned_limit(snapshot.as_ref(), "context"))
+                    .flatten()
+            }),
             max_output_tokens: positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
                 .or_else(|| {
                     entry
@@ -1838,7 +1910,11 @@ fn api_models_from_response_for(
                         .get("top_provider")
                         .and_then(|provider| positive_u64(provider, &["max_completion_tokens"]))
                 })
-                .or_else(|| (!limits_asserted).then(|| pinned_limit(snapshot.as_ref(), "output")).flatten()),
+                .or_else(|| {
+                    (!limits_asserted)
+                        .then(|| pinned_limit(snapshot.as_ref(), "output"))
+                        .flatten()
+                }),
             tools: custom_model_metadata_supports_tools(entry),
             parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"]),
             #[cfg(test)]
@@ -2096,7 +2172,13 @@ fn discovered_reasoning_capability(
         Protocol::MistralConversations => return None,
         // Native codecs need a declaration-owned control/budget contract, but
         // that must not broaden an endpoint's narrower exact choices/default.
-        Protocol::AnthropicMessages | Protocol::GoogleGenerativeAi | Protocol::BedrockConverse => {
+        // Pi-messages is native in the same sense: its reasoning state is
+        // carried on the wire, so the declaration owns the contract rather than
+        // a manufactured Chat control.
+        Protocol::AnthropicMessages
+        | Protocol::GoogleGenerativeAi
+        | Protocol::BedrockConverse
+        | Protocol::PiMessages => {
             let mut capability = known?;
             if metadata.control.is_some_and(|control| {
                 control != ReasoningControl::Effort && control != capability.control
@@ -2259,7 +2341,9 @@ fn register_openai_compatible_models_from_response(
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
                 parallel_tool_calls: model.tools
-                    && model.parallel_tool_calls.unwrap_or(protocol != Protocol::OpenAiChat),
+                    && model
+                        .parallel_tool_calls
+                        .unwrap_or(protocol != Protocol::OpenAiChat),
                 reasoning,
                 responses_lite: false,
                 agent_delegation: None,
@@ -3044,8 +3128,7 @@ fn try_register_declaration(
             try_register_environment_declaration(catalog, declaration)
         }
         ProviderAuthentication::ApplicationDefaultCredentials => {
-            let Some(configuration) = crate::providers::resolve_application_default_credentials()?
-            else {
+            let Some(configuration) = crate::providers::resolve_vertex_configuration()? else {
                 return Ok(());
             };
             match declaration.model_discovery {
@@ -3243,7 +3326,7 @@ fn declaration_is_configured(declaration: &ProviderDeclaration) -> anyhow::Resul
                 Ok(crate::providers::resolve_environment(declaration)?.is_some())
             }
             ProviderAuthentication::ApplicationDefaultCredentials => {
-                Ok(crate::providers::resolve_application_default_credentials()?.is_some())
+                Ok(crate::providers::resolve_vertex_configuration()?.is_some())
             }
             // A host-owned integration must call CopilotProvider explicitly;
             // environment/configuration bootstrap has no authority to enable it.
@@ -3336,7 +3419,8 @@ fn register_declaration_inventory(
 /// its own catalog-registration branch instead.
 fn register_selected_preset_inventories(catalog: &mut ModelCatalog, routes: &[&'static str]) {
     for route in routes {
-        if let Some(declaration) = readiness_declarations().find(|declaration| declaration.id == *route)
+        if let Some(declaration) =
+            readiness_declarations().find(|declaration| declaration.id == *route)
         {
             register_declaration_inventory(catalog, declaration);
         }
@@ -3345,7 +3429,10 @@ fn register_selected_preset_inventories(catalog: &mut ModelCatalog, routes: &[&'
     // emitted before it, so the harness reads the delta as the time readiness
     // may attribute to the user's own selection; with a Codex route this phase
     // is skipped because that route initializes inside `catalog.codex`.
-    if routes.iter().any(|route| *route != crate::providers::CODEX.id) {
+    if routes
+        .iter()
+        .any(|route| *route != crate::providers::CODEX.id)
+    {
         startup_phase("catalog.selected");
     }
 }
@@ -5181,11 +5268,7 @@ fn discover_codex_models_within_envelope(
         CODEX_READINESS_ENVELOPE,
         cancel,
         move |cancel| {
-            discover_codex_models_with(
-                store,
-                cancel,
-                crate::auth::codex::REFRESH_LOCK_WAIT,
-            )
+            discover_codex_models_with(store, cancel, crate::auth::codex::REFRESH_LOCK_WAIT)
         },
     )
 }
@@ -5292,8 +5375,8 @@ pub(crate) fn run_route_readiness<T: Send + 'static>(
     envelope: Duration,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     work: impl FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<T>
-    + Send
-    + 'static,
+        + Send
+        + 'static,
 ) -> anyhow::Result<T> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker_cancel = std::sync::Arc::clone(&cancel);
@@ -5347,10 +5430,8 @@ fn discover_codex_models_with(
         .build()?;
     runtime.block_on(async move {
         #[cfg(test)]
-        let resolver = crate::auth::codex::CodexResolver::with_refresh_lock_wait(
-            store,
-            refresh_lock_wait,
-        );
+        let resolver =
+            crate::auth::codex::CodexResolver::with_refresh_lock_wait(store, refresh_lock_wait);
         #[cfg(not(test))]
         let resolver = {
             let _ = refresh_lock_wait;
@@ -7772,7 +7853,10 @@ mod codex_context_note_regression_tests {
             "gpt-5.6-luna",
             &resolution,
         );
-        assert_eq!(notes.note_for(&ModelId("gpt-5.6-luna".to_owned())), Some(note.as_str()));
+        assert_eq!(
+            notes.note_for(&ModelId("gpt-5.6-luna".to_owned())),
+            Some(note.as_str())
+        );
     }
 
     /// The note is delivered lazily and at most once per session, and a route

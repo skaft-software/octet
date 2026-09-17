@@ -192,8 +192,12 @@ fn register_static_model(
     catalog.register_model(ModelSpec {
         preset: octet_ai::ModelPreset {
             mistral_reasoning: match model.reasoning_mode {
-                super::models::StaticReasoningMode::MistralEffort => Some(octet_ai::MistralReasoningProfile::ReasoningEffort),
-                super::models::StaticReasoningMode::MistralPrompt => Some(octet_ai::MistralReasoningProfile::PromptMode),
+                super::models::StaticReasoningMode::MistralEffort => {
+                    Some(octet_ai::MistralReasoningProfile::ReasoningEffort)
+                }
+                super::models::StaticReasoningMode::MistralPrompt => {
+                    Some(octet_ai::MistralReasoningProfile::PromptMode)
+                }
                 _ => None,
             },
             ..Default::default()
@@ -267,12 +271,18 @@ pub(crate) fn register_discovered_model_at_route(
     if !declaration.routes.contains(route) {
         anyhow::bail!("discovery route is not declared by the provider");
     }
+    // A declaration-owned wire profile fills the silence left by an inventory
+    // that publishes identifiers and capability metadata only. Endpoint
+    // assertions always win: a model without a reasoning capability receives no
+    // thinking profile, and the profile carries no header, sampling value or
+    // credential from discovery.
+    let preset = discovered_wire_preset(declaration, route, &capabilities);
     let catalog_id = format!("{}/{}", declaration.id, api_name);
     if has_model_id(catalog, &catalog_id) {
         return Ok(());
     }
     catalog.register_model(ModelSpec {
-        preset: Default::default(),
+        preset,
         id: ModelId(catalog_id),
         endpoint: EndpointId(route.endpoint_id.into()),
         api_name: api_name.to_owned(),
@@ -284,6 +294,31 @@ pub(crate) fn register_discovered_model_at_route(
         cache: cache_compatibility(declaration.compatibility, api_name, route.protocol),
     })?;
     Ok(())
+}
+
+/// The declaration-owned wire profile a discovered route receives, if any.
+///
+/// Silence is the default: a non-Chat route, a model the endpoint and the
+/// pinned record both leave without a reasoning capability, or a capability
+/// whose control is a token budget (which the Chat protocol cannot encode
+/// without a declared budget field) receives no preset. Only the declaration's
+/// own provider identity selects a profile; no discovered header or preset is
+/// read.
+fn discovered_wire_preset(
+    declaration: &ProviderDeclaration,
+    route: &ProviderRoute,
+    capabilities: &Capabilities,
+) -> octet_ai::ModelPreset {
+    if route.protocol != Protocol::OpenAiChat {
+        return Default::default();
+    }
+    let Some(reasoning) = capabilities.reasoning.as_ref() else {
+        return Default::default();
+    };
+    if reasoning.control == ReasoningControl::TokenBudget {
+        return Default::default();
+    }
+    super::models::discovery_wire_preset(declaration.id).unwrap_or_default()
 }
 
 /// Copy declared public headers into a request map. The generated manifest
@@ -606,6 +641,160 @@ mod tests {
         assert_eq!(model.spec.protocol, Protocol::BedrockConverse);
         assert!(!model.spec.capabilities.structured_output);
         assert_eq!(model.endpoint.id.0, "bedrock");
+    }
+
+    #[test]
+    fn declared_wire_profiles_fill_discovered_token_plan_and_coding_models() {
+        use crate::providers::contract::{BASETEN, QWEN_TOKEN_PLAN, ZAI_CODING_CN};
+
+        let credential = EnvironmentCredential::for_test("TEST_PROVIDER_KEY", "test-value");
+        let reasoning = octet_ai::ReasoningCapability {
+            options: Some(octet_ai::types::ReasoningOptions {
+                values: vec!["low".into(), "high".into()],
+                default: Some("high".into()),
+            }),
+            control: octet_ai::ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::SystemMessage,
+            min_effort: octet_ai::ReasoningEffort::Low,
+            max_effort: octet_ai::ReasoningEffort::High,
+        };
+        let capabilities = || Capabilities {
+            input_modalities: ModalitySet::none(),
+            output_modalities: ModalitySet::none(),
+            tools: true,
+            parallel_tool_calls: false,
+            reasoning: Some(reasoning.clone()),
+            responses_lite: false,
+            agent_delegation: None,
+            structured_output: false,
+            deferred_tool_loading: false,
+        };
+        let limits = ModelLimits {
+            context_window: 262_144,
+            max_output_tokens: 65_536,
+        };
+
+        for (declaration, api_name, expected_format) in [
+            (
+                &BASETEN,
+                "zai-org/GLM-5.2",
+                octet_ai::ThinkingFormat::Baseten,
+            ),
+            (
+                &QWEN_TOKEN_PLAN,
+                "qwen3.7-max",
+                octet_ai::ThinkingFormat::Qwen,
+            ),
+            (&ZAI_CODING_CN, "glm-5.2", octet_ai::ThinkingFormat::Zai),
+        ] {
+            let mut catalog = ModelCatalog::default();
+            register_environment_endpoints(
+                &mut catalog,
+                declaration,
+                &credential,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            register_discovered_model(
+                &mut catalog,
+                declaration,
+                api_name,
+                None,
+                capabilities(),
+                limits,
+                None,
+            )
+            .unwrap();
+            let model = catalog
+                .resolve(&ModelId(format!("{}/{api_name}", declaration.id)))
+                .expect("discovered model");
+            assert_eq!(model.spec.preset.thinking_format, Some(expected_format));
+            assert_eq!(model.spec.preset.supports_reasoning_effort, Some(true));
+            if expected_format == octet_ai::ThinkingFormat::Baseten {
+                assert_eq!(
+                    model.spec.preset.chat_template_args,
+                    Some(super::super::models::baseten_chat_template_args())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn discovered_models_without_reasoning_keep_an_empty_preset() {
+        use crate::providers::contract::BASETEN;
+
+        let credential = EnvironmentCredential::for_test("TEST_PROVIDER_KEY", "test-value");
+        let mut catalog = ModelCatalog::default();
+        register_environment_endpoints(&mut catalog, &BASETEN, &credential, Duration::from_secs(1))
+            .unwrap();
+        register_discovered_model(
+            &mut catalog,
+            &BASETEN,
+            "text-only-model",
+            None,
+            Capabilities {
+                input_modalities: ModalitySet::none(),
+                output_modalities: ModalitySet::none(),
+                tools: true,
+                parallel_tool_calls: false,
+                reasoning: None,
+                responses_lite: false,
+                agent_delegation: None,
+                structured_output: false,
+                deferred_tool_loading: false,
+            },
+            ModelLimits {
+                context_window: 32_768,
+                max_output_tokens: 8_192,
+            },
+            None,
+        )
+        .unwrap();
+        let model = catalog
+            .resolve(&ModelId("baseten/text-only-model".into()))
+            .expect("discovered model");
+        assert_eq!(model.spec.preset, octet_ai::ModelPreset::default());
+    }
+
+    #[test]
+    fn wire_profiles_stay_silent_for_non_chat_and_budget_capabilities() {
+        use crate::providers::contract::ZAI_CODING_CN;
+
+        let budget = Capabilities {
+            input_modalities: ModalitySet::none(),
+            output_modalities: ModalitySet::none(),
+            tools: true,
+            parallel_tool_calls: false,
+            reasoning: Some(octet_ai::ReasoningCapability {
+                options: None,
+                control: octet_ai::ReasoningControl::TokenBudget,
+                exposes_text: true,
+                preserves_state: false,
+                effort_budgets: None,
+                openai_chat_mode: octet_ai::OpenAiChatReasoningMode::SystemMessage,
+                min_effort: octet_ai::ReasoningEffort::Minimal,
+                max_effort: octet_ai::ReasoningEffort::High,
+            }),
+            responses_lite: false,
+            agent_delegation: None,
+            structured_output: false,
+            deferred_tool_loading: false,
+        };
+        // A token-budget Chat contract has no declared budget field here, so the
+        // pinned thinking format must not be attached.
+        assert_eq!(
+            discovered_wire_preset(&ZAI_CODING_CN, &ZAI_CODING_CN.routes[0], &budget),
+            octet_ai::ModelPreset::default()
+        );
+        // A non-Chat route never receives a Chat wire profile.
+        assert_ne!(MINIMAX.routes[0].protocol, Protocol::OpenAiChat);
+        assert_eq!(
+            discovered_wire_preset(&MINIMAX, &MINIMAX.routes[0], &budget),
+            octet_ai::ModelPreset::default()
+        );
     }
 
     #[test]

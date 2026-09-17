@@ -64,8 +64,63 @@ pub(crate) mod preset;
 pub(crate) mod mistral_conversations;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;
+pub(crate) mod pi_messages;
 
 pub(crate) mod sse;
+
+/// Pi's per-API `supportsStrictMode` default with a model's explicit
+/// declaration applied.
+///
+/// Pi's defaults are API-specific (`openai-completions` detects strict support,
+/// `openai-responses` defaults to `false` unless generated metadata enables it,
+/// Azure/Codex Responses and Google default to `true`, Bedrock and Anthropic to
+/// `false`). A model preset may set `supports_strict_mode` to override the
+/// route default in either direction. This is compatibility data, never a
+/// provider-name branch.
+pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
+    use crate::types::Protocol;
+    if let Some(declared) = model.spec.preset.supports_strict_mode {
+        return declared;
+    }
+    // Deliberately compared by name, not matched exhaustively: a new wire
+    // protocol must not force an edit here, and every future route keeps the
+    // conservative default until it declares otherwise.
+    if model.spec.protocol == Protocol::OpenAiResponses {
+        return matches!(
+            model.endpoint.runtime.responses_profile,
+            crate::types::ResponsesRuntimeProfile::Azure | crate::types::ResponsesRuntimeProfile::Codex
+        );
+    }
+    if model.spec.protocol == Protocol::AnthropicMessages {
+        return anthropic_strict_tools_for(model);
+    }
+    if model.spec.protocol == Protocol::BedrockConverse {
+        return false;
+    }
+    // OpenAI Chat, Google, Mistral and every future route default to Pi's
+    // detected/compliant strict support (true).
+    true
+}
+
+/// Pi's `AnthropicMessagesCompat.supportsStrictTools`: default `false`.
+pub(crate) fn anthropic_strict_tools_for(model: &crate::catalog::Model) -> bool {
+    model
+        .spec
+        .preset
+        .anthropic_compat
+        .as_ref()
+        .and_then(|compat| compat.supports_strict_tools)
+        .unwrap_or(false)
+}
+
+/// Pi's `supportsOpenAIGrammarTools`: off unless the model declares it.
+pub(crate) fn grammar_tools_for(model: &crate::catalog::Model) -> bool {
+    model
+        .spec
+        .preset
+        .supports_openai_grammar_tools
+        .unwrap_or(false)
+}
 
 /// Resolves a protocol path while preserving the narrowly allowed version query
 /// attached to an endpoint base URL. Azure's versioned API uses this shape;

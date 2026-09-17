@@ -4,9 +4,14 @@
 //! response-size limit, and no redirects. The update delegates to the channel
 //! that installed the running binary: the version-pinned installer for
 //! installer installs, a pinned `cargo install` for Cargo installs, or an exact
-//! npm install for a validated global npm package. octet never replaces itself
-//! in process; the channel swaps the installed files under the running
-//! process, and the user restarts octet.
+//! npm install for a validated global npm package. The update itself never
+//! replaces the running image: the channel swaps the installed files under the
+//! running process, and the user restarts octet — or an interactive `/reload`
+//! safely re-execs into the new on-disk generation at the same PID with the
+//! exact session resumed (see `crate::reexec`). The install/swap boundary and
+//! the re-exec boundary stay separate: this module owns installation, and
+//! `crate::reexec` owns deciding when the running process may enter the newly
+//! installed files.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

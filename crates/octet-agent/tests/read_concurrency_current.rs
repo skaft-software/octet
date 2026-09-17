@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use futures_util::StreamExt;
 use octet_agent::{
     Agent, AgentConfig, AgentEvent, EffectBroker, EffectPolicy, ExtensionHost, FinishReason,
     ReadTool, ReplaySafety, SandboxConfig, Session, Tool, ToolCallHook, ToolConcurrency,

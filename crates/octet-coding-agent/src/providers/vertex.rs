@@ -24,6 +24,14 @@ const TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+/// Fixed API-key authority for Vertex. An API key selects the global endpoint
+/// and needs no project or location, exactly as upstream's API-key client does
+/// (`packages/ai/src/providers/google-vertex.ts` `createClientWithApiKey`).
+const VERTEX_API_KEY_BASE_URL: &str = "https://aiplatform.googleapis.com/v1/publishers/google/";
+/// Upstream markers that mean "fall back to Application Default Credentials"
+/// rather than "use this API key" (`api/google-vertex.ts`
+/// `GCP_VERTEX_CREDENTIALS_MARKER` / `isPlaceholderApiKey`).
+const VERTEX_CREDENTIALS_MARKER: &str = "gcp-vertex-credentials";
 
 /// A fully validated Vertex endpoint/auth binding. It has no `Debug`
 /// implementation so accidental diagnostics cannot reveal dynamic credential
@@ -101,13 +109,20 @@ struct ParsedAdc {
     project_id: Option<String>,
 }
 
-/// Resolve a configured Vertex endpoint without performing a network request.
+/// Resolve the Vertex endpoint/auth selection without performing a network
+/// request.
 ///
-/// A missing ADC file means Vertex is simply unavailable, so its static models
-/// stay out of the picker. Invalid configured values are returned as a safe,
-/// credential-free error for bootstrap to report.
-pub(crate) fn resolve_application_default_credentials(
-) -> anyhow::Result<Option<VertexConfiguration>> {
+/// Selection order mirrors upstream: an explicit `GOOGLE_CLOUD_API_KEY` (api
+/// key presentation, global authority, no project/location) first, then
+/// owner-private Application Default Credentials with project and location. A
+/// missing configuration means Vertex is simply unavailable, so its static
+/// models stay out of the picker; invalid configured values are returned as a
+/// safe, credential-free error for bootstrap to report.
+pub(crate) fn resolve_vertex_configuration() -> anyhow::Result<Option<VertexConfiguration>> {
+    let api_key = first_environment_value(&[octet_ai::GOOGLE_VERTEX_API_KEY_VAR])?;
+    if let Some(configuration) = vertex_api_key_configuration(api_key.as_deref())? {
+        return Ok(Some(configuration));
+    }
     let Some((path, explicit_path)) = adc_path()? else {
         return Ok(None);
     };
@@ -141,6 +156,44 @@ pub(crate) fn resolve_application_default_credentials(
         auth: Auth::dynamic(Arc::new(resolver)),
         base_url,
     }))
+}
+
+/// The API-key selection, when the variable carries a usable key.
+///
+/// The mode decision is delegated to the shared `octet_ai` selector; this
+/// module only normalizes upstream's placeholder markers to "absent" first, so
+/// a host-injected marker is never sent as a literal key. The returned
+/// configuration retains only the shared variable name and the fixed authority,
+/// so no call site can read, log or persist the key.
+fn vertex_api_key_configuration(
+    value: Option<&str>,
+) -> anyhow::Result<Option<VertexConfiguration>> {
+    let mut environment = std::collections::BTreeMap::new();
+    if let Some(value) = value
+        .map(str::trim)
+        .filter(|value| !vertex_api_key_is_marker(value))
+    {
+        environment.insert(
+            octet_ai::GOOGLE_VERTEX_API_KEY_VAR.to_owned(),
+            value.to_owned(),
+        );
+    }
+    if octet_ai::select_vertex_credential(&environment) != Some(octet_ai::VertexCredential::ApiKey)
+    {
+        return Ok(None);
+    }
+    Ok(Some(VertexConfiguration {
+        auth: octet_ai::vertex_api_key_auth(),
+        base_url: url::Url::parse(VERTEX_API_KEY_BASE_URL)
+            .context("could not construct Vertex API-key endpoint")?,
+    }))
+}
+
+/// Upstream's "this route is already authenticated" markers.
+fn vertex_api_key_is_marker(value: &str) -> bool {
+    value.is_empty()
+        || value == VERTEX_CREDENTIALS_MARKER
+        || (value.starts_with('<') && value.ends_with('>') && value.len() > 2)
 }
 
 fn adc_path() -> anyhow::Result<Option<(PathBuf, bool)>> {
@@ -437,6 +490,49 @@ impl CredentialResolver for VertexAdcResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_api_key_selects_the_global_authority_and_never_the_value() {
+        // Real key: global API-key authority with the key variable name only.
+        let configuration = vertex_api_key_configuration(Some("AIzaSyExampleKey"))
+            .unwrap()
+            .expect("api-key configuration");
+        assert_eq!(configuration.base_url.as_str(), VERTEX_API_KEY_BASE_URL);
+        assert!(matches!(
+            configuration.auth,
+            Auth::HeaderEnv { ref name, ref var }
+                if name == http::HeaderName::from_static("x-goog-api-key")
+                    && var == octet_ai::GOOGLE_VERTEX_API_KEY_VAR
+        ));
+        let rendered = format!("{:?}", configuration.auth);
+        assert!(!rendered.contains("AIzaSy"));
+        assert!(rendered.contains(octet_ai::GOOGLE_VERTEX_API_KEY_VAR));
+        // The path stays on the documented publishers surface for the Google
+        // codec's `models/{api_name}:streamGenerateContent` join.
+        assert_eq!(
+            configuration
+                .base_url
+                .join("models/gemini-3-flash-preview:streamGenerateContent?alt=sse")
+                .unwrap()
+                .as_str(),
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3-flash-preview:streamGenerateContent?alt=sse"
+        );
+
+        // Placeholder markers, the credential marker and blank values fall
+        // through to Application Default Credentials instead of being sent.
+        for placeholder in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("<authenticated>"),
+            Some(VERTEX_CREDENTIALS_MARKER),
+        ] {
+            assert!(
+                vertex_api_key_configuration(placeholder).unwrap().is_none(),
+                "{placeholder:?} must not become an API key"
+            );
+        }
+    }
 
     #[test]
     fn endpoint_segments_cannot_escape_the_google_authority() {

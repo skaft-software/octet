@@ -56,6 +56,25 @@ pub trait EventObserver: Send + Sync {
     fn on_event_for_owner(&self, event: &AgentEvent, _resource_owner: &str) {
         self.on_event(event);
     }
+
+    /// Called once when a provider response durably parks a deferred run
+    /// (`run_suspend`).
+    ///
+    /// Like [`Self::on_run_started_for_owner`], this hook is intentionally
+    /// separate from [`Self::on_event`]: it gives a host a typed, durable
+    /// suspension identity (operation, handle, poll, generation) without adding
+    /// a frontend stream variant. No provider work is in flight for the parked
+    /// operation until a later permitted pass polls it.
+    fn on_run_suspend(&self, _suspension: &crate::events::DeferredRunSuspended) {}
+
+    /// Called once after an admitted deferred poll durably resumes a parked run
+    /// (`run_resume`).
+    ///
+    /// The poll's `deferred.effect_pending` intent is durable before this
+    /// callback, and exactly one permit was consumed for the driving pass; a
+    /// stale, duplicate, foreign, or expired poll never reaches this hook
+    /// because it is refused before any provider work.
+    fn on_run_resume(&self, _resume: &crate::events::DeferredRunResumed) {}
 }
 
 /// Typed interception point around every broker-admitted, successfully resolved

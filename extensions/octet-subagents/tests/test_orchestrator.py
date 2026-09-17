@@ -446,7 +446,10 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(worker["turn_count"], 2)
         self.assertEqual(worker["turn_limit"], 2)
         self.assertEqual(self.snapshots[-1]["collection"]["nodes"][0]["state"], "degraded")
-        self.assertIn("1 limited", self.snapshots[-1]["collection"]["title"])
+        # The picker header is the stable surface name; the live counts remain
+        # in the extension's own status label.
+        self.assertEqual(self.snapshots[-1]["collection"]["title"], "Subagents")
+        self.assertIn("1 limited", self.snapshots[-1]["status"]["label"])
 
         delivery = self.host.parent_turn_delivery(
             owner="owner-a", principal="octet-subagents@test", commit=True
@@ -585,6 +588,60 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "worker_awaiting_approval")
         self.assertEqual(self.host.steers, [])
         self.assertEqual(self.host.follow_ups, [])
+
+    def test_host_reattach_refusal_and_park_reasons_are_surfaced(self):
+        """A refused reattach or a parked worker reports the host's own reason."""
+        agent_id = self.spawn("refused-worker")["worker"]["id"]
+        self.host.start(agent_id)
+        record = self.host.agents[agent_id]
+        record.status = {"state": "detached"}
+        record.diagnostic = (
+            "not reattached: another live session owner holds the durable fleet "
+            "lease (instance abc123, generation 7)"
+        )
+
+        refused = self.orchestrator.status(
+            self.client, self.owner, {"target": agent_id}
+        )
+        worker = refused["worker"]
+        self.assertTrue(worker["detached"])
+        self.assertTrue(worker["reattachable"])
+        self.assertIn("another live session owner", worker["host_diagnostic"])
+        node = next(
+            item
+            for item in self.snapshots[-1]["collection"]["nodes"]
+            if item["id"] == "worker:%s" % agent_id
+        )
+        self.assertIn("another live session owner", node["secondary"])
+
+        waited = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertEqual(waited["reattachment"]["state"], "detached")
+        self.assertIn(
+            "another live session owner", waited["reattachment"]["reason"]
+        )
+
+        # The owning session parks it at the approval boundary instead: the park
+        # reason is reported on the approval surface, and it stays parked.
+        record.status = {
+            "state": "awaiting_approval",
+            "reason": "tool effect requires new authority",
+        }
+        record.diagnostic = (
+            "parked at the approval boundary and not resumed by reattachment; "
+            "an explicit decision is required: tool effect requires new authority"
+        )
+        parked = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertEqual(parked["worker"]["state"], "awaiting_approval")
+        self.assertIn("explicit decision", parked["approval"]["reason"])
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.continue_worker(
+                self.client, self.owner, {"target": agent_id, "message": "Keep going."}
+            )
+        self.assertEqual(raised.exception.code, "worker_awaiting_approval")
 
     def test_cached_command_surface_reports_detached_workers_without_faking_a_wait(self):
         agent_id = self.spawn("detached-worker")["worker"]["id"]

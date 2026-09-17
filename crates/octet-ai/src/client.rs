@@ -14,7 +14,9 @@ use crate::error::{
     AiError, DecodeError, HttpError, ProviderError, StreamProgress, StreamProtocolError,
     TransportError, TransportPhase,
 };
+use crate::deferred::DeferredHandle;
 use crate::host_transport::{HostStreamModel, HostStreamTransport};
+use crate::runtime::{is_reserved_header, HookModelContext, HostRequestOptions};
 use crate::responses_ws::{ResponsesWsLiveness, ResponsesWsPool};
 use crate::stream::{
     ProviderLifecycle, ProviderLifecycleState, ResponseBuilder, ResponseStream, StreamEvent,
@@ -35,6 +37,64 @@ fn merge_preset_headers(
         headers.insert(name, value);
     }
     Ok(())
+}
+
+/// Maximum encoded request body a host payload hook may produce.
+const MAX_HOOKED_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Applies one host payload hook to an encoded JSON request body.
+///
+/// The hook sees exactly the codec's payload. A non-JSON body, an oversized
+/// replacement, or a hook error fails the attempt before authentication or
+/// dispatch; there is no hidden retry.
+fn apply_payload_hook(
+    hook: &Arc<dyn crate::runtime::PayloadHook>,
+    model: &Model,
+    body: bytes::Bytes,
+) -> Result<bytes::Bytes, AiError> {
+    if body.is_empty() {
+        return Ok(body);
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+    let host_model = HookModelContext::from_model(model);
+    let Some(replacement) = hook.on_payload(payload, &host_model)? else {
+        return Ok(body);
+    };
+    let encoded = serde_json::to_vec(&replacement)
+        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+    if encoded.len() > MAX_HOOKED_BODY_BYTES {
+        return Err(crate::ConfigError::Parse(format!(
+            "payload hook produced a body larger than the {MAX_HOOKED_BODY_BYTES}-byte limit"
+        ))
+        .into());
+    }
+    Ok(bytes::Bytes::from(encoded))
+}
+
+/// Canonical preparation shared by every host-mediated attempt.
+///
+/// Replay history is derived without mutating the caller's conversation and
+/// strict validation runs before the transport sees the request, so a host
+/// transport can never observe a request that the built-in path would reject.
+fn prepare_host_request(
+    model: &Model,
+    req: Request,
+) -> Result<(Request, Vec<crate::error::Diagnostic>), AiError> {
+    let mut request = req;
+    request.messages = crate::transform::transform_request_messages_owned(request.messages, model);
+    let request =
+        crate::validate::normalize_request_reasoning(&request, &model.spec.capabilities)
+            .into_owned();
+    let diagnostics = crate::validate::validate_request(
+        &request,
+        &model.spec.capabilities,
+        &model.spec.limits,
+        model.spec.protocol,
+        &model.spec.id,
+        crate::CompatibilityMode::Strict,
+    )?;
+    Ok((request, diagnostics))
 }
 
 // A session may select new model headers, credentials or an endpoint URL.
@@ -424,6 +484,10 @@ fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiError) -> AiErr
             **inner = sanitize_ai_error(redactor, drained);
         }
         AiError::Batch(error) => sanitize_batch_error(redactor, error),
+        // A deferred poll refusal carries only the static refusal wording and
+        // numeric permit/leaf generations, so there is nothing provider-owned
+        // to redact here.
+        AiError::Deferred(_) => {}
         AiError::Config(_)
         | AiError::Auth(_)
         | AiError::Validation(_)
@@ -903,6 +967,8 @@ struct HttpStreamRequest {
     pre_send_diagnostics: Vec<crate::error::Diagnostic>,
     buffer_ambiguous_compatibility_content: bool,
     diagnostic_redactor: CredentialRedactor,
+    /// Optional host hook observing the HTTP response before its body is read.
+    on_response: Option<Arc<dyn crate::runtime::ResponseHook>>,
 }
 
 /// Falling back is replay-safe only when opening the WebSocket failed before
@@ -1129,6 +1195,7 @@ async fn stream_http(
         pre_send_diagnostics,
         buffer_ambiguous_compatibility_content,
         mut diagnostic_redactor,
+        on_response,
     } = request;
     let lifecycle_feedback = parts.streaming
         && model.spec.protocol == Protocol::OpenAiChat
@@ -1189,8 +1256,19 @@ async fn stream_http(
         .map_err(|error| request_open_transport_error(error, "request"))
         .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
 
-    // 4. Handle non-2xx HTTP errors
+    // A host response hook observes every provider response (success or error)
+    // before the body stream is touched. It is advisory and cannot replace or
+    // retry the response.
     let status = res.status();
+    if let Some(hook) = on_response {
+        hook.on_response(
+            status,
+            res.headers(),
+            &HookModelContext::from_model(&model),
+        );
+    }
+
+    // 4. Handle non-2xx HTTP errors
     if !status.is_success() {
         // Extract only the two headers needed for the structured error
         // before consuming the response. Cloning the whole HeaderMap
@@ -1472,6 +1550,7 @@ async fn stream_http(
                                 Protocol::BedrockConverse => unreachable!("Bedrock uses AWS Event Stream, not SSE"),
                                 Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
+                                Protocol::PiMessages => crate::protocol::pi_messages::decode_stream_event(&model_clone, &sse, &mut builder),
                             }
                             .map_err(|error| {
                                 annotate_stream_failure(
@@ -1568,6 +1647,7 @@ async fn stream_http(
                                 Protocol::BedrockConverse => unreachable!("Bedrock uses AWS Event Stream, not SSE"),
                                 Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
+                                Protocol::PiMessages => crate::protocol::pi_messages::decode_stream_event(&model_clone, &sse, &mut builder),
                             }
                             .map_err(|error| {
                                 annotate_stream_failure(
@@ -1605,10 +1685,14 @@ async fn stream_http(
                     ))?;
                 }
             }
-            // Native Conversations deltas do not settle entries, even when
-            // function arguments already form valid JSON. Classify the missing
-            // native terminal here before the generic guard handles raw EOF.
-            if model_clone.spec.protocol == Protocol::MistralConversations && !terminal_seen {
+            // Native Conversations and pi-messages entries settle only on their
+            // own terminal event, even when their deltas already form valid
+            // JSON. Classify the missing native terminal here before the generic
+            // guard handles raw EOF.
+            if matches!(
+                model_clone.spec.protocol,
+                Protocol::MistralConversations | Protocol::PiMessages
+            ) && !terminal_seen {
                 Err(annotate_stream_failure(
                     AiError::StreamProtocol(StreamProtocolError::MissingFinish),
                     &builder,
@@ -2007,7 +2091,7 @@ impl AiClient {
             .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire))
     }
 
-    fn mark_request_dispatch(&self) {
+    pub(crate) fn mark_request_dispatch(&self) {
         if let Some(state) = &self.request_dispatch {
             state.store(true, std::sync::atomic::Ordering::Release);
         }
@@ -2162,19 +2246,60 @@ impl AiClient {
     pub async fn stream_with_overrides(
         &self,
         model: &Model,
-        mut req: Request,
+        req: Request,
         overrides: crate::RequestOverrides,
     ) -> Result<ResponseStream, AiError> {
+        self.stream_with_host_options(model, req, overrides, HostRequestOptions::default())
+            .await
+    }
+
+    /// Executes one inference attempt with private request-local configuration
+    /// and host-owned runtime options.
+    ///
+    /// [`HostRequestOptions`] carries per-request hooks and a credential
+    /// override that must never become canonical request data. The built-in
+    /// HTTP path applies them; a host stream transport refuses them so a hook
+    /// can never observe or rewrite wire material it does not own.
+    pub async fn stream_with_host_options(
+        &self,
+        model: &Model,
+        mut req: Request,
+        overrides: crate::RequestOverrides,
+        host_options: HostRequestOptions,
+    ) -> Result<ResponseStream, AiError> {
         overrides.validate().map_err(|error| crate::ConfigError::Parse(error.to_string()))?;
+        host_options.validate()?;
+        if !host_options.metadata.is_empty() {
+            return Err(crate::ConfigError::Parse(
+                "per-request metadata is unsupported until the selected codec declares a wire field"
+                    .into(),
+            )
+            .into());
+        }
         if overrides.max_retries.unwrap_or(0) != 0 || overrides.max_retry_delay_ms.unwrap_or(0) != 0 {
             return Err(crate::ConfigError::Parse("client retries are host-owned; nonzero retry overrides are unsupported".into()).into());
         }
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
-        let host_transport = self.host_stream_transports.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&model.endpoint.id);
+        if host_options.api_key.is_some()
+            && matches!(&model.endpoint.auth, crate::auth::Auth::RequestSigner(_))
+        {
+            return Err(crate::ConfigError::Parse(
+                "a per-request api key override cannot be applied to a request-aware signer".into(),
+            )
+            .into());
+        }
+        let host_transport = host_options.fetch.is_some()
+            || self.host_stream_transports.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&model.endpoint.id);
         if host_transport && (!overrides.headers.is_empty() || !overrides.env.is_empty()
             || !overrides.sampling_params.is_empty() || overrides.azure.is_some()) {
             return Err(crate::ConfigError::Parse("wire overrides are unsupported by a host stream transport".into()).into());
+        }
+        if host_transport && host_options.has_wire_hooks() {
+            return Err(crate::ConfigError::Parse(
+                "per-request api key, metadata, and payload/header/response hooks are unsupported by a host stream transport".into(),
+            )
+            .into());
         }
         let mut model = model.clone();
         if !overrides.sampling_params.is_empty() || !overrides.headers.is_empty() {
@@ -2193,15 +2318,7 @@ impl AiClient {
         if !host_transport {
             crate::declarations::azure::apply(&mut model, overrides.azure.as_ref(), &overrides.env)?;
         }
-        let mut client = self.clone();
-        if crate::declarations::proxy::ProxyEnvironment::NAMES.iter().any(|name| overrides.env.contains_key(*name)) {
-            let current = self.proxy_environment.as_ref().ok_or_else(|| crate::ConfigError::Parse("proxy overrides require the built-in HTTP transport".into()))?;
-            let proxy = Arc::new(current.overlay(&overrides.env));
-            client.http = proxy.clone().configure(reqwest::Client::builder()
-                .connect_timeout(DEFAULT_CONNECT_TIMEOUT).redirect(reqwest::redirect::Policy::none()))
-                .build().map_err(|_| crate::ConfigError::Parse("could not configure request-local HTTP transport".into()))?;
-            client.proxy_environment = Some(proxy);
-        }
+        let mut client = self.with_environment_overlay(&overrides.env)?;
         let deadline = if let Some(timeout) = overrides.timeout_ms {
             let timeout = Duration::from_millis(timeout);
             let deadline = tokio::time::Instant::now().checked_add(timeout)
@@ -2212,7 +2329,7 @@ impl AiClient {
             client.stream_deadline = client.stream_deadline.min(timeout);
             Some(deadline)
         } else { None };
-        let open = client.stream_once(&model, req, &overrides.env);
+        let open = client.stream_once(&model, req, &overrides.env, &host_options);
         let Some(deadline) = deadline else { return open.await; };
         let mut stream = tokio::time::timeout_at(deadline, open).await.map_err(|_| {
             AiError::Transport(TransportError { phase: TransportPhase::ResponseHeaders, timeout: true, message: "request-local opening deadline exceeded".into() })
@@ -2316,39 +2433,27 @@ impl AiClient {
         result.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))
     }
 
-    async fn stream_once(&self, model: &Model, req: Request, environment: &std::collections::BTreeMap<String, String>) -> Result<ResponseStream, AiError> {
+    async fn stream_once(&self, model: &Model, req: Request, environment: &std::collections::BTreeMap<String, String>, host_options: &HostRequestOptions) -> Result<ResponseStream, AiError> {
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         if model.spec.endpoint != model.endpoint.id {
             return Err(crate::ConfigError::UnknownEndpoint(model.spec.endpoint.clone()).into());
         }
 
-        let host_transport = self
-            .host_stream_transports
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&model.endpoint.id)
-            .cloned();
+        let host_transport = host_options.fetch.clone().or_else(|| {
+            self.host_stream_transports
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&model.endpoint.id)
+                .cloned()
+        });
         if let Some(transport) = host_transport {
             // Keep host-mediated transports on the canonical side of the same
             // replay-history and capability boundary as HTTP codecs. Unlike a
             // protocol codec they cannot safely perform lossy wire-specific
             // degradation, so validate strictly rather than exposing an
             // unsupported canonical feature to an extension transport.
-            let mut request = req;
-            request.messages =
-                crate::transform::transform_request_messages_owned(request.messages, model);
-            let request =
-                crate::validate::normalize_request_reasoning(&request, &model.spec.capabilities)
-                    .into_owned();
-            let diagnostics = crate::validate::validate_request(
-                &request,
-                &model.spec.capabilities,
-                &model.spec.limits,
-                model.spec.protocol,
-                &model.spec.id,
-                crate::CompatibilityMode::Strict,
-            )?;
+            let (request, diagnostics) = prepare_host_request(model, req)?;
             self.mark_request_dispatch();
             let stream = transport
                 .stream(HostStreamModel::from(model), request, diagnostics)
@@ -2378,7 +2483,7 @@ impl AiClient {
             crate::types::OutputModalities::Text => None,
         };
         // 1. Build the HTTP request parts via the protocol codec
-        let parts = match model.spec.protocol {
+        let mut parts = match model.spec.protocol {
             Protocol::OpenAiChat => crate::protocol::openai_chat::build_request(model, &req)?,
             Protocol::AnthropicMessages => crate::protocol::anthropic::build_request(model, &req)?,
             Protocol::OpenAiResponses => {
@@ -2389,7 +2494,14 @@ impl AiClient {
             Protocol::MistralConversations => {
                 crate::protocol::mistral_conversations::build_request(model, &req)?
             }
+            Protocol::PiMessages => crate::protocol::pi_messages::build_request(model, &req)?,
         };
+
+        // A host payload hook sees and may replace exactly the encoded JSON the
+        // codec produced, before any credential is attached or a byte is sent.
+        if let Some(hook) = &host_options.on_payload {
+            parts.body = apply_payload_hook(hook, model, parts.body)?;
+        }
 
         let proxy = self.request_proxy(&parts.url)?;
 
@@ -2417,6 +2529,20 @@ impl AiClient {
             headers.insert(k.clone(), v.clone());
         }
 
+        // A host header transform runs after endpoint/model/codec headers and
+        // before authentication, so request-aware signers still cover the
+        // final set. It cannot add or change authentication, host, framing, or
+        // signing headers.
+        if let Some(transform) = &host_options.transform_headers {
+            let before = headers.clone();
+            transform.transform_headers(&mut headers, &HookModelContext::from_model(model))?;
+            for name in headers.keys() {
+                if is_reserved_header(name) && before.get(name) != headers.get(name) {
+                    return Err(crate::ConfigError::ReservedHeader(name.clone()).into());
+                }
+            }
+        }
+
         // Request-aware signers (SigV4) must run after body encoding, so the
         // exact body and final header set are covered. Ordinary auth remains
         // resolved here so the Responses WebSocket path can use it directly.
@@ -2424,9 +2550,13 @@ impl AiClient {
             matches!(&model.endpoint.auth, crate::auth::Auth::RequestSigner(_));
         let mut diagnostic_redactor = CredentialRedactor::default();
         if !request_aware_signer {
-            let resolved_headers = crate::auth::resolve_headers_in_environment(&model.endpoint.auth, environment)
-                .await
-                .map_err(AiError::Auth)?;
+            let resolved_headers = crate::auth::resolve_headers_with_api_key(
+                &model.endpoint.auth,
+                environment,
+                host_options.api_key.as_ref(),
+            )
+            .await
+            .map_err(AiError::Auth)?;
             diagnostic_redactor = resolved_headers.redactor;
             let mut current_key = None;
             for (key, value) in resolved_headers.headers {
@@ -2457,6 +2587,7 @@ impl AiClient {
             pre_send_diagnostics,
             buffer_ambiguous_compatibility_content,
             diagnostic_redactor: diagnostic_redactor.clone(),
+            on_response: host_options.on_response.clone(),
         };
 
         // Responses WebSockets are deliberately opt-in per endpoint. A
@@ -2787,7 +2918,21 @@ impl AiClient {
     /// Executes and collects one request using the same private overrides and
     /// no-retry contract as [`Self::stream_with_overrides`].
     pub async fn complete_with_overrides(&self, model: &Model, req: Request, overrides: crate::RequestOverrides) -> Result<Response, AiError> {
-        let mut stream = self.stream_with_overrides(model, req, overrides).await?;
+        self.complete_with_host_options(model, req, overrides, HostRequestOptions::default())
+            .await
+    }
+
+    /// Executes and collects one request with host-owned runtime options.
+    pub async fn complete_with_host_options(
+        &self,
+        model: &Model,
+        req: Request,
+        overrides: crate::RequestOverrides,
+        host_options: HostRequestOptions,
+    ) -> Result<Response, AiError> {
+        let mut stream = self
+            .stream_with_host_options(model, req, overrides, host_options)
+            .await?;
         let mut final_response = None;
 
         while let Some(ev_res) = stream.next().await {
@@ -2798,6 +2943,174 @@ impl AiClient {
         }
 
         final_response.ok_or_else(|| AiError::StreamProtocol(StreamProtocolError::MissingFinish))
+    }
+
+    /// The reqwest transport owned by this client, for crate-internal auxiliary
+    /// APIs (the image-generation adapter) that share the same proxy snapshot.
+    pub(crate) fn http_transport(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// Resolves the proxy for `target` under this client's snapshot.
+    pub(crate) fn proxy_for(&self, target: &url::Url) -> Result<Option<url::Url>, AiError> {
+        self.request_proxy(target)
+    }
+
+    /// Clones this client with a request-local proxy overlay when `env` selects
+    /// one of the proxy variables. The overlay never mutates process state or
+    /// the original client; malformed values fail closed.
+    pub(crate) fn with_environment_overlay(
+        &self,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<AiClient, AiError> {
+        if !crate::declarations::proxy::ProxyEnvironment::NAMES
+            .iter()
+            .any(|name| env.contains_key(*name))
+        {
+            return Ok(self.clone());
+        }
+        let current = self.proxy_environment.as_ref().ok_or_else(|| {
+            crate::ConfigError::Parse("proxy overrides require the built-in HTTP transport".into())
+        })?;
+        let proxy = Arc::new(current.overlay(env));
+        let mut client = self.clone();
+        client.http = proxy
+            .clone()
+            .configure(
+                reqwest::Client::builder()
+                    .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+                    .redirect(reqwest::redirect::Policy::none()),
+            )
+            .build()
+            .map_err(|_| {
+                crate::ConfigError::Parse("could not configure request-local HTTP transport".into())
+            })?;
+        client.proxy_environment = Some(proxy);
+        Ok(client)
+    }
+
+    fn deferred_endpoint_transport(
+        &self,
+        model: &Model,
+    ) -> Result<Arc<dyn HostStreamTransport>, AiError> {
+        self.host_stream_transports
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&model.endpoint.id)
+            .cloned()
+            .ok_or_else(|| crate::error::UnsupportedError::Deferred.into())
+    }
+
+    fn validate_deferred_overrides(overrides: &crate::RequestOverrides) -> Result<(), AiError> {
+        overrides
+            .validate()
+            .map_err(|error| crate::ConfigError::Parse(error.to_string()))?;
+        if !overrides.headers.is_empty()
+            || !overrides.sampling_params.is_empty()
+            || overrides.azure.is_some()
+            || overrides.max_retries.unwrap_or(0) != 0
+            || overrides.max_retry_delay_ms.unwrap_or(0) != 0
+        {
+            return Err(crate::ConfigError::Parse(
+                "deferred requests accept only request-local environment and timeout overrides".into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Submits one request that the provider may park instead of completing.
+    ///
+    /// A parked turn finishes with [`crate::StopReason::Deferred`] and a
+    /// [`DeferredHandle`] on the response; it is never silently retried. Only a
+    /// transport that implements
+    /// [`HostStreamTransport::submit_deferred`] can park a request.
+    /// `poll_after_ms` is the caller's request-local minimum delay before the
+    /// next poll.
+    pub async fn submit_deferred(
+        &self,
+        model: &Model,
+        req: Request,
+        overrides: crate::RequestOverrides,
+        poll_after_ms: Option<u64>,
+    ) -> Result<ResponseStream, AiError> {
+        crate::catalog::validate_endpoint(&model.endpoint)?;
+        crate::catalog::validate_model_spec(&model.spec)?;
+        Self::validate_deferred_overrides(&overrides)?;
+        let transport = self.deferred_endpoint_transport(model)?;
+        let (request, diagnostics) = prepare_host_request(model, req)?;
+        self.mark_request_dispatch();
+        let stream = transport
+            .submit_deferred(
+                HostStreamModel::from(model),
+                request,
+                diagnostics,
+                poll_after_ms,
+            )
+            .await?;
+        Ok(crate::stream::guard(stream))
+    }
+
+    /// Polls one deferred handle under a one-shot, generation-bound permit.
+    ///
+    /// The permit is consumed before any provider work: a missing, already
+    /// consumed, or stale permit fails closed, so one driving pass can never
+    /// admit two billable polls. The caller owns the durable leaf generation it
+    /// minted the permit for. `wait_ms` bounds the provider long-poll; `Some(0)`
+    /// performs one status check.
+    pub async fn fetch_deferred(
+        &self,
+        model: &Model,
+        handle: DeferredHandle,
+        mut permit: crate::deferred::DeferredPollPermit,
+        leaf_generation: u64,
+        wait_ms: Option<u64>,
+    ) -> Result<ResponseStream, AiError> {
+        crate::catalog::validate_endpoint(&model.endpoint)?;
+        crate::catalog::validate_model_spec(&model.spec)?;
+        permit.consume(leaf_generation)?;
+        if handle.id.is_empty() {
+            return Err(
+                crate::ConfigError::Parse("deferred handle has an empty provider id".into())
+                    .into(),
+            );
+        }
+        if handle.model_id != model.spec.id.0 {
+            return Err(crate::ConfigError::Parse(
+                "deferred handle belongs to a different model".into(),
+            )
+            .into());
+        }
+        let transport = self.deferred_endpoint_transport(model)?;
+        self.mark_request_dispatch();
+        let stream = transport
+            .fetch_deferred(HostStreamModel::from(model), handle, wait_ms)
+            .await?;
+        Ok(crate::stream::guard(stream))
+    }
+
+    /// Best-effort cancellation of one deferred handle.
+    ///
+    /// Cancellation does not un-send provider work or erase usage uncertainty;
+    /// it only asks the owning transport to release the parked response.
+    pub async fn cancel_deferred(
+        &self,
+        model: &Model,
+        handle: DeferredHandle,
+    ) -> Result<(), AiError> {
+        crate::catalog::validate_endpoint(&model.endpoint)?;
+        crate::catalog::validate_model_spec(&model.spec)?;
+        if handle.model_id != model.spec.id.0 {
+            return Err(crate::ConfigError::Parse(
+                "deferred handle belongs to a different model".into(),
+            )
+            .into());
+        }
+        let transport = self.deferred_endpoint_transport(model)?;
+        self.mark_request_dispatch();
+        transport
+            .cancel_deferred(HostStreamModel::from(model), handle)
+            .await
     }
 }
 

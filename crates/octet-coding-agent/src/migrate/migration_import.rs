@@ -2351,7 +2351,9 @@ mod tests {
         let original = b"# existing destination configuration\n";
         fs::write(&paths.config, original).unwrap();
         let mut setup = setup();
-        setup.push_model(mapped_model("openai", "gpt-4o-mini")).unwrap();
+        setup
+            .push_model(mapped_model("openai", "gpt-4o-mini"))
+            .unwrap();
         let plan = build_ingestion_plan(&paths, &setup, false).unwrap();
         assert!(plan.conflicts.is_empty());
         assert_eq!(plan.changes[0].target, paths.config);

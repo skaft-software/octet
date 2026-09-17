@@ -38,6 +38,15 @@ UNSUPPORTED_MODEL_IDS = {
     "openai": {"gpt-5.6"},
 }
 
+# A reviewed source correction, like the exclusions above: pi keeps Baseten's
+# rename-based GLM-5.2 endpoints text-only even though models.dev reports image
+# input (`scripts/generate-models.ts` `supportsImageInput = !isGlm52 && ...`).
+# Only the pinned input modalities are corrected; every other leaf is kept.
+TEXT_ONLY_MODEL_IDS = {
+    ("baseten", "zai-org/GLM-5.2"),
+    ("baseten", "zai-org/GLM-5.2-Fast"),
+}
+
 # Display-name aliases come from model-owner catalogs, not every downstream
 # gateway. Including aggregators duplicates thousands of leaf IDs and removes
 # useful unique aliases without adding a more authoritative name.
@@ -73,6 +82,7 @@ NAME_SOURCES = {
 # downloaded catalog.
 PROVIDER_SOURCES = {
     "anthropic": "anthropic",
+    "baseten": "baseten",
     "cerebras": "cerebras",
     "deepseek": "deepseek",
     "fireworks": "fireworks-ai",
@@ -84,10 +94,55 @@ PROVIDER_SOURCES = {
     "openai": "openai",
     "openrouter": "openrouter",
     "opencode": "opencode",
+    # The Alibaba Token Plan and Zhipu coding-plan sources feed octet's renamed
+    # token-plan/coding routes (`scripts/generate-models.ts` 2388, 1265). The
+    # Individual subscription is the same international source, narrowed to the
+    # documented personal allowlist below.
+    "qwen-token-plan": "alibaba-token-plan",
+    "qwen-token-plan-cn": "alibaba-token-plan-cn",
+    "qwen-token-plan-individual": "alibaba-token-plan",
     "together": "togetherai",
     "xai": "xai",
     "xiaomi": "xiaomi",
+    "zai-coding-cn": "zhipuai-coding-plan",
 }
+
+# Upstream's generated catalogs keep only routes the provider actually serves:
+# a tool-capable model, not deprecated, not retired, and (for the Individual
+# subscription) inside the documented personal allowlist. These are membership
+# rules for the pinned snapshot, not wire assertions; a route upstream does not
+# emit must not become a priced octet route.
+MODEL_REQUIRES_TOOL_CALL = {
+    "qwen-token-plan",
+    "qwen-token-plan-cn",
+    "qwen-token-plan-individual",
+    "zai-coding-cn",
+}
+MODEL_SKIPS_DEPRECATED = {"baseten"}
+# Retired Alibaba Token Plan alias excluded for every variant
+# (`scripts/generate-models.ts` `QWEN_TOKEN_PLAN_EXCLUDED_MODEL_IDS`).
+EXCLUDED_MODEL_IDS = {
+    "alibaba-token-plan": {"qwen3.8-max-preview"},
+    "alibaba-token-plan-cn": {"qwen3.8-max-preview"},
+}
+# QwenCloud Token Plan Individual text-model allowlist, verified upstream
+# 2026-09-03 (`QWEN_TOKEN_PLAN_INDIVIDUAL_MODEL_IDS`).
+QWEN_TOKEN_PLAN_INDIVIDUAL_MODEL_IDS = {
+    "deepseek-v4-flash-0731",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "glm-5.2",
+    "qwen3.6-flash",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.8-flash",
+    "qwen3.8-max",
+}
+MODEL_ALLOWLISTS = {"qwen-token-plan-individual": QWEN_TOKEN_PLAN_INDIVIDUAL_MODEL_IDS}
+# The coding-plan entry can publish no rate; pi quotes the equivalent `zai`
+# catalog there. When neither publishes input and output rates the route stays
+# unpriced rather than fabricated.
+PRICING_FALLBACK_SOURCES = {"zai-coding-cn": "zai"}
 
 
 def microdollars(value: object | None) -> int:
@@ -103,6 +158,66 @@ def microdollars(value: object | None) -> int:
 
 def supported_model(provider_id: str, model_id: str) -> bool:
     return model_id not in UNSUPPORTED_MODEL_IDS.get(provider_id, set())
+
+
+def catalog_model_included(
+    octet_provider: str,
+    source_provider: str,
+    model_id: str,
+    model: object,
+) -> bool:
+    """Whether upstream's generated catalog emits this pinned route.
+
+    `model` stays a source assertion, never a wire profile: only membership is
+    decided here so a retired or non-tool route cannot look available.
+    """
+    if not isinstance(model, dict):
+        return False
+    if model_id in EXCLUDED_MODEL_IDS.get(source_provider, set()):
+        return False
+    allowlist = MODEL_ALLOWLISTS.get(octet_provider)
+    if allowlist is not None and model_id not in allowlist:
+        return False
+    if octet_provider in MODEL_REQUIRES_TOOL_CALL and model.get("tool_call") is not True:
+        return False
+    if octet_provider in MODEL_SKIPS_DEPRECATED and model.get("status") == "deprecated":
+        return False
+    return True
+
+
+def pinned_cost(
+    catalog: dict[str, object],
+    octet_provider: str,
+    source_provider: str,
+    model_id: str,
+    model: dict[str, object],
+) -> dict[str, object] | None:
+    """Exact published rates for one pinned route, with pi's reference fallback.
+
+    Partial or absent rates stay absent so hard cost ceilings remain unknown
+    rather than priced from a neighbouring catalog.
+    """
+    cost = model.get("cost")
+    if (
+        isinstance(cost, dict)
+        and cost.get("input") is not None
+        and cost.get("output") is not None
+    ):
+        return cost
+    fallback_id = PRICING_FALLBACK_SOURCES.get(octet_provider)
+    if fallback_id is None or fallback_id == source_provider:
+        return None
+    fallback = catalog.get(fallback_id)
+    fallback_models = fallback.get("models") if isinstance(fallback, dict) else None
+    entry = fallback_models.get(model_id) if isinstance(fallback_models, dict) else None
+    reference = entry.get("cost") if isinstance(entry, dict) else None
+    if (
+        isinstance(reference, dict)
+        and reference.get("input") is not None
+        and reference.get("output") is not None
+    ):
+        return reference
+    return None
 
 
 def names_snapshot(catalog: dict[str, object]) -> dict[str, str]:
@@ -142,14 +257,12 @@ def snapshot(catalog: dict[str, object]) -> dict[str, dict[str, int | None]]:
         for model_id, model in sorted(models.items()):
             if (
                 not isinstance(model_id, str)
-                or not isinstance(model, dict)
                 or not supported_model(source_provider, model_id)
+                or not catalog_model_included(octet_provider, source_provider, model_id, model)
             ):
                 continue
-            cost = model.get("cost")
-            if not isinstance(cost, dict) or "input" not in cost or "output" not in cost:
-                continue
-            if cost["input"] is None or cost["output"] is None:
+            cost = pinned_cost(catalog, octet_provider, source_provider, model_id, model)
+            if cost is None:
                 continue
             output[f"{octet_provider}/{model_id}".lower()] = {
                 "cache_read": microdollars(cost.get("cache_read")),
@@ -177,11 +290,24 @@ def capabilities_snapshot(catalog: dict[str, object]) -> dict[str, object]:
         if not isinstance(provider, dict) or not isinstance(provider.get("models"), dict):
             continue
         for model_id, model in sorted(provider["models"].items()):
-            if not isinstance(model, dict) or not supported_model(source_provider, model_id):
+            if (
+                not isinstance(model_id, str)
+                or not supported_model(source_provider, model_id)
+                or not catalog_model_included(octet_provider, source_provider, model_id, model)
+            ):
                 continue
-            output[f"{octet_provider}/{model_id}"] = {
-                key: model[key] for key in CAPABILITY_FIELDS if key in model
-            }
+            record = {key: model[key] for key in CAPABILITY_FIELDS if key in model}
+            modalities = record.get("modalities")
+            if (
+                (octet_provider, model_id) in TEXT_ONLY_MODEL_IDS
+                and isinstance(modalities, dict)
+                and isinstance(modalities.get("input"), list)
+            ):
+                record["modalities"] = {
+                    **modalities,
+                    "input": [item for item in modalities["input"] if item != "image"],
+                }
+            output[f"{octet_provider}/{model_id}"] = record
     return output
 
 

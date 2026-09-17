@@ -2,10 +2,10 @@
 
 use std::io::{IsTerminal, Write};
 
-use octet_agent::{AgentEvent, InputPart, OutputChannel, UserInput};
-use octet_ai::Media;
 use crate::app::App;
 use crate::modes::rpc::JsonEventStream;
+use octet_agent::{AgentEvent, InputPart, OutputChannel, UserInput};
+use octet_ai::Media;
 
 use crate::app::bootstrap::{build_app, resolve_launch_print, Bootstrap};
 use crate::modes::{timestamp, HostRunOutcome};
@@ -57,7 +57,13 @@ pub(crate) fn finish_ephemeral_accounting() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn run_invocation(boot: Bootstrap, prompt: String, remaining: Vec<String>, media: Vec<Media>, json: bool) -> anyhow::Result<()> {
+pub(crate) async fn run_invocation(
+    boot: Bootstrap,
+    prompt: String,
+    remaining: Vec<String>,
+    media: Vec<Media>,
+    json: bool,
+) -> anyhow::Result<()> {
     // Explicit template arguments are data, not local commands.
     if boot.config.prompt_template.is_none() {
         crate::commands::reject_tui_changelog(&prompt)?;
@@ -65,14 +71,17 @@ pub(crate) async fn run_invocation(boot: Bootstrap, prompt: String, remaining: V
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;
     let mut app = build_app(boot, launch, system)?;
-    if json { JsonEventStream::header(&app)?; }
+    if json {
+        JsonEventStream::header(&app)?;
+    }
     let result = async {
         run_prompt(&mut app, prompt, media, json).await?;
         for prompt in remaining {
             run_prompt(&mut app, prompt, Vec::new(), json).await?;
         }
         Ok(())
-    }.await;
+    }
+    .await;
     app.executable_extensions.shutdown().await;
     // An ephemeral run discards its transcript but must still persist accounting,
     // even when the run itself failed.
@@ -90,8 +99,15 @@ pub(crate) async fn run_invocation(boot: Bootstrap, prompt: String, remaining: V
     }
 }
 
-async fn run_prompt(app: &mut App, prompt: String, media: Vec<Media>, json: bool) -> anyhow::Result<()> {
-    if app.config.prompt_template.is_none() { crate::commands::reject_tui_changelog(&prompt)?; }
+async fn run_prompt(
+    app: &mut App,
+    prompt: String,
+    media: Vec<Media>,
+    json: bool,
+) -> anyhow::Result<()> {
+    if app.config.prompt_template.is_none() {
+        crate::commands::reject_tui_changelog(&prompt)?;
+    }
     let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
             if app.config.debug_prompt {
@@ -157,7 +173,9 @@ async fn run_prompt(app: &mut App, prompt: String, media: Vec<Media>, json: bool
             )
         ),
     };
-    if let Some(events) = events.as_mut() { events.start(&input)?; }
+    if let Some(events) = events.as_mut() {
+        events.start(&input)?;
+    }
     let extension_turn = app.executable_extensions.begin_turn().await;
     app.executable_extensions
         .commit_prompt_context(pending_context_count);
@@ -185,13 +203,25 @@ async fn run_prompt(app: &mut App, prompt: String, media: Vec<Media>, json: bool
             break HostRunOutcome::stream_lost();
         };
         if let Some(events) = events.as_mut() {
-            if let AgentEvent::TurnFinished { message, session_cost_microdollars, .. } = &event {
+            if let AgentEvent::TurnFinished {
+                message,
+                session_cost_microdollars,
+                ..
+            } = &event
+            {
                 response_text = crate::extensions::assistant_text(message);
-                if let (Some(limit), Some(total)) = (app.config.max_cost_microdollars, *session_cost_microdollars) {
-                    if total >= limit { limit_reached = true; control.abort(); }
+                if let (Some(limit), Some(total)) =
+                    (app.config.max_cost_microdollars, *session_cost_microdollars)
+                {
+                    if total >= limit {
+                        limit_reached = true;
+                        control.abort();
+                    }
                 }
             }
-            if let Some(outcome) = events.observe(event)? { break outcome; }
+            if let Some(outcome) = events.observe(event)? {
+                break outcome;
+            }
             continue;
         }
         if let Some(outcome) =
@@ -303,7 +333,9 @@ async fn run_prompt(app: &mut App, prompt: String, media: Vec<Media>, json: bool
         }
     };
     drop(run);
-    if let Some(events) = events.as_mut() { events.finish(&outcome)?; }
+    if let Some(events) = events.as_mut() {
+        events.finish(&outcome)?;
+    }
     app.executable_extensions
         .settle_turn(extension_turn, &outcome)
         .await;

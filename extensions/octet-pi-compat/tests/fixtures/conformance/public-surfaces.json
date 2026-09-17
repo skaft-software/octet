@@ -288,7 +288,7 @@
       "kind": "lifecycle_or_hook",
       "target": "tool_result",
       "expected": "reduced_event",
-      "assertion": "Pi-tool content/details/error/usage transforms are preserved; native mutation fails."
+      "assertion": "Pi-tool content/details/error transforms are preserved and hook usage applies; executed usage/termination cross only under their negotiated result features, and an unnegotiated result field fails explicitly instead of being dropped."
     },
     {
       "id": "extension_api:on",
@@ -304,7 +304,7 @@
       "kind": "initialize",
       "target": "registerTool",
       "expected": "registered",
-      "assertion": "Initial tool registration and execution use the public Pi runner."
+      "assertion": "Initial tool registration and execution use the public Pi runner; promptSnippet/promptGuidelines are projected into the model-facing description, executionMode: \"sequential\" is enforced by a bridge execution lane, and a constrainedSampling requirement fails closed."
     },
     {
       "id": "extension_api:registerCommand",

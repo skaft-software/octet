@@ -3119,7 +3119,10 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                assert_eq!(fs::metadata(&helper).unwrap().permissions().mode() & 0o077, 0);
+                assert_eq!(
+                    fs::metadata(&helper).unwrap().permissions().mode() & 0o077,
+                    0
+                );
             }
         }
         assert!(package.join("extension.toml").is_file());

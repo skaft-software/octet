@@ -351,18 +351,39 @@ fn semantic_scroll_keeps_reasoning_anchor_when_first_roster_is_inserted() {
     assert_eq!(cache.block_starts.len(), state.transcript.len());
 }
 
-
 #[test]
-fn worker_strip_yields_to_history_and_returns_at_the_live_tail() {
+fn worker_roster_is_transcript_material_at_the_live_tail_and_in_history() {
     let mut shell = worker_history_shell();
-    assert!(!shell_chrome(&shell.state.borrow(), WIDTH, Instant::now()).subagents.is_empty());
+    // The active roster is a transcript block, never pinned chrome.
+    let live = rendered_history_rows(&shell);
+    assert!(!live.is_empty());
     shell.scroll_lines(-24);
-    let before = rendered_history_rows(&shell);
-    assert!(!before.is_empty());
-    assert!(shell_chrome(&shell.state.borrow(), WIDTH, Instant::now()).subagents.is_empty());
+    let expected = rendered_history_rows(&shell);
+    assert!(!expected.is_empty());
+    assert!(
+        shell.state.borrow().viewport_anchor.get().is_some(),
+        "scrolling back anchors the reader's window"
+    );
+
+    // A live roster update is an in-place transcript edit: it must never return
+    // the reader to the tail, and the rows they were reading stay visible.
     assert!(shell.set_subagent_presentation(Some(&roster(8, "running")), true));
-    assert_eq!(rendered_history_rows(&shell), before);
+    assert!(!shell.state.borrow().follow_tail);
+    let after = rendered_history_rows(&shell);
+    let texts = |rows: &[(usize, String)]| {
+        rows.iter()
+            .map(|(_, text)| text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(&after), texts(&expected), "{expected:?} vs {after:?}");
+
     shell.scroll_lines(i16::MAX);
     assert!(shell.state.borrow().follow_tail);
-    assert!(!shell_chrome(&shell.state.borrow(), WIDTH, Instant::now()).subagents.is_empty());
+    let state = shell.state.borrow();
+    let index = state.subagent_activity_block.expect("live roster block");
+    let cache = state.transcript_cache.borrow();
+    assert!(cache.lines
+        [cache.block_starts[index]..cache.block_starts[index] + cache.block_lengths[index]]
+        .iter()
+        .any(|line| line.contains("Subagents")));
 }

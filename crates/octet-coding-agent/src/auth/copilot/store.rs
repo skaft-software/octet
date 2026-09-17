@@ -51,16 +51,16 @@ impl Snapshot {
         let credential: Credential = serde_json::from_slice(bytes)
             .map_err(|_| anyhow!("GitHub Copilot credential is invalid; sign in again"))?;
         if credential.version != 1 || !valid_token(&credential.github_token) {
-            return Err(anyhow!("GitHub Copilot credential is invalid; sign in again"));
+            return Err(anyhow!(
+                "GitHub Copilot credential is invalid; sign in again"
+            ));
         }
         Ok(Some(credential.github_token))
     }
 }
 
 pub(super) fn valid_token(token: &str) -> bool {
-    !token.is_empty()
-        && token.len() <= 4096
-        && token.bytes().all(|byte| byte.is_ascii_graphic())
+    !token.is_empty() && token.len() <= 4096 && token.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 impl CredentialStore {
@@ -73,7 +73,11 @@ impl CredentialStore {
         let bytes = match secure_fs::read_private_file_bounded(&self.path, MAX_CREDENTIAL_BYTES) {
             Ok(bytes) => Some(bytes),
             Err(SecureFileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return Err(anyhow!("GitHub Copilot private credential could not be read")),
+            Err(_) => {
+                return Err(anyhow!(
+                    "GitHub Copilot private credential could not be read"
+                ))
+            }
         };
         Ok(Snapshot { bytes })
     }
@@ -115,6 +119,8 @@ impl CredentialStore {
             return Ok(());
         };
         secure_fs::remove_private_file_if_unchanged(&self.path, &bytes, MAX_CREDENTIAL_BYTES)
-            .map_err(|_| anyhow!("GitHub Copilot private credential changed or could not be removed"))
+            .map_err(|_| {
+                anyhow!("GitHub Copilot private credential changed or could not be removed")
+            })
     }
 }

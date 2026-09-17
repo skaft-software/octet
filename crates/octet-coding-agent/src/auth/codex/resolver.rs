@@ -71,11 +71,10 @@ impl CodexResolver {
         let _task_guard = self.refresh_lock.lock().await;
         let lock_store = self.store.clone();
         let refresh_lock_wait = self.refresh_lock_wait;
-        let process_guard = tokio::task::spawn_blocking(move || {
-            lock_store.lock_refresh_within(refresh_lock_wait)
-        })
-        .await
-        .context("refresh-lock worker failed")??;
+        let process_guard =
+            tokio::task::spawn_blocking(move || lock_store.lock_refresh_within(refresh_lock_wait))
+                .await
+                .context("refresh-lock worker failed")??;
         let cred = self
             .store
             .load_while_refresh_locked(&process_guard)?
@@ -333,7 +332,11 @@ mod tests {
         // The refused attempt rotated nothing: no token request reached the
         // endpoint, and the credential file is exactly as its owner left it.
         assert!(
-            server.received_requests().await.unwrap_or_default().is_empty(),
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
             "a refused lock must not rotate a token"
         );
         let unchanged = store.load().unwrap().unwrap();

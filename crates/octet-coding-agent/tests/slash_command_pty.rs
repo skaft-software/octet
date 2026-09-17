@@ -522,6 +522,35 @@ fn real_octet_slash_context_renders_while_a_response_is_streaming() {
     octet.shutdown();
 }
 
+/// 2d.1 / 2d.2 — the settings and scope reports render mid-run from captured
+/// facts, and a mutation queues for the idle boundary with an explicit notice
+/// instead of silently doing nothing while the run owns the application.
+#[test]
+fn real_octet_settings_and_scoped_models_report_while_a_response_is_streaming() {
+    let (api, mut octet) = streaming_octet();
+    octet.pty.write_input(b"/settings\r");
+    octet.pty.wait_for(b"octet settings");
+    octet.pty.wait_for(b"Project trust is deliberately not persisted here");
+    assert!(
+        !contains_bytes(&octet.pty.output, TAIL_MARKER),
+        "settings rendered only after the response finished; transcript: {}",
+        visible_bytes(&octet.pty.output)
+    );
+    assert!(!api.completed.load(Ordering::SeqCst));
+
+    // Enter dismisses the report overlay; an empty draft is not a follow-up.
+    octet.pty.write_input(b"\r");
+    octet.pty.write_input(b"/scoped-models\r");
+    octet.pty.wait_for(b"Model cycling scope");
+    octet.pty.write_input(b"\r");
+    octet.pty.write_input(b"/scoped-models all\r");
+    octet.pty.wait_for(b"model scope change queued for the next idle boundary");
+
+    api.release();
+    octet.pty.wait_for(TAIL_MARKER);
+    octet.shutdown();
+}
+
 /// The effort picker is opened inline by the active-run dispatcher, not queued
 /// to the idle boundary with the setting change it produces.
 #[test]

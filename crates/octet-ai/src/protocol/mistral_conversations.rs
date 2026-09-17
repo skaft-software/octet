@@ -11,6 +11,7 @@
 use serde_json::{json, Value};
 
 use crate::catalog::Model;
+use crate::declarations::MistralReasoningProfile;
 use crate::error::{AiError, ConfigError, DecodeError, Diagnostic, UnsupportedError};
 use crate::protocol::sse::SseEvent;
 use crate::protocol::HttpRequestParts;
@@ -45,12 +46,25 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         )
         .into());
     }
-    if req.reasoning != ReasoningConfig::Off {
-        return Err(UnsupportedError::Reasoning.into());
-    }
     if req.reasoning_mode != ReasoningMode::Standard {
         return Err(UnsupportedError::ReasoningMode.into());
     }
+    // Native reasoning controls are declaration-driven: a model without a
+    // declared Mistral reasoning profile keeps the original fail-closed
+    // rejection, and a declared profile emits exactly one of the two native
+    // fields. The upstream client selects between them per model
+    // (`usesReasoningEffort` / `usesPromptModeReasoning`); octet reads that
+    // choice from the model preset rather than branching on a model id.
+    let reasoning_control = match (&req.reasoning, model.spec.preset.mistral_reasoning) {
+        (ReasoningConfig::Off, _) => None,
+        (ReasoningConfig::Budget(_), _) => {
+            // Conversations `CompletionArgs` has no token-budget field; a
+            // caller budget cannot be silently converted into an effort tier.
+            return Err(UnsupportedError::Reasoning.into());
+        }
+        (_, None) => return Err(UnsupportedError::Reasoning.into()),
+        (selection, Some(profile)) => Some((profile, selection.clone())),
+    };
     // CompletionArgs accepts only enum tool choices, not a named function.
     // Weakening a forced function to auto/required would change execution intent.
     if matches!(&req.tool_choice, ToolChoice::Named(_)) {
@@ -152,8 +166,10 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
             // Strict JSON-schema constrained sampling rewrites the function
             // parameters into Mistral's enforced subset; otherwise the
             // canonical schema is sent unchanged.
-            let (parameters, _strict) =
-                crate::constrained_sampling::function_tool_parameters(tool, true)?;
+            let (parameters, _strict) = crate::constrained_sampling::function_tool_parameters(
+                tool,
+                super::strict_mode_for(model),
+            )?;
             tools.push(json!({
                 "type": "function",
                 "function": {
@@ -201,6 +217,19 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
             args.insert("response_format".into(), format);
         }
     }
+    if let Some((profile, selection)) = reasoning_control {
+        match profile {
+            MistralReasoningProfile::ReasoningEffort => {
+                args.insert(
+                    "reasoning_effort".into(),
+                    json!(mistral_reasoning_effort(model, &selection)),
+                );
+            }
+            MistralReasoningProfile::PromptMode => {
+                args.insert("prompt_mode".into(), json!("reasoning"));
+            }
+        }
+    }
     if !args.is_empty() {
         body["completion_args"] = Value::Object(args);
     }
@@ -222,6 +251,36 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         streaming: true,
         diagnostics,
     })
+}
+
+
+/// Map a portable selection onto the native Conversations `reasoning_effort`
+/// value. Pi's `mapReasoningEffort` maps the selected level through
+/// `thinkingLevelMap` and falls back to `"high"` for an absent or explicitly
+/// unmapped level; the wire enum is an open `none|minimal|low|medium|high|xhigh`.
+fn mistral_reasoning_effort(model: &Model, selection: &ReasoningConfig) -> String {
+    use crate::types::ReasoningEffort;
+    let level = match selection {
+        ReasoningConfig::Off => return "none".to_owned(),
+        ReasoningConfig::On => "high",
+        ReasoningConfig::Effort(effort) => match effort {
+            ReasoningEffort::Minimal => "minimal",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::Xhigh => "xhigh",
+            ReasoningEffort::Max | ReasoningEffort::Ultra => "max",
+        },
+        ReasoningConfig::Budget(_) => "high",
+    };
+    model
+        .spec
+        .preset
+        .thinking_level_map
+        .get(level)
+        .and_then(|mapped| mapped.as_deref())
+        .unwrap_or("high")
+        .to_owned()
 }
 
 fn drop_unsupported(
@@ -605,4 +664,133 @@ fn decode_usage(
         total_tokens: count("total_tokens", false)?,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::harness::model as harness_model;
+    use crate::types::UserMessage;
+
+    fn native_model(profile: Option<MistralReasoningProfile>) -> Model {
+        let mut model = harness_model(Protocol::MistralConversations, None);
+        std::sync::Arc::make_mut(&mut model.spec)
+            .preset
+            .mistral_reasoning = profile;
+        model
+    }
+
+    fn request(reasoning: ReasoningConfig) -> Request {
+        Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("go".to_owned())],
+            })],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: Vec::new(),
+            reasoning,
+            reasoning_mode: ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        }
+    }
+
+    fn completion_args(model: &Model, req: &Request) -> serde_json::Value {
+        let body: serde_json::Value =
+            serde_json::from_slice(&build_request(model, req).unwrap().body).unwrap();
+        body["completion_args"].clone()
+    }
+
+    #[test]
+    fn declared_profiles_emit_exactly_one_native_reasoning_control() {
+        let mut effort_model = native_model(Some(MistralReasoningProfile::ReasoningEffort));
+        std::sync::Arc::make_mut(&mut effort_model.spec)
+            .preset
+            .thinking_level_map
+            .insert("high".to_owned(), Some("none".to_owned()));
+        let args = completion_args(
+            &effort_model,
+            &request(ReasoningConfig::Effort(crate::types::ReasoningEffort::High)),
+        );
+        assert_eq!(args["reasoning_effort"], "none");
+        assert!(args.get("prompt_mode").is_none());
+
+        // An unmapped level uses Pi's `mapReasoningEffort` fallback: Pi's own
+        // Mistral wire enum collapses every enabled level to `high` unless the
+        // model's `thinkingLevelMap` names a different value.
+        let default_model = native_model(Some(MistralReasoningProfile::ReasoningEffort));
+        let args = completion_args(
+            &default_model,
+            &request(ReasoningConfig::Effort(crate::types::ReasoningEffort::Low)),
+        );
+        assert_eq!(args["reasoning_effort"], "high");
+        assert!(args.get("prompt_mode").is_none());
+
+        // A declared mapping is authoritative for that level.
+        let mut mapped_model = native_model(Some(MistralReasoningProfile::ReasoningEffort));
+        std::sync::Arc::make_mut(&mut mapped_model.spec)
+            .preset
+            .thinking_level_map
+            .insert("low".to_owned(), Some("low".to_owned()));
+        let args = completion_args(
+            &mapped_model,
+            &request(ReasoningConfig::Effort(crate::types::ReasoningEffort::Low)),
+        );
+        assert_eq!(args["reasoning_effort"], "low");
+
+        let prompt_model = native_model(Some(MistralReasoningProfile::PromptMode));
+        let args = completion_args(
+            &prompt_model,
+            &request(ReasoningConfig::Effort(crate::types::ReasoningEffort::High)),
+        );
+        assert_eq!(args["prompt_mode"], "reasoning");
+        assert!(args.get("reasoning_effort").is_none());
+
+        // Reasoning off emits neither native control.
+        let args = completion_args(&prompt_model, &request(ReasoningConfig::Off));
+        assert!(args.get("prompt_mode").is_none());
+        assert!(args.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn undeclared_or_budget_reasoning_fails_closed() {
+        for profile in [
+            None,
+            Some(MistralReasoningProfile::ReasoningEffort),
+            Some(MistralReasoningProfile::PromptMode),
+        ] {
+            let model = native_model(profile);
+            // A token budget has no native field on this wire, and a model
+            // without a declared profile rejects every enabled control.
+            assert!(build_request(&model, &request(ReasoningConfig::Budget(4096))).is_err());
+            assert!(
+                build_request(&model, &request(ReasoningConfig::Off)).is_ok(),
+                "{profile:?}"
+            );
+            if profile.is_none() {
+                assert!(build_request(
+                    &model,
+                    &request(ReasoningConfig::Effort(crate::types::ReasoningEffort::High))
+                )
+                .is_err());
+            }
+        }
+        // Even a token-budget-capable model keeps the native rejection: the
+        // Conversations `CompletionArgs` shape has no budget field.
+        let mut budget_capable = native_model(None);
+        std::sync::Arc::make_mut(&mut budget_capable.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap()
+            .control = crate::types::ReasoningControl::TokenBudget;
+        assert!(build_request(&budget_capable, &request(ReasoningConfig::Budget(4096))).is_err());
+    }
 }

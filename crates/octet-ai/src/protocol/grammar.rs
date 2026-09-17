@@ -12,7 +12,14 @@ fn invalid(detail: &str) -> AiError {
     DecodeError::InvalidProviderField(format!("custom tool input {detail}")).into()
 }
 
-pub(super) fn input_property(tools: &[ToolDef], name: &str) -> Result<Option<String>, AiError> {
+pub(super) fn input_property(
+    tools: &[ToolDef],
+    name: &str,
+    supports_grammar: bool,
+) -> Result<Option<String>, AiError> {
+    if !supports_grammar {
+        return Ok(None);
+    }
     tools
         .iter()
         .find(|tool| tool.name == name)
@@ -54,6 +61,10 @@ fn property(builder: &ResponseBuilder, index: usize) -> Result<String, AiError> 
     Ok(input_property(
         builder.tool_definitions.as_deref().unwrap_or_default(),
         &call.name,
+        // A provider `custom` call is already framed as grammar input by the
+        // wire itself; the route declaration gates whether the request may
+        // *declare* one, which the emission/replay paths enforce.
+        true,
     )?
     .unwrap_or_else(|| "input".to_owned()))
 }

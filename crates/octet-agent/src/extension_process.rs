@@ -9618,9 +9618,10 @@ fn provider_protocol_name(protocol: Protocol) -> Option<&'static str> {
         // The API 0.3 extension-provider schema intentionally declares only
         // these three generic wire protocols. Do not coerce native host codecs
         // into a misleading generic route.
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi | Protocol::MistralConversations => {
-            None
-        }
+        Protocol::BedrockConverse
+        | Protocol::GoogleGenerativeAi
+        | Protocol::MistralConversations
+        | Protocol::PiMessages => None,
     }
 }
 
@@ -13159,6 +13160,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     .map_err(|error| format!("invalid cancel request id: {error}"))?;
                 settle_child_request(&state.child_requests, &request_id);
             }
+            // API 0.3 provider catalog reverse requests. The always-running
+            // protocol reader dispatches these inline, so a registration issued
+            // after the initial load phase (for example from a command or tool
+            // handler) mutates the host registry the moment its frame arrives;
+            // it is never queued until a reload. Product catalog projection is a
+            // separate, host-owned synchronization boundary that runs before the
+            // next request, so an in-flight request is never mutated.
             methods::PROVIDERS_COMPLETE => {
                 require_declared(state.declared.providers, "provider catalogs")?;
                 api_v03::parse_provider_catalog_complete_params(params)
@@ -17240,6 +17248,276 @@ providers = true
             !registry.route_is_active(&route),
             "the original route must be stale after the extension update"
         );
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn late_provider_registration_does_not_disturb_an_in_flight_request() {
+        let temp = TempDir::new().expect("tempdir");
+        let script_path = temp.path().join("late-provider-stream.py");
+        write_executable_script(
+            &script_path,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    value = json.loads(line)
+    assert line.rstrip("\n") == canonical(value), line
+    return value
+
+
+def send(value):
+    sys.stdout.write(canonical(value) + "\n")
+    sys.stdout.flush()
+
+
+def provider(provider_id, model_id):
+    return {
+        "provider": {
+            "id": provider_id,
+            "label": provider_id + " provider",
+            "auth": {"kind": "none"},
+        },
+        "models": [{
+            "id": model_id,
+            "api_name": model_id,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }],
+    }
+
+
+def reverse_request(identifier, method, params):
+    send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+    response = receive()
+    assert response.get("id") == identifier and "result" in response, response
+    return response["result"]
+
+
+def stream(stream_id, text):
+    events = [
+        ("started", {"response_id": stream_id + "-response"}),
+        ("text_start", {"index": 0}),
+        ("text_delta", {"index": 0, "delta": text}),
+        ("text_end", {"index": 0}),
+        ("finished", {"stop_reason": "stop"}),
+    ]
+    for sequence, (kind, payload) in enumerate(events):
+        send({
+            "jsonrpc": "2.0",
+            "method": "provider/event",
+            "params": {
+                "stream_id": stream_id,
+                "sequence": sequence,
+                "kind": kind,
+                "payload": payload,
+            },
+        })
+
+
+initialize = receive()
+assert initialize["method"] == "initialize", initialize
+contract = initialize["params"]["contract"]
+provider_capabilities = {"provider_catalog", "provider_stream", "provider_auth"}
+provider_methods = {
+    "providers/complete",
+    "providers/register",
+    "providers/update",
+    "providers/unregister",
+    "provider/stream",
+    "provider/event",
+    "provider/cancel",
+    "provider/auth/request",
+    "provider/auth/revoke",
+}
+selection = {
+    "schema": contract["schema"],
+    "encoding": contract["encoding"],
+    "capabilities": [
+        capability
+        for capability in contract["required_capabilities"] + contract["optional_capabilities"]
+        if capability in contract["required_capabilities"] or capability in provider_capabilities
+    ],
+    "methods": [
+        method
+        for method in contract["required_methods"] + contract["optional_methods"]
+        if method in contract["required_methods"] or method in provider_methods
+    ],
+    "limits": contract["limits"],
+}
+send({
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {"api_version": "0.3", "tools": [], "contract": selection},
+})
+reverse_request("initial-register", "providers/register", provider("alpha", "alpha-model"))
+send({"jsonrpc": "2.0", "method": "providers/complete", "params": {}})
+
+while True:
+    message = receive()
+    method = message.get("method")
+    if method == "provider/stream":
+        params = message["params"]
+        if params["provider_id"] == "alpha":
+            # Publish a second provider while alpha's request is already in
+            # flight. The accepted request must keep streaming.
+            reverse_request("late-register", "providers/register", provider("beta", "beta-model"))
+        send({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {"stream_id": params["stream_id"], "accepted": True},
+        })
+        stream(params["stream_id"], params["provider_id"] + " is live")
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
+        break
+    else:
+        raise AssertionError(message)
+"#,
+        );
+        let manifest = ExtensionManifest::parse(
+            r#"name = "late-provider-stream"
+version = "0.3.0"
+api_version = "0.3"
+[entrypoint]
+command = "late-provider-stream.py"
+[contributes]
+providers = true
+"#,
+        )
+        .expect("API 0.3 provider manifest");
+        let registry = Arc::new(ExtensionProviderRegistry::new());
+        let mut runtime = ExtensionRuntimeConfig::new(temp.path());
+        runtime.provider_registry = Some(Arc::clone(&registry));
+        let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), runtime)
+            .await
+            .expect("start late-provider fixture");
+        let route = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(route) = registry.resolve("alpha", "alpha-model") {
+                    break route;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("initial provider route");
+
+        let transport = process.provider_stream_transport("alpha", "alpha-model");
+        let mut response = transport
+            .stream(
+                HostStreamModel {
+                    id: octet_ai::ModelId("alpha/alpha-model".into()),
+                    protocol: Protocol::OpenAiChat,
+                    pricing: None,
+                },
+                octet_ai::Request {
+                    system: None,
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    tool_choice: Default::default(),
+                    max_output_tokens: None,
+                    temperature: None,
+                    stop: Vec::new(),
+                    reasoning: Default::default(),
+                    reasoning_mode: Default::default(),
+                    responses: None,
+                    output_format: Default::default(),
+                    output_modalities: Default::default(),
+                    compatibility: Default::default(),
+                    cache_retention: Default::default(),
+                    session_id: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .expect("the in-flight request is accepted while beta is registered");
+
+        let mut text = String::new();
+        let finished = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match futures_util::StreamExt::next(&mut response).await {
+                    Some(Ok(StreamEvent::TextDelta { delta, .. })) => text.push_str(&delta),
+                    Some(Ok(StreamEvent::Finished(response))) => break Some(response),
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => panic!("canonical stream event failed: {error}"),
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .expect("the in-flight stream settled")
+        .expect("the in-flight stream finished");
+        assert_eq!(text, "alpha is live");
+        assert_eq!(finished.stop_reason, StopReason::EndTurn);
+        assert!(
+            registry.route_is_active(&route),
+            "an unrelated late registration must not invalidate the in-flight route"
+        );
+        assert!(
+            registry.resolve("beta", "beta-model").is_some(),
+            "the late declaration is available to the same session"
+        );
+
+        // The late provider is immediately usable: the next request routes to it.
+        let beta_transport = process.provider_stream_transport("beta", "beta-model");
+        let mut beta_response = beta_transport
+            .stream(
+                HostStreamModel {
+                    id: octet_ai::ModelId("beta/beta-model".into()),
+                    protocol: Protocol::OpenAiChat,
+                    pricing: None,
+                },
+                octet_ai::Request {
+                    system: None,
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    tool_choice: Default::default(),
+                    max_output_tokens: None,
+                    temperature: None,
+                    stop: Vec::new(),
+                    reasoning: Default::default(),
+                    reasoning_mode: Default::default(),
+                    responses: None,
+                    output_format: Default::default(),
+                    output_modalities: Default::default(),
+                    compatibility: Default::default(),
+                    cache_retention: Default::default(),
+                    session_id: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .expect("the late provider accepts a request");
+        let mut beta_text = String::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = futures_util::StreamExt::next(&mut beta_response).await {
+                match event.expect("canonical stream event") {
+                    StreamEvent::TextDelta { delta, .. } => beta_text.push_str(&delta),
+                    StreamEvent::Finished(_) => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the late provider stream settled");
+        assert_eq!(beta_text, "beta is live");
         assert!(process.shutdown().await);
     }
 

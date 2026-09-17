@@ -24,6 +24,18 @@ remain reproducible/offline:
 - rates are stored as integer microdollars per million tokens, converted from
   models.dev's dollars-per-million values during the explicit snapshot refresh.
 
+The image-generation catalog is a separate pinned snapshot:
+
+- `models/openrouter-image-models.json` contains the OpenRouter image routes
+  (those whose `architecture.output_modalities` include `image`), with token
+  rates converted to integer microdollars per million tokens; a dynamic-routing
+  placeholder (`-1`) leaves the route unpriced rather than quoting zero;
+- `models/openrouter-image-source.json` pins the source URL and SHA-256 of the
+  saved `/models` response; and
+- both are produced by `scripts/refresh-openrouter-image-models.py` from a
+  saved response (`--source`, then `--check` to verify). Normal builds embed
+  the checked-in JSON through `src/images.rs` and never fetch the network.
+
 The pricing snapshot is intentionally limited to octet's built-in providers. A
 provider/model route absent from the snapshot remains unpriced unless an
 explicit `CatalogConfig` or provider-specific override supplies rates. This is

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::app::{reasoning_label, App, Reconfig};
+use crate::cli::parity::ScopedModel;
 use crate::codex_context::CodexContextTier;
 use crate::compaction::{context_window, estimate_next_request_tokens};
 use crate::config::CompactionMode;
@@ -12,7 +13,9 @@ use octet_agent::{
     analyze_session_cache, analyze_session_cache_stats, CacheStats, EntryValue, Session,
     UsageRecordKind,
 };
-use octet_ai::{AssistantPart, Cost, Message, Model, Protocol, ResponsesRuntimeProfile, Usage};
+use octet_ai::{
+    AssistantPart, Cost, Message, Model, ModelId, Protocol, ResponsesRuntimeProfile, Usage,
+};
 
 /// Parsed in-TUI command. Commands are deliberately separate from shell CLI
 /// options: only editor text beginning with `/` enters this grammar.
@@ -65,6 +68,13 @@ pub enum Command {
     Extensions(ExtensionsSubcommand),
     /// Inspect or mutate the durable session goal.
     Goal(GoalCommand),
+    /// Inspect or change user-level display and default preferences.
+    Settings(SettingsCommand),
+    /// Inspect or change the ordered model cycling scope.
+    ScopedModels(ScopedModelsCommand),
+    /// Local shell escape. `!command` results are model-visible context;
+    /// `!!command` results are explicitly excluded from it.
+    Bash(BashEscape),
     Unknown(String),
 }
 
@@ -117,6 +127,102 @@ pub enum SkillsSubcommand {
     Reload,
     /// Explicitly deactivate a skill.
     Off(String),
+}
+
+/// Subcommands for the `/settings` slash command.
+///
+/// Settings are user-level display/default preferences. Project trust is
+/// deliberately absent: this surface never persists a default trust decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettingsCommand {
+    /// Show the effective settings summary.
+    Show,
+    /// Select the compiled terminal appearance, or open the picker.
+    Theme(Option<String>),
+    /// Enable, disable, or report inline tool-result image placement.
+    Images(Option<bool>),
+    /// Set, or report, the persisted default model for new sessions.
+    DefaultModel(Option<String>),
+    /// Set, or report, the persisted default reasoning level.
+    DefaultReasoning(Option<String>),
+    /// Report the active endpoint's declared transport.
+    Transport,
+    /// Report the editor-padding policy.
+    Padding,
+}
+
+/// Subcommands for the `/scoped-models` slash command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopedModelsCommand {
+    /// Show the ordered cycling scope and what would be persisted.
+    Show,
+    /// Scope cycling to every currently available model.
+    All,
+    /// Remove the scope restriction and the persisted pattern list.
+    Clear,
+    /// Enable every model a model-id or provider glob selects.
+    Enable(String),
+    /// Disable every model a model-id or provider glob selects.
+    Disable(String),
+    /// Enable the target when any of it is disabled; otherwise disable it.
+    Toggle(String),
+    /// Move one scoped model within the ordered cycling scope.
+    Move { model: String, direction: ScopeMove },
+}
+
+/// One ordered movement inside the `/scoped-models` scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeMove {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
+impl ScopeMove {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    /// User-facing wording for a move report.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Top => "to the top",
+            Self::Bottom => "to the bottom",
+        }
+    }
+}
+
+/// One parsed local shell escape (`!command` / `!!command`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BashEscape {
+    /// Exact command text after the `!`/`!!` prefix.
+    pub command: String,
+    /// `true` for `!!command`: the result must never enter model context.
+    pub excluded: bool,
+}
+
+impl BashEscape {
+    /// Parse one trimmed editor submission, or `None` when it is not a shell
+    /// escape. `!` and `!!` alone parse as empty commands so dispatch can
+    /// report usage instead of silently running nothing.
+    pub fn parse(input: &str) -> Option<Self> {
+        let body = input.trim().strip_prefix('!')?;
+        let excluded = body.starts_with('!');
+        let command = body.strip_prefix('!').unwrap_or(body).trim();
+        Some(Self {
+            command: command.to_owned(),
+            excluded,
+        })
+    }
 }
 
 /// One command shown in the prompt's live slash-command suggestions.
@@ -282,6 +388,18 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         "inspect or manage the durable session goal",
         true
     ),
+    slash!(
+        "settings",
+        "/settings [theme|images on/off|default model/reasoning|transport|padding]",
+        "show or change display and default preferences",
+        true
+    ),
+    slash!(
+        "scoped-models",
+        "/scoped-models [all|clear|enable|disable|toggle|move]",
+        "manage the ordered model cycling scope",
+        true
+    ),
     slash!("exit", "/exit", "exit octet", false),
 ];
 
@@ -416,13 +534,12 @@ impl CodexContextSurface {
         let model_id = model.spec.id.0.clone();
         let (fallback_default, entitled_max_window) =
             crate::codex_context::entitled_context_windows(&model_id);
-        let advertised_window = if CodexContextTier::from_plan_entitlement(entitled)
-            == CodexContextTier::Extended
-        {
-            fallback_default.max(entitled_max_window)
-        } else {
-            fallback_default
-        };
+        let advertised_window =
+            if CodexContextTier::from_plan_entitlement(entitled) == CodexContextTier::Extended {
+                fallback_default.max(entitled_max_window)
+            } else {
+                fallback_default
+            };
         Some(Self {
             model_id,
             effective_window: model.spec.limits.context_window,
@@ -620,6 +737,14 @@ pub fn complete_slash_command(input: &str) -> Option<String> {
     ))
 }
 
+fn parse_on_off(value: &str) -> Option<bool> {
+    match value {
+        "on" | "true" | "yes" => Some(true),
+        "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_goal_command(argument: &str) -> GoalCommand {
     let argument = argument.trim();
     if argument.is_empty() {
@@ -644,6 +769,9 @@ fn parse_goal_command(argument: &str) -> GoalCommand {
 /// Parse a slash command without interpreting models, paths, or capabilities.
 pub fn parse(input: &str) -> Command {
     let input = input.trim();
+    if let Some(escape) = BashEscape::parse(input) {
+        return Command::Bash(escape);
+    }
     let Some(body) = input.strip_prefix('/') else {
         return Command::Unknown(input.to_owned());
     };
@@ -734,6 +862,59 @@ pub fn parse(input: &str) -> Command {
     if full_name == "goal" {
         let argument = body[name.len()..].trim();
         return Command::Goal(parse_goal_command(argument));
+    }
+
+    if full_name == "settings" {
+        let args = parts.collect::<Vec<_>>();
+        return match args.as_slice() {
+            [] => Command::Settings(SettingsCommand::Show),
+            ["theme"] => Command::Settings(SettingsCommand::Theme(None)),
+            ["theme", value] => {
+                Command::Settings(SettingsCommand::Theme(Some((*value).to_owned())))
+            }
+            ["images"] => Command::Settings(SettingsCommand::Images(None)),
+            ["images", value] => match parse_on_off(value) {
+                Some(enabled) => Command::Settings(SettingsCommand::Images(Some(enabled))),
+                None => Command::Unknown(input.to_owned()),
+            },
+            ["default", "model"] => Command::Settings(SettingsCommand::DefaultModel(None)),
+            ["default", "model", id] => {
+                Command::Settings(SettingsCommand::DefaultModel(Some((*id).to_owned())))
+            }
+            ["default", "reasoning"] => Command::Settings(SettingsCommand::DefaultReasoning(None)),
+            ["default", "reasoning", level] => {
+                Command::Settings(SettingsCommand::DefaultReasoning(Some((*level).to_owned())))
+            }
+            ["transport"] => Command::Settings(SettingsCommand::Transport),
+            ["padding"] => Command::Settings(SettingsCommand::Padding),
+            _ => Command::Unknown(input.to_owned()),
+        };
+    }
+
+    if full_name == "scoped-models" {
+        let args = parts.collect::<Vec<_>>();
+        return match args.as_slice() {
+            [] | ["status"] => Command::ScopedModels(ScopedModelsCommand::Show),
+            ["all"] => Command::ScopedModels(ScopedModelsCommand::All),
+            ["clear"] | ["off"] => Command::ScopedModels(ScopedModelsCommand::Clear),
+            ["enable", target] => {
+                Command::ScopedModels(ScopedModelsCommand::Enable((*target).to_owned()))
+            }
+            ["disable", target] => {
+                Command::ScopedModels(ScopedModelsCommand::Disable((*target).to_owned()))
+            }
+            ["toggle", target] => {
+                Command::ScopedModels(ScopedModelsCommand::Toggle((*target).to_owned()))
+            }
+            ["move", model, direction] => match ScopeMove::parse(direction) {
+                Some(direction) => Command::ScopedModels(ScopedModelsCommand::Move {
+                    model: (*model).to_owned(),
+                    direction,
+                }),
+                None => Command::Unknown(input.to_owned()),
+            },
+            _ => Command::Unknown(input.to_owned()),
+        };
     }
 
     if full_name == "help" {
@@ -983,6 +1164,330 @@ pub fn debug_report_text(
         report.push('\n');
     }
     report
+}
+
+/// Maximum bytes retained from one local shell escape's command or output in
+/// the durable record. The live transcript keeps the complete bounded capture;
+/// the durable record stays small enough that one command cannot dominate the
+/// model context.
+pub const SHELL_ESCAPE_RECORD_BYTES: usize = 32 * 1024;
+
+/// One finished local shell escape (`!command` / `!!command`).
+///
+/// `!command` results are appended as an ordinary user message so the next
+/// model turn sees them; `!!command` results use a non-model-visible session
+/// entry, so the execution is still durably accounted for while the model
+/// context stays exactly as the user requested.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellEscapeRecord {
+    command: String,
+    output: String,
+    exit_code: i32,
+    /// `true` for `!!command`: this record never enters model context.
+    excluded: bool,
+}
+
+impl ShellEscapeRecord {
+    /// Bound one shell result for the durable record.
+    pub fn new(
+        command: impl Into<String>,
+        output: impl Into<String>,
+        exit_code: i32,
+        excluded: bool,
+    ) -> Self {
+        Self {
+            command: bounded_record_text(&command.into(), SHELL_ESCAPE_RECORD_BYTES),
+            output: bounded_record_text(&output.into(), SHELL_ESCAPE_RECORD_BYTES),
+            exit_code,
+            excluded,
+        }
+    }
+
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+
+    pub fn excluded(&self) -> bool {
+        self.excluded
+    }
+
+    /// Prefix the reader typed, so the transcript and the record agree.
+    pub fn prefix(&self) -> &'static str {
+        if self.excluded {
+            "!!"
+        } else {
+            "!"
+        }
+    }
+
+    /// Model-visible text for an included (`!`) result. Never used for `!!`.
+    pub fn context_text(&self) -> String {
+        format!(
+            "$ {}\nexit {}\n{}",
+            self.command,
+            self.exit_code,
+            self.output.trim_end()
+        )
+    }
+
+    /// Transcript/accounting text; the exclusion decision is explicit so a
+    /// later reader cannot mistake an excluded result for model context.
+    pub fn transcript_text(&self) -> String {
+        format!(
+            "{}$ {}\nexit {}\n{}{}",
+            self.prefix(),
+            self.command,
+            self.exit_code,
+            if self.excluded {
+                "[excluded from model context]\n"
+            } else {
+                ""
+            },
+            self.output.trim_end()
+        )
+    }
+}
+
+fn bounded_record_text(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    const MARKER: &str = "\n... truncated for the durable record ...";
+    let mut end = limit.saturating_sub(MARKER.len()).min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = value[..end].to_owned();
+    bounded.push_str(MARKER);
+    bounded
+}
+
+/// Readable label for the endpoint's declared streaming transport.
+pub fn transport_label(model: &Model) -> &'static str {
+    match model.endpoint.transport {
+        octet_ai::EndpointTransport::Http => "http",
+        octet_ai::EndpointTransport::WebSocketPreferred => "websocket-preferred",
+    }
+}
+
+/// Effective values for the `/settings` surface.
+///
+/// Captured as plain facts so the active-run path can render the same report
+/// without borrowing the application that the run owns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingsSurface {
+    pub default_model: Option<String>,
+    pub reasoning: String,
+    pub theme: Option<String>,
+    pub transport: &'static str,
+    pub endpoint: String,
+    pub show_images: bool,
+}
+
+impl SettingsSurface {
+    /// Capture the effective settings from the application.
+    pub fn capture(app: &App) -> Self {
+        Self {
+            default_model: app.config.model.as_ref().map(|model| model.0.clone()),
+            reasoning: reasoning_label(&app.reasoning),
+            theme: app.config.theme.clone(),
+            transport: transport_label(&app.model),
+            endpoint: app.model.endpoint.id.0.clone(),
+            show_images: app.config.show_images,
+        }
+    }
+}
+
+/// Effective `/settings` summary.
+///
+/// Every line is a fact the running product actually holds. Transport and
+/// editor padding are route/theme declarations rather than persisted user
+/// preferences, and project trust is deliberately not a setting at all.
+pub fn settings_text(surface: &SettingsSurface) -> String {
+    let default_model = surface
+        .default_model
+        .as_deref()
+        .unwrap_or("(chosen at startup or by the session)");
+    format!(
+        "octet settings\n\n\
+         Default model      {default_model}\n\
+         Default reasoning  {}\n\
+         Theme              {}\n\
+         Transport          {} (declared by the {} route; not a user preference)\n\
+         Inline images      {}\n\
+         Editor padding     compiled theme layout (no persisted override)\n\n\
+         Project trust is deliberately not persisted here: workspace trust comes from --workspace-trusted or the interactive startup prompt.\n\n\
+         Change: /settings theme <auto|light|dark> · /settings images <on|off> · /settings default model <id> · /settings default reasoning <level>",
+        surface.reasoning,
+        surface.theme.as_deref().unwrap_or("auto"),
+        surface.transport,
+        surface.endpoint,
+        if surface.show_images { "on" } else { "off" },
+    )
+}
+
+/// Render the ordered cycling scope and what a persistence round-trip keeps.
+pub fn scoped_models_text(scope: Option<&[ScopedModel]>, available: &[(String, String)]) -> String {
+    let mut text = String::from("Model cycling scope\n");
+    match scope {
+        None => text.push_str(&format!(
+            "  (unrestricted) all {} available models cycle in catalog order\n",
+            available.len()
+        )),
+        Some([]) => text.push_str("  (empty) no model is a cycling target\n"),
+        Some(scope) => {
+            text.push_str(&format!(
+                "  {} of {} available models, in this exact order:\n",
+                scope.len(),
+                available.len()
+            ));
+            for (index, entry) in scope.iter().enumerate() {
+                let level = entry
+                    .reasoning
+                    .as_deref()
+                    .map(|level| format!(":{level}"))
+                    .unwrap_or_default();
+                let availability = if available.iter().any(|(id, _)| id == &entry.id.0) {
+                    ""
+                } else {
+                    " (unavailable on this route)"
+                };
+                text.push_str(&format!(
+                    "  {:>2}. {}{level}{availability}\n",
+                    index + 1,
+                    entry.id.0,
+                ));
+            }
+        }
+    }
+    text.push_str(
+        "\nUse /scoped-models enable <id|provider/*>, disable <id|provider/*>, toggle <...>,\n\
+         move <id> <up|down|top|bottom>, all, or clear. Cycling bindings follow this order.",
+    );
+    text
+}
+
+/// Persisted comma-separated pattern list for one ordered scope. `None` means
+/// "clear the persisted scope", which is distinct from an empty scope.
+pub fn scope_patterns_string(scope: &[ScopedModel]) -> Option<String> {
+    (!scope.is_empty()).then(|| {
+        scope
+            .iter()
+            .map(|entry| match entry.reasoning.as_deref() {
+                Some(level) => format!("{}:{level}", entry.id.0),
+                None => entry.id.0.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    })
+}
+
+/// Enable or disable every model a model-id or provider glob selects.
+/// Returns how many entries changed.
+pub fn set_scope_target(
+    scope: &mut Vec<ScopedModel>,
+    available: &[(String, String)],
+    target: &str,
+    enable: bool,
+) -> Result<usize, String> {
+    let matched = available
+        .iter()
+        .filter(|(id, provider)| crate::cli::parity::model_pattern_matches(target, id, provider))
+        .collect::<Vec<_>>();
+    if matched.is_empty() {
+        return Err(format!(
+            "no available model matches {target:?}; run /model to list the credential-scoped catalog"
+        ));
+    }
+    if enable {
+        let mut added = 0usize;
+        for (id, _) in matched {
+            if !scope.iter().any(|entry| entry.id.0 == id.as_str()) {
+                scope.push(ScopedModel {
+                    id: ModelId(id.clone()),
+                    pattern: id.clone(),
+                    reasoning: None,
+                });
+                added += 1;
+            }
+        }
+        Ok(added)
+    } else {
+        let targets = matched
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>();
+        let before = scope.len();
+        scope.retain(|entry| !targets.contains(&entry.id.0.as_str()));
+        Ok(before.saturating_sub(scope.len()))
+    }
+}
+
+/// Enable the target unless every matching model is already in the scope, in
+/// which case disable it. Returns whether the target is now enabled.
+pub fn toggle_scope_target(
+    scope: &mut Vec<ScopedModel>,
+    available: &[(String, String)],
+    target: &str,
+) -> Result<bool, String> {
+    let all_enabled = available
+        .iter()
+        .filter(|(id, provider)| crate::cli::parity::model_pattern_matches(target, id, provider))
+        .all(|(id, _)| scope.iter().any(|entry| entry.id.0 == id.as_str()));
+    set_scope_target(scope, available, target, !all_enabled)?;
+    Ok(!all_enabled)
+}
+
+/// Move one scoped model inside the ordered scope. A boundary move is an
+/// explicit error, never a silent no-op.
+pub fn move_scope_model(
+    scope: &mut Vec<ScopedModel>,
+    model: &str,
+    direction: ScopeMove,
+) -> Result<(), String> {
+    let index = scope
+        .iter()
+        .position(|entry| entry.id.0 == model)
+        .or_else(|| {
+            scope
+                .iter()
+                .position(|entry| entry.id.0.eq_ignore_ascii_case(model))
+        })
+        .ok_or_else(|| {
+            format!("{model:?} is not in the current scope; enable it before moving it")
+        })?;
+    match direction {
+        ScopeMove::Up if index == 0 => Err(format!("{model:?} is already first")),
+        ScopeMove::Up => {
+            scope.swap(index, index - 1);
+            Ok(())
+        }
+        ScopeMove::Down if index + 1 == scope.len() => Err(format!("{model:?} is already last")),
+        ScopeMove::Down => {
+            scope.swap(index, index + 1);
+            Ok(())
+        }
+        ScopeMove::Top if index == 0 => Err(format!("{model:?} is already first")),
+        ScopeMove::Top => {
+            let entry = scope.remove(index);
+            scope.insert(0, entry);
+            Ok(())
+        }
+        ScopeMove::Bottom if index + 1 == scope.len() => Err(format!("{model:?} is already last")),
+        ScopeMove::Bottom => {
+            let entry = scope.remove(index);
+            scope.push(entry);
+            Ok(())
+        }
+    }
 }
 
 pub fn session_text(session: &Session) -> String {
@@ -1388,7 +1893,10 @@ mod tests {
             .unwrap();
         let text = session_text(&session);
         assert!(text.contains("Session: detail-session"), "{text}");
-        assert!(text.contains(&format!("File: {}", path.display())), "{text}");
+        assert!(
+            text.contains(&format!("File: {}", path.display())),
+            "{text}"
+        );
         assert!(text.contains("Head: 002"), "{text}");
         assert!(text.contains("Entries: 2"), "{text}");
         assert!(text.contains("Active-branch messages: 2"), "{text}");
@@ -1435,10 +1943,7 @@ mod tests {
         let report = debug_report_text(Some((120, 40)), Some(&lines), &[]);
         assert!(report.contains("Terminal: 120x40"));
         assert!(report.contains("Total lines: 3"));
-        assert!(
-            report.contains("[1] (w=9) \"wide 漢字\""),
-            "{report}"
-        );
+        assert!(report.contains("[1] (w=9) \"wide 漢字\""), "{report}");
         assert!(
             report.contains(r#"[2] (w=15) "quote\"and\\slash""#),
             "{report}"
@@ -1458,6 +1963,286 @@ mod tests {
             report.lines().any(|line| line.contains("\"hello\"")),
             "{report}"
         );
+    }
+
+    #[test]
+    fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
+        assert_eq!(parse("/settings"), Command::Settings(SettingsCommand::Show));
+        assert_eq!(
+            parse("/settings theme"),
+            Command::Settings(SettingsCommand::Theme(None))
+        );
+        assert_eq!(
+            parse("/settings theme light"),
+            Command::Settings(SettingsCommand::Theme(Some("light".into())))
+        );
+        assert_eq!(
+            parse("/settings images off"),
+            Command::Settings(SettingsCommand::Images(Some(false)))
+        );
+        assert_eq!(
+            parse("/settings default model custom/alpha-model"),
+            Command::Settings(SettingsCommand::DefaultModel(Some(
+                "custom/alpha-model".into()
+            )))
+        );
+        assert_eq!(
+            parse("/settings default reasoning high"),
+            Command::Settings(SettingsCommand::DefaultReasoning(Some("high".into())))
+        );
+        assert_eq!(
+            parse("/settings transport"),
+            Command::Settings(SettingsCommand::Transport)
+        );
+        assert_eq!(
+            parse("/settings padding"),
+            Command::Settings(SettingsCommand::Padding)
+        );
+        // Project trust is deliberately not a setting this surface can change.
+        assert!(matches!(
+            parse("/settings default trust always"),
+            Command::Unknown(_)
+        ));
+        assert!(matches!(
+            parse("/settings images maybe"),
+            Command::Unknown(_)
+        ));
+        assert!(matches!(parse("/settings bogus"), Command::Unknown(_)));
+
+        assert_eq!(
+            parse("/scoped-models"),
+            Command::ScopedModels(ScopedModelsCommand::Show)
+        );
+        assert_eq!(
+            parse("/scoped-models all"),
+            Command::ScopedModels(ScopedModelsCommand::All)
+        );
+        assert_eq!(
+            parse("/scoped-models clear"),
+            Command::ScopedModels(ScopedModelsCommand::Clear)
+        );
+        assert_eq!(
+            parse("/scoped-models toggle openai/*"),
+            Command::ScopedModels(ScopedModelsCommand::Toggle("openai/*".into()))
+        );
+        assert_eq!(
+            parse("/scoped-models move gpt-6-astra top"),
+            Command::ScopedModels(ScopedModelsCommand::Move {
+                model: "gpt-6-astra".into(),
+                direction: ScopeMove::Top,
+            })
+        );
+        assert!(matches!(
+            parse("/scoped-models move gpt-6-astra sideways"),
+            Command::Unknown(_)
+        ));
+        // Both commands are discoverable popup entries with real parser routes.
+        for name in ["settings", "scoped-models"] {
+            assert!(SLASH_COMMANDS.iter().any(|command| command.name == name));
+        }
+    }
+
+    #[test]
+    fn shell_escape_parser_distinguishes_included_and_excluded_commands() {
+        assert_eq!(
+            parse("!git status"),
+            Command::Bash(BashEscape {
+                command: "git status".into(),
+                excluded: false,
+            })
+        );
+        assert_eq!(
+            parse("  !!rm -rf build  "),
+            Command::Bash(BashEscape {
+                command: "rm -rf build".into(),
+                excluded: true,
+            })
+        );
+        // Multi-line commands survive verbatim.
+        assert_eq!(
+            parse("!printf 'a\\nb'"),
+            Command::Bash(BashEscape {
+                command: "printf 'a\\nb'".into(),
+                excluded: false,
+            })
+        );
+        // `!` and `!!` alone are parsed so dispatch reports usage, not silence.
+        assert_eq!(
+            parse("!"),
+            Command::Bash(BashEscape {
+                command: String::new(),
+                excluded: false,
+            })
+        );
+        assert_eq!(
+            parse("!!"),
+            Command::Bash(BashEscape {
+                command: String::new(),
+                excluded: true,
+            })
+        );
+        // Ordinary prose with an exclamation mark is untouched.
+        assert!(matches!(parse("hello, world!"), Command::Unknown(_)));
+    }
+
+    #[test]
+    fn shell_escape_record_bounds_labels_and_never_leaks_excluded_text_into_context() {
+        let included = ShellEscapeRecord::new("git status", "clean", 0, false);
+        assert_eq!(included.prefix(), "!");
+        assert!(!included.excluded());
+        assert!(included.context_text().contains("$ git status"));
+        assert!(included.context_text().contains("exit 0"));
+        assert!(included.context_text().contains("clean"));
+        assert!(!included
+            .transcript_text()
+            .contains("excluded from model context"));
+
+        let excluded = ShellEscapeRecord::new("git log", "deadbeef", 1, true);
+        assert_eq!(excluded.prefix(), "!!");
+        assert!(excluded.excluded());
+        assert!(excluded
+            .transcript_text()
+            .contains("[excluded from model context]"));
+
+        // Oversized output is truncated on a character boundary and says so.
+        let long = "漢".repeat(SHELL_ESCAPE_RECORD_BYTES);
+        let record = ShellEscapeRecord::new("cat big", long, 0, false);
+        assert!(record.output().len() <= SHELL_ESCAPE_RECORD_BYTES);
+        assert!(record
+            .output()
+            .ends_with("truncated for the durable record ..."));
+        assert!(record.output().is_char_boundary(record.output().len()));
+    }
+
+    #[test]
+    fn scoped_scope_targets_toggle_move_and_persist_in_requested_order() {
+        use octet_ai::ModelId;
+        let available = vec![
+            ("custom/alpha-model".to_owned(), "custom-openai".to_owned()),
+            ("gpt-6-astra".to_owned(), "openai".to_owned()),
+            ("gpt-6-luna".to_owned(), "openai".to_owned()),
+        ];
+        let mut scope = Vec::<ScopedModel>::new();
+        // A provider glob enables every model of that provider, in catalog order.
+        assert_eq!(
+            set_scope_target(&mut scope, &available, "openai/*", true),
+            Ok(2)
+        );
+        assert_eq!(
+            scope
+                .iter()
+                .map(|entry| entry.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-6-astra", "gpt-6-luna"]
+        );
+        // A toggle flips a provider selection explicitly and never silently
+        // no-ops on an unmatched target.
+        assert_eq!(
+            toggle_scope_target(&mut scope, &available, "openai/*"),
+            Ok(false)
+        );
+        assert!(scope.is_empty());
+        assert_eq!(
+            toggle_scope_target(&mut scope, &available, "openai/*"),
+            Ok(true)
+        );
+        assert_eq!(
+            set_scope_target(&mut scope, &available, "custom/*", true),
+            Ok(1)
+        );
+        assert_eq!(
+            scope
+                .iter()
+                .map(|entry| entry.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-6-astra", "gpt-6-luna", "custom/alpha-model"]
+        );
+        // Reorder moves exactly one entry and refuses a boundary no-op.
+        assert_eq!(
+            move_scope_model(&mut scope, "custom/alpha-model", ScopeMove::Top),
+            Ok(())
+        );
+        assert!(move_scope_model(&mut scope, "custom/alpha-model", ScopeMove::Up).is_err());
+        assert_eq!(
+            move_scope_model(&mut scope, "gpt-6-luna", ScopeMove::Up),
+            Ok(())
+        );
+        assert_eq!(
+            move_scope_model(&mut scope, "custom/alpha-model", ScopeMove::Bottom),
+            Ok(())
+        );
+        assert_eq!(
+            scope
+                .iter()
+                .map(|entry| entry.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-6-luna", "gpt-6-astra", "custom/alpha-model"]
+        );
+        // Persisted patterns are the exact ordered id list; a level rides along.
+        scope[0].reasoning = Some("high".into());
+        assert_eq!(
+            scope_patterns_string(&scope).as_deref(),
+            Some("gpt-6-luna:high,gpt-6-astra,custom/alpha-model")
+        );
+        assert_eq!(scope_patterns_string(&[]), None);
+        let text = scoped_models_text(Some(&scope), &available);
+        assert!(text.contains("gpt-6-luna:high"), "{text}");
+        assert!(
+            text.contains("3 of 3 available models, in this exact order"),
+            "{text}"
+        );
+        let mut absent = scope.clone();
+        absent.push(ScopedModel {
+            id: ModelId("gone".into()),
+            pattern: "gone".into(),
+            reasoning: None,
+        });
+        assert!(scoped_models_text(Some(&absent), &available)
+            .contains("gone (unavailable on this route)"));
+        assert!(
+            scoped_models_text(None, &available).contains("(unrestricted) all 3 available models")
+        );
+        assert!(set_scope_target(&mut scope, &available, "nope/*", true).is_err());
+    }
+
+    #[test]
+    fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() {
+        let surface = SettingsSurface {
+            default_model: Some("gpt-4o-mini".into()),
+            reasoning: "high".into(),
+            theme: Some("dark".into()),
+            transport: "websocket-preferred",
+            endpoint: "codex".into(),
+            show_images: true,
+        };
+        let text = settings_text(&surface);
+        for expected in [
+            "Default model      gpt-4o-mini",
+            "Default reasoning  high",
+            "Theme              dark",
+            "Transport          websocket-preferred (declared by the codex route; not a user preference)",
+            "Inline images      on",
+            "Editor padding     compiled theme layout (no persisted override)",
+            "Project trust is deliberately not persisted here",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        // Unset defaults are named, never rendered as an empty value.
+        let empty = SettingsSurface {
+            default_model: None,
+            reasoning: "off".into(),
+            theme: None,
+            transport: "http",
+            endpoint: "custom".into(),
+            show_images: false,
+        };
+        let text = settings_text(&empty);
+        assert!(
+            text.contains("Default model      (chosen at startup or by the session)"),
+            "{text}"
+        );
+        assert!(text.contains("Theme              auto"), "{text}");
+        assert!(text.contains("Inline images      off"), "{text}");
     }
 
     #[test]
@@ -1856,9 +2641,12 @@ mod tests {
         let mut model = app.model.clone();
         std::sync::Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
         std::sync::Arc::make_mut(&mut model.spec).id = octet_ai::ModelId(model_id.into());
-        std::sync::Arc::make_mut(&mut model.spec).limits.context_window = context_window;
-        std::sync::Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
-            octet_ai::ResponsesRuntimeProfile::Codex;
+        std::sync::Arc::make_mut(&mut model.spec)
+            .limits
+            .context_window = context_window;
+        std::sync::Arc::make_mut(&mut model.endpoint)
+            .runtime
+            .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
         model
     }
 
@@ -1879,7 +2667,9 @@ mod tests {
             .expect("Codex route");
         assert_eq!(surface.effective_window(), 272_000);
         assert!(!surface.has_uncertain_usage());
-        let clamp = surface.clamp().expect("the deliberate cap must be reported");
+        let clamp = surface
+            .clamp()
+            .expect("the deliberate cap must be reported");
         assert_eq!(clamp.advertised_context_window, 872_000);
         assert_eq!(clamp.effective_context_window, 272_000);
         let message = clamp.message();
@@ -1903,8 +2693,9 @@ mod tests {
             ("gpt-5.6-luna", 1_000_000),
         ] {
             for entitled in [false, true] {
-                let surface = CodexContextSurface::capture(&codex_route(model_id, window), entitled)
-                    .expect("Codex route");
+                let surface =
+                    CodexContextSurface::capture(&codex_route(model_id, window), entitled)
+                        .expect("Codex route");
                 let summary = surface.summary_lines().join("\n");
                 for leak in [
                     "Session::",
@@ -1962,10 +2753,7 @@ mod tests {
         // The operation id is an internal diagnostic; it is recorded by the
         // session, never rendered. `the_effort_menu_summary_never_renders_...`
         // asserts that for every Codex family and entitlement.
-        assert!(
-            !summary.contains("codex-context-above-272k"),
-            "{summary}"
-        );
+        assert!(!summary.contains("codex-context-above-272k"), "{summary}");
     }
 
     #[test]
@@ -1976,7 +2764,10 @@ mod tests {
         let refused = unentitled.raise(872_000, true).unwrap_err();
         assert!(refused.contains("Pro or ProLite"), "{refused}");
         assert!(
-            unentitled.summary_lines().join("\n").contains("Pro or ProLite"),
+            unentitled
+                .summary_lines()
+                .join("\n")
+                .contains("Pro or ProLite"),
             "the unentitled surface must say what a raise needs"
         );
 
@@ -1990,6 +2781,8 @@ mod tests {
         // Above the model's entitlement the request is refused outright.
         let above = entitled.raise(4_000_000, true).unwrap_err();
         assert!(above.contains("872000"), "{above}");
-        assert!(entitled.raise_instruction(872_000).contains("--codex-context-window 872000"));
+        assert!(entitled
+            .raise_instruction(872_000)
+            .contains("--codex-context-window 872000"));
     }
 }

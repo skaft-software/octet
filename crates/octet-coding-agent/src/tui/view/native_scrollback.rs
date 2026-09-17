@@ -10,30 +10,57 @@ use super::transcript_commit::transcript_pinned_frame;
 use super::viewport::{overlay_lines, transcript_lines};
 use super::{ShellState, TranscriptBlock};
 
-/// Live tool output is replaceable telemetry, not a final result. Keep a
-/// trailing pending call wholly addressable until its authoritative result
-/// arrives. In particular, a five-line preview in an eight-row terminal must
-/// not push the mutable tool heading into saved lines. Final results are never
-/// clipped by this policy; they flow into native history in their entirety
-/// (subject only to the existing explicit disclosure policy).
+/// The mutable tail of the logical transcript: rows that must repaint in place
+/// rather than enter native history.
 ///
-/// This intentionally handles only an ordinary trailing call. Historical live
-/// calls/rosters and Markdown finalization still need a separate emitted-
-/// presentation policy; silently freezing those rows would lose real updates.
+/// Live tool output and an active delegation roster are replaceable telemetry,
+/// not a final result. Keep a trailing pending call - or the active roster,
+/// wherever it sits in the current turn - wholly addressable until its
+/// authoritative result arrives. In particular, a five-line preview in an
+/// eight-row terminal must not push the mutable tool heading into saved lines,
+/// and an active roster must keep counting in place instead of freezing into a
+/// terminal-owned copy that a subsequent scroll can never update. Final results
+/// and settled rosters are never clipped by this policy; they flow into native
+/// history in their entirety (subject only to the existing explicit disclosure
+/// policy).
+///
+/// This seam is the only place that decides whether the roster is replaceable,
+/// so the alternate-screen renderer inherits the same emitted-presentation
+/// policy without a native-history assumption of its own. Historical settled
+/// rosters stay ordinary history; nothing here rewrites an already-emitted row.
+fn mutable_tail_start(state: &ShellState) -> Option<usize> {
+    // An active roster is live telemetry wherever it sits in this turn: the
+    // model-status row and the streaming answer normally follow it, so the
+    // block is not necessarily the last transcript entry.
+    if let Some(index) = state.subagent_activity_block {
+        if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get(index) {
+            if panel
+                .subagent_activity
+                .as_ref()
+                .is_some_and(super::subagent_activity_is_active)
+            {
+                return Some(index);
+            }
+        }
+    }
+    let index = state.transcript.len().checked_sub(1)?;
+    let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
+        return None;
+    };
+    if panel.finished {
+        return None;
+    }
+    Some(index)
+}
+
 fn pending_tool_tail(
     state: &ShellState,
     chrome: &ShellChrome,
     width: u16,
 ) -> Option<(usize, Vec<String>)> {
-    let index = state.transcript.len().checked_sub(1)?;
-    let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
-        return None;
-    };
-    if panel.finished || panel.subagent_activity.is_some() {
-        return None;
-    }
+    let tail_start = mutable_tail_start(state)?;
     let cache = state.transcript_cache.borrow();
-    let start = cache.block_starts[index];
+    let start = *cache.block_starts.get(tail_start)?;
     let rows = &cache.lines[start..];
     let budget =
         usize::from(state.size.1).saturating_sub(shell_chrome_rows(chrome).saturating_add(1));

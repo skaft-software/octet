@@ -28,8 +28,17 @@
 //! would leave a run parked forever or, worse, admit a second poll for the same
 //! permit.
 
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+
+use crate::session_writer::SessionWriter;
+
 /// Identity of the model captured in a run's durable configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelIdentity {
     /// Provider id.
     pub provider: String,
@@ -48,7 +57,8 @@ impl ModelIdentity {
 }
 
 /// Provider handle for one deferred response (pi-ai `DeferredHandle`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeferredHandle {
     /// Provider id that owns the handle.
     pub provider: String,
@@ -99,6 +109,9 @@ impl DeferredHandle {
         if self.id.is_empty() {
             return Some(DeferredHandleRejection::EmptyId);
         }
+        if self.api.is_empty() {
+            return Some(DeferredHandleRejection::EmptyApi);
+        }
         if self.provider != identity.provider || self.model_id != identity.model_id {
             return Some(DeferredHandleRejection::ForeignProvider {
                 configured: identity.clone(),
@@ -121,12 +134,14 @@ impl DeferredHandle {
 }
 
 /// Why a provider's deferred handle cannot be trusted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeferredHandleRejection {
     /// The provider reported a deferred response without a handle.
     Absent,
     /// The handle carried an empty provider token.
     EmptyId,
+    /// The handle carried an empty api identifier.
+    EmptyApi,
     /// Provider or model id does not match the run's durable configuration.
     ForeignProvider {
         /// Identity captured in the run configuration.
@@ -148,6 +163,7 @@ impl std::fmt::Display for DeferredHandleRejection {
         match self {
             Self::Absent => write!(f, "the response carried no deferred handle"),
             Self::EmptyId => write!(f, "the deferred handle has an empty provider id"),
+            Self::EmptyApi => write!(f, "the deferred handle has an empty api id"),
             Self::ForeignProvider { configured, handle } => write!(
                 f,
                 "the deferred handle belongs to {}/{} but the run is configured for {}/{}",
@@ -162,7 +178,8 @@ impl std::fmt::Display for DeferredHandleRejection {
 }
 
 /// Normalized stop reason of one assistant or deferred-poll response.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeferredStopReason {
     /// The provider parked the request and returned a handle.
     Deferred,
@@ -175,7 +192,8 @@ pub enum DeferredStopReason {
 }
 
 /// The parts of one response needed to classify a suspension.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeferredResponseDeclaration {
     /// Normalized stop reason.
     pub stop_reason: DeferredStopReason,
@@ -189,7 +207,7 @@ pub struct DeferredResponseDeclaration {
 pub const INVALID_DEFERRED_HANDLE_DIAGNOSTIC: &str = "Provider returned an invalid deferred handle";
 
 /// Why a deferred response could not be suspended.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeferredSuspendFailureKind {
     /// The handle was absent, empty, foreign, or for the wrong api.
     MalformedHandle(DeferredHandleRejection),
@@ -200,7 +218,7 @@ pub enum DeferredSuspendFailureKind {
 }
 
 /// A terminal refusal to suspend.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredSuspendFailure {
     /// Classified cause.
     pub kind: DeferredSuspendFailureKind,
@@ -221,7 +239,8 @@ pub enum DeferredSuspendDecision {
 }
 
 /// Durable phase of a suspended deferred run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
 pub enum DeferredPhase {
     /// `deferred.suspended`: no poll outcome is unknown; a permitted poll
     /// increments the poll number.
@@ -237,7 +256,8 @@ pub enum DeferredPhase {
 }
 
 /// The durable `deferred.suspended` / `deferred.effect_pending` leaf.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeferredSuspended {
     /// Owning operation.
     pub operation_id: String,
@@ -272,7 +292,8 @@ impl DeferredSuspended {
 }
 
 /// Concretely observable suspension state (Pi's `SuspendedRun`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SuspendedRunObservation {
     /// Owning operation.
     pub operation_id: String,
@@ -396,7 +417,7 @@ impl DeferredPollPermit {
 }
 
 /// Why a poll was refused. Refusals never fall back to "waiting".
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeferredPollRefusalKind {
     /// The permit was minted for a different (older or newer) durable leaf.
     StalePermit {
@@ -417,7 +438,7 @@ pub enum DeferredPollRefusalKind {
 }
 
 /// A fail-closed refusal to poll.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredPollRefusal {
     /// Classified cause.
     pub kind: DeferredPollRefusalKind,
@@ -426,7 +447,7 @@ pub struct DeferredPollRefusal {
 }
 
 /// Replacement of one unknown-outcome poll under fresh ids.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnknownPollReplacement {
     /// Reserved response entry id of the abandoned poll.
     pub abandoned_response_id: String,
@@ -439,7 +460,8 @@ pub struct UnknownPollReplacement {
 }
 
 /// One admitted deferred poll.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeferredPollIntent {
     /// Poll number the provider is being polled for.
     pub poll: u64,
@@ -630,6 +652,1050 @@ impl DeferredSuspended {
                     generation: self.generation.saturating_add(1),
                 }))
             }
+        }
+    }
+}
+
+// ── Durable suspended-run lifecycle ─────────────────────────────────────────
+//
+// The decision core above is host-runtime independent. This section makes it
+// durable: a suspended run is a replaceable session record keyed by operation,
+// every durable change moves the leaf's generation by exactly one, and only the
+// pass that prepared against the current generation may write the next one.
+// That single fence is what makes the poll permit one-owner: a stale, duplicate,
+// foreign, or expired poll is refused before any provider work, and a crash
+// between "poll admitted" and "outcome known" leaves a durable
+// `deferred.effect_pending` record whose replacement uses fresh reserved ids, so
+// one billable poll can never be merged into the run twice.
+
+/// Hard bounds for the durable deferred-run store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeferredRunLimits {
+    /// Maximum bytes of one operation id or reserved durable id.
+    pub max_operation_bytes: usize,
+    /// Maximum distinct operations retained, including terminal tombstones.
+    pub max_runs: usize,
+    /// Maximum bytes of one provider handle's opaque `data` value.
+    pub max_handle_data_bytes: usize,
+}
+
+impl Default for DeferredRunLimits {
+    fn default() -> Self {
+        Self {
+            max_operation_bytes: 256,
+            max_runs: 1024,
+            max_handle_data_bytes: 64 * 1024,
+        }
+    }
+}
+
+/// Why a durable deferred-run store mutation was refused. Every variant fails
+/// closed: the caller must not poll, settle, or overwrite on an error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeferredRunError {
+    /// No durable leaf exists for the operation.
+    UnknownOperation(String),
+    /// The caller prepared against a generation that is no longer durable.
+    StaleGeneration {
+        /// Operation whose leaf moved.
+        operation: String,
+        /// Generation the caller prepared against.
+        expected: u64,
+        /// Generation currently durable.
+        actual: u64,
+    },
+    /// A write attempted to move the durable leaf backwards or sideways.
+    GenerationRegression {
+        /// Operation whose leaf would move.
+        operation: String,
+        /// Generation currently durable.
+        previous: u64,
+        /// Generation the write carried.
+        next: u64,
+    },
+    /// The operation already has a terminal outcome.
+    OutcomeKnown(String),
+    /// The owning session closed; no further durable change is possible.
+    Closed,
+    /// A hard storage bound would be exceeded.
+    BoundExceeded(String),
+    /// A persisted record is not a valid leaf.
+    Corrupt(String),
+    /// The durable append failed; nothing was acknowledged.
+    Persistence(String),
+}
+
+impl std::fmt::Display for DeferredRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownOperation(operation) => {
+                write!(f, "no durable deferred run exists for operation {operation}")
+            }
+            Self::StaleGeneration {
+                operation,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "deferred run {operation} moved from generation {expected} to {actual}; the pass is fenced"
+            ),
+            Self::GenerationRegression {
+                operation,
+                previous,
+                next,
+            } => write!(
+                f,
+                "deferred run {operation} cannot move from generation {previous} to {next}"
+            ),
+            Self::OutcomeKnown(operation) => write!(
+                f,
+                "deferred run {operation} already has a terminal outcome"
+            ),
+            Self::Closed => write!(f, "deferred-run store is closed"),
+            Self::BoundExceeded(detail) => write!(f, "deferred-run bound exceeded: {detail}"),
+            Self::Corrupt(detail) => write!(f, "deferred-run record is corrupt: {detail}"),
+            Self::Persistence(detail) => write!(f, "deferred-run persistence failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for DeferredRunError {}
+
+/// Durable state of one deferred run leaf.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DeferredRunState {
+    /// Parked at `deferred.suspended`; a permitted poll increments the poll
+    /// number.
+    Suspended {
+        /// The durable leaf, including the handle to poll.
+        leaf: Box<DeferredSuspended>,
+    },
+    /// Parked at `deferred.effect_pending`: a poll was admitted and its outcome
+    /// is unknown. The next permitted pass replaces it under fresh reserved ids
+    /// at the same poll number.
+    EffectPending {
+        /// The durable leaf, including the reserved response and usage ids.
+        leaf: Box<DeferredSuspended>,
+    },
+    /// Terminal: the admitted poll settled these reserved durable ids.
+    Settled {
+        /// Reserved response entry id consumed by the committed response.
+        response_id: String,
+        /// Reserved usage id consumed by the committed usage record.
+        usage_id: String,
+    },
+    /// Terminal: the run was cancelled before an admitted poll settled. No
+    /// later pass may poll it.
+    Cancelled,
+    /// Terminal: the admitted poll failed; the diagnostic is bounded host
+    /// metadata, never provider prose.
+    Failed {
+        /// Bounded host diagnostic for the terminal failure.
+        diagnostic: String,
+    },
+}
+
+/// One durable deferred-run record, keyed by operation id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeferredRunRecord {
+    /// Operation whose provider request is parked.
+    pub operation_id: String,
+    /// Durable generation of this record; every durable change moves it by
+    /// exactly one.
+    pub generation: u64,
+    /// Durable state of the leaf.
+    pub state: DeferredRunState,
+}
+
+impl DeferredRunRecord {
+    /// Builds a `deferred.suspended` record from a classified suspension.
+    pub fn suspended(leaf: DeferredSuspended) -> Result<Self, DeferredRunError> {
+        if leaf.phase != DeferredPhase::Suspended {
+            return Err(DeferredRunError::Corrupt(
+                "a suspended record requires the suspended phase".into(),
+            ));
+        }
+        Ok(Self {
+            operation_id: leaf.operation_id.clone(),
+            generation: leaf.generation,
+            state: DeferredRunState::Suspended {
+                leaf: Box::new(leaf),
+            },
+        })
+    }
+
+    /// Builds a `deferred.effect_pending` record for an admitted poll.
+    pub fn effect_pending(leaf: DeferredSuspended) -> Result<Self, DeferredRunError> {
+        if !matches!(leaf.phase, DeferredPhase::EffectPending { .. }) {
+            return Err(DeferredRunError::Corrupt(
+                "an effect-pending record requires the effect-pending phase".into(),
+            ));
+        }
+        Ok(Self {
+            operation_id: leaf.operation_id.clone(),
+            generation: leaf.generation,
+            state: DeferredRunState::EffectPending {
+                leaf: Box::new(leaf),
+            },
+        })
+    }
+
+    /// Builds a terminal settled tombstone.
+    pub fn settled(
+        operation_id: impl Into<String>,
+        generation: u64,
+        response_id: impl Into<String>,
+        usage_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            generation,
+            state: DeferredRunState::Settled {
+                response_id: response_id.into(),
+                usage_id: usage_id.into(),
+            },
+        }
+    }
+
+    /// Builds a terminal cancellation tombstone.
+    pub fn cancelled(operation_id: impl Into<String>, generation: u64) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            generation,
+            state: DeferredRunState::Cancelled,
+        }
+    }
+
+    /// Builds a terminal failure tombstone.
+    pub fn failed(
+        operation_id: impl Into<String>,
+        generation: u64,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            generation,
+            state: DeferredRunState::Failed {
+                diagnostic: diagnostic.into(),
+            },
+        }
+    }
+
+    /// The parked leaf, when this record is not terminal.
+    pub fn leaf(&self) -> Option<&DeferredSuspended> {
+        match &self.state {
+            DeferredRunState::Suspended { leaf } | DeferredRunState::EffectPending { leaf } => {
+                Some(leaf)
+            }
+            DeferredRunState::Settled { .. }
+            | DeferredRunState::Cancelled
+            | DeferredRunState::Failed { .. } => None,
+        }
+    }
+
+    /// Observation of the parked leaf, when this record is not terminal.
+    pub fn observation(&self) -> Option<SuspendedRunObservation> {
+        self.leaf().map(DeferredSuspended::observation)
+    }
+
+    /// Whether the leaf reached a terminal state and may never poll again.
+    pub fn is_terminal(&self) -> bool {
+        !matches!(
+            self.state,
+            DeferredRunState::Suspended { .. } | DeferredRunState::EffectPending { .. }
+        )
+    }
+
+    /// Stable label for telemetry and diagnostics.
+    pub fn state_label(&self) -> &'static str {
+        match self.state {
+            DeferredRunState::Suspended { .. } => "suspended",
+            DeferredRunState::EffectPending { .. } => "effect_pending",
+            DeferredRunState::Settled { .. } => "settled",
+            DeferredRunState::Cancelled => "cancelled",
+            DeferredRunState::Failed { .. } => "failed",
+        }
+    }
+
+    /// Refuses a record that cannot describe a real deferred run.
+    pub fn validate(&self, limits: &DeferredRunLimits) -> Result<(), DeferredRunError> {
+        validate_deferred_segment("operation id", &self.operation_id, limits.max_operation_bytes)?;
+        match &self.state {
+            DeferredRunState::Suspended { leaf } => {
+                validate_deferred_leaf(leaf, limits)?;
+                if leaf.phase != DeferredPhase::Suspended || leaf.generation != self.generation {
+                    return Err(DeferredRunError::Corrupt(
+                        "suspended record phase or generation does not match its leaf".into(),
+                    ));
+                }
+            }
+            DeferredRunState::EffectPending { leaf } => {
+                validate_deferred_leaf(leaf, limits)?;
+                if !matches!(leaf.phase, DeferredPhase::EffectPending { .. })
+                    || leaf.generation != self.generation
+                {
+                    return Err(DeferredRunError::Corrupt(
+                        "effect-pending record phase or generation does not match its leaf".into(),
+                    ));
+                }
+            }
+            DeferredRunState::Settled {
+                response_id,
+                usage_id,
+            } => {
+                validate_deferred_segment("response id", response_id, limits.max_operation_bytes)?;
+                validate_deferred_segment("usage id", usage_id, limits.max_operation_bytes)?;
+            }
+            DeferredRunState::Cancelled => {}
+            DeferredRunState::Failed { diagnostic } => {
+                if diagnostic.len() > limits.max_operation_bytes {
+                    return Err(DeferredRunError::BoundExceeded(
+                        "deferred failure diagnostic".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_deferred_segment(
+    label: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), DeferredRunError> {
+    if value.is_empty() || value.len() > max_bytes {
+        return Err(DeferredRunError::Corrupt(format!(
+            "{label} must be 1..={max_bytes} bytes"
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
+    {
+        return Err(DeferredRunError::Corrupt(format!(
+            "{label} must be a bounded ASCII identifier"
+        )));
+    }
+    Ok(())
+}
+
+/// Truncates one persisted diagnostic to a byte budget on a char boundary.
+fn truncate_bounded(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn validate_deferred_leaf(
+    leaf: &DeferredSuspended,
+    limits: &DeferredRunLimits,
+) -> Result<(), DeferredRunError> {
+    validate_deferred_segment("leaf operation id", &leaf.operation_id, limits.max_operation_bytes)?;
+    validate_deferred_segment("source entry id", &leaf.source_entry_id, limits.max_operation_bytes)?;
+    validate_deferred_segment(
+        "deferred handle id",
+        &leaf.handle.id,
+        limits.max_operation_bytes,
+    )?;
+    if leaf.handle.id.is_empty() {
+        return Err(DeferredRunError::Corrupt(
+            "deferred handle id must be non-empty".into(),
+        ));
+    }
+    for (label, value) in [
+        ("provider", leaf.handle.provider.as_str()),
+        ("model id", leaf.handle.model_id.as_str()),
+        ("api", leaf.handle.api.as_str()),
+    ] {
+        if value.is_empty() || value.len() > limits.max_operation_bytes {
+            return Err(DeferredRunError::Corrupt(format!(
+                "deferred handle {label} must be 1..={} bytes",
+                limits.max_operation_bytes
+            )));
+        }
+    }
+    if leaf.handle.provider != leaf.identity.provider
+        || leaf.handle.model_id != leaf.identity.model_id
+    {
+        return Err(DeferredRunError::Corrupt(
+            "deferred handle does not belong to the recorded identity".into(),
+        ));
+    }
+    if leaf.handle.api != leaf.response_api {
+        return Err(DeferredRunError::Corrupt(
+            "deferred handle api does not match the recorded response api".into(),
+        ));
+    }
+    if let Some(data) = &leaf.handle.data {
+        let encoded = serde_json::to_string(data)
+            .map_err(|error| DeferredRunError::Corrupt(error.to_string()))?;
+        if encoded.len() > limits.max_handle_data_bytes {
+            return Err(DeferredRunError::BoundExceeded(
+                "deferred handle data".into(),
+            ));
+        }
+    }
+    if let DeferredPhase::EffectPending {
+        response_id,
+        usage_id,
+    } = &leaf.phase
+    {
+        validate_deferred_segment(
+            "reserved response id",
+            response_id,
+            limits.max_operation_bytes,
+        )?;
+        validate_deferred_segment("reserved usage id", usage_id, limits.max_operation_bytes)?;
+    }
+    Ok(())
+}
+
+/// Durable, generation-fenced store for suspended deferred runs.
+///
+/// `new` is an in-memory decision fixture. Agent sessions construct it through
+/// [`crate::session::Session`] so every durable change is an append followed by
+/// `sync_data`; replay makes the leaf survive a crash or restart.
+#[derive(Debug)]
+pub struct DeferredRunStore {
+    limits: DeferredRunLimits,
+    state: Mutex<DeferredRunStoreState>,
+    journal: Option<Arc<SessionWriter>>,
+}
+
+#[derive(Debug, Default)]
+struct DeferredRunStoreState {
+    records: BTreeMap<String, DeferredRunRecord>,
+    terminal: VecDeque<String>,
+    closed: bool,
+}
+
+impl Default for DeferredRunStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeferredRunStore {
+    /// Creates a store with the default hard bounds.
+    pub fn new() -> Self {
+        Self::with_limits(DeferredRunLimits::default())
+    }
+
+    /// Creates a store with explicit hard bounds.
+    pub fn with_limits(limits: DeferredRunLimits) -> Self {
+        Self {
+            limits,
+            state: Mutex::new(DeferredRunStoreState::default()),
+            journal: None,
+        }
+    }
+
+    pub(crate) fn with_journal(journal: Arc<SessionWriter>) -> Self {
+        Self {
+            journal: Some(journal),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn attach_journal(mut self, journal: Arc<SessionWriter>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Hard bounds in force for this store.
+    pub fn limits(&self) -> DeferredRunLimits {
+        self.limits
+    }
+
+    /// Fences further durable changes; replay still exposes the records.
+    pub fn close(&self) {
+        self.lock_state().closed = true;
+    }
+
+    /// Durable state of one operation, if one exists.
+    pub fn record(&self, operation_id: &str) -> Option<DeferredRunRecord> {
+        self.lock_state().records.get(operation_id).cloned()
+    }
+
+    /// Every durable record, in stable operation order.
+    pub fn records(&self) -> Vec<DeferredRunRecord> {
+        self.lock_state().records.values().cloned().collect()
+    }
+
+    /// Every non-terminal record, in stable operation order.
+    pub fn parked_records(&self) -> Vec<DeferredRunRecord> {
+        self.lock_state()
+            .records
+            .values()
+            .filter(|record| !record.is_terminal())
+            .cloned()
+            .collect()
+    }
+
+    /// Parks a run at `deferred.suspended` from one classified response.
+    ///
+    /// A malformed, absent, foreign, rejected, or aborted handle is a terminal
+    /// decision with **no durable write**, exactly like the in-memory decision
+    /// core. The operation id is the durable identity of the parked request, so
+    /// two different suspensions of one session never overwrite each other.
+    pub fn suspend(
+        &self,
+        identity: &ModelIdentity,
+        operation_id: &str,
+        source_entry_id: &str,
+        declaration: DeferredResponseDeclaration,
+    ) -> Result<DeferredSuspendDecision, DeferredRunError> {
+        let decision = suspend_deferred_response(identity, operation_id, source_entry_id, declaration);
+        let DeferredSuspendDecision::Suspended(leaf) = decision else {
+            return Ok(decision);
+        };
+        let record = DeferredRunRecord::suspended(*leaf)?;
+        self.write_new(record.clone())?;
+        match record.leaf() {
+            Some(leaf) => Ok(DeferredSuspendDecision::Suspended(Box::new(leaf.clone()))),
+            None => Err(DeferredRunError::Corrupt(
+                "suspension did not persist".into(),
+            )),
+        }
+    }
+
+    /// Begins exactly one resume pass against the current durable generation.
+    ///
+    /// With [`DeferredResumeIntent::Observe`] nothing is written and no
+    /// provider work may start. With [`DeferredResumeIntent::Poll`] the pass
+    /// owns exactly one permit: the admitted poll's `deferred.effect_pending`
+    /// intent — including its fresh reserved durable ids — is written **before**
+    /// this method returns, so a crash during the poll leaves a replaceable
+    /// unknown-outcome leaf rather than an in-process wait. Refusals never write
+    /// and never fall back to waiting.
+    pub fn begin_pass(
+        &self,
+        operation_id: &str,
+        pass_id: impl Into<String>,
+        intent: DeferredResumeIntent,
+        now_ms: i64,
+    ) -> Result<DeferredResumeStart, DeferredRunError> {
+        let pass_id = pass_id.into();
+        validate_deferred_segment("pass id", &pass_id, self.limits.max_operation_bytes)?;
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(DeferredRunError::Closed);
+        }
+        let Some(record) = state.records.get(operation_id).cloned() else {
+            return Ok(DeferredResumeStart::Unknown);
+        };
+        if record.is_terminal() {
+            return Ok(DeferredResumeStart::Finished(Box::new(record)));
+        }
+        let leaf = record
+            .leaf()
+            .cloned()
+            .ok_or_else(|| DeferredRunError::Corrupt("non-terminal record without a leaf".into()))?;
+        let mut permit = match intent {
+            DeferredResumeIntent::Poll => DeferredPollPermit::one(pass_id, record.generation),
+            DeferredResumeIntent::Observe => DeferredPollPermit::none(pass_id, record.generation),
+        };
+        // The reserved ids are derived from the durable operation, generation,
+        // and poll the pass actually prepares against, so a replacement poll at
+        // a bumped generation never reuses an abandoned reservation.
+        let poll = match &leaf.phase {
+            DeferredPhase::Suspended => leaf.poll.saturating_add(1),
+            DeferredPhase::EffectPending { .. } => leaf.poll,
+        };
+        let (response_id, usage_id) = reserved_poll_ids(operation_id, record.generation, poll);
+        let mut reserved = [response_id, usage_id].into_iter();
+        let mut next_id = move || reserved.next().unwrap_or_default();
+        match prepare_deferred_poll(&leaf, &mut permit, now_ms, &mut next_id) {
+            DeferredPollPreparation::Waiting(observation) => {
+                Ok(DeferredResumeStart::Waiting(*observation))
+            }
+            DeferredPollPreparation::Refused(refusal) => {
+                Ok(DeferredResumeStart::Refused(refusal))
+            }
+            DeferredPollPreparation::Admitted(intent) => {
+                let generation = record
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                let next_leaf = DeferredSuspended {
+                    operation_id: leaf.operation_id.clone(),
+                    source_entry_id: leaf.source_entry_id.clone(),
+                    identity: leaf.identity.clone(),
+                    response_api: leaf.response_api.clone(),
+                    poll: intent.poll,
+                    phase: intent.phase.clone(),
+                    handle: leaf.handle.clone(),
+                    generation,
+                };
+                let next = DeferredRunRecord::effect_pending(next_leaf)?;
+                self.write_locked(&mut state, next.clone())?;
+                Ok(DeferredResumeStart::Admitted(Box::new(AdmittedDeferredPoll {
+                    intent: *intent,
+                    effect_pending: next,
+                })))
+            }
+        }
+    }
+
+    /// Applies one performed poll outcome to its durable effect-pending leaf.
+    ///
+    /// The completion is fenced on the effect-pending record the pass wrote, so
+    /// only the pass that owned the permit can settle, park, or fail the leaf.
+    /// A still-deferred poll returns to `deferred.suspended` at the same poll
+    /// number with a bumped generation; a settled or failed poll writes a
+    /// terminal tombstone so no later pass can poll it again.
+    pub fn complete_pass(
+        &self,
+        poll: &AdmittedDeferredPoll,
+        outcome: DeferredPollOutcome,
+    ) -> Result<DeferredPollCompletion, DeferredRunError> {
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(DeferredRunError::Closed);
+        }
+        let operation_id = poll.effect_pending.operation_id.clone();
+        let record = state
+            .records
+            .get(&operation_id)
+            .cloned()
+            .ok_or_else(|| DeferredRunError::UnknownOperation(operation_id.clone()))?;
+        if record != poll.effect_pending {
+            return Err(DeferredRunError::StaleGeneration {
+                operation: operation_id,
+                expected: poll.effect_pending.generation,
+                actual: record.generation,
+            });
+        }
+        let leaf = record
+            .leaf()
+            .cloned()
+            .ok_or_else(|| DeferredRunError::Corrupt("effect-pending record lost its leaf".into()))?;
+        let (response_id, usage_id) = match &poll.intent.phase {
+            DeferredPhase::EffectPending {
+                response_id,
+                usage_id,
+            } => (response_id.clone(), usage_id.clone()),
+            DeferredPhase::Suspended => {
+                return Err(DeferredRunError::Corrupt(
+                    "an admitted poll is always effect pending".into(),
+                ))
+            }
+        };
+        match leaf.resume_after_poll(&poll.intent, outcome) {
+            DeferredResume::Suspended(next_leaf) => {
+                let observation = next_leaf.observation();
+                let next = DeferredRunRecord::suspended(*next_leaf)?;
+                self.write_locked(&mut state, next)?;
+                Ok(DeferredPollCompletion::Suspended(observation))
+            }
+            DeferredResume::Settled => {
+                let generation = record
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                let next =
+                    DeferredRunRecord::settled(&operation_id, generation, &response_id, &usage_id);
+                self.write_locked(&mut state, next)?;
+                Ok(DeferredPollCompletion::Settled {
+                    response_id,
+                    usage_id,
+                })
+            }
+            DeferredResume::Failed(failure) => {
+                let generation = record
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                // The tombstone must be bounded so a verbose provider message
+                // can never prevent the terminal write; an unwritten tombstone
+                // would leave the poll replaceable and could bill it twice.
+                let diagnostic = truncate_bounded(&failure.diagnostic, self.limits.max_operation_bytes);
+                let next = DeferredRunRecord::failed(&operation_id, generation, diagnostic);
+                self.write_locked(&mut state, next)?;
+                Ok(DeferredPollCompletion::Failed(failure))
+            }
+        }
+    }
+
+    /// Cancels one parked deferred run, fenced on its current generation.
+    ///
+    /// The tombstone makes cancellation durable: a later resume, including
+    /// after a restart, reports a terminal record instead of polling. When the
+    /// cancelled leaf was `deferred.effect_pending`, the abandoned poll's
+    /// outcome is unknown and the caller must record that exposure rather than
+    /// inventing usage or re-polling.
+    pub fn cancel(
+        &self,
+        operation_id: &str,
+        expected_generation: u64,
+    ) -> Result<DeferredRunCancellation, DeferredRunError> {
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(DeferredRunError::Closed);
+        }
+        let record = state
+            .records
+            .get(operation_id)
+            .cloned()
+            .ok_or_else(|| DeferredRunError::UnknownOperation(operation_id.to_owned()))?;
+        if record.is_terminal() {
+            return Err(DeferredRunError::OutcomeKnown(operation_id.to_owned()));
+        }
+        if record.generation != expected_generation {
+            return Err(DeferredRunError::StaleGeneration {
+                operation: operation_id.to_owned(),
+                expected: expected_generation,
+                actual: record.generation,
+            });
+        }
+        let generation = record
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+        let cancelled = DeferredRunRecord::cancelled(operation_id, generation);
+        self.write_locked(&mut state, cancelled.clone())?;
+        Ok(DeferredRunCancellation {
+            previous: record,
+            cancelled,
+        })
+    }
+
+    pub(crate) fn restore(&self, record: DeferredRunRecord) -> Result<(), DeferredRunError> {
+        record.validate(&self.limits)?;
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(DeferredRunError::Closed);
+        }
+        if let Some(existing) = state.records.get(&record.operation_id) {
+            if existing.is_terminal() {
+                return Err(DeferredRunError::Corrupt(
+                    "a terminal deferred record may not be followed".into(),
+                ));
+            }
+            if record.generation <= existing.generation {
+                return Err(DeferredRunError::GenerationRegression {
+                    operation: record.operation_id.clone(),
+                    previous: existing.generation,
+                    next: record.generation,
+                });
+            }
+        }
+        self.insert_locked(&mut state, record)
+    }
+
+    fn write_new(&self, record: DeferredRunRecord) -> Result<(), DeferredRunError> {
+        record.validate(&self.limits)?;
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(DeferredRunError::Closed);
+        }
+        if record.generation != 0 {
+            return Err(DeferredRunError::GenerationRegression {
+                operation: record.operation_id.clone(),
+                previous: 0,
+                next: record.generation,
+            });
+        }
+        if let Some(existing) = state.records.get(&record.operation_id) {
+            return Err(if existing.is_terminal() {
+                DeferredRunError::OutcomeKnown(record.operation_id.clone())
+            } else {
+                DeferredRunError::StaleGeneration {
+                    operation: record.operation_id.clone(),
+                    expected: 0,
+                    actual: existing.generation,
+                }
+            });
+        }
+        self.ensure_capacity(&state, &record.operation_id)?;
+        // The durable append precedes the in-memory change: a failed append
+        // leaves the previous leaf authoritative instead of a state a restart
+        // could not observe.
+        self.persist(&record)?;
+        self.insert_locked(&mut state, record)
+    }
+
+    fn write_locked(
+        &self,
+        state: &mut DeferredRunStoreState,
+        record: DeferredRunRecord,
+    ) -> Result<(), DeferredRunError> {
+        record.validate(&self.limits)?;
+        let existing = state.records.get(&record.operation_id);
+        match existing {
+            Some(existing) if existing.is_terminal() => {
+                return Err(DeferredRunError::OutcomeKnown(record.operation_id.clone()));
+            }
+            Some(existing) => {
+                let expected_next = existing
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                if record.generation != expected_next {
+                    return Err(DeferredRunError::GenerationRegression {
+                        operation: record.operation_id.clone(),
+                        previous: existing.generation,
+                        next: record.generation,
+                    });
+                }
+            }
+            None => {
+                if record.generation != 0 {
+                    return Err(DeferredRunError::GenerationRegression {
+                        operation: record.operation_id.clone(),
+                        previous: 0,
+                        next: record.generation,
+                    });
+                }
+            }
+        }
+        // Only an accepted transition is durably appended; refusals never
+        // write bytes.
+        self.ensure_capacity(state, &record.operation_id)?;
+        self.persist(&record)?;
+        self.insert_locked(state, record)
+    }
+
+    /// Refuses a new operation before any durable bytes are written when the
+    /// bound is full of non-evictable live leaves.
+    fn ensure_capacity(
+        &self,
+        state: &DeferredRunStoreState,
+        operation_id: &str,
+    ) -> Result<(), DeferredRunError> {
+        if state.records.contains_key(operation_id) || state.records.len() < self.limits.max_runs {
+            return Ok(());
+        }
+        if state
+            .terminal
+            .iter()
+            .any(|candidate| state.records.contains_key(candidate))
+        {
+            return Ok(());
+        }
+        Err(DeferredRunError::BoundExceeded(format!(
+            "{} deferred runs retained (limit {})",
+            state.records.len(),
+            self.limits.max_runs
+        )))
+    }
+
+    fn insert_locked(
+        &self,
+        state: &mut DeferredRunStoreState,
+        record: DeferredRunRecord,
+    ) -> Result<(), DeferredRunError> {
+        let operation_id = record.operation_id.clone();
+        let terminal = record.is_terminal();
+        // A terminal record frees its live slot but stays as a tombstone so a
+        // restart cannot revive the operation; tombstones are evicted oldest
+        // first once the hard bound is reached.
+        if !state.records.contains_key(&operation_id) && state.records.len() >= self.limits.max_runs
+        {
+            let mut evicted = false;
+            while let Some(oldest) = state.terminal.pop_front() {
+                if state.records.remove(&oldest).is_some() {
+                    evicted = true;
+                    break;
+                }
+            }
+            if !evicted {
+                return Err(DeferredRunError::BoundExceeded(format!(
+                    "{} deferred runs retained (limit {})",
+                    state.records.len(),
+                    self.limits.max_runs
+                )));
+            }
+        }
+        // Replacing a live record keeps its position in the terminal order
+        // untouched; a terminal write moves it to the back of the queue.
+        if terminal {
+            state.terminal.push_back(operation_id.clone());
+        }
+        state.records.insert(operation_id, record);
+        Ok(())
+    }
+
+    fn persist(&self, record: &DeferredRunRecord) -> Result<(), DeferredRunError> {
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
+        let value = crate::session::SessionRecord::DeferredRun {
+            record: record.clone(),
+        };
+        let mut bytes =
+            serde_json::to_vec(&value).map_err(|error| DeferredRunError::Corrupt(error.to_string()))?;
+        bytes.push(b'\n');
+        journal
+            .persist(&bytes)
+            .map_err(|error| DeferredRunError::Persistence(error.to_string()))
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, DeferredRunStoreState> {
+        // A poisoned lock only means another caller panicked; the store is
+        // plain data, so keep serving durability instead of disabling it.
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+/// How one resume pass may advance a parked deferred run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeferredResumeIntent {
+    /// The pass owns exactly one poll permit for the current generation.
+    Poll,
+    /// The pass observes only: no permit, no durable write, no provider work.
+    Observe,
+}
+
+/// Result of beginning one resume pass.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DeferredResumeStart {
+    /// No durable record exists for the operation.
+    Unknown,
+    /// The record is terminal; nothing may poll again.
+    Finished(Box<DeferredRunRecord>),
+    /// Observe-only pass: the run stays durably suspended and nothing is
+    /// written.
+    Waiting(SuspendedRunObservation),
+    /// Exactly one poll is admitted and its effect-pending intent is durable.
+    Admitted(Box<AdmittedDeferredPoll>),
+    /// Fail closed: no durable write and no provider work.
+    Refused(Box<DeferredPollRefusal>),
+}
+
+/// One admitted poll plus the durable effect-pending record that fences it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdmittedDeferredPoll {
+    /// Durable intent recorded before the provider call.
+    pub intent: DeferredPollIntent,
+    /// The effect-pending record written before the provider call.
+    pub effect_pending: DeferredRunRecord,
+}
+
+/// What a performed poll did to the durable leaf.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DeferredPollCompletion {
+    /// The provider is still working; the run is parked again at
+    /// `deferred.suspended` with a bumped generation.
+    Suspended(SuspendedRunObservation),
+    /// The provider settled; these reserved durable ids name the commit slots.
+    Settled {
+        /// Reserved response entry id.
+        response_id: String,
+        /// Reserved usage id.
+        usage_id: String,
+    },
+    /// The provider failed the poll; the run is terminal.
+    Failed(Box<DeferredSuspendFailure>),
+}
+
+/// One durable cancellation: the record that was cancelled and its tombstone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeferredRunCancellation {
+    /// The parked record that was cancelled.
+    pub previous: DeferredRunRecord,
+    /// The terminal tombstone now durable.
+    pub cancelled: DeferredRunRecord,
+}
+
+impl DeferredRunCancellation {
+    /// Whether the cancelled leaf had an admitted poll whose outcome is
+    /// unknown, so the caller must record exposure instead of usage.
+    pub fn abandoned_unknown_poll(&self) -> bool {
+        matches!(self.previous.state, DeferredRunState::EffectPending { .. })
+    }
+}
+
+/// Fresh reserved durable ids for one admitted poll.
+///
+/// Ids are derived from the operation, the durable generation, and the poll
+/// number, so a crashed pass and its replacement never share an id: recovery at
+/// a bumped generation reserves a different pair, and the abandoned pair is
+/// exactly what the replacement reports for deletion. Deterministic ids also
+/// make a replayed generation map back to the same reservation instead of
+/// minting a second one.
+pub fn reserved_poll_ids(operation_id: &str, generation: u64, poll: u64) -> (String, String) {
+    (
+        reserved_poll_id("response", operation_id, generation, poll),
+        reserved_poll_id("usage", operation_id, generation, poll),
+    )
+}
+
+fn reserved_poll_id(kind: &str, operation_id: &str, generation: u64, poll: u64) -> String {
+    let digest = Sha256::digest(operation_id.as_bytes());
+    let mut prefix = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        prefix.push_str(&format!("{byte:02x}"));
+    }
+    format!("deferred-{kind}-{prefix}-g{generation}-p{poll}")
+}
+
+impl From<octet_ai::deferred::DeferredHandle> for DeferredHandle {
+    /// Adopts one codec-issued provider handle into the durable decision core.
+    ///
+    /// The transport owns the handle shape; the durable leaf records the exact
+    /// provider token, expiry, suggested poll delay, and opaque conversion data
+    /// so a restart can poll the same effect with the same identity.
+    fn from(handle: octet_ai::deferred::DeferredHandle) -> Self {
+        Self {
+            provider: handle.provider,
+            model_id: handle.model_id,
+            api: handle.api,
+            id: handle.id,
+            expires_at_ms: handle.expires_at_ms,
+            poll_after_ms: handle.poll_after_ms,
+            data: handle.data,
+        }
+    }
+}
+
+impl From<DeferredHandle> for octet_ai::deferred::DeferredHandle {
+    /// Returns one durable handle to the codec for a provider poll.
+    fn from(handle: DeferredHandle) -> Self {
+        Self {
+            provider: handle.provider,
+            model_id: handle.model_id,
+            api: handle.api,
+            id: handle.id,
+            expires_at_ms: handle.expires_at_ms,
+            poll_after_ms: handle.poll_after_ms,
+            data: handle.data,
+        }
+    }
+}
+
+impl DeferredResponseDeclaration {
+    /// Classifies one completed codec response as a deferred declaration.
+    ///
+    /// The api id is the one the transport attached to the handle: the codec
+    /// response carries no separate api string, so the recorded api is the
+    /// transport's own declaration and every later poll must agree with it. A
+    /// `deferred` stop reason without a handle stays a malformed handle, never
+    /// a suspension.
+    pub fn from_response(response: &octet_ai::Response) -> Self {
+        let stop_reason = match response.stop_reason {
+            octet_ai::StopReason::Deferred => DeferredStopReason::Deferred,
+            octet_ai::StopReason::Refusal => DeferredStopReason::Failed,
+            _ => DeferredStopReason::Settled,
+        };
+        let handle = response.deferred.clone().map(DeferredHandle::from);
+        let api = handle
+            .as_ref()
+            .map(|handle| handle.api.clone())
+            .unwrap_or_default();
+        Self {
+            stop_reason,
+            api,
+            handle,
         }
     }
 }

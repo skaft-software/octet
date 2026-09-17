@@ -68,15 +68,72 @@ Public Pi argument validation now runs after preparation and after interception,
 before execution on both tool wires. The API `0.3` dispatcher additionally calls
 Pi's tool-call interception. Adversarial fixtures assert zero execute effects for
 non-coercible values, additional properties, invalid preparation and invalid hook
-mutation; Pi number-to-string coercion is retained, not rejected as an invalid
-raw value. This imports the selected runtime's public `pi-ai` export.
+mutation, observed through a marker file each fixture tool writes only when its
+execute callback actually runs; Pi number-to-string coercion is retained, not
+rejected as an invalid raw value. This imports the selected runtime's public
+`pi-ai` export.
 
-Tool-result usage/termination remain **unintegrated host consumers**, not proven
-parity: generic metadata is not durable native tool usage. Dynamic execute results
-cannot be selectively rejected before their effects without a declared result
-contract. Same-name concurrent hook/call FIFO identity, tool executionMode,
-constrainedSampling and native prompt snippet/guideline projection also still need
-host contracts. A busy `waitForIdle` now errors rather than claiming to wait.
+### Negotiated tool-result contract (usage and termination)
+
+Pi declares `usage` and `terminate` on an executed tool result. Carrying them is a
+host kernel service (durable tool-usage accounting and the finalized-batch
+unanimous termination rule), so the bridge negotiates two independent optional
+features with the same names on both wires — `tool_result_usage` and
+`tool_result_termination` — and selects each only from the host's own offer.
+
+* With the feature selected: the bridged tool result carries a typed
+  `usage` record with the kernel's native tool-usage counters one for one —
+  `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`,
+  `total_tokens`, plus optional `cache_write_1h_tokens` and `reasoning_tokens` —
+  and an optional `terminate` boolean. `details` keeps its original shape and is
+  never used to smuggle usage.
+* Pi reports USD `cost` on the same Usage record. An all-zero cost is Pi's own
+  unpriced encoding and is accepted (nothing is lost); a non-zero cost fails
+  explicitly, because the kernel's typed tool usage carries token counters only
+  and silently discarding a billed amount would be a false accounting claim.
+  Carrying cost needs an exact bounded decimal amount type and its aggregation in
+  the kernel first.
+* With the feature absent: a Pi result that carries the field fails explicitly
+  (`invalid params` on the API `0.3` envelope, a named error on API `0.2`). It is
+  neither dropped nor relabelled as generic metadata, and the bridge never
+  advertises the field to a host that did not offer it.
+* `usage` follows Pi's own merge rule: a `tool_result` hook may replace it
+  (`hook.usage ?? result.usage`), absent hook usage preserves the executed usage,
+  and exactly one final record is emitted. Termination comes from the executed
+  result only — Pi's `ToolResultEventResult` declares no termination mutation — so
+  a hook that tries to change it is an unrepresentable mutation that fails.
+* The current octet host does **not** offer either feature. Until its decoder and
+  durable consumer land, this profile therefore refuses those fields rather than
+  claiming tool-usage accounting or batch termination parity.
+
+### Tool-definition projections
+
+Pi declares more on a tool definition than the API `0.2` tool wire carries. The
+bridge never sends an undeclared wire field, because the host decodes the tool
+definition with an exact field set:
+
+* `promptSnippet` and `promptGuidelines` are projected into the model-facing
+  description, using Pi's own normalization (one-line snippet, trimmed and
+  de-duplicated guideline bullets). Pi renders the snippet in its system-prompt
+  tool list and the guidelines as prompt bullets; octet exposes the same text
+  through the tool schema.
+* `executionMode: "sequential"`, which makes Pi serialize a whole tool batch, is
+  enforced by a bridge execution lane: while any registered Pi tool declares it,
+  bridged Pi tool executions never overlap. The host already classifies extension
+  tool calls as batch barriers, so this lane is defence in depth rather than the
+  only serialization.
+* `constrainedSampling` that Pi itself treats as a hard requirement
+  (`strict: "require"`, or a grammar variant) fails initialization explicitly,
+  because the octet host owns provider requests and serves no per-tool sampling
+  contract. A `strict: "prefer"` request is accepted with a startup diagnostic:
+  calls are produced unconstrained and still validated before execution.
+
+Still open on this profile: the host result wire and durable native tool-usage
+accounting (including an exact bounded decimal cost amount), same-name concurrent
+hook/call FIFO identity, and the remaining
+session/control/root/custom-entry/label/model/thinking/scoped-model/active-tools/
+compaction/idle-queue surfaces recorded below. A busy `waitForIdle` errors rather
+than claiming to wait.
 
 These are deterministic bridge regressions, not a new runtime qualification.
 The inspected `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391` source is Pi `0.85.1`;
@@ -131,14 +188,14 @@ translated into arbitrary Pi cross-process event authority.
 | `user_bash` | safe divergence | `events:user_bash` | Event registration is diagnosed explicitly because user_bash is not emitted by the bounded bridge. |
 | `input` | safe divergence | `events:input` | Event registration is diagnosed explicitly because input is not emitted by the bounded bridge. |
 | `tool_call` | safe divergence | `events:tool_call` | Blocks and Pi-tool argument preparation are preserved; unrepresentable mutation fails. |
-| `tool_result` | safe divergence | `events:tool_result` | Pi-tool content/details/error/usage transforms are preserved; native mutation fails. |
+| `tool_result` | safe divergence | `events:tool_result` | Pi-tool content/details/error transforms are preserved and hook usage applies; executed usage/termination cross only under their negotiated result features, and an unnegotiated result field fails explicitly instead of being dropped. |
 
 #### `ExtensionAPI`
 
 | Pi surface | Status | Fixture | Declared behavior |
 | --- | --- | --- | --- |
 | `on` | safe divergence | `extension_api:on` | Supported events are registered; unavailable events emit a startup diagnostic. |
-| `registerTool` | safe divergence | `extension_api:registerTool` | Initial tool registration and execution use the public Pi runner. |
+| `registerTool` | safe divergence | `extension_api:registerTool` | Initial tool registration and execution use the public Pi runner; promptSnippet/promptGuidelines are projected into the model-facing description, executionMode: "sequential" is enforced by a bridge execution lane, and a constrainedSampling requirement fails closed. |
 | `registerCommand` | safe divergence | `extension_api:registerCommand` | Initial commands become native octet commands when runtime_commands is negotiated. |
 | `registerShortcut` | safe divergence | `extension_api:registerShortcut` | Shortcut registration is diagnosed at startup; host key dispatch remains deferred. |
 | `registerFlag` | safe divergence | `extension_api:registerFlag` | Pi exposes flags only after loading extension code, while octet discovers trusted API `0.3` manifest flags before startup; bridge registration remains diagnosed. |

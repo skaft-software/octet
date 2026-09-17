@@ -4,7 +4,7 @@ use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome, ThemeSurfaceHeading};
 
 use super::reasoning_render::activity_shimmer_marker;
 use super::surface_layout::{surface_roles, SurfacePlan};
-use super::{fit_line, TranscriptBlock};
+use super::{fit_line, SubagentStateGroup, TranscriptBlock};
 
 fn padded_to_width(line: &str, width: u16) -> String {
     let line = fit_line(line, width);
@@ -219,18 +219,44 @@ pub(super) fn event_margin_marker_with_frame(
         }
         TranscriptBlock::Reasoning(_) => None,
         TranscriptBlock::Assistant(_) if markers_enabled => Some(theme.fg("foreground", event_dot)),
+        // A live delegation roster pulses on the same spinner clock as an
+        // active tool. Its aggregate is the running group until every child has
+        // settled, so the marker can never resolve to success/error early.
         TranscriptBlock::Tool(panel) if markers_enabled && !panel.finished => {
-            Some(if panel.subagent_activity.is_some() {
-                theme.fg("foreground", event_dot)
-            } else {
-                active_phase_dot()
+            Some(active_phase_dot())
+        }
+        TranscriptBlock::Tool(panel) if markers_enabled => {
+            Some(match panel.subagent_activity.as_ref() {
+                // A settled roster resolves from the declared child states the rows
+                // print: red when any worker failed or was cancelled, neutral when
+                // work was stopped, green when every worker finished successfully.
+                Some(view) => {
+                    // The marker resolves from the declared child states, not
+                    // from the broader failure summary the panel uses for its
+                    // styling: a worker the reader *stopped* is neutral, while
+                    // only a failed/cancelled worker (or an explicit
+                    // roster-level failure that produced none) turns the event
+                    // red.
+                    let aggregate = super::subagent_activity_aggregate(view);
+                    if aggregate == Some(SubagentStateGroup::Failed)
+                        || view.failure_reason.is_some()
+                    {
+                        theme.settled_event_dot("error", event_dot)
+                    } else if aggregate == Some(SubagentStateGroup::Stopped) {
+                        theme.settled_event_dot("neutral", event_dot)
+                    } else {
+                        theme.settled_event_dot("success", event_dot)
+                    }
+                }
+                None => {
+                    if panel.is_error {
+                        theme.settled_event_dot("error", event_dot)
+                    } else {
+                        theme.settled_event_dot("success", event_dot)
+                    }
+                }
             })
         }
-        TranscriptBlock::Tool(panel) if markers_enabled => Some(if panel.is_error {
-            theme.settled_event_dot("error", event_dot)
-        } else {
-            theme.settled_event_dot("success", event_dot)
-        }),
         TranscriptBlock::Shell(shell) if markers_enabled && shell.running => {
             Some(active_phase_dot())
         }

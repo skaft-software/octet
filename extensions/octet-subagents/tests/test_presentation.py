@@ -275,6 +275,7 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(activity["summary"], "fixture-worker · failed")
         self.assertEqual(snapshot["status"]["state"], "degraded")
         self.assertIn("1 failed", snapshot["status"]["label"])
+        self.assertEqual(snapshot["collection"]["title"], "Subagents")
         for compact in (
             node["secondary"], activity["summary"], narrow_list([worker], 1_700_000_003_000)
         ):
@@ -284,6 +285,54 @@ class PresentationTests(unittest.TestCase):
         detail = snapshot["collection"]["detail"]["body"]
         self.assertIn("[error] bash command=make test", detail)
         self.assertIn(worker.last_error, detail)
+
+    def test_stable_collection_title_is_not_the_live_count_status_label(self):
+        empty = build_snapshot([], selected_agent_id=None, now_ms=1_700_000_001_000)
+        self.assertEqual(empty["collection"]["title"], "Subagents")
+        self.assertEqual(empty["status"]["label"], "Subagents")
+
+        worker = self.worker("limit_reached")
+        snapshot = build_snapshot(
+            [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_002_000
+        )
+        # The header must not change shape as workers come and go; the counts
+        # stay available in the status label the host already reads.
+        self.assertEqual(snapshot["collection"]["title"], "Subagents")
+        self.assertNotIn("limited", snapshot["collection"]["title"])
+        self.assertIn("1 limited", snapshot["status"]["label"])
+
+    def test_detached_and_parked_workers_report_the_host_reason(self):
+        """A refused reattach or an approval park shows the host's own reason."""
+        reason = (
+            "not reattached: another live session owner holds the durable "
+            "fleet lease (instance abc123, generation 7)"
+        )
+        worker = self.worker("orphaned", host_diagnostic=reason)
+        snapshot = build_snapshot(
+            [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_005_000
+        )
+        node = snapshot["collection"]["nodes"][0]
+        self.assertIn("another live session owner", node["secondary"])
+        self.assertIn(
+            "Host reattachment: %s" % reason,
+            snapshot["collection"]["detail"]["body"],
+        )
+
+        parked = self.worker("awaiting_approval", host_diagnostic=reason)
+        snapshot = build_snapshot(
+            [parked], selected_agent_id=parked.agent_id, now_ms=1_700_000_006_000
+        )
+        self.assertIn(
+            "another live session owner", snapshot["collection"]["nodes"][0]["secondary"]
+        )
+        self.assertIn("Host reattachment", snapshot["collection"]["detail"]["body"])
+
+        # An attached worker with no host reason never renders a reattach line.
+        running = self.worker("running")
+        snapshot = build_snapshot(
+            [running], selected_agent_id=running.agent_id, now_ms=1_700_000_007_000
+        )
+        self.assertNotIn("Host reattachment", snapshot["collection"]["detail"]["body"])
 
     def test_worker_rows_omit_absence_and_human_format_bounded_values(self):
         # Every ceiling is inherited and no counter is exposed: absence must be
@@ -303,7 +352,7 @@ class PresentationTests(unittest.TestCase):
             [bare], selected_agent_id=bare.agent_id, now_ms=1_700_000_004_000
         )
         secondary = snapshot["collection"]["nodes"][0]["secondary"]
-        self.assertEqual(secondary, "running · 4s · explore/claude-sonnet-test · 0 calls")
+        self.assertEqual(secondary, "running · 4s · claude-sonnet-test · 0 calls")
         for absent in ("no ceiling", "?", "inherited", "unlimited", "not exposed"):
             self.assertNotIn(absent, secondary)
 

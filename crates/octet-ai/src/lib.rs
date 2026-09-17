@@ -39,13 +39,17 @@ pub mod catalog;
 pub mod client;
 pub mod constrained_sampling;
 pub mod declarations;
+pub mod deferred;
 pub mod discovery;
 pub mod error;
+pub mod faux;
 pub mod host_transport;mod json_repair;
+pub mod images;
 pub mod model_metadata;
 pub mod pricing;
 pub mod responses;
 mod responses_ws;
+pub mod runtime;
 pub mod stream;
 mod transform;
 pub mod types;
@@ -57,6 +61,9 @@ pub use assistant_frame::{
     reduce_assistant_message_frames, AssistantMessageFrame, AssistantMessageFrameEncoder,
 };
 pub use auth::{
+    anthropic_bearer_auth, environment_variable_present, first_present_variable,
+    select_vertex_credential, vertex_api_key_auth, VertexCredential,
+    ANTHROPIC_BEARER_TOKEN_VARIABLES, GOOGLE_APPLICATION_CREDENTIALS_VAR, GOOGLE_VERTEX_API_KEY_VAR,
     Auth, AwsCredentials, AwsSigV4Signer, CredentialResolver, CredentialResolverRegistry,
     CredentialScheme, RequestSigner, ResolvedCredential, Secret, SignedRequestHeaders,
     SigningRequest,
@@ -74,12 +81,26 @@ pub use declarations::{
     ProviderCredentialPreset, RequestOverrides, ThinkingFormat, ThinkingSelection,
     ThinkingTokenBudgetField, ThinkingVariable,
 };
+pub use deferred::{
+    DeferredHandle, DeferredHandleRejection, DeferredPollPermit, DeferredPollRefusalKind,
+};
 pub use error::{
     AiError, AuthError, ConfigError, DecodeError, Diagnostic, HttpError, PricingError,
     ProviderError, StreamProgress, StreamProtocolError, TransportError, TransportPhase,
     UnsupportedError, ValidationError,
 };
+pub use faux::{
+    FauxDeferredStatus, FauxMessage, FauxOptions, FauxProvider, FauxResponse, FauxState,
+    FauxToolCall,
+};
 pub use host_transport::{HostStreamModel, HostStreamTransport};
+pub use images::{
+    GeneratedImage, ImageApi, ImageCancellation, ImageGenerationOptions, ImageGenerationRequest,
+    ImageGenerationResponse, ImageInput, ImageModel, ImageModelCatalog, ImageModelSpec,
+    ImageModality, ImageOutput, ImagePricing, ImageStopReason, MAX_GENERATED_IMAGES,
+    MAX_GENERATED_IMAGE_BYTES, MAX_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUTS, MAX_IMAGE_PROMPT_BYTES,
+    OPENROUTER_API_KEY_VAR, OPENROUTER_IMAGES_API,
+};
 pub use mime::Mime;
 pub use pricing::{
     responses_cost_of, Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR,
@@ -88,6 +109,10 @@ pub use responses::{
     ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest, ResponsesCompactResponse,
     ResponsesInput, ResponsesItem, ResponsesItemError, ResponsesOptions, ResponsesOutput,
     ResponsesReplayItem,
+};
+pub use runtime::{
+    HeaderTransform, HookModelContext, HostRequestOptions, PayloadHook, ResponseHook,
+    MAX_RUNTIME_METADATA_BYTES, MAX_RUNTIME_METADATA_ENTRIES,
 };
 pub use stream::{
     CanonicalStreamAssembler, ProviderLifecycle, ProviderLifecycleState, ResponseStream,

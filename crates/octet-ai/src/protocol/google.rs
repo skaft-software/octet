@@ -394,7 +394,10 @@ fn google_tools(
         // Google's validated subset; otherwise the canonical JSON Schema is sent
         // unchanged.
         let (parameters, strict) =
-            crate::constrained_sampling::function_tool_parameters(tool, true)?;
+            crate::constrained_sampling::function_tool_parameters(
+                tool,
+                super::strict_mode_for(model),
+            )?;
         use_strict_mode |= strict;
         let mut declaration = Map::new();
         declaration.insert("name".to_owned(), Value::String(tool.name.clone()));

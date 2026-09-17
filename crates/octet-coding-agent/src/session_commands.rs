@@ -96,7 +96,8 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
             &config.invocation_cwd,
             include_secrets,
             force,
-            matches!(format, ExportFormat::Html).then_some(config.theme.as_deref().unwrap_or("dark")),
+            matches!(format, ExportFormat::Html)
+                .then_some(config.theme.as_deref().unwrap_or("dark")),
         ),
         SessionCommand::Delete { id } => delete(&store, &id),
         SessionCommand::Repair { id } => repair(&store, &id),
@@ -127,7 +128,11 @@ fn accounting(store: &SessionStore) -> anyhow::Result<()> {
     let dollars = summary.total_cost_microdollars as f64 / 1_000_000.0;
     crate::output::stdout_line(format!(
         "Recorded cost: ${dollars:.4}{}",
-        if summary.has_uncertain_usage { " (known subtotal)" } else { "" }
+        if summary.has_uncertain_usage {
+            " (known subtotal)"
+        } else {
+            ""
+        }
     ));
     crate::output::stdout_line(format!(
         "Usage: {} record(s), {} input / {} output tokens",
@@ -347,8 +352,13 @@ pub(crate) fn export_portable(
 }
 
 fn export_with_format(
-    store: &SessionStore, id: &str, output: Option<PathBuf>, cwd: &Path,
-    include_secrets: bool, force: bool, html_theme: Option<&str>,
+    store: &SessionStore,
+    id: &str,
+    output: Option<PathBuf>,
+    cwd: &Path,
+    include_secrets: bool,
+    force: bool,
+    html_theme: Option<&str>,
 ) -> anyhow::Result<SessionExportReport> {
     let path = store.path_by_id(id)?;
     Session::open_read_only(&path)
@@ -383,7 +393,13 @@ fn export_with_format(
         redact_value(&mut package, None, &mut redaction_count)?;
     }
     package["redaction_count"] = Value::from(redaction_count);
-    let destination = output.unwrap_or_else(|| PathBuf::from(if html_theme.is_some() { format!("{id}.html") } else { format!("{id}.octet-session.json") }));
+    let destination = output.unwrap_or_else(|| {
+        PathBuf::from(if html_theme.is_some() {
+            format!("{id}.html")
+        } else {
+            format!("{id}.octet-session.json")
+        })
+    });
     let destination = if destination.is_absolute() {
         destination
     } else {

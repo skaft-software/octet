@@ -846,7 +846,7 @@ where
 /// Resolves authentication settings into concrete headers and a request-scoped
 /// credential redactor.
 pub(crate) async fn resolve_headers(auth: &Auth) -> Result<ResolvedHeaders, AuthError> {
-    resolve_headers_with_env(auth, &read_bounded_env).await
+    resolve_headers_with_env(auth, &read_bounded_env, None).await
 }
 
 /// Reads a request-local environment overlay without changing process state.
@@ -857,9 +857,24 @@ pub(crate) fn read_request_env(env: &BTreeMap<String, String>, var: &str) -> Res
     }
 }
 
-/// Resolve only the selected auth binding through the request-local overlay.
-pub(crate) async fn resolve_headers_in_environment(auth: &Auth, env: &BTreeMap<String, String>) -> Result<ResolvedHeaders, AuthError> {
-    resolve_headers_with_env(auth, &|var| read_request_env(env, var)).await
+/// Resolve the selected auth binding through the request-local overlay with an
+/// optional per-request key override.
+///
+/// This is the single overlay-aware entry point: every request-scoped caller
+/// owns a request-local environment map, so no separate overlay-only wrapper is
+/// retained. An override is only accepted for an environment-backed scheme
+/// ([`Auth::BearerEnv`], [`Auth::HeaderEnv`], [`Auth::HeaderBearerEnv`]): it
+/// replaces the environment lookup for that exact declared header and never
+/// consults the process environment. A fixed secret, dynamic resolver, request
+/// signer, or unauthenticated endpoint refuses the override instead of
+/// silently ignoring it, because dropping a caller's credential would either
+/// dispatch unauthenticated or forge an unrequested identity.
+pub(crate) async fn resolve_headers_with_api_key(
+    auth: &Auth,
+    env: &BTreeMap<String, String>,
+    api_key: Option<&Secret>,
+) -> Result<ResolvedHeaders, AuthError> {
+    resolve_headers_with_env(auth, &|var| read_request_env(env, var), api_key).await
 }
 
 /// Resolves regular credentials or invokes a signer against the exact prepared
@@ -892,12 +907,30 @@ pub(crate) async fn resolve_headers_for_request(
 async fn resolve_headers_with_env<F>(
     auth: &Auth,
     read_env: &F,
+    api_key: Option<&Secret>,
 ) -> Result<ResolvedHeaders, AuthError>
 where
     F: Fn(&str) -> Result<Option<String>, ConfigError>,
 {
     let mut headers = http::HeaderMap::new();
     let mut redactor = CredentialRedactor::default();
+
+    // An override only substitutes for an environment lookup on a declared
+    // env-backed scheme. Any other scheme refuses before dispatch.
+    let env_secret = |var: &str| -> Result<Secret, AuthError> {
+        match api_key {
+            Some(secret) => Ok(secret.clone()),
+            None => resolve_env_secret_with(var, read_env),
+        }
+    };
+    if api_key.is_some()
+        && !matches!(
+            auth,
+            Auth::BearerEnv { .. } | Auth::HeaderEnv { .. } | Auth::HeaderBearerEnv { .. }
+        )
+    {
+        return Err(AuthError::Resolve);
+    }
 
     match auth {
         Auth::None => {}
@@ -917,7 +950,7 @@ where
             headers.insert(name.clone(), val);
         }
         Auth::BearerEnv { var } => {
-            let secret = resolve_env_secret_with(var, read_env)?;
+            let secret = env_secret(var)?;
             redactor.insert(secret.clone());
             let bearer_str = format!("Bearer {}", secret.expose());
             let mut val = http::HeaderValue::from_str(&bearer_str)
@@ -926,7 +959,7 @@ where
             headers.insert(http::header::AUTHORIZATION, val);
         }
         Auth::HeaderEnv { name, var } => {
-            let secret = resolve_env_secret_with(var, read_env)?;
+            let secret = env_secret(var)?;
             redactor.insert(secret.clone());
             let mut val = http::HeaderValue::from_str(secret.expose())
                 .map_err(|_| AuthError::InvalidHeaderValue)?;
@@ -934,7 +967,7 @@ where
             headers.insert(name.clone(), val);
         }
         Auth::HeaderBearerEnv { name, var } => {
-            let secret = resolve_env_secret_with(var, read_env)?;
+            let secret = env_secret(var)?;
             redactor.insert(secret.clone());
             let bearer_str = format!("Bearer {}", secret.expose());
             let mut val = http::HeaderValue::from_str(&bearer_str)
@@ -985,6 +1018,89 @@ pub(crate) fn auth_header_name(auth: &Auth) -> Option<http::HeaderName> {
         | Auth::HeaderBearerEnv { name, .. } => Some(name.clone()),
         Auth::Dynamic(_) | Auth::RequestSigner(_) => None,
     }
+}
+
+/// Google Vertex API-key environment variable.
+pub const GOOGLE_VERTEX_API_KEY_VAR: &str = "GOOGLE_CLOUD_API_KEY";
+/// Google application-default credentials file environment variable.
+pub const GOOGLE_APPLICATION_CREDENTIALS_VAR: &str = "GOOGLE_APPLICATION_CREDENTIALS";
+/// Anthropic OAuth/bearer token aliases, in precedence order.
+///
+/// `ANTHROPIC_API_KEY` is deliberately absent: it authenticates the ordinary
+/// `x-api-key` route, not the OAuth bearer routes.
+pub const ANTHROPIC_BEARER_TOKEN_VARIABLES: [&str; 2] =
+    ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"];
+
+/// Which credential source a Google Vertex route must use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VertexCredential {
+    /// API-key mode; the key is presented as the declared `x-goog-api-key`
+    /// header and no ambient ADC or metadata probe is permitted.
+    ApiKey,
+    /// Ambient application-default credentials (service-account file, workload
+    /// identity, or metadata server) owned by the host's credential provider.
+    ApplicationDefault,
+}
+
+/// Whether a variable is present with a non-blank value.
+pub fn environment_variable_present(env: &BTreeMap<String, String>, var: &str) -> bool {
+    env.get(var).is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Returns the first of `variables` present with a non-blank value.
+pub fn first_present_variable<'a>(
+    env: &'a BTreeMap<String, String>,
+    variables: &[&'a str],
+) -> Option<&'a str> {
+    variables
+        .iter()
+        .copied()
+        .find(|var| environment_variable_present(env, var))
+}
+
+/// Selects the Vertex credential mode from an already-resolved environment view.
+///
+/// A present, non-blank `GOOGLE_CLOUD_API_KEY` selects [`VertexCredential::ApiKey`]
+/// and **never** falls through to ADC: the caller must not probe the metadata
+/// server or a credentials file after a key is selected. With no key,
+/// `GOOGLE_APPLICATION_CREDENTIALS` selects [`VertexCredential::ApplicationDefault`]
+/// explicitly. `None` means no declared source; this function performs no I/O
+/// and never inspects the ambient process environment itself.
+pub fn select_vertex_credential(
+    env: &BTreeMap<String, String>,
+) -> Option<VertexCredential> {
+    if environment_variable_present(env, GOOGLE_VERTEX_API_KEY_VAR) {
+        return Some(VertexCredential::ApiKey);
+    }
+    if environment_variable_present(env, GOOGLE_APPLICATION_CREDENTIALS_VAR) {
+        return Some(VertexCredential::ApplicationDefault);
+    }
+    None
+}
+
+/// The declared Vertex API-key auth binding (`x-goog-api-key`).
+///
+/// It is only valid together with [`VertexCredential::ApiKey`]; the missing-key
+/// case must fail closed rather than resolve an ambient ADC credential under an
+/// API-key route.
+pub fn vertex_api_key_auth() -> Auth {
+    Auth::HeaderEnv {
+        name: http::HeaderName::from_static("x-goog-api-key"),
+        var: GOOGLE_VERTEX_API_KEY_VAR.to_owned(),
+    }
+}
+
+/// Selects the Anthropic bearer alias for an OAuth/subscription token.
+///
+/// Alias precedence is declaration order ([`ANTHROPIC_BEARER_TOKEN_VARIABLES`]).
+/// The returned [`Auth::BearerEnv`] keeps the variable name authoritative so
+/// the Messages codec can infer the OAuth beta set from the declared variable.
+/// `None` means no OAuth/bearer alias is configured; callers then use their
+/// ordinary API-key route rather than inventing a token.
+pub fn anthropic_bearer_auth(env: &BTreeMap<String, String>) -> Option<Auth> {
+    first_present_variable(env, &ANTHROPIC_BEARER_TOKEN_VARIABLES).map(|var| Auth::BearerEnv {
+        var: var.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -1098,7 +1214,7 @@ mod tests {
             bounded_env_value(var, Ok(at_limit.clone()))
         };
 
-        let bearer = resolve_headers_with_env(&Auth::bearer_env("BEARER_KEY"), &read_at_limit)
+        let bearer = resolve_headers_with_env(&Auth::bearer_env("BEARER_KEY"), &read_at_limit, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1110,6 +1226,7 @@ mod tests {
         let header = resolve_headers_with_env(
             &Auth::header_env(http::HeaderName::from_static("x-api-key"), "HEADER_KEY"),
             &read_at_limit,
+            None,
         )
         .await
         .unwrap();
@@ -1125,6 +1242,7 @@ mod tests {
                 "GATEWAY_KEY",
             ),
             &read_at_limit,
+            None,
         )
         .await
         .unwrap();
@@ -1154,7 +1272,7 @@ mod tests {
                 "GATEWAY_KEY",
             ),
         ] {
-            let error = resolve_headers_with_env(&auth, &read_over_limit)
+            let error = resolve_headers_with_env(&auth, &read_over_limit, None)
                 .await
                 .err()
                 .expect("oversized environment credentials must fail");
@@ -1393,5 +1511,109 @@ mod tests {
             auth_header_name(&Auth::header(CONTENT_TYPE, "a")),
             Some(CONTENT_TYPE)
         );
+    }
+
+    #[test]
+    fn vertex_api_key_mode_never_falls_back_to_adc() {
+        let both = BTreeMap::from([
+            (GOOGLE_VERTEX_API_KEY_VAR.to_owned(), "key-value".to_owned()),
+            (
+                GOOGLE_APPLICATION_CREDENTIALS_VAR.to_owned(),
+                "/tmp/adc.json".to_owned(),
+            ),
+        ]);
+        assert_eq!(select_vertex_credential(&both), Some(VertexCredential::ApiKey));
+
+        let blank_key = BTreeMap::from([
+            (GOOGLE_VERTEX_API_KEY_VAR.to_owned(), "   ".to_owned()),
+            (
+                GOOGLE_APPLICATION_CREDENTIALS_VAR.to_owned(),
+                "/tmp/adc.json".to_owned(),
+            ),
+        ]);
+        assert_eq!(
+            select_vertex_credential(&blank_key),
+            Some(VertexCredential::ApplicationDefault)
+        );
+
+        let adc_only = BTreeMap::from([(
+            GOOGLE_APPLICATION_CREDENTIALS_VAR.to_owned(),
+            "/tmp/adc.json".to_owned(),
+        )]);
+        assert_eq!(
+            select_vertex_credential(&adc_only),
+            Some(VertexCredential::ApplicationDefault)
+        );
+        assert_eq!(select_vertex_credential(&BTreeMap::new()), None);
+
+        match vertex_api_key_auth() {
+            Auth::HeaderEnv { name, var } => {
+                assert_eq!(name.as_str(), "x-goog-api-key");
+                assert_eq!(var, GOOGLE_VERTEX_API_KEY_VAR);
+            }
+            other => panic!("unexpected vertex auth binding: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_bearer_alias_precedence_is_declaration_order() {
+        let both = BTreeMap::from([
+            ("ANTHROPIC_AUTH_TOKEN".to_owned(), "auth-token".to_owned()),
+            ("ANTHROPIC_OAUTH_TOKEN".to_owned(), "oauth-token".to_owned()),
+        ]);
+        assert!(matches!(
+            anthropic_bearer_auth(&both),
+            Some(Auth::BearerEnv { var }) if var == "ANTHROPIC_AUTH_TOKEN"
+        ));
+
+        let oauth_only = BTreeMap::from([(
+            "ANTHROPIC_OAUTH_TOKEN".to_owned(),
+            "oauth-token".to_owned(),
+        )]);
+        assert!(matches!(
+            anthropic_bearer_auth(&oauth_only),
+            Some(Auth::BearerEnv { var }) if var == "ANTHROPIC_OAUTH_TOKEN"
+        ));
+
+        // A plain API key is not an OAuth/bearer alias: the caller's ordinary
+        // x-api-key route must be used instead.
+        let api_key_only = BTreeMap::from([("ANTHROPIC_API_KEY".to_owned(), "key".to_owned())]);
+        assert!(anthropic_bearer_auth(&api_key_only).is_none());
+        assert!(anthropic_bearer_auth(&BTreeMap::new()).is_none());
+    }
+
+    #[tokio::test]
+    async fn api_key_override_replaces_env_and_refuses_other_schemes() {
+        let var = "OCTET_TEST_API_KEY_OVERRIDE_VAR";
+        let auth = Auth::HeaderEnv {
+            name: http::HeaderName::from_static("x-api-key"),
+            var: var.to_owned(),
+        };
+
+        let override_secret = Secret::from("override-value");
+        let resolved = resolve_headers_with_api_key(&auth, &BTreeMap::new(), Some(&override_secret))
+            .await
+            .unwrap();
+        assert_eq!(resolved.headers["x-api-key"].to_str().unwrap(), "override-value");
+        assert_eq!(resolved.redactor.redact("override-value"), "[REDACTED]");
+        assert!(resolved.headers["x-api-key"].is_sensitive());
+
+        // Without an override the request-local env map supplies the value.
+        let env = BTreeMap::from([(var.to_owned(), "env-value".to_owned())]);
+        let resolved = resolve_headers_with_api_key(&auth, &env, None).await.unwrap();
+        assert_eq!(resolved.headers["x-api-key"].to_str().unwrap(), "env-value");
+
+        // A fixed credential, dynamic resolver, signer, or unauthenticated
+        // endpoint refuses the override instead of silently ignoring it.
+        for refused in [
+            Auth::bearer("fixed"),
+            Auth::none(),
+        ] {
+            assert!(matches!(
+                resolve_headers_with_api_key(&refused, &BTreeMap::new(), Some(&override_secret))
+                    .await,
+                Err(AuthError::Resolve)
+            ));
+        }
     }
 }

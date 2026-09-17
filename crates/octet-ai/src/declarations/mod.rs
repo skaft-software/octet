@@ -11,7 +11,12 @@
 //! - `chatTemplateArgs` / `chatTemplateKwargs` with `{ "$var": ... }`
 //!   interpolation and the `string-thinking` thinking format;
 //! - provider credential environment aliases such as `ANTHROPIC_AUTH_TOKEN`,
-//!   `ANTHROPIC_OAUTH_TOKEN` and `GOOGLE_CLOUD_API_KEY`.
+//!   `ANTHROPIC_OAUTH_TOKEN` and `GOOGLE_CLOUD_API_KEY`;
+//! - per-route/per-model capability compat records: `supportsStrictMode`,
+//!   `supportsOpenAIGrammarTools` and the Anthropic Messages record
+//!   (eager tool-input streaming, strict tools, mid-conversation effort,
+//!   empty-signature replay, allowed fallback models with local pricing);
+//! - request-local Codex transport selection and connect deadline.
 //!
 //! This is deliberately description only. It performs no network, filesystem or
 //! credential access, and it never weakens an existing host auth policy. The
@@ -24,7 +29,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod bedrock;
+pub mod codex;
 pub mod proxy;
+pub mod radius;
 pub(crate) mod azure;
 pub use azure::AzureRequestOptions;
 
@@ -343,6 +351,32 @@ pub struct ModelPreset {
     /// Explicit Mistral Chat reasoning request contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mistral_reasoning: Option<MistralReasoningProfile>,
+    /// Whether this model accepts the `strict` tool field / strict JSON-schema
+    /// constrained sampling. `None` selects the route's own default, exactly
+    /// like Pi's per-API compat defaults; `Some(false)` disables strict even on
+    /// a route whose default would enable it.
+    #[serde(
+        default,
+        alias = "supportsStrictMode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_strict_mode: Option<bool>,
+    /// Whether this model accepts OpenAI grammar `custom` tools. Pi defaults
+    /// this to `false` on every route and lets generated metadata enable it.
+    #[serde(
+        default,
+        alias = "supportsOpenAIGrammarTools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_openai_grammar_tools: Option<bool>,
+    /// Anthropic Messages-specific compatibility record (Pi's
+    /// `AnthropicMessagesCompat`).
+    #[serde(
+        default,
+        alias = "anthropicCompat",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub anthropic_compat: Option<AnthropicCompatPreset>,
 }
 
 /// Mistral Chat reasoning controls, selected by model data rather than its name.
@@ -353,6 +387,118 @@ pub enum MistralReasoningProfile {
     ReasoningEffort,
     /// Emit prompt_mode = "reasoning" while enabled.
     PromptMode,
+}
+
+/// Anthropic Messages compatibility record (Pi's `AnthropicMessagesCompat`).
+///
+/// Every field is optional: `None` keeps the route default documented on the
+/// field, so a declaration only records a deviation from a compliant route.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AnthropicCompatPreset {
+    /// Whether the route accepts per-tool `eager_input_streaming`. Default
+    /// `true`; `false` omits it and sends the legacy
+    /// `fine-grained-tool-streaming-2025-05-14` beta for tool-enabled requests.
+    #[serde(
+        default,
+        alias = "supportsEagerToolInputStreaming",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_eager_tool_input_streaming: Option<bool>,
+    /// Whether the route accepts Anthropic strict tool schemas. Default `false`.
+    #[serde(
+        default,
+        alias = "supportsStrictTools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_strict_tools: Option<bool>,
+    /// Whether the exact transport supports effort-only system messages and the
+    /// thinking binding controls. Default `false`.
+    #[serde(
+        default,
+        alias = "supportsMidConvoEffort",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_mid_convo_effort: Option<bool>,
+    /// Whether to force adaptive thinking regardless of the model id.
+    #[serde(
+        default,
+        alias = "forceAdaptiveThinking",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub force_adaptive_thinking: Option<bool>,
+    /// Whether an empty thinking signature may be replayed as `signature: ""`
+    /// instead of converting the thinking block to text. Default `false`.
+    #[serde(
+        default,
+        alias = "allowEmptySignature",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_empty_signature: Option<bool>,
+    /// Models this route accepts in the `fallbacks` request field. Empty means
+    /// the field is omitted (Anthropic rejects it with no permitted target).
+    #[serde(
+        default,
+        alias = "allowedFallbackModels",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub allowed_fallback_models: Vec<AnthropicFallbackModel>,
+}
+
+/// One Anthropic server-side refusal fallback target.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AnthropicFallbackModel {
+    /// Provider that owns the fallback model.
+    pub provider: String,
+    /// Fallback model identifier accepted in `fallbacks[].model`.
+    pub model: String,
+    /// Local pricing metadata for a response the fallback model produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<AnthropicFallbackCost>,
+}
+
+/// Per-million-token prices for an Anthropic fallback model.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AnthropicFallbackCost {
+    /// Input-token rate per million tokens.
+    pub input: f64,
+    /// Output-token rate per million tokens.
+    pub output: f64,
+    /// Cache-read rate per million tokens.
+    #[serde(alias = "cacheRead")]
+    pub cache_read: f64,
+    /// Cache-write rate per million tokens.
+    #[serde(alias = "cacheWrite")]
+    pub cache_write: f64,
+}
+
+impl AnthropicCompatPreset {
+    fn validate(&self) -> Result<(), DeclarationError> {
+        for fallback in &self.allowed_fallback_models {
+            if fallback.provider.trim().is_empty()
+                || fallback.provider.len() > 256
+                || fallback.model.trim().is_empty()
+                || fallback.model.len() > 256
+            {
+                return Err(DeclarationError::Invalid(
+                    "invalid Anthropic fallback model declaration".into(),
+                ));
+            }
+            if let Some(cost) = &fallback.cost {
+                if [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                    .into_iter()
+                    .any(|rate| !rate.is_finite() || rate < 0.0)
+                {
+                    return Err(DeclarationError::Invalid(
+                        "invalid Anthropic fallback model cost".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for ModelPreset {
@@ -381,7 +527,9 @@ impl ModelPreset {
             || self.chat_template_kwargs.is_some() || self.supports_reasoning_effort.is_some();
         if (chat && protocol != crate::Protocol::OpenAiChat)
             || (self.supports_max_output_tokens.is_some() && protocol != crate::Protocol::OpenAiResponses)
-            || (self.mistral_reasoning.is_some() && protocol != crate::Protocol::OpenAiChat)
+            || (self.mistral_reasoning.is_some()
+                && !matches!(protocol, crate::Protocol::OpenAiChat | crate::Protocol::MistralConversations))
+            || (self.anthropic_compat.is_some() && protocol != crate::Protocol::AnthropicMessages)
             || (!self.sampling_params.is_empty() && match protocol {
                 crate::Protocol::OpenAiChat => false,
                 crate::Protocol::OpenAiResponses => self.sampling_params.keys().any(|name| !matches!(name.as_str(), "temperature" | "top_p" | "top_logprobs")),
@@ -400,6 +548,9 @@ impl ModelPreset {
         check_object_size(self)?;
         check_headers(&self.headers)?;
         check_sampling(&self.sampling_params)?;
+        if let Some(anthropic) = &self.anthropic_compat {
+            anthropic.validate()?;
+        }
         if self.mistral_reasoning.is_some() && self.thinking_format.is_some() {
             return Err(DeclarationError::Invalid("Mistral reasoning and generic thinking formats are mutually exclusive".into()));
         }
@@ -513,6 +664,22 @@ pub struct RequestOverrides {
     /// Maximum delay in milliseconds to wait for a server-requested retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retry_delay_ms: Option<u64>,
+    /// Request-local Codex Responses transport selection. Only a route that
+    /// declares [`crate::EndpointTransport::WebSocketPreferred`] may open the
+    /// Responses WebSocket.
+    #[serde(
+        default,
+        alias = "codexTransport",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_transport: Option<codex::CodexTransport>,
+    /// Request-local Codex WebSocket connect deadline in milliseconds.
+    #[serde(
+        default,
+        alias = "codexConnectTimeoutMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_connect_timeout_ms: Option<u64>,
 }
 
 impl std::fmt::Debug for RequestOverrides {
@@ -539,6 +706,7 @@ impl RequestOverrides {
                 "timeout_ms must be greater than zero".to_owned(),
             ));
         }
+        codex::normalize_codex_timeout_ms(self.codex_connect_timeout_ms)?;
         if let Some(retries) = self.max_retries {
             if retries > MAX_RETRIES_CEILING {
                 return Err(DeclarationError::Invalid(format!(

@@ -292,8 +292,26 @@ pub(super) fn render_loop(
         rx,
         application_viewport,
         clear_on_start,
+        alternate_screen_opt_in(),
         synchronize_terminal_size,
     );
+}
+
+/// Opt-in entry point for Pi's fullscreen alternate-screen session.
+///
+/// The primary screen remains the default: its native scrollback is what the
+/// default mouse policy (`auto`/`terminal`) promises the reader, and the PTY
+/// frame contract pins that behaviour. `OCTET_TUI_ALT_SCREEN` (any value other
+/// than empty/`0`/`false`/`off`) runs the same renderer with a fixed alternate
+/// viewport that restores the final document to the main screen on exit, until
+/// a product surface (config or CLI) carries the choice.
+fn alternate_screen_opt_in() -> bool {
+    std::env::var("OCTET_TUI_ALT_SCREEN").is_ok_and(|value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        )
+    })
 }
 
 // The same loop is exercised with an in-memory terminal and resize probe in
@@ -305,9 +323,14 @@ pub(super) fn render_loop_with_terminal(
     rx: Receiver<RenderCommand>,
     application_viewport: bool,
     clear_on_start: bool,
+    alternate_screen: bool,
     synchronize_size: impl Fn(&SharedState, &TerminalSize) -> bool,
 ) {
     let mut tui = TUI::new(Box::new(terminal));
+    // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
+    // policy in `native_scrollback` (not native history) decides which rows stay
+    // mutable, so the same live blocks survive the renderer change.
+    tui.set_alternate_screen(alternate_screen);
     // Removing bounded live activity must not clear saved lines merely because
     // the frame contracted. Offscreen semantic mutations still use Pi's replay.
     tui.set_clear_on_shrink(false);
@@ -695,7 +718,11 @@ mod scheduler_tests {
         // The request is answered from the retained frame and never dropped.
         let (reply, receive) = mpsc::channel();
         tx.send(RenderCommand::DumpFrame(reply)).unwrap();
-        assert!(coalesce_render_commands(&rx, Some(Instant::now()), &renderer));
+        assert!(coalesce_render_commands(
+            &rx,
+            Some(Instant::now()),
+            &renderer
+        ));
         let frame = receive
             .recv_timeout(Duration::from_millis(50))
             .expect("diagnostics reply");
@@ -714,7 +741,11 @@ mod scheduler_tests {
         assert!(coalesce_render_commands(&rx, None, &renderer));
         assert_eq!(rx.try_iter().count(), 999);
         tx.send(RenderCommand::Stop).unwrap();
-        assert!(!coalesce_render_commands(&rx, Some(Instant::now()), &renderer));
+        assert!(!coalesce_render_commands(
+            &rx,
+            Some(Instant::now()),
+            &renderer
+        ));
         drop(tx);
         assert!(!coalesce_render_commands(&rx, None, &renderer));
     }

@@ -940,6 +940,14 @@ fn scripted_model_for_protocol(uri: &str, protocol: Protocol) -> Model {
         Protocol::BedrockConverse | Protocol::GoogleGenerativeAi | Protocol::MistralConversations => {
             panic!("{protocol:?} requires a codec-specific provider fixture")
         }
+        // `pi-messages` is the native host codec (the Pi gateway request
+        // document plus its serialized assistant-message stream), not another
+        // provider alias, and this target has no Pi route fixture. Asking for
+        // one is a test setup error, so it is named explicitly instead of being
+        // folded into a catch-all that would swallow a future protocol.
+        Protocol::PiMessages => {
+            panic!("{protocol:?} is the native host codec and has no scripted fixture")
+        }
     }
 }
 
@@ -8247,6 +8255,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                 yield Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
                     message: AssistantMessage { content: vec![AssistantPart::Text("R".into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn, usage: octet_ai::Usage::default(),
+                    deferred: None,
                     cost: response_cost, response_id: None, responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
@@ -8279,6 +8288,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                     message: AssistantMessage { content: vec![AssistantPart::Text(text.into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn,
                     usage: octet_ai::Usage::default(), cost: response_cost, response_id: None,
+                    deferred: None,
                     responses_output: None, diagnostics: Vec::new(),
                 }));
             })),

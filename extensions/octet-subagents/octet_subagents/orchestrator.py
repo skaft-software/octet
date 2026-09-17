@@ -541,6 +541,10 @@ class Orchestrator:
                         "republished a live record for the current run"
                     ),
                 }
+                if selected.host_diagnostic:
+                    # The host refused the reattach and named why: report the
+                    # reason instead of a silent stall.
+                    result["reattachment"]["reason"] = selected.host_diagnostic
             elif selected is not None and selected.reattached:
                 result["reattachment"] = {
                     "state": "reattached",
@@ -555,6 +559,8 @@ class Orchestrator:
                         "and stays visible until it is approved or stopped"
                     ),
                 }
+                if selected.host_diagnostic:
+                    result["approval"]["reason"] = selected.host_diagnostic
         return result
 
     def stop(
@@ -1121,6 +1127,7 @@ class Orchestrator:
                     worker.state = "orphaned"
                     worker.detached_at_ms = now
                     worker.phase = DETACHED_PHASE
+                    worker.host_diagnostic = None
                     worker.current_tool = None
                     worker.completed_at_ms = now
                     if worker.last_error is None:
@@ -1219,6 +1226,15 @@ class Orchestrator:
         worker.live_task = record.get("live_task") if type(record.get("live_task")) is bool else None
         blocked = record.get("launch_blocked")
         worker.launch_blocked = sanitize_document(blocked, 512) if isinstance(blocked, str) and blocked else None
+        # The host record carries its own bounded reason when a worker could not
+        # be reattached or is parked at the approval boundary. It is surfaced by
+        # this process instead of being replaced by a local guess.
+        diagnostic = record.get("diagnostic")
+        worker.host_diagnostic = (
+            sanitize_document(diagnostic, MAX_ERROR_BYTES)
+            if isinstance(diagnostic, str) and diagnostic.strip()
+            else None
+        )
         # A detached worker whose record the host reports again has been
         # reattached by the owning session: clear the detachment, count it, and
         # drop exactly the diagnostic the extension wrote when it detached.
@@ -1243,9 +1259,10 @@ class Orchestrator:
             "stopped": "stopped",
             "restarted": "restarted",
         }.get(state_name, "orphaned")
-        if reattaching and mapped == "orphaned":
-            # The host still reports the same detached/parked state; this is not
-            # a reattachment, and the original detachment time is preserved.
+        if reattaching and mapped in {"orphaned", "awaiting_approval"}:
+            # The host still reports a detached or parked state; this is not a
+            # reattachment, and the original detachment time is preserved. A
+            # worker parked on new authority was deliberately not resumed.
             reattaching = False
         if state_name == "interrupted":
             if worker.timeout_requested:
@@ -1353,6 +1370,9 @@ class Orchestrator:
             worker.reattach_count += 1
             worker.last_reattached_at_ms = self._now_ms()
             worker.phase = REATTACHED_PHASE
+            # The refusal/park note described the previous detached state; the
+            # host has republished a live record, so it no longer applies.
+            worker.host_diagnostic = None
             if worker.last_error == DETACHED_DIAGNOSTIC:
                 # Only the detachment diagnostic is cleared; a real host error is
                 # preserved across reattachment.

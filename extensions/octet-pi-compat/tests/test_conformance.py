@@ -14,9 +14,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
-    from .helpers import BridgeProcess, NODE
+    from .helpers import BridgeProcess, NODE, v03_contract
 except ImportError:  # unittest discovery imports this file as a top-level module.
-    from helpers import BridgeProcess, NODE
+    from helpers import BridgeProcess, NODE, v03_contract
 
 
 COMPAT_ROOT = Path(__file__).resolve().parents[1]
@@ -411,6 +411,128 @@ class DeferredPlanModeSurfaceTests(unittest.TestCase):
                 )
                 self.assertNotIn("error", response, surface)
                 self.assertIn(f"surface:{surface}:explicit", bridge.notifications(), surface)
+
+
+@unittest.skipUnless(NODE, "node is required for Pi conformance fixture subprocesses")
+class DeferredControlSurfaceTests(unittest.TestCase):
+    """The deferred session/root/model/thinking/compaction/idle remainder.
+
+    Every deferred control surface is refused explicitly on the bindings, and the
+    wire carries no child method that could silently serve it: the bridge neither
+    consumes a `host.pi_compat`-shaped seam offer nor emits a `pi/*` request.
+    """
+
+    DEFERRED_SEAMS = [
+        "tool_policy",
+        "session_state",
+        "messages",
+        "widgets",
+        "editor",
+        "shortcuts",
+        "flags",
+    ]
+    # Plausible child-method spellings for the deferred remainder. None of these
+    # is a negotiated method on either wire.
+    DEFERRED_METHODS = (
+        "pi/session",
+        "pi/messages",
+        "pi/entry",
+        "pi/label",
+        "pi/model",
+        "pi/thinkingLevel",
+        "pi/activeTools",
+        "pi/compact",
+        "pi/waitForIdle",
+        "shortcut/trigger",
+        "session/create",
+        "session/fork",
+        "session/switch",
+        "session/reload",
+        "tree/navigate",
+        "entry/append",
+        "label/set",
+        "model/set",
+        "thinking/set",
+        "tools/active",
+    )
+    DEFERRED_SURFACES = (
+        "extension_api.sendMessage",
+        "extension_api.sendUserMessage",
+        "extension_api.appendEntry",
+        "extension_api.setSessionName",
+        "extension_api.setLabel",
+        "extension_api.setActiveTools",
+        "extension_api.setModel",
+        "extension_api.setThinkingLevel",
+        "context.hasPendingMessages",
+        "context.compact",
+        "context.getSystemPrompt",
+        "context.shutdown",
+        "context.newSession",
+        "context.fork",
+        "context.navigateTree",
+        "context.switchSession",
+        "context.reload",
+        "context.replacement.sendMessage",
+        "context.replacement.sendUserMessage",
+    )
+
+    def test_deferred_host_seam_offer_enables_no_child_method(self) -> None:
+        with BridgeProcess() as bridge:
+            baseline = sorted(bridge.initialize("runtime_commands")["protocol"]["features"])
+        with BridgeProcess(fixture_mode="registration") as bridge:
+            offered = bridge.initialize(
+                "runtime_commands",
+                host={"pi_compat": {"features": self.DEFERRED_SEAMS}},
+            )
+            self.assertEqual(baseline, sorted(offered["protocol"]["features"]))
+            for surface in self.DEFERRED_SURFACES:
+                response = bridge.request(
+                    "command/execute",
+                    {"name": "surface-probe", "arguments": [surface]},
+                )
+                self.assertNotIn("error", response, surface)
+                self.assertIn(f"surface:{surface}:explicit", bridge.notifications(), surface)
+            for method in self.DEFERRED_METHODS:
+                response = bridge.request(method, {})
+                self.assertIn("error", response, method)
+            emitted = {
+                message.get("method")
+                for message in bridge.messages
+                if isinstance(message.get("method"), str)
+            }
+            self.assertEqual(set(self.DEFERRED_METHODS) & emitted, set())
+
+    def test_api_03_selects_no_deferred_control_method(self) -> None:
+        with BridgeProcess(api_version="0.3") as bridge:
+            initialized = bridge.initialize(host={"pi_compat": {"features": self.DEFERRED_SEAMS}})
+            selected = set(initialized["contract"]["methods"])
+            self.assertEqual(set(self.DEFERRED_METHODS) & selected, set())
+            self.assertTrue(set(v03_contract(providers=False)["required_methods"]) <= selected)
+            for method in self.DEFERRED_METHODS:
+                response = bridge.request(method, {})
+                self.assertEqual(-32601, response["error"]["code"], method)
+
+    def test_busy_idle_queue_refuses_and_idle_boundary_returns(self) -> None:
+        with BridgeProcess() as bridge:
+            bridge.initialize("runtime_commands")
+            busy = bridge.request("command/execute", {"name": "surface-probe", "arguments": ["context.waitForIdle"]})
+            self.assertNotIn("error", busy)
+            bridge.request("command/execute", {"name": "surface-probe", "arguments": ["context.isIdle"]})
+            self.assertIn("surface:context.isIdle:bounded:true", bridge.notifications())
+            bridge.request("turn/started", {})
+            while_busy = bridge.request(
+                "command/execute", {"name": "surface-probe", "arguments": ["context.waitForIdle"]}
+            )
+            self.assertIn("error", while_busy)
+            self.assertIn("idle-wait service unavailable", while_busy["error"]["message"])
+            bridge.request("command/execute", {"name": "surface-probe", "arguments": ["context.isIdle"]})
+            self.assertIn("surface:context.isIdle:bounded:false", bridge.notifications())
+            bridge.request("turn/settled", {"outcome": "cancelled"})
+            after = bridge.request(
+                "command/execute", {"name": "surface-probe", "arguments": ["context.waitForIdle"]}
+            )
+            self.assertNotIn("error", after)
 
 
 if __name__ == "__main__":

@@ -25,9 +25,9 @@ use crossterm::event::Event;
 use octet_agent::extension_process::{
     ConfirmationRequest, ConfirmationResponse, ContextContribution, ContextPlacement,
     DiscoveredExtension, ExtensionAutocompleteRequest, ExtensionEditorRequest,
-    ExtensionEditorResponse, ExtensionEvent, ExtensionEventBus, ExtensionFlag, ExtensionHealthSnapshot,
-    ExtensionHealthState, ExtensionHook, ExtensionHookDisposition, ExtensionHostState,
-    ExtensionInputRequest, ExtensionInputResponse, ExtensionLifecycleEvent,
+    ExtensionEditorResponse, ExtensionEvent, ExtensionEventBus, ExtensionFlag,
+    ExtensionHealthSnapshot, ExtensionHealthState, ExtensionHook, ExtensionHookDisposition,
+    ExtensionHostState, ExtensionInputRequest, ExtensionInputResponse, ExtensionLifecycleEvent,
     ExtensionLifecycleOutcome, ExtensionManifest, ExtensionPolicy,
     ExtensionPolicyEvaluationResponse, ExtensionProcess, ExtensionRequestId,
     ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionSessionLifecycleReceiver,
@@ -46,9 +46,9 @@ use octet_agent::extension_runtime::{
 use octet_agent::{
     Agent, CancellationToken, ExtensionHost, ExtensionPolicyDecision,
     ExtensionPresentationSnapshot, ExtensionProviderAuthorizationPolicy,
-    ExtensionProviderAuthorizationStatus, ExtensionProviderOwner, ExtensionProviderRegistry,
-    PostMutationContext, PostMutationKind, PostMutationRescan, PostMutationState, Session,
-    ToolProgress, ToolProgressSink,
+    ExtensionProviderAuthorizationStatus, ExtensionProviderCatalogEntry, ExtensionProviderOwner,
+    ExtensionProviderRegistry, PostMutationContext, PostMutationKind, PostMutationRescan,
+    PostMutationState, Session, ToolProgress, ToolProgressSink,
 };
 use octet_ai::{
     AiClient, AssistantMessage, AssistantPart, Auth, CacheCompatibility, Capabilities, Endpoint,
@@ -112,6 +112,9 @@ const LIFECYCLE_NOTIFY_DEADLINE: Duration = Duration::from_millis(250);
 /// batch (including zero providers); this remains a bounded fail-closed wait
 /// for older extensions that do not negotiate the additive notification.
 const PROVIDER_REGISTRATION_BARRIER: Duration = Duration::from_millis(500);
+/// Upper bound on live-registration notices emitted by one catalog
+/// synchronization, so a late bulk registration cannot flood the transcript.
+const MAX_LIVE_REGISTRATION_NOTICES: usize = 8;
 /// Total per-extension deadline for the typed post-mutation hook. A timeout
 /// drops only that extension's rescan request after the host mutation settled.
 const POST_MUTATION_RPC_DEADLINE: Duration = Duration::from_millis(250);
@@ -524,6 +527,24 @@ where
     }
 }
 
+/// One live secret-free API 0.3 provider declaration owned by an extension.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ExtensionProviderSummary {
+    /// Extension-declared provider identifier.
+    pub id: String,
+    /// Extension-declared display label.
+    pub label: String,
+    /// Host-owned availability wire status (`ready`, `pending`, `denied`,
+    /// `unavailable`, or `revoked`).
+    pub authorization: String,
+    /// Routable catalog model ids (`provider/model`).
+    pub models: Vec<String>,
+    /// True only after the owning generation completed its initial catalog; a
+    /// declaration may be recorded while that batch is still incomplete, and
+    /// then it is never callable.
+    pub live: bool,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ExtensionSummary {
     pub name: String,
@@ -546,6 +567,8 @@ pub struct ExtensionSummary {
     pub commands: Vec<String>,
     pub hooks: Vec<ExtensionHook>,
     pub ui: Vec<ExtensionUiSurface>,
+    /// Live secret-free API 0.3 provider declarations owned by this extension.
+    pub providers: Vec<ExtensionProviderSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -1027,6 +1050,10 @@ impl ExtensionProviderAuthorizationPolicy for CodingAgentProviderAuthorizationPo
 #[derive(Default)]
 struct ProviderCatalogProjection {
     revision: Option<usize>,
+    /// Model ids the last synchronization attempted to project. A desired
+    /// model the catalog refused (for example a conflicting identifier) stays
+    /// here so an unchanged registry is never re-projected on every boundary.
+    desired: BTreeSet<String>,
     routes: BTreeMap<String, EndpointId>,
 }
 
@@ -1053,6 +1080,19 @@ impl Default for ExtensionProviderRuntime {
 impl ExtensionProviderRuntime {
     fn registry(&self) -> Arc<ExtensionProviderRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    /// Returns every recorded declaration owned by one extension instance,
+    /// paired with whether the owning generation's initial batch completed.
+    fn recorded_providers_for(
+        &self,
+        instance_id: &str,
+    ) -> Vec<(ExtensionProviderCatalogEntry, bool)> {
+        self.registry
+            .recorded_providers()
+            .into_iter()
+            .filter(|(entry, _)| entry.owner.extension_instance_id == instance_id)
+            .collect()
     }
 
     fn initial_provider_owners(processes: &[ExtensionProcess]) -> Vec<ExtensionProviderOwner> {
@@ -1120,8 +1160,7 @@ impl ExtensionProviderRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = projection.revision == Some(revision)
-            && projection.routes.keys().collect::<BTreeSet<_>>()
-                == desired.iter().collect::<BTreeSet<_>>()
+            && projection.desired == desired
             && projection.routes.iter().all(|(model, endpoint)| {
                 catalog
                     .resolve(&ModelId(model.clone()))
@@ -1131,6 +1170,12 @@ impl ExtensionProviderRuntime {
             return Vec::new();
         }
 
+        // A synchronization after the first projection is a live change to a
+        // running session. Models that were not projected before are reported
+        // through the existing notice surface; the first projection stays quiet.
+        let live_change = projection.revision.is_some();
+        let previously_projected = projection.routes.keys().cloned().collect::<BTreeSet<_>>();
+        let mut newly_live = Vec::new();
         for (model, endpoint) in std::mem::take(&mut projection.routes) {
             let model = ModelId(model);
             catalog.remove_model_if_endpoint(&model, &endpoint);
@@ -1260,10 +1305,26 @@ impl ExtensionProviderRuntime {
                     endpoint_id.clone(),
                     process.provider_stream_transport(entry.provider.id.clone(), provider_model.id),
                 );
+                if live_change && !previously_projected.contains(&model_id.0) {
+                    newly_live.push(model_id.0.clone());
+                }
                 projection.routes.insert(model_id.0, endpoint_id);
             }
         }
         projection.revision = Some(revision);
+        projection.desired = desired;
+        for (index, model) in newly_live.iter().enumerate() {
+            if index == MAX_LIVE_REGISTRATION_NOTICES {
+                diagnostics.push(format!(
+                    "extension provider: {} more model(s) registered while this session was running",
+                    newly_live.len().saturating_sub(MAX_LIVE_REGISTRATION_NOTICES)
+                ));
+                break;
+            }
+            diagnostics.push(format!(
+                "extension provider model {model:?} is now live; it is available for the next request"
+            ));
+        }
         diagnostics
     }
 
@@ -1280,6 +1341,7 @@ impl ExtensionProviderRuntime {
             catalog.remove_endpoint_if_unused(&endpoint);
         }
         projection.revision = None;
+        projection.desired.clear();
     }
 }
 
@@ -2133,6 +2195,9 @@ impl ExecutableExtensions {
                         .unwrap_or_else(|| descriptor.manifest.contributes.commands.clone()),
                     hooks: descriptor.manifest.contributes.hooks,
                     ui: descriptor.manifest.contributes.ui,
+                    // Live declarations are overlaid by `summaries()` from the
+                    // shared registry; discovery alone has no provider state.
+                    providers: Vec::new(),
                 }
             })
             .collect();
@@ -2556,6 +2621,22 @@ impl ExecutableExtensions {
                 .into_iter()
                 .map(|definition| definition.name)
                 .collect();
+            summary.providers = self
+                .provider_runtime
+                .recorded_providers_for(process.extension_instance_id())
+                .into_iter()
+                .map(|(entry, complete)| ExtensionProviderSummary {
+                    id: entry.provider.id.clone(),
+                    label: entry.provider.label.clone(),
+                    authorization: entry.authorization.as_wire().to_owned(),
+                    models: entry
+                        .models
+                        .iter()
+                        .map(|model| extension_provider_model_id(&entry.provider.id, &model.id).0)
+                        .collect(),
+                    live: complete,
+                })
+                .collect();
         }
         summaries
     }
@@ -2694,6 +2775,25 @@ impl ExecutableExtensions {
                 if !extension.tools.is_empty() {
                     lines.push(format!("  tools: {}", extension.tools.join(", ")));
                 }
+                if !extension.providers.is_empty() {
+                    lines.push(format!(
+                        "  providers: {}",
+                        extension
+                            .providers
+                            .iter()
+                            .map(|provider| {
+                                format!(
+                                    "{} [{}] {} · models: {}",
+                                    provider.id,
+                                    provider.authorization,
+                                    if provider.live { "live" } else { "pending" },
+                                    provider.models.join(", ")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
                 if !extension.commands.is_empty() {
                     lines.push(format!("  commands: /{}", extension.commands.join(", /")));
                 }
@@ -2778,7 +2878,9 @@ impl ExecutableExtensions {
         self.pending_context = PendingContext::default();
         self.pending_post_mutation_rescans.clear();
         self.mutation_family_generations.clear();
-        if let Some(bus) = &self.event_bus { bus.reset(); }
+        if let Some(bus) = &self.event_bus {
+            bus.reset();
+        }
         self.session_id = host_state(session, model, reasoning, sessions).session_id;
         self.resource_owner = Some(session.resource_owner_key());
         let active_owner = self.resource_owner.as_deref();
@@ -3666,8 +3768,15 @@ impl ExecutableExtensions {
         self.seen_post_mutation_ids
             .push_back(mutation.mutation_id().to_owned());
         if mutation.kind() != PostMutationKind::Resource {
-            for resource in mutation.affected_resources().iter().filter(|resource| mutation_resources::known(resource)) {
-                let current = self.mutation_family_generations.entry(resource.clone()).or_default();
+            for resource in mutation
+                .affected_resources()
+                .iter()
+                .filter(|resource| mutation_resources::known(resource))
+            {
+                let current = self
+                    .mutation_family_generations
+                    .entry(resource.clone())
+                    .or_default();
                 *current = (*current).max(mutation.generation());
             }
         }
@@ -3757,10 +3866,14 @@ impl ExecutableExtensions {
         state: PostMutationState,
     ) -> Vec<PostMutationRescan> {
         let Some(mutation) = PostMutationContext::new(
-            mutation_id, PostMutationKind::Configuration,
-            ["resource:settings".to_owned()], generation, state,
+            mutation_id,
+            PostMutationKind::Configuration,
+            ["resource:settings".to_owned()],
+            generation,
+            state,
         ) else {
-            self.diagnostics.push("warning: rejected invalid configuration post_mutation notification");
+            self.diagnostics
+                .push("warning: rejected invalid configuration post_mutation notification");
             return Vec::new();
         };
         self.notify_post_mutation(mutation).await
@@ -3840,7 +3953,8 @@ impl ExecutableExtensions {
         let mut families = BTreeMap::new();
         for request in requests {
             let requester_current = self.processes.iter().any(|process| {
-                process.descriptor().manifest.name == request.extension && process.is_running()
+                process.descriptor().manifest.name == request.extension
+                    && process.is_running()
                     && process.health_snapshot().generation == request.process_generation
             });
             if !requester_current {
@@ -3848,11 +3962,17 @@ impl ExecutableExtensions {
                 continue;
             }
             for resource_id in request.resource_ids {
-                if request.kind != PostMutationKind::Resource && mutation_resources::known(&resource_id) {
-                    if self.mutation_family_generations.get(&resource_id) == Some(&request.generation) {
+                if request.kind != PostMutationKind::Resource
+                    && mutation_resources::known(&resource_id)
+                {
+                    if self.mutation_family_generations.get(&resource_id)
+                        == Some(&request.generation)
+                    {
                         families.insert(resource_id, request.generation);
                     } else {
-                        messages.push("warning: discarded stale post_mutation resource generation".into());
+                        messages.push(
+                            "warning: discarded stale post_mutation resource generation".into(),
+                        );
                     }
                     continue;
                 }
@@ -3876,7 +3996,12 @@ impl ExecutableExtensions {
             }
         }
         for (resource, generation) in families {
-            messages.push(mutation_resources::rescan(&resource, generation, config, self.rescan_global_config.as_deref()));
+            messages.push(mutation_resources::rescan(
+                &resource,
+                generation,
+                config,
+                self.rescan_global_config.as_deref(),
+            ));
         }
         if selected.is_empty() {
             return messages;
@@ -7884,6 +8009,485 @@ context = true
 
         assert_eq!(assistant_text(&message), "final answer");
     }
+
+    const LATE_PROVIDER_FIXTURE: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    value = json.loads(line)
+    assert line.rstrip("\n") == canonical(value), line
+    return value
+
+
+def send(value):
+    sys.stdout.write(canonical(value) + "\n")
+    sys.stdout.flush()
+
+
+def provider(provider_id, model_id):
+    return {
+        "provider": {
+            "id": provider_id,
+            "label": provider_id + " provider",
+            "auth": {"kind": "none"},
+        },
+        "models": [{
+            "id": model_id,
+            "api_name": model_id,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }],
+    }
+
+
+def reverse_request(identifier, method, params):
+    send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+    response = receive()
+    assert response.get("id") == identifier and "result" in response, response
+    return response["result"]
+
+
+def provider_many(provider_id, count):
+    declaration = provider(provider_id, "bulk-model-0")
+    declaration["models"] = [
+        {
+            "id": "bulk-model-%d" % index,
+            "api_name": "bulk-model-%d" % index,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }
+        for index in range(count)
+    ]
+    return declaration
+
+
+initialize = receive()
+assert initialize["method"] == "initialize", initialize
+contract = initialize["params"]["contract"]
+provider_capabilities = {"provider_catalog", "provider_stream", "provider_auth"}
+provider_methods = {
+    "providers/complete",
+    "providers/register",
+    "providers/update",
+    "providers/unregister",
+    "provider/stream",
+    "provider/event",
+    "provider/cancel",
+    "provider/auth/request",
+    "provider/auth/revoke",
+}
+selection = {
+    "schema": contract["schema"],
+    "encoding": contract["encoding"],
+    "capabilities": [
+        capability
+        for capability in contract["required_capabilities"] + contract["optional_capabilities"]
+        if capability in contract["required_capabilities"] or capability in provider_capabilities
+    ],
+    "methods": [
+        method
+        for method in contract["required_methods"] + contract["optional_methods"]
+        if method in contract["required_methods"] or method in provider_methods
+    ],
+    "limits": contract["limits"],
+}
+send({
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {
+        "api_version": "0.3",
+        "tools": [{
+            "name": "late-control",
+            "description": "Publish or retire a provider declaration after the initial catalog",
+            "parameters": {"type": "object"},
+        }],
+        "contract": selection,
+    },
+})
+reverse_request("initial-register", "providers/register", provider("alpha", "alpha-model"))
+send({"jsonrpc": "2.0", "method": "providers/complete", "params": {}})
+
+while True:
+    message = receive()
+    method = message.get("method")
+    if method == "tool/call":
+        action = message["params"]["arguments"].get("action")
+        if action == "register-beta":
+            reverse_request("late-register", "providers/register", provider("beta", "beta-model"))
+        elif action == "register-many":
+            reverse_request(
+                "late-register-many",
+                "providers/register",
+                provider_many("bulk", 12),
+            )
+        elif action == "unregister-beta":
+            reverse_request("late-unregister", "providers/unregister", {"provider_id": "beta"})
+        else:
+            raise AssertionError(action)
+        send({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {
+                "content": [{"type": "text", "text": action}],
+                "is_error": False,
+                "metadata": {},
+            },
+        })
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
+        break
+    else:
+        raise AssertionError(message)
+"#;
+
+    async fn start_late_provider_fixture(
+        directory: &std::path::Path,
+    ) -> (ExtensionProcess, ExtensionProviderRuntime) {
+        std::fs::write(directory.join("late-provider.py"), LATE_PROVIDER_FIXTURE).unwrap();
+        let manifest = ExtensionManifest::parse(
+            r#"name = "late-provider"
+version = "0.3.0"
+api_version = "0.3"
+[entrypoint]
+command = "python3"
+args = ["late-provider.py"]
+[contributes]
+tools = ["late-control"]
+providers = true
+"#,
+        )
+        .unwrap();
+        let runtime = ExtensionProviderRuntime::default();
+        let mut config = ExtensionRuntimeConfig::new(directory);
+        config.provider_registry = Some(runtime.registry());
+        config.request_timeout = Duration::from_secs(5);
+        config.shutdown_timeout = Duration::from_secs(1);
+        config.supervise = false;
+        let process = ExtensionProcess::start(
+            DiscoveredExtension {
+                manifest,
+                manifest_path: directory.join(EXTENSION_MANIFEST_FILENAME),
+                source: ExtensionSource::Explicit,
+                activation: octet_agent::extension_process::ExtensionActivation {
+                    enabled: true,
+                    trust: ExtensionTrust::Trusted,
+                },
+            },
+            config,
+        )
+        .await
+        .unwrap();
+        (process, runtime)
+    }
+
+    async fn wait_for_extension_provider(
+        runtime: &ExtensionProviderRuntime,
+        provider_id: &str,
+        model_id: &str,
+    ) -> bool {
+        for _ in 0..500 {
+            if runtime.registry().resolve(provider_id, model_id).is_some() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    fn resident_endpoint(id: &str) -> Endpoint {
+        Endpoint {
+            id: EndpointId(id.to_owned()),
+            base_url: url::Url::parse("http://127.0.0.1:9/").unwrap(),
+            auth: Auth::None,
+            default_headers: http::HeaderMap::new(),
+            transport: EndpointTransport::Http,
+            runtime: RequestRuntime::default(),
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn late_provider_registration_becomes_live_at_the_next_synchronization_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let (process, runtime) = start_late_provider_fixture(temp.path()).await;
+        let processes = vec![process.clone()];
+        assert!(
+            wait_for_extension_provider(&runtime, "alpha", "alpha-model").await,
+            "the initial declaration was never published"
+        );
+
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let client = AiClient::new();
+        assert!(
+            runtime
+                .synchronize(&mut catalog, &client, &processes)
+                .is_empty(),
+            "the first projection must not report a live registration"
+        );
+        assert!(catalog
+            .resolve(&ModelId("alpha/alpha-model".into()))
+            .is_ok());
+
+        // The registration is issued from a tool handler, i.e. strictly after
+        // the initial load phase.
+        process
+            .call_tool(
+                "late-control",
+                serde_json::json!({"action": "register-beta"}),
+                process.current_context(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            wait_for_extension_provider(&runtime, "beta", "beta-model").await,
+            "the late declaration never reached the registry"
+        );
+        let beta = ModelId("beta/beta-model".into());
+        assert!(
+            catalog.resolve(&beta).is_err(),
+            "a running session must not mutate before its synchronization boundary"
+        );
+
+        let notices = runtime.synchronize(&mut catalog, &client, &processes);
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.contains("beta/beta-model")),
+            "a live registration must be visible to the user: {notices:?}"
+        );
+        let registered = catalog
+            .resolve(&beta)
+            .expect("the late model is selectable");
+        assert_eq!(registered.spec.api_name, "beta-model");
+        assert_eq!(registered.spec.limits.context_window, 8192);
+        assert!(!registered.spec.capabilities.tools);
+        assert!(
+            registered.spec.pricing.is_none(),
+            "an unpriced declaration must stay explicitly unknown, never free"
+        );
+        assert!(
+            runtime
+                .synchronize(&mut catalog, &client, &processes)
+                .is_empty(),
+            "an unchanged registry must not re-project or re-notice"
+        );
+
+        // The live summary surface reports the same declaration as live.
+        let mut extensions = ExecutableExtensions::default();
+        extensions.provider_runtime = runtime.clone();
+        extensions.processes.push(process.clone());
+        extensions.summaries = vec![ExtensionSummary {
+            name: "late-provider".into(),
+            version: "0.3.0".into(),
+            manifest_path: temp.path().join(EXTENSION_MANIFEST_FILENAME),
+            manifest_digest: String::new(),
+            bundle_digest: None,
+            source: ExtensionSource::Explicit,
+            enabled: true,
+            trusted: true,
+            running: false,
+            api_version: "0.3".into(),
+            negotiated_features: Vec::new(),
+            telemetry_schema: None,
+            compatibility: "compatible".into(),
+            health: None,
+            runtime: None,
+            tools: Vec::new(),
+            commands: Vec::new(),
+            hooks: Vec::new(),
+            ui: Vec::new(),
+            providers: Vec::new(),
+        }];
+        let summary = extensions.summaries().remove(0);
+        let provider = summary
+            .providers
+            .iter()
+            .find(|provider| provider.id == "beta")
+            .expect("the live declaration is listed");
+        assert!(provider.live, "the late declaration must be reported live");
+        assert_eq!(provider.authorization, "ready");
+        assert_eq!(provider.models, vec!["beta/beta-model".to_owned()]);
+        assert!(extensions.inspect_text().contains("beta [ready] live"));
+
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_bulk_late_registration_notice_stays_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let (process, runtime) = start_late_provider_fixture(temp.path()).await;
+        let processes = vec![process.clone()];
+        assert!(wait_for_extension_provider(&runtime, "alpha", "alpha-model").await);
+
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let client = AiClient::new();
+        runtime.synchronize(&mut catalog, &client, &processes);
+
+        process
+            .call_tool(
+                "late-control",
+                serde_json::json!({"action": "register-many"}),
+                process.current_context(),
+            )
+            .await
+            .unwrap();
+        assert!(wait_for_extension_provider(&runtime, "bulk", "bulk-model-0").await);
+
+        let notices = runtime.synchronize(&mut catalog, &client, &processes);
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.contains("is now live"))
+                .count(),
+            MAX_LIVE_REGISTRATION_NOTICES,
+            "live-registration notices must stay bounded: {notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice
+                    .contains("more model(s) registered while this session was running")),
+            "the overflow must be summarized: {notices:?}"
+        );
+        assert!(catalog
+            .resolve(&ModelId("bulk/bulk-model-11".into()))
+            .is_ok());
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_conflicting_late_model_never_replaces_a_resident_catalog_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let (process, runtime) = start_late_provider_fixture(temp.path()).await;
+        let processes = vec![process.clone()];
+        assert!(wait_for_extension_provider(&runtime, "alpha", "alpha-model").await);
+
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let client = AiClient::new();
+        runtime.synchronize(&mut catalog, &client, &processes);
+
+        // A resident route (for example a built-in) already owns the exact
+        // catalog id the late declaration would use.
+        let shadow = ModelId("beta/beta-model".into());
+        catalog
+            .register_endpoint(resident_endpoint("resident-route"))
+            .unwrap();
+        catalog
+            .register_model(ModelSpec {
+                id: shadow.clone(),
+                endpoint: EndpointId("resident-route".into()),
+                api_name: "resident-model".into(),
+                display_name: None,
+                protocol: Protocol::OpenAiChat,
+                capabilities: Capabilities {
+                    input_modalities: Default::default(),
+                    output_modalities: Default::default(),
+                    tools: false,
+                    parallel_tool_calls: false,
+                    reasoning: None,
+                    responses_lite: false,
+                    agent_delegation: None,
+                    structured_output: false,
+                    deferred_tool_loading: false,
+                },
+                limits: ModelLimits {
+                    context_window: 8192,
+                    max_output_tokens: 1024,
+                },
+                pricing: None,
+                preset: Default::default(),
+                cache: CacheCompatibility {
+                    supports_long_retention: false,
+                    send_session_id_header: false,
+                    send_session_affinity_headers: false,
+                    session_affinity_format: None,
+                    cache_control_format: None,
+                    supports_cache_control_on_tools: false,
+                },
+            })
+            .unwrap();
+
+        process
+            .call_tool(
+                "late-control",
+                serde_json::json!({"action": "register-beta"}),
+                process.current_context(),
+            )
+            .await
+            .unwrap();
+        assert!(wait_for_extension_provider(&runtime, "beta", "beta-model").await);
+
+        let notices = runtime.synchronize(&mut catalog, &client, &processes);
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.contains("conflicts with an existing catalog model")),
+            "a conflicting late model must be refused with a diagnostic: {notices:?}"
+        );
+        assert_eq!(
+            catalog.resolve(&shadow).unwrap().endpoint.id,
+            EndpointId("resident-route".into()),
+            "the resident route must never be silently replaced"
+        );
+        assert!(
+            runtime
+                .synchronize(&mut catalog, &client, &processes)
+                .is_empty(),
+            "a refused declaration must not force re-projection on every boundary"
+        );
+
+        // Unregistering the late declaration leaves the resident route intact.
+        process
+            .call_tool(
+                "late-control",
+                serde_json::json!({"action": "unregister-beta"}),
+                process.current_context(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..500 {
+            if runtime.registry().resolve("beta", "beta-model").is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(runtime.registry().resolve("beta", "beta-model").is_none());
+        runtime.synchronize(&mut catalog, &client, &processes);
+        assert_eq!(
+            catalog.resolve(&shadow).unwrap().endpoint.id,
+            EndpointId("resident-route".into())
+        );
+        assert!(catalog
+            .resolve(&ModelId("alpha/alpha-model".into()))
+            .is_ok());
+
+        assert!(process.shutdown().await);
+    }
 }
 
 #[cfg(test)]
@@ -7893,3 +8497,11 @@ mod hook_tests;
 #[cfg(test)]
 #[path = "extensions/bus_tests.rs"]
 mod bus_tests;
+
+#[cfg(test)]
+#[path = "extensions/lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "extensions/ui_transport_tests.rs"]
+mod ui_transport_tests;

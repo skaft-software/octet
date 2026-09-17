@@ -1,5 +1,7 @@
 //! Checked-in static model definitions selected by provider declarations.
 
+use std::collections::BTreeMap;
+
 use octet_ai::{OpenAiChatReasoningMode, Protocol, ReasoningEffort};
 
 use super::contract::StaticModelSet;
@@ -1162,7 +1164,8 @@ pub const MISTRAL_MODELS: &[StaticModelPreset] = &[
         false,
         true,
         ReasoningEffort::High,
-    ).with_reasoning_mode(StaticReasoningMode::MistralPrompt),
+    )
+    .with_reasoning_mode(StaticReasoningMode::MistralPrompt),
     StaticModelPreset::new(
         "mistral-large-latest",
         "Mistral Large",
@@ -1182,7 +1185,8 @@ pub const MISTRAL_MODELS: &[StaticModelPreset] = &[
         true,
         true,
         ReasoningEffort::High,
-    ).with_reasoning_mode(StaticReasoningMode::MistralEffort),
+    )
+    .with_reasoning_mode(StaticReasoningMode::MistralEffort),
     StaticModelPreset::new(
         "pixtral-large-latest",
         "Pixtral Large",
@@ -1349,6 +1353,61 @@ pub const CLOUDFLARE_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
         ReasoningEffort::High,
     ),
 ];
+
+/// Declaration-owned wire profiles for discovered OpenAI-compatible routes.
+///
+/// These mirror the upstream generated `compat` data for providers whose static
+/// catalog is not vendored: the *wire format* is provider-scoped, while the
+/// per-model reasoning choices keep coming from the endpoint's own assertion or
+/// from the pinned metadata record. Nothing here reads a provider-discovered
+/// header or preset; the declaration's own identity selects the profile, and a
+/// profile is only attached to a model that already declares a reasoning
+/// capability.
+///
+/// Anchors: pi `@8a7b0c03` `scripts/generate-models.ts` `processBasetenModels`
+/// (`thinkingFormat: "baseten"`, `chatTemplateArgs: { enable_thinking:
+/// { $var: "thinking.enabled" } }`, `supportsReasoningEffort: true`),
+/// `processZaiModels` (`thinkingFormat: "zai"`) and the Alibaba Token Plan
+/// variant (`thinkingFormat: "qwen"`, `supportsReasoningEffort: true`).
+/// Behavioral reference: `packages/ai/test/baseten-models.test.ts`.
+pub(crate) fn discovery_wire_preset(provider_id: &str) -> Option<octet_ai::ModelPreset> {
+    let preset = match provider_id {
+        "baseten" => octet_ai::ModelPreset {
+            thinking_format: Some(octet_ai::ThinkingFormat::Baseten),
+            chat_template_args: Some(baseten_chat_template_args()),
+            supports_reasoning_effort: Some(true),
+            ..Default::default()
+        },
+        "qwen-token-plan" | "qwen-token-plan-cn" | "qwen-token-plan-individual" => {
+            octet_ai::ModelPreset {
+                thinking_format: Some(octet_ai::ThinkingFormat::Qwen),
+                supports_reasoning_effort: Some(true),
+                ..Default::default()
+            }
+        }
+        "zai-coding-cn" => octet_ai::ModelPreset {
+            thinking_format: Some(octet_ai::ThinkingFormat::Zai),
+            supports_reasoning_effort: Some(true),
+            ..Default::default()
+        },
+        _ => return None,
+    };
+    Some(preset)
+}
+
+/// `chat_template_args` for the Baseten thinking contract: the top-level
+/// `enable_thinking` toggle value is always resolved, on or off.
+pub(super) fn baseten_chat_template_args() -> BTreeMap<String, octet_ai::ChatTemplateValue> {
+    let mut args = BTreeMap::new();
+    args.insert(
+        "enable_thinking".to_owned(),
+        octet_ai::ChatTemplateValue::Variable(octet_ai::ChatTemplateVariable {
+            variable: octet_ai::ThinkingVariable::Enabled,
+            omit_when_off: false,
+        }),
+    );
+    args
+}
 
 /// Return static models for a declaration-selected set without branching on a
 /// provider identifier.

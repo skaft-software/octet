@@ -1,7 +1,7 @@
 use super::*;
 use crate::codex_context::{
-    CODEX_5_6_CONTEXT_WINDOW, CODEX_CONTEXT_WINDOW_CAP, CODEX_LEGACY_CONTEXT_WINDOW,
-    CodexContextClampReporter,
+    CodexContextClampReporter, CODEX_5_6_CONTEXT_WINDOW, CODEX_CONTEXT_WINDOW_CAP,
+    CODEX_LEGACY_CONTEXT_WINDOW,
 };
 
 #[test]
@@ -891,11 +891,9 @@ fn third_party_gpt_6_astra_discovery_uses_its_pinned_provider_metadata() {
     assert_eq!(models.len(), 1);
     // A third-party Astra route does not inherit direct OpenAI or snapshot
     // capabilities, even when its provider-scoped display metadata is known.
-    let snapshot = octet_ai::model_metadata::model_capability_metadata(
-        "openrouter",
-        "openai/gpt-6-astra",
-    )
-    .unwrap();
+    let snapshot =
+        octet_ai::model_metadata::model_capability_metadata("openrouter", "openai/gpt-6-astra")
+            .unwrap();
     assert_eq!(
         models[0].display_name.as_deref(),
         Some(snapshot["name"].as_str().unwrap())
@@ -931,7 +929,10 @@ fn third_party_gpt_6_astra_discovery_uses_its_pinned_provider_metadata() {
     assert!(models[0].capabilities.tools);
     assert!(models[0].capabilities.structured_output);
     let reasoning = models[0].capabilities.reasoning.as_ref().unwrap();
-    assert_eq!(reasoning.openai_chat_mode, OpenAiChatReasoningMode::OpenRouter);
+    assert_eq!(
+        reasoning.openai_chat_mode,
+        OpenAiChatReasoningMode::OpenRouter
+    );
     assert_eq!(reasoning.options.as_ref().unwrap().values, ["low", "high"]);
     assert_eq!(
         reasoning.options.as_ref().unwrap().default.as_deref(),
@@ -3797,7 +3798,7 @@ async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopba
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
-    constrained_sampling: None,
+            constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
             parameters: serde_json::json!({"type":"object"}),
@@ -4356,10 +4357,10 @@ fn newly_discovered_openrouter_model_decodes_its_advertised_reasoning_parameters
         OpenAiChatReasoningMode::OpenRouter
     );
     assert!(
-        capability.options.as_ref().is_some_and(|options| options
-            .values
-            .iter()
-            .any(|value| value == "high")),
+        capability
+            .options
+            .as_ref()
+            .is_some_and(|options| options.values.iter().any(|value| value == "high")),
         "the default OpenRouter effort set remains available: {capability:?}"
     );
     // A model that does not advertise reasoning stays without it.
@@ -4470,7 +4471,10 @@ fn pinned_metadata_enriches_discovered_display_only() {
         reasoning.options.as_ref().unwrap().default.as_deref(),
         Some("high")
     );
-    assert_eq!(reasoning.openai_chat_mode, OpenAiChatReasoningMode::DeepSeekThinking);
+    assert_eq!(
+        reasoning.openai_chat_mode,
+        OpenAiChatReasoningMode::DeepSeekThinking
+    );
     assert!(reasoning.preserves_state);
     assert!(!reasoning.supports(&ReasoningConfig::Off));
     assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)));
@@ -4656,7 +4660,10 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     // publishes no limit for it.
     assert_eq!(registered.spec.limits.context_window, 65_536);
     assert_eq!(registered.spec.limits.max_output_tokens, 32_768);
-    assert_eq!(registered.spec.capabilities.reasoning.as_ref(), Some(&reasoning));
+    assert_eq!(
+        registered.spec.capabilities.reasoning.as_ref(),
+        Some(&reasoning)
+    );
     // An effort array in an external catalog is not a universal wire contract.
     let groq = BUILTIN_PROVIDER_DECLARATIONS
         .iter()
@@ -4749,7 +4756,7 @@ async fn pinned_metadata_deepseek_flash_exact_wire_controls_and_required_replay(
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
-    constrained_sampling: None,
+            constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
             parameters: serde_json::json!({"type":"object"}),
@@ -4926,7 +4933,12 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         let (context, output, values, default) = if api_name == "deepseek-flash" {
             (1_000_000, 384_000, vec!["none", "low", "high", "max"], None)
         } else {
-            (1_000_000, 384_000, vec!["none", "high", "xhigh"], Some("high"))
+            (
+                1_000_000,
+                384_000,
+                vec!["none", "high", "xhigh"],
+                Some("high"),
+            )
         };
         assert_eq!(legacy.spec.limits.context_window, context);
         assert_eq!(legacy.spec.limits.max_output_tokens, output);
@@ -4937,7 +4949,10 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         );
         assert!(reasoning.preserves_state);
         assert_eq!(reasoning.options.as_ref().unwrap().values, values);
-        assert_eq!(reasoning.options.as_ref().unwrap().default.as_deref(), default);
+        assert_eq!(
+            reasoning.options.as_ref().unwrap().default.as_deref(),
+            default
+        );
         assert_eq!(
             reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
             api_name == "deepseek-flash"
@@ -5248,7 +5263,10 @@ fn pinned_metadata_native_discovery_rejects_budgets_outside_output_limit() {
             assert_eq!(model.spec.limits.max_output_tokens, effective_output);
             // Preserve the full declaration when it fits; otherwise retain the
             // inventory row without raising limits or inventing a budget table.
-            assert_eq!(model.spec.capabilities.reasoning.as_ref(), fits.then_some(&known));
+            assert_eq!(
+                model.spec.capabilities.reasoning.as_ref(),
+                fits.then_some(&known)
+            );
         }
     }
 }
@@ -5394,7 +5412,10 @@ fn codex_registration_keeps_the_deliberate_cap_and_reports_it_once() {
     assert_eq!(clamp.effective_context_window, CODEX_CONTEXT_WINDOW_CAP);
 
     // Report through the same boundary the registration loop uses.
-    assert_eq!(reporter.observe(resolution.clamp.clone()), Some(clamp.clone()));
+    assert_eq!(
+        reporter.observe(resolution.clamp.clone()),
+        Some(clamp.clone())
+    );
     assert_eq!(reporter.observe(resolution.clamp.clone()), None);
     assert_eq!(reporter.observe(None), None);
     assert_eq!(reporter.observe(resolution.clamp), Some(clamp));
@@ -5466,7 +5487,10 @@ fn codex_registration_names_above_tier_accounting_for_every_raised_route() {
     );
     assert_eq!(resolution.context_window, CODEX_5_6_CONTEXT_WINDOW);
     assert!(!resolution.override_applied, "luna needs no override");
-    assert!(resolution.clamp.is_none(), "372K luna is the documented window");
+    assert!(
+        resolution.clamp.is_none(),
+        "372K luna is the documented window"
+    );
     assert!(
         resolution.has_uncertain_usage,
         "above 272K the whole request is metered differently"
@@ -5701,11 +5725,13 @@ fn an_unusable_codex_cache_discovers_once_and_never_serves_dynamic_capabilities(
         .write(true)
         .open(&cache_path)
         .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(
-            std::time::SystemTime::now()
-                .checked_sub(CODEX_MODEL_CACHE_REFRESH_INTERVAL + Duration::from_secs(1))
-                .unwrap(),
-        ))
+        .set_times(
+            std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now()
+                    .checked_sub(CODEX_MODEL_CACHE_REFRESH_INTERVAL + Duration::from_secs(1))
+                    .unwrap(),
+            ),
+        )
         .unwrap();
     let discovery_requests = std::cell::Cell::new(0_u32);
     let (models, source) = codex_inventory_models(&store, &claims, false, false, {
@@ -5774,7 +5800,12 @@ fn an_unusable_codex_cache_discovers_once_and_never_serves_dynamic_capabilities(
     for model in &models {
         assert!(!model.responses_lite, "{}", model.id);
         assert_eq!(model.agent_delegation, None, "{}", model.id);
-        assert_ne!(model.max_effort, octet_ai::ReasoningEffort::Ultra, "{}", model.id);
+        assert_ne!(
+            model.max_effort,
+            octet_ai::ReasoningEffort::Ultra,
+            "{}",
+            model.id
+        );
     }
 }
 
@@ -6018,13 +6049,19 @@ fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
     let app = build_app(boot, launch, "system".into()).unwrap();
 
     // On-demand surface: readable without delivering.
-    let report = app.codex_context_report().expect("the note is available").to_owned();
+    let report = app
+        .codex_context_report()
+        .expect("the note is available")
+        .to_owned();
     assert!(report.starts_with("note: Codex model"), "{report}");
     assert!(!report.contains("Session::"), "{report}");
     assert_eq!(app.codex_context_report(), Some(report.as_str()));
 
     // First assistant turn: delivered exactly once, then silent.
-    assert_eq!(app.take_codex_context_note().as_deref(), Some(report.as_str()));
+    assert_eq!(
+        app.take_codex_context_note().as_deref(),
+        Some(report.as_str())
+    );
     assert_eq!(app.take_codex_context_note(), None);
     assert_eq!(app.take_codex_context_note(), None);
     // The peek survives delivery for diagnostics: the once-per-session latch
@@ -6044,10 +6081,15 @@ fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
         None,
         None,
         None,
-        Some(SessionSelection::CreateNew(directory.path().join("new-note.jsonl"))),
+        Some(SessionSelection::CreateNew(
+            directory.path().join("new-note.jsonl"),
+        )),
     )
     .unwrap();
-    assert_eq!(app.take_codex_context_note().as_deref(), Some(report.as_str()));
+    assert_eq!(
+        app.take_codex_context_note().as_deref(),
+        Some(report.as_str())
+    );
     assert_eq!(app.take_codex_context_note(), None);
 
     // Reopening that same transcript is not a new note-delivery boundary.

@@ -135,9 +135,9 @@ pub(super) fn styled_status_text(theme: &OctetTheme, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use futures_util::StreamExt as _;
     use super::*;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use futures_util::StreamExt as _;
 
     #[test]
     fn output_token_rate_uses_authoritative_usage_and_generation_elapsed_time() {
@@ -395,7 +395,10 @@ mod tests {
         let frames = recorded.borrow().clone();
         assert!(!frames.is_empty());
         for frame in &frames {
-            assert!(frame.contains(CURSOR_MARKER), "startup lost its cursor: {frame:?}");
+            assert!(
+                frame.contains(CURSOR_MARKER),
+                "startup lost its cursor: {frame:?}"
+            );
             for forbidden in [
                 "starting extensions",
                 "extensions",
@@ -430,17 +433,26 @@ mod tests {
         let mut control = InteractiveShell::test_shell();
         control.set_size(96, 18);
         control.state.borrow_mut().startup_pending = true;
-        control.state.borrow_mut().editor.set_text("x draft during startup z");
+        control
+            .state
+            .borrow_mut()
+            .editor
+            .set_text("x draft during startup z");
         control.set_run_label("discovering models…");
         let control_lines = ShellComponent::new(control.state.clone(), false).render(96);
         let control_frame = plain(&control_lines);
-        assert!(control_frame.contains("discovering models"), "{control_frame:?}");
+        assert!(
+            control_frame.contains("discovering models"),
+            "{control_frame:?}"
+        );
         assert!(
             control_frame.contains("x draft during startup z"),
             "{control_frame:?}"
         );
         assert!(
-            control_lines.iter().any(|line| line.contains(CURSOR_MARKER)),
+            control_lines
+                .iter()
+                .any(|line| line.contains(CURSOR_MARKER)),
             "{control_frame:?}"
         );
 
@@ -463,7 +475,10 @@ mod tests {
             "read-only onboarding notice",
             "x draft during startup z",
         ] {
-            assert!(ready.contains(expected), "{expected:?} missing from {ready:?}");
+            assert!(
+                ready.contains(expected),
+                "{expected:?} missing from {ready:?}"
+            );
         }
         for frame in &frames {
             for absent in [

@@ -13,7 +13,12 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn model(url: &str, protocol: Protocol) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
-            preset: Default::default(),
+            // These fixtures declare grammar `custom` tools, so the route must
+            // declare OpenAI grammar support (Pi defaults it off).
+            preset: ModelPreset {
+                supports_openai_grammar_tools: Some(true),
+                ..Default::default()
+            },
             id: ModelId("fixture".into()),
             endpoint: EndpointId("fixture".into()),
             api_name: "fixture".into(),

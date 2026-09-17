@@ -502,9 +502,24 @@ class BridgeProtocolTests(unittest.TestCase):
             self.assertNotIn("error", response)
             self.assertTrue(any(message.get("method") == "$/progress" for message in bridge.messages))
 
-    def test_transformed_tool_result_preserves_details_usage_and_error(self) -> None:
+    def test_hook_tool_result_transform_keeps_content_details_and_error(self) -> None:
         with BridgeProcess() as bridge:
             bridge.initialize()
+            response = bridge.request(
+                "tool/call",
+                {
+                    "name": "fixture_echo",
+                    "arguments": {"value": "transform"},
+                    "catalog_revision": 0,
+                },
+            )
+            # A hook-created Usage without the negotiated result contract is an
+            # explicit refusal, never generic metadata that merely looks native.
+            self.assertIn("error", response)
+            self.assertIn("tool_result_usage", response["error"]["message"])
+
+        with BridgeProcess(fixture_mode="result-contract") as bridge:
+            bridge.initialize("tool_result_usage", "tool_result_termination")
             result = bridge.request(
                 "tool/call",
                 {
@@ -515,12 +530,17 @@ class BridgeProtocolTests(unittest.TestCase):
             )["result"]
             self.assertEqual("transformed", result["content"][0]["text"])
             self.assertTrue(result["is_error"])
+            self.assertEqual({"transformed": True}, result["metadata"])
             self.assertEqual(
                 {
-                    "details": {"transformed": True},
-                    "usage": {"input": 1, "output": 2},
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "total_tokens": 3,
+                    "reasoning_tokens": 0,
                 },
-                result["metadata"],
+                result["usage"],
             )
 
     def test_current_ui_names_fail_explicitly_and_host_state_is_visible(self) -> None:
@@ -1851,6 +1871,420 @@ class Api03ProviderBridgeTests(unittest.TestCase):
             bridge.process.wait(timeout=2.0)
             self.assertEqual(1, bridge.process.returncode)
             self.assertTrue(any("not canonical JSON" in line for line in bridge.stderr))
+
+
+@unittest.skipUnless(NODE, "node is required for the Pi compatibility subprocess tests")
+class ToolResultContractTests(unittest.TestCase):
+    """Negotiated Pi tool-result usage and termination on both wires.
+
+    A fixture host offer is the only way to exercise the future host wire; the
+    shipped octet host does not offer these capabilities yet, which is exactly
+    why the unnegotiated cases below must fail instead of silently dropping or
+    relabelling a Pi result field.
+    """
+
+    RESULT_FEATURES = ("tool_result_usage", "tool_result_termination")
+    USAGE = {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "cache_read_tokens": 3,
+        "cache_write_tokens": 5,
+        "total_tokens": 26,
+        "cache_write_1h_tokens": 2,
+        "reasoning_tokens": 4,
+    }
+
+    def tool_call(self, bridge, name, value=None, api_version="0.2", **extra):
+        arguments = {} if value is None else {"value": value}
+        arguments.update(extra)
+        params = {"name": name, "arguments": arguments, "catalog_revision": 0}
+        if api_version == "0.3":
+            params = {
+                "name": bridge.command_name,
+                "arguments": {"tool_name": name, "arguments": arguments},
+                "context": {},
+            }
+        return bridge.request("tool/call", params)
+
+    def initialize(self, bridge, api_version="0.2", *features):
+        if api_version == "0.3":
+            contract = v03_contract(providers=False)
+            contract["optional_capabilities"] = [
+                *contract["optional_capabilities"],
+                *features,
+            ]
+            return bridge.initialize(contract=contract)
+        return bridge.initialize(*features)
+
+    def test_usage_and_termination_cross_only_when_negotiated(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version):
+                with BridgeProcess(api_version=api_version, fixture_mode="result-contract") as bridge:
+                    self.initialize(bridge, api_version, *self.RESULT_FEATURES)
+                    result = self.tool_call(bridge, "fixture_usage_terminate", api_version=api_version)["result"]
+                    self.assertEqual(self.USAGE, result["usage"])
+                    self.assertTrue(result["terminate"])
+                    # details keeps its own shape rather than wrapping usage.
+                    self.assertEqual({"fixture": "usage-terminate"}, result["metadata"])
+
+    def test_unnegotiated_result_fields_fail_instead_of_being_dropped(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version):
+                with BridgeProcess(api_version=api_version, fixture_mode="result-contract") as bridge:
+                    self.initialize(bridge, api_version)
+                    usage = self.tool_call(bridge, "fixture_usage", api_version=api_version)
+                    terminate = self.tool_call(bridge, "fixture_terminate", api_version=api_version)
+                    # A present `terminate: false` is still a result field that the
+                    # host did not negotiate, so it is refused rather than ignored.
+                    explicit_false = self.tool_call(
+                        bridge, "fixture_usage_case", value="terminate-false", api_version=api_version
+                    )
+                    if api_version == "0.3":
+                        # API 0.3 keeps its fixed error envelope instead of
+                        # exposing internal refusal text.
+                        self.assertEqual(-32602, usage["error"]["code"])
+                        self.assertEqual(-32602, terminate["error"]["code"])
+                        self.assertEqual(-32602, explicit_false["error"]["code"])
+                    else:
+                        self.assertIn("tool_result_usage", usage["error"]["message"])
+                        self.assertIn("tool_result_termination", terminate["error"]["message"])
+                        self.assertIn("tool_result_termination", explicit_false["error"]["message"])
+
+    def test_each_capability_is_admitted_independently(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version):
+                with BridgeProcess(api_version=api_version, fixture_mode="result-contract") as bridge:
+                    self.initialize(bridge, api_version, "tool_result_usage")
+                    self.assertEqual(
+                        self.USAGE,
+                        self.tool_call(bridge, "fixture_usage", api_version=api_version)["result"]["usage"],
+                    )
+                    terminate = self.tool_call(bridge, "fixture_terminate", api_version=api_version)
+                    self.assertIn("error", terminate)
+                    if api_version == "0.2":
+                        self.assertIn("tool_result_termination", terminate["error"]["message"])
+
+    def test_hook_usage_replaces_and_passthrough_preserves_execute_usage(self) -> None:
+        hook_usage = {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 3,
+            "reasoning_tokens": 0,
+        }
+        with BridgeProcess(fixture_mode="result-contract") as bridge:
+            bridge.initialize(*self.RESULT_FEATURES)
+            replaced = self.tool_call(bridge, "fixture_usage", value="hook-usage")["result"]
+            # Exactly one final usage: the hook's replacement, never a sum.
+            self.assertEqual(hook_usage, replaced["usage"])
+            passthrough = self.tool_call(bridge, "fixture_usage", value="hook-usage-passthrough")["result"]
+            self.assertEqual(self.USAGE, passthrough["usage"])
+            # A hook that only replaces details must not erase the executed usage.
+            details_only = self.tool_call(bridge, "fixture_usage", value="hook-details")["result"]
+            self.assertEqual(self.USAGE, details_only["usage"])
+            self.assertEqual({"transformed": True}, details_only["metadata"])
+
+    def test_hook_termination_mutation_is_refused_and_execute_termination_survives(self) -> None:
+        with BridgeProcess(fixture_mode="result-contract") as bridge:
+            bridge.initialize(*self.RESULT_FEATURES)
+            response = self.tool_call(bridge, "fixture_hook_result", value="hook-terminate")
+            self.assertIn("cannot mutate tool termination", response["error"]["message"])
+            matching = self.tool_call(bridge, "fixture_hook_result", value="hook-terminate-matching")
+            self.assertNotIn("error", matching)
+            executing = self.tool_call(bridge, "fixture_terminate", value="hook-details")["result"]
+            self.assertTrue(executing["terminate"])
+
+    def test_malformed_execute_usage_is_an_explicit_error(self) -> None:
+        cases = (
+            "negative",
+            "missing",
+            "unknown",
+            "cost-unknown",
+            "cost-missing",
+            "cost-nan",
+            "cost-negative",
+            "cost-not-a-number",
+            "cost-priced",
+            "reasoning-exceeds",
+            "cache-1h-exceeds",
+        )
+        with BridgeProcess(fixture_mode="result-contract") as bridge:
+            bridge.initialize(*self.RESULT_FEATURES)
+            for case in cases:
+                with self.subTest(case=case):
+                    response = self.tool_call(bridge, "fixture_usage_case", value=case)
+                    self.assertIn("usage", response["error"]["message"])
+            response = self.tool_call(bridge, "fixture_usage_case", value="terminate-type")
+            self.assertIn("terminate must be a boolean", response["error"]["message"])
+            # An all-zero cost is Pi's unpriced encoding: accepted, and never
+            # emitted as a monetary field the host cannot account. A Usage
+            # without cost reports nothing. A priced cost fails explicitly.
+            no_cost = self.tool_call(bridge, "fixture_usage_case", value="no-cost")["result"]
+            self.assertNotIn("cost", no_cost["usage"])
+            priced = self.tool_call(bridge, "fixture_usage_case", value="cost-priced")
+            self.assertIn("cannot be accounted", priced["error"]["message"])
+
+    def test_result_contract_selection_is_visible_in_negotiation(self) -> None:
+        with BridgeProcess() as bridge:
+            initialized = bridge.initialize(*self.RESULT_FEATURES)
+            self.assertEqual(
+                {
+                    "request_cancellation",
+                    "content_parts",
+                    "tool_result_termination",
+                    "tool_result_usage",
+                },
+                set(initialized["protocol"]["features"]),
+            )
+        with BridgeProcess() as bridge:
+            initialized = bridge.initialize()
+            self.assertEqual(
+                {"request_cancellation", "content_parts"},
+                set(initialized["protocol"]["features"]),
+            )
+            self.assertTrue(
+                any(
+                    "tool_result_usage" in line and "not offered" in line
+                    for line in bridge.stderr
+                )
+            )
+        with BridgeProcess(api_version="0.3") as bridge:
+            contract = v03_contract(providers=False)
+            contract["optional_capabilities"] = [
+                *contract["optional_capabilities"],
+                "tool_result_usage",
+                "tool_result_termination",
+            ]
+            selected = bridge.initialize(contract=contract)["contract"]["capabilities"]
+            self.assertIn("tool_result_usage", selected)
+            self.assertIn("tool_result_termination", selected)
+        with BridgeProcess(api_version="0.3") as bridge:
+            selected = bridge.initialize()["contract"]["capabilities"]
+            self.assertNotIn("tool_result_usage", selected)
+            self.assertNotIn("tool_result_termination", selected)
+
+
+@unittest.skipUnless(NODE, "node is required for the Pi compatibility subprocess tests")
+class ToolDefinitionProjectionTests(unittest.TestCase):
+    def test_prompt_snippet_and_guidelines_are_projected_into_the_tool_description(self) -> None:
+        with BridgeProcess(fixture_mode="projection") as bridge:
+            initialized = bridge.initialize()
+            published = {
+                tool["name"]: tool
+                for tool in initialized["tools"]
+            }
+            tool = published["fixture_snippet"]
+            self.assertEqual(
+                "Snippet projection fixture\n\nSnippet with whitespace collapse\n\n"
+                "- First guideline\n- Second guideline",
+                tool["description"],
+            )
+            # The wire carries exactly the declared fields: an undeclared
+            # promptSnippet/promptGuidelines field would be silently ignored by
+            # the host's exact tool-definition decoder.
+            self.assertEqual({"name", "description", "parameters"}, set(tool))
+            response = bridge.request(
+                "tool/call",
+                {"name": "fixture_snippet", "arguments": {}, "catalog_revision": 0},
+            )
+            self.assertNotIn("error", response)
+
+    def test_sequential_execution_mode_serializes_bridged_tool_executions(self) -> None:
+        with BridgeProcess(fixture_mode="projection") as bridge:
+            bridge.initialize()
+            first = bridge.send_request(
+                "tool/call",
+                {"name": "fixture_parallel_probe", "arguments": {}, "catalog_revision": 0},
+            )
+            second = bridge.send_request(
+                "tool/call",
+                {"name": "fixture_sequential", "arguments": {}, "catalog_revision": 0},
+            )
+            first_result = bridge.wait_response(first, timeout=5.0)
+            second_result = bridge.wait_response(second, timeout=5.0)
+            self.assertNotIn("error", first_result)
+            self.assertNotIn("error", second_result)
+            log = bridge.request(
+                "tool/call",
+                {"name": "fixture_execution_log", "arguments": {}, "catalog_revision": 0},
+            )["result"]["content"][0]["text"]
+            entries = [entry for entry in json.loads(log) if entry["name"] != "fixture_execution_log"]
+            self.assertEqual(["start", "end", "start", "end"], [entry["phase"] for entry in entries])
+            self.assertEqual(
+                [
+                    "fixture_parallel_probe",
+                    "fixture_parallel_probe",
+                    "fixture_sequential",
+                    "fixture_sequential",
+                ],
+                [entry["name"] for entry in entries],
+            )
+
+    def test_constrained_sampling_requirement_fails_closed_and_preference_is_diagnosed(self) -> None:
+        with BridgeProcess(fixture_mode="sampling-prefer") as bridge:
+            response = bridge.request(
+                "initialize",
+                {"workspace": str(FIXTURES), "host": {}, "protocol": {"optional_features": []}},
+            )
+            self.assertNotIn("error", response)
+            self.assertIn("fixture_sampling", response["result"]["tools"][-1]["name"])
+        with BridgeProcess(fixture_mode="sampling-prefer") as bridge:
+            bridge.initialize()
+            self.assertTrue(
+                any(
+                    "fixture_sampling" in line and "constrained sampling" in line
+                    for line in bridge.stderr
+                )
+            )
+        for mode in ("sampling-require", "sampling-grammar", "sampling-unknown"):
+            with self.subTest(mode=mode), BridgeProcess(fixture_mode=mode) as bridge:
+                response = bridge.request(
+                    "initialize",
+                    {"workspace": str(FIXTURES), "host": {}, "protocol": {"optional_features": []}},
+                )
+                self.assertIn("error", response)
+                message = response["error"]["message"]
+                self.assertTrue(
+                    "constrained sampling" in message or "constrainedSampling" in message,
+                    message,
+                )
+
+
+@unittest.skipUnless(NODE, "node is required for the Pi compatibility subprocess tests")
+class ZeroEffectArgumentValidationTests(unittest.TestCase):
+    """Every published Pi tool validates arguments before its execute effect.
+
+    Each fixture tool appends to one marker file when it actually executes, so
+    the assertions observe the absence of the effect itself rather than only the
+    absence of a diagnostic.
+    """
+
+    INVALID_INPUTS = (
+        {"value": {"not": "coercible"}},
+        {"value": "ok", "unexpected": True},
+        {"raw": "invalid"},
+    )
+
+    def register_dynamic_tool(self, bridge) -> None:
+        bridge.handlers["tools/register"] = lambda _message: {
+            "revision": 1,
+            "tools": [
+                "fixture_echo",
+                "fixture_prompt",
+                "fixture_progress",
+                "fixture_marker_a",
+                "fixture_marker_b",
+                "fixture_marker_c",
+            ],
+        }
+        response = bridge.request("command/execute", {"name": "add-marker-tool", "arguments": []})
+        self.assertNotIn("error", response)
+        bridge.wait_for(
+            lambda messages: next(
+                (message for message in messages if message.get("method") == "tools/register"),
+                None,
+            ),
+            description="dynamic marker tool registration",
+        )
+
+    def tool_call(self, bridge, api_version, name, arguments, revision=1) -> dict:
+        params = {"name": name, "arguments": arguments, "catalog_revision": revision}
+        if api_version == "0.3":
+            params = {
+                "name": bridge.command_name,
+                "arguments": {"tool_name": name, "arguments": arguments},
+                "context": {},
+            }
+        return bridge.request("tool/call", params)
+
+    def test_invalid_inputs_leave_no_execute_effect_for_each_tool(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version), tempfile.TemporaryDirectory() as directory:
+                marker = Path(directory) / "marker.log"
+                with BridgeProcess(
+                    api_version=api_version,
+                    fixture_mode="zero-effect",
+                    fixture_environment={"OCTET_PI_FIXTURE_MARKER": str(marker)},
+                ) as bridge:
+                    initialized = bridge.initialize("runtime_commands", "dynamic_tools")
+                    names = ["fixture_marker_a", "fixture_marker_b"]
+                    if api_version == "0.2":
+                        # API 0.2 negotiates a live catalog, so the third tool is
+                        # registered after initialization; API 0.3 stays fixed.
+                        self.register_dynamic_tool(bridge)
+                        names.append("fixture_marker_c")
+                        self.assertTrue(
+                            {"fixture_marker_a", "fixture_marker_b"}
+                            <= {tool["name"] for tool in initialized["tools"]}
+                        )
+                    else:
+                        self.assertEqual(
+                            [bridge.command_name],
+                            [tool["name"] for tool in initialized["tools"]],
+                        )
+                    for name in names:
+                        for arguments in self.INVALID_INPUTS:
+                            with self.subTest(name=name, arguments=arguments):
+                                response = self.tool_call(bridge, api_version, name, arguments)
+                                self.assertIn("error", response)
+                    self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
+                    # The same tools do execute with valid arguments, so the
+                    # zero-effect assertion above observes the real call path.
+                    for name in names:
+                        response = self.tool_call(
+                            bridge, api_version, name, {"value": "ok"}, revision=1
+                        )
+                        self.assertNotIn("error", response)
+                    self.assertEqual(
+                        [f"{name} ok" for name in names],
+                        marker.read_text().splitlines(),
+                    )
+
+    def test_invalid_hook_mutation_never_reaches_execution(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version), tempfile.TemporaryDirectory() as directory:
+                marker = Path(directory) / "marker.log"
+                with BridgeProcess(
+                    api_version=api_version,
+                    fixture_mode="zero-effect",
+                    fixture_environment={"OCTET_PI_FIXTURE_MARKER": str(marker)},
+                ) as bridge:
+                    bridge.initialize("dynamic_tools")
+                    if api_version == "0.3":
+                        # The API 0.3 fixed dispatcher applies Pi interception itself.
+                        response = self.tool_call(
+                            bridge, api_version, "fixture_marker_b", {"value": "hook-invalid"}
+                        )
+                    else:
+                        response = bridge.request(
+                            "hook/run",
+                            {
+                                "hook": "before_tool_call",
+                                "payload": {
+                                    "name": "fixture_marker_b",
+                                    "arguments": {"value": "hook-invalid"},
+                                },
+                            },
+                        )
+                    self.assertIn("error", response)
+                self.assertFalse(marker.exists())
+
+    def test_invalid_prepared_input_never_reaches_execution(self) -> None:
+        for api_version in ("0.2", "0.3"):
+            with self.subTest(api_version=api_version), tempfile.TemporaryDirectory() as directory:
+                marker = Path(directory) / "marker.log"
+                with BridgeProcess(
+                    api_version=api_version,
+                    fixture_mode="zero-effect",
+                    fixture_environment={"OCTET_PI_FIXTURE_MARKER": str(marker)},
+                ) as bridge:
+                    bridge.initialize()
+                    response = self.tool_call(
+                        bridge, api_version, "fixture_marker_a", {"raw": "invalid"}
+                    )
+                    self.assertIn("error", response)
+                self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use octet_ai::{Media, ToolDef};
+use octet_ai::{Media, ToolDef, Usage};
 use tokio::sync::mpsc;
 
 use crate::effect::{ToolEffect, ToolPolicyDenialCode};
@@ -1309,6 +1309,7 @@ pub struct ToolOutput {
     delivery_commit: Option<ToolOutputCommit>,
     presentation_images_omitted: bool,
     terminate: bool,
+    usage: Option<Usage>,
 }
 
 /// Decides whether a completed tool batch may end the run.
@@ -1341,6 +1342,7 @@ impl std::fmt::Debug for ToolOutput {
                 "presentation_images_omitted",
                 &self.presentation_images_omitted,
             )
+            .field("usage", &self.usage)
             .finish_non_exhaustive()
     }
 }
@@ -1359,6 +1361,7 @@ impl ToolOutput {
             delivery_commit: None,
             presentation_images_omitted: false,
             terminate: false,
+            usage: None,
         }
     }
 
@@ -1397,7 +1400,26 @@ impl ToolOutput {
             delivery_commit: None,
             presentation_images_omitted: false,
             terminate: false,
+            usage: None,
         }
+    }
+
+    /// Attaches provider-reported usage produced by this tool execution.
+    ///
+    /// Pi's `ToolResultMessage.usage` is explicitly *not* part of main LLM
+    /// context accounting: the agent adds it to the run's billed turn totals and
+    /// never to the assistant turn's context estimate. A tool that calls a
+    /// provider on the host's behalf (search, retrieval, sandbox inference)
+    /// reports the exact counters here; unpriced or absent usage stays absent
+    /// rather than becoming a fabricated zero.
+    pub fn with_usage(mut self, usage: Usage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    /// Provider-reported usage produced by this tool execution, if any.
+    pub fn usage(&self) -> Option<&Usage> {
+        self.usage.as_ref()
     }
 
     /// Marks whether this completed output represents a semantic tool error.
@@ -1643,6 +1665,9 @@ impl ToolOutput {
             delivery_commit: None,
             presentation_images_omitted: false,
             terminate: self.terminate,
+            // Provider usage is billing evidence for the completed call, not
+            // presentation content: lowering media must never drop it.
+            usage: self.usage.clone(),
         }
     }
 }

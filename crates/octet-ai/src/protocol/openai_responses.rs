@@ -256,10 +256,14 @@ struct ResponsesTool {
     name: String,
     description: String,
     parameters: serde_json::Value,
-    /// Present for function tools: `true` only when the caller asked for
-    /// strict JSON-schema sampling and the route could enforce the rewritten
-    /// schema.
-    strict: bool,
+    /// `true` only when the caller asked for strict JSON-schema sampling and
+    /// the route could enforce the rewritten schema. The field is omitted
+    /// entirely when the route cannot enforce strict tools at all, mirroring
+    /// Pi's `convertResponsesTools` (`if (supportsStrictMode) functionTool.strict = strict`);
+    /// a route that rejects unknown fields must not receive a misleading
+    /// `strict: false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
 }
 
 /// OpenAI Responses `custom` tool constrained by a Lark/regex grammar.
@@ -332,7 +336,9 @@ fn map_responses_tools(
     for tool in tools {
         // Grammar-constrained tools are caller-opted OpenAI `custom` tools;
         // every other tool is a strict-resolved function tool.
-        if let Some(grammar) = crate::constrained_sampling::resolve_grammar(tool, true)? {
+        if let Some(grammar) =
+            crate::constrained_sampling::resolve_grammar(tool, super::grammar_tools_for(model))?
+        {
             mapped.push(ResponsesToolWire::Custom(ResponsesCustomTool {
                 r#type: "custom",
                 name: tool.name.clone(),
@@ -345,14 +351,15 @@ fn map_responses_tools(
             }));
             continue;
         }
+        let supports_strict = super::strict_mode_for(model);
         let (parameters, strict) =
-            crate::constrained_sampling::function_tool_parameters(tool, true)?;
+            crate::constrained_sampling::function_tool_parameters(tool, supports_strict)?;
         mapped.push(ResponsesToolWire::Function(ResponsesTool {
             r#type: "function",
             name: tool.name.clone(),
             description: tool.description.clone(),
             parameters,
-            strict,
+            strict: supports_strict.then_some(strict),
         }));
     }
     Ok(Some(mapped))
@@ -1063,6 +1070,7 @@ pub(crate) fn build_request(
     );
 
     // 4. Map tools & tool_choice
+    let grammar_tools = super::grammar_tools_for(model);
     let responses_lite = model.spec.capabilities.responses_lite;
     let mut tools_opt = if responses_lite {
         None
@@ -1108,7 +1116,7 @@ pub(crate) fn build_request(
             ToolChoice::Required => Some(serde_json::Value::String("required".to_string())),
             ToolChoice::None => Some(serde_json::Value::String("none".to_string())),
             ToolChoice::Named(name) => Some(serde_json::json!({
-                "type": if super::grammar::input_property(&req.tools, name)?.is_some() { "custom" } else { "function" },
+                "type": if super::grammar::input_property(&req.tools, name, grammar_tools)?.is_some() { "custom" } else { "function" },
                 "name": name
             })),
         }
@@ -1172,7 +1180,12 @@ pub(crate) fn build_request(
     };
     let mut wire_input = serde_json::to_value(input).expect("Responses input serializes");
     if !responses_lite {
-        map_grammar_replay(&mut wire_input, &req, raw_input.is_none())?;
+        map_grammar_replay(
+            &mut wire_input,
+            &req,
+            raw_input.is_none(),
+            super::grammar_tools_for(model),
+        )?;
     }
     let responses_req = ResponsesRequest {
         model: model.spec.api_name.clone(),
@@ -1242,13 +1255,16 @@ fn map_grammar_replay(
     input: &mut serde_json::Value,
     req: &Request,
     canonical_calls: bool,
+    grammar_tools: bool,
 ) -> Result<(), AiError> {
     let mut custom_ids = std::collections::HashSet::new();
     for message in req.messages.iter().filter(|_| canonical_calls) {
         if let Message::Assistant(assistant) = message {
             for part in &assistant.content {
                 if let AssistantPart::ToolCall(call) = part {
-                    if super::grammar::input_property(&req.tools, &call.name)?.is_some() {
+                    if super::grammar::input_property(&req.tools, &call.name, grammar_tools)?
+                        .is_some()
+                    {
                         custom_ids.insert(call.id.0.clone());
                         custom_ids.insert(crate::protocol::normalize_tool_call_id(&call.id.0));
                     }
@@ -1262,7 +1278,7 @@ fn map_grammar_replay(
             && item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
         {
             if let Some(name) = item.get("name").and_then(serde_json::Value::as_str) {
-                if let Some(property) = super::grammar::input_property(&req.tools, name)? {
+                if let Some(property) = super::grammar::input_property(&req.tools, name, grammar_tools)? {
                     let arguments = item
                         .get("arguments")
                         .and_then(serde_json::Value::as_str)
