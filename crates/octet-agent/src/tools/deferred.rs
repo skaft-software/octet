@@ -13,8 +13,10 @@
 //!   poll permit — `run_resume` is emitted and the permit is consumed at most
 //!   once per pass;
 //! * a poll that is admitted but whose outcome becomes unknown leaves a
-//!   `deferred.effect_pending` leaf; the next permitted pass replaces that
-//!   unknown poll under **fresh** ids at the **same** poll number and deletes the
+//!   `deferred.effect_pending` leaf. That leaf is **not** re-polled
+//!   automatically: a new billable poll may only replace the unknown one after
+//!   an explicit [`DeferredResumeIntent::ReplaceUnknownPoll`] decision, and the
+//!   replacement then uses **fresh** ids at the same poll number and deletes the
 //!   abandoned stream frame list, so a duplicate partial response can never be
 //!   merged into the run;
 //! * a poll that returns another deferred response goes back to
@@ -57,7 +59,11 @@ impl ModelIdentity {
 }
 
 /// Provider handle for one deferred response (pi-ai `DeferredHandle`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `data` is opaque provider conversion material required to reconstruct the
+/// final message; like `octet_ai::deferred::DeferredHandle` it is never
+/// included in `Debug`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeferredHandle {
     /// Provider id that owns the handle.
@@ -75,6 +81,26 @@ pub struct DeferredHandle {
     pub poll_after_ms: Option<u64>,
     /// Provider conversion data required to reconstruct the final message.
     pub data: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for DeferredHandle {
+    /// Mirrors `octet_ai::deferred::DeferredHandle`: the opaque provider
+    /// conversion data is redacted, so a durable handle can be logged or
+    /// rendered in a diagnostic without leaking provider material. The two
+    /// handle types stay separate on purpose (transport shape vs durable
+    /// decision-core shape); only the redaction rule is shared.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeferredHandle")
+            .field("provider", &self.provider)
+            .field("model_id", &self.model_id)
+            .field("api", &self.api)
+            .field("id", &self.id)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("poll_after_ms", &self.poll_after_ms)
+            .field("data", &self.data.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl DeferredHandle {
@@ -246,7 +272,8 @@ pub enum DeferredPhase {
     /// increments the poll number.
     Suspended,
     /// `deferred.effect_pending`: a poll was admitted and its outcome is unknown.
-    /// Recovery replaces it under fresh ids at the same poll number.
+    /// An explicit [`DeferredResumeIntent::ReplaceUnknownPoll`] replaces it under
+    /// fresh ids at the same poll number; a plain poll is refused.
     EffectPending {
         /// Reserved response entry id of the unknown poll.
         response_id: String,
@@ -365,13 +392,17 @@ pub fn suspend_deferred_response(
 ///
 /// A permit is minted for one durable leaf generation, is consumed at most once,
 /// and cannot be re-minted by the tool or provider. `none` is the honest
-/// representation of a pass that carries no permit at all.
+/// representation of a pass that carries no permit at all. Only a permit minted
+/// with [`Self::one_replacing_unknown`] may replace a poll whose outcome is
+/// unknown: every other permit refuses instead of spending a second billable
+/// poll on an effect that may already have been accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeferredPollPermit {
     pass_id: String,
     generation: u64,
     remaining: u32,
     consumed: bool,
+    replace_unknown: bool,
 }
 
 impl DeferredPollPermit {
@@ -382,6 +413,20 @@ impl DeferredPollPermit {
             generation,
             remaining: 1,
             consumed: false,
+            replace_unknown: false,
+        }
+    }
+
+    /// Grants the pass one poll and the explicit right to replace a poll whose
+    /// outcome is unknown.
+    ///
+    /// A caller may mint this only after an explicit user decision to spend a
+    /// new billable poll on the same effect; the abandoned poll's exposure is
+    /// recorded by the caller that drives the replacement.
+    pub fn one_replacing_unknown(pass_id: impl Into<String>, generation: u64) -> Self {
+        Self {
+            replace_unknown: true,
+            ..Self::one(pass_id, generation)
         }
     }
 
@@ -392,6 +437,7 @@ impl DeferredPollPermit {
             generation,
             remaining: 0,
             consumed: false,
+            replace_unknown: false,
         }
     }
 
@@ -434,6 +480,14 @@ pub enum DeferredPollRefusalKind {
     ExpiredHandle {
         /// Expiry the provider supplied.
         expires_at_ms: i64,
+    },
+    /// The durable leaf owns an admitted poll whose outcome is unknown. Spending
+    /// another billable poll on the same effect requires an explicit
+    /// [`DeferredResumeIntent::ReplaceUnknownPoll`]; a plain permit fails
+    /// closed instead of auto-replacing it.
+    UnknownPollOutcome {
+        /// Poll number whose outcome is unknown.
+        poll: u64,
     },
 }
 
@@ -544,6 +598,21 @@ pub fn prepare_deferred_poll(
                 ),
             }));
         }
+    }
+    // An unknown-outcome poll may already have been accepted and billed. It is
+    // never replaced automatically: only a permit the caller minted with
+    // `one_replacing_unknown` (an explicit resume decision) may spend a second
+    // billable poll on the same effect.
+    if matches!(suspended.phase, DeferredPhase::EffectPending { .. }) && !permit.replace_unknown {
+        return DeferredPollPreparation::Refused(Box::new(DeferredPollRefusal {
+            kind: DeferredPollRefusalKind::UnknownPollOutcome {
+                poll: suspended.poll,
+            },
+            diagnostic: format!(
+                "deferred poll {} has an unknown outcome; resuming it needs an explicit replacement decision",
+                suspended.poll
+            ),
+        }));
     }
 
     permit.remaining -= 1;
@@ -665,8 +734,9 @@ impl DeferredSuspended {
 // That single fence is what makes the poll permit one-owner: a stale, duplicate,
 // foreign, or expired poll is refused before any provider work, and a crash
 // between "poll admitted" and "outcome known" leaves a durable
-// `deferred.effect_pending` record whose replacement uses fresh reserved ids, so
-// one billable poll can never be merged into the run twice.
+// `deferred.effect_pending` record whose replacement requires an explicit
+// [`DeferredResumeIntent::ReplaceUnknownPoll`] decision and then uses fresh
+// reserved ids, so one billable poll can never be merged into the run twice.
 
 /// Hard bounds for the durable deferred-run store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -772,8 +842,9 @@ pub enum DeferredRunState {
         leaf: Box<DeferredSuspended>,
     },
     /// Parked at `deferred.effect_pending`: a poll was admitted and its outcome
-    /// is unknown. The next permitted pass replaces it under fresh reserved ids
-    /// at the same poll number.
+    /// is unknown. Only an explicit
+    /// [`DeferredResumeIntent::ReplaceUnknownPoll`] pass replaces it, under
+    /// fresh reserved ids at the same poll number; a plain poll is refused.
     EffectPending {
         /// The durable leaf, including the reserved response and usage ids.
         leaf: Box<DeferredSuspended>,
@@ -1172,9 +1243,11 @@ impl DeferredRunStore {
     /// provider work may start. With [`DeferredResumeIntent::Poll`] the pass
     /// owns exactly one permit: the admitted poll's `deferred.effect_pending`
     /// intent — including its fresh reserved durable ids — is written **before**
-    /// this method returns, so a crash during the poll leaves a replaceable
-    /// unknown-outcome leaf rather than an in-process wait. Refusals never write
-    /// and never fall back to waiting.
+    /// this method returns, so a crash during the poll leaves an
+    /// unknown-outcome leaf rather than an in-process wait. That leaf may then
+    /// only be replaced by an explicit
+    /// [`DeferredResumeIntent::ReplaceUnknownPoll`] pass under fresh ids.
+    /// Refusals never write and never fall back to waiting.
     pub fn begin_pass(
         &self,
         operation_id: &str,
@@ -1201,6 +1274,9 @@ impl DeferredRunStore {
         let mut permit = match intent {
             DeferredResumeIntent::Poll => DeferredPollPermit::one(pass_id, record.generation),
             DeferredResumeIntent::Observe => DeferredPollPermit::none(pass_id, record.generation),
+            DeferredResumeIntent::ReplaceUnknownPoll => {
+                DeferredPollPermit::one_replacing_unknown(pass_id, record.generation)
+            }
         };
         // The reserved ids are derived from the durable operation, generation,
         // and poll the pass actually prepares against, so a replacement poll at
@@ -1550,10 +1626,17 @@ impl DeferredRunStore {
 /// How one resume pass may advance a parked deferred run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeferredResumeIntent {
-    /// The pass owns exactly one poll permit for the current generation.
+    /// The pass owns exactly one poll permit for the current generation. A leaf
+    /// whose poll outcome is unknown is refused, not replaced.
     Poll,
     /// The pass observes only: no permit, no durable write, no provider work.
     Observe,
+    /// The pass owns one poll permit **and** explicitly replaces a leaf whose
+    /// poll outcome is unknown with a new billable poll (fresh reserved ids at
+    /// the same poll number). This is the only intent that may spend a second
+    /// billable request for an effect that may already have been accepted, so a
+    /// caller may use it only after an explicit user resume decision.
+    ReplaceUnknownPoll,
 }
 
 /// Result of beginning one resume pass.
@@ -1697,5 +1780,106 @@ impl DeferredResponseDeclaration {
             api,
             handle,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity() -> ModelIdentity {
+        ModelIdentity::new("test-provider", "test-model")
+    }
+
+    fn handle() -> DeferredHandle {
+        DeferredHandle::new("test-provider", "test-model", "test-api", "handle-1")
+    }
+
+    fn effect_pending_leaf() -> DeferredSuspended {
+        DeferredSuspended {
+            operation_id: "op-1".to_owned(),
+            source_entry_id: "entry-1".to_owned(),
+            identity: identity(),
+            response_api: "test-api".to_owned(),
+            poll: 3,
+            phase: DeferredPhase::EffectPending {
+                response_id: "abandoned-response".to_owned(),
+                usage_id: "abandoned-usage".to_owned(),
+            },
+            handle: handle(),
+            generation: 7,
+        }
+    }
+
+    #[test]
+    fn handle_debug_redacts_conversion_data() {
+        let mut handle = handle();
+        handle.data = Some(serde_json::json!({
+            "provider_token": "secret-provider-material",
+        }));
+        let debug = format!("{handle:?}");
+        assert!(
+            debug.contains("[REDACTED]"),
+            "the conversion data slot must be marked redacted: {debug}"
+        );
+        assert!(
+            !debug.contains("secret-provider-material"),
+            "provider conversion data must never reach Debug: {debug}"
+        );
+        // The typed identity stays debuggable: redaction covers `data` only.
+        assert!(debug.contains("handle-1"));
+    }
+
+    #[test]
+    fn a_plain_permit_never_replaces_an_unknown_outcome_poll() {
+        let leaf = effect_pending_leaf();
+        let mut permit = DeferredPollPermit::one("pass-1", leaf.generation);
+        let preparation = prepare_deferred_poll(&leaf, &mut permit, 0, || "fresh".to_owned());
+        match preparation {
+            DeferredPollPreparation::Refused(refusal) => {
+                assert_eq!(
+                    refusal.kind,
+                    DeferredPollRefusalKind::UnknownPollOutcome { poll: 3 }
+                );
+                assert!(refusal.diagnostic.contains("unknown outcome"));
+            }
+            other => panic!("an unknown outcome must be refused, got {other:?}"),
+        }
+        assert_eq!(permit.remaining(), 1, "a refusal spends no permit");
+        assert!(!permit.is_consumed());
+        assert!(matches!(
+            prepare_deferred_poll(
+                &leaf,
+                &mut DeferredPollPermit::none("pass-2", leaf.generation),
+                0,
+                || "fresh".to_owned()
+            ),
+            DeferredPollPreparation::Waiting(_)
+        ));
+    }
+
+    #[test]
+    fn an_explicit_replacement_resumes_the_unknown_outcome_under_fresh_ids() {
+        let leaf = effect_pending_leaf();
+        let mut permit = DeferredPollPermit::one_replacing_unknown("pass-2", leaf.generation);
+        let preparation = prepare_deferred_poll(&leaf, &mut permit, 0, || "fresh".to_owned());
+        let DeferredPollPreparation::Admitted(intent) = preparation else {
+            panic!("an explicit replacement must be admitted, got {preparation:?}");
+        };
+        assert_eq!(intent.poll, 3, "a poll is not a new request");
+        let DeferredPhase::EffectPending {
+            response_id,
+            usage_id,
+        } = &intent.phase
+        else {
+            panic!("an admitted replacement is effect pending");
+        };
+        assert_eq!(response_id, "fresh");
+        assert_eq!(usage_id, "fresh");
+        let replacement = intent
+            .discard_unknown_poll
+            .expect("the abandoned reservation must be reported");
+        assert_eq!(replacement.abandoned_response_id, "abandoned-response");
+        assert_eq!(replacement.abandoned_usage_id, "abandoned-usage");
     }
 }

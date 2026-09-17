@@ -1,3 +1,9 @@
+> **Advocacy, not evidence.** This handoff is the wave authors' own argument for their work;
+> nothing here is independent proof. The adversarial pass already **falsified attack #7**:
+> plain mode still rendered `[completed with warnings]` instead of the TUI's `[completed]`
+> family, so the claim was false as written for everything built from `ae0ffee2`. The P0
+> dogfood cut repairs plain mode; read §8 as claims to attack, not as results.
+
 # Wave 15 review handoff — octet 0.8.0, Pi parity and live reload
 
 Audience: an adversarial review agent. Everything below is either a verified fact with a

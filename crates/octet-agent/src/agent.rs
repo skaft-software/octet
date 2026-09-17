@@ -6249,8 +6249,11 @@ fn stop_reason_label(reason: DeferredStopReason) -> &'static str {
 fn refusal_stop_reason(refusal: &DeferredPollRefusal) -> &'static str {
     match refusal.kind {
         crate::tools::deferred::DeferredPollRefusalKind::ExpiredHandle { .. } => "aborted",
+        // An unknown outcome is refused, not terminal: the run stays parked at
+        // its effect-pending leaf until an explicit replacement resume.
         crate::tools::deferred::DeferredPollRefusalKind::StalePermit { .. }
         | crate::tools::deferred::DeferredPollRefusalKind::AlreadyConsumed
+        | crate::tools::deferred::DeferredPollRefusalKind::UnknownPollOutcome { .. }
         | crate::tools::deferred::DeferredPollRefusalKind::ForeignHandle(_) => "refused",
     }
 }
@@ -7342,7 +7345,11 @@ impl Agent {
     /// Resumes one parked deferred run with exactly one poll permit.
     ///
     /// `intent` selects whether this pass owns a permit ([`DeferredResumeIntent::Poll`])
-    /// or merely observes. An admitted poll's `deferred.effect_pending` intent
+    /// or merely observes. A leaf whose admitted poll outcome is unknown
+    /// (`deferred.effect_pending`) is refused by [`DeferredResumeIntent::Poll`];
+    /// only [`DeferredResumeIntent::ReplaceUnknownPoll`], an explicit user
+    /// resume decision, may replace it with a new billable poll under fresh
+    /// reserved ids. An admitted poll's `deferred.effect_pending` intent
     /// is durable before the provider is called and `run_resume` is emitted
     /// before the poll; the permit is consumed exactly once and a second call
     /// with the same pass or an older generation is refused without provider

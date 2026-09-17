@@ -952,6 +952,11 @@ struct ConfigLayer {
     reload_poll_ms: Option<u64>,
     reload_debounce_ms: Option<u64>,
     reload_max_files: Option<usize>,
+    /// Host re-exec opt-in. Separate from `reload` on purpose: resources and
+    /// extensions may auto-reload by default, but replacing the running image
+    /// (`execve` of a replaced `current_exe`) needs this explicit bool or an
+    /// explicit `/reload --force`.
+    reload_host: Option<bool>,
     telemetry: Option<PathBuf>,
     enabled_extensions: Option<Vec<String>>,
     trusted_extensions: Option<Vec<String>>,
@@ -999,6 +1004,7 @@ impl ConfigLayer {
         override_some!(reload_poll_ms);
         override_some!(reload_debounce_ms);
         override_some!(reload_max_files);
+        override_some!(reload_host);
         override_some!(telemetry);
         override_some!(enabled_extensions);
         override_some!(trusted_extensions);
@@ -1192,15 +1198,20 @@ pub fn persisted_scoped_models() -> Option<String> {
 /// Live-reload policy for the interactive frontend.
 ///
 /// Read from the user level only (`reload`, `reload_poll_ms`,
-/// `reload_debounce_ms`, `reload_max_files`), because automatic reload and its
-/// cadence are user decisions a trusted project must not make on the user's
-/// behalf. Values are range-clamped, and a missing or unreadable file leaves
-/// the defaults in place — the same fail-open shape `persisted_scoped_models`
-/// uses, since `build_config` already reports a broken configuration.
+/// `reload_debounce_ms`, `reload_max_files`, `reload_host`), because automatic
+/// reload and its cadence are user decisions a trusted project must not make on
+/// the user's behalf. Values are range-clamped, and a missing or unreadable
+/// file leaves the defaults in place — the same fail-open shape
+/// `persisted_scoped_models` uses, since `build_config` already reports a broken
+/// configuration.
 ///
-/// Enabled by default: the interactive prompt arms the supervisor, announces
-/// itself once in the transcript, and applies reloads only at the idle prompt.
-/// `reload = false` disables it for good.
+/// Enabled by default for resources and extensions: the interactive prompt arms
+/// the supervisor, announces itself once in the transcript, and applies reloads
+/// only at the idle prompt. `reload = false` disables it for good. The host
+/// layer (`execve` of a changed `current_exe`) is **off** unless the user opted
+/// in with `reload_host = true`; `/reload --force` can always take a host pass
+/// now, and the deployed host may additionally require a confirmation for a
+/// retargeted image (`reexec.rs`).
 pub fn live_reload_settings() -> crate::reload::ReloadSettings {
     let Some(path) = global_config_path() else {
         return crate::reload::ReloadSettings::default();
@@ -1211,6 +1222,7 @@ pub fn live_reload_settings() -> crate::reload::ReloadSettings {
     let values = layer.values;
     crate::reload::ReloadSettings {
         enabled: values.reload.unwrap_or(true),
+        host_enabled: values.reload_host.unwrap_or(false),
         poll_interval: values
             .reload_poll_ms
             .map(std::time::Duration::from_millis)
@@ -1671,11 +1683,13 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         telemetry: env_value("OCTET_TELEMETRY").map(PathBuf::from),
         // Live reload is an interactive, user-level policy: `merge_project`
         // never copies it and the environment layer never arms it, so a
-        // project or a stray variable cannot turn automatic reload on.
+        // project or a stray variable cannot turn automatic reload on — and
+        // host re-exec in particular has no environment switch at all.
         reload: None,
         reload_poll_ms: None,
         reload_debounce_ms: None,
         reload_max_files: None,
+        reload_host: None,
         enabled_extensions: env_value("OCTET_EXTENSIONS").map(split_names),
         trusted_extensions: env_value("OCTET_TRUSTED_EXTENSIONS").map(split_names),
         system_prompt: env_value("OCTET_SYSTEM_PROMPT"),

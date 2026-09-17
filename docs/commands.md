@@ -33,7 +33,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
 | `/compact [instructions]` | Request compaction at the next safe boundary; bounded custom instructions apply to local summaries, not native Responses compact. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
-| `/reload` | Reload user keybindings, instructions, prompts, skills, and enabled extensions at a safe boundary; when the executable on disk changed, safely re-exec into it with the active session resumed. Refused while a model turn, tool call, shell child, effect approval, in-flight session write, or delegated worker is active. |
+| `/reload` | Reload user keybindings, instructions, prompts, skills, and enabled extensions at a safe boundary. Host re-exec is **opt-in**: it happens only on `/reload --force` (or an executable change with `reload_host = true`), and a moved/replaced binary is confirmed before it is probed. Refused while a model turn, tool call, shell child, effect approval, in-flight session write, or delegated worker is active. |
 | `/login [provider]` | Sign in to a subscription provider. |
 | `/logout [provider]` | Remove its stored credential. |
 | `/status` | Active model, context, capabilities, and diagnostics. |
