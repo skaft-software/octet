@@ -5,6 +5,14 @@
 Changes in the local 0.8.0 release candidate. This build is not published; see
 [release notes](docs/releases/v0.8.0.md) for availability and current limits.
 
+### Release safety
+
+- Update both Rust lockfiles to rustls 0.23.45 for RUSTSEC-2026-0285, retaining
+  dependency security checks rather than suppressing the advisory.
+- Keep Python shutdown hooks and their acknowledgements ahead of a subsequent
+  stdin EOF, while preserving the bounded drain for a non-cooperative hook.
+- Retain Rust 1.86 compatibility in process event-bus response admission.
+
 ### Interaction
 
 - Silence routine session lookup/replay/fork progress during startup, including

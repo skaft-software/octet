@@ -80,7 +80,9 @@ Cerebras contracts. Their fixture provenance is recorded in
 ## Reviewed metadata refresh (v0.8.0)
 
 The release-candidate refresh pins public `https://models.dev/api.json` source
-SHA-256 `cdd1df48d8daf6eea84662d89daf39a5774a3b90c447aaa011c850a43e077dba`.
+SHA-256 `1b41949164821e5412c91e39a1d2d7fb062b479024f5e05604ab8bcf3b25753f`.
+A follow-up CI freshness check refreshed only the source receipt; all three
+selected metadata snapshots remained byte-identical.
 The four checked-in outputs include this source record and the following
 reviewed changes relative to the v0.7.6 snapshots:
 

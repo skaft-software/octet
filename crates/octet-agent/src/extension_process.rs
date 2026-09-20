@@ -10650,7 +10650,7 @@ impl ProcessConnection {
         code: i64,
         message: String,
     ) -> Result<(), ExtensionRuntimeError> {
-        self.send_child_envelope_admitted(id, ChildEnvelope::<()>::Error { code, message })
+        self.send_child_envelope_admitted::<()>(id, ChildEnvelope::Error { code, message })
             .await
             .map(|_| ())
     }

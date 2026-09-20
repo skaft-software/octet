@@ -2414,10 +2414,15 @@ class Extension:
         ).start()
 
     def _start_eof_drain(self) -> None:
+        shutdown_requested = self._draining
         self._draining = True
 
         def eof_flow() -> None:
-            if not self._wait_for_futures(self.shutdown_timeout):
+            if shutdown_requested:
+                # EOF must not overtake an admitted shutdown hook and its ACK.
+                # A non-cooperative hook still cannot extend the EOF drain forever.
+                self._shutdown_done.wait(self.shutdown_timeout + self.cancellation_grace)
+            elif not self._wait_for_futures(self.shutdown_timeout):
                 self._cancel_all("transport_lost")
                 self._wait_for_futures(self.cancellation_grace)
             self._fail_pending(RpcError(-32000, "stdin closed while waiting for host response"))

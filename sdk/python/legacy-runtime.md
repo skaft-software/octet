@@ -556,4 +556,6 @@ Stdout is reserved for JSON-RPC; `ext.log.info(...)` and other log levels emit
 structured JSON stderr diagnostics. On `shutdown`, Python stops admission,
 drains to a bounded deadline, cooperatively cancels the remainder, runs optional
 `@ext.on_shutdown`, acknowledges, and exits. Stdin EOF uses the same bounded
-drain before treating transport as lost. See [host shutdown and failure stages](../../docs/extensions/PROTOCOL-REFERENCE.md#18-shutdown).
+drain before treating transport as lost. If EOF follows an admitted shutdown, it
+waits for that hook and acknowledgement within the EOF drain budget; a stuck hook
+cannot extend the drain indefinitely. See [host shutdown and failure stages](../../docs/extensions/PROTOCOL-REFERENCE.md#18-shutdown).
