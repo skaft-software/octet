@@ -80,15 +80,16 @@ Cerebras contracts. Their fixture provenance is recorded in
 ## Reviewed metadata refresh (v0.8.0)
 
 The release-candidate refresh pins public `https://models.dev/api.json` source
-SHA-256 `59ad3b7dca386d788e7c79b005cb03d77db0136a4f299780b678015a754bab6b`.
-The latest CI freshness refresh removes three OpenCode Jev routes absent from
-upstream (`jev-1.13`, `jev-1.13-free`, and `jev-latest`), updates eight OpenRouter
-price records, and changes two output ceilings. Canonical names stay identical.
+SHA-256 `c22e96f4bd6e4f238806c3ac8ef3c4971b1701d26957ef6f035350fcd5c11c98`.
+The CI freshness refreshes remove three OpenCode Jev routes absent from
+upstream (`jev-1.13`, `jev-1.13-free`, and `jev-latest`), update eight OpenRouter
+price records, and change two output ceilings. Canonical names stay identical.
 OpenRouter `deepseek/deepseek-v4-pro-0813` now reports 393,216 output tokens and
 `~z-ai/glm-flash-latest` reports 943,718. The `~deepseek/deepseek-pro-latest`
-OpenRouter quote is $0.53328/$1.59984/$0.016968 per million input/output/cache-read
-tokens; this is not direct DeepSeek pricing. Other refreshed quotes cover V4 Flash,
-Qwen 3.6 35B and 3.8 27B, Tencent HY3, and GLM 5.3/latest.
+OpenRouter quote is $0.528/$1.584/$0.0168 per million input/output/cache-read
+tokens; this is not direct DeepSeek pricing. A final freshness recheck changed
+only this latest-alias quote and `deepseek/deepseek-v4-pro-0813`. Other refreshed
+quotes cover V4 Flash, Qwen 3.6 35B and 3.8 27B, Tencent HY3, and GLM 5.3/latest.
 Earlier candidate refreshes lowered Muse Glimmer input/output quotes to
 $0.30/$1.20 per million and its output limit to 16,384. Mistral Small 3.1 asserts
 tools in the saved source; snapshot tool flags do not grant runtime tool capability.

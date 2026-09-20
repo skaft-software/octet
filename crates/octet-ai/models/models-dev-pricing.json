@@ -3311,10 +3311,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
-    "cache_read": 16968,
+    "cache_read": 16800,
     "cache_write_5m": 0,
-    "input": 533280,
-    "output": 1599840,
+    "input": 528000,
+    "output": 1584000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
@@ -5418,10 +5418,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 16968,
+    "cache_read": 16800,
     "cache_write_5m": 0,
-    "input": 533280,
-    "output": 1599840,
+    "input": 528000,
+    "output": 1584000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {

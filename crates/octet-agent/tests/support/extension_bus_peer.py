@@ -13,6 +13,7 @@ SDK_PATH = "__SDK_PATH__"
 EXTENSION_NAME = "__EXTENSION_NAME__"
 LIFECYCLE_HOOKS = False
 sys.path.insert(0, SDK_PATH)
+from octet_extension.api_v03 import ERROR_SPECS
 from octet_extension.event_bus import BusError, FieldSpec, HostEventBus, TopicRegistry, TopicSpec
 from octet_extension.protocol import RpcError
 
@@ -42,6 +43,11 @@ def send(value):
 def result(call_id, value):
     send({"jsonrpc": "2.0", "id": call_id, "result": {
         "content": [], "is_error": False, "metadata": None, "structured_content": value}})
+
+
+def rpc_error(error):
+    message = next((message for code, message in ERROR_SPECS.values() if code == error.code), "invalid params")
+    return {"code": error.code, "message": message}
 
 
 def observe_wire(kind):
@@ -95,10 +101,14 @@ def tools():
         if request["method"] == "hook/run":
             try:
                 if request["params"]["hook"] == "session_start":
+                    # Binding delivery is asynchronous after initialization.
+                    # Wait on this worker, never on the serial protocol reader.
+                    if not bus.wait_rebound(timeout=2):
+                        raise BusError(-32011, "fixture_bus_not_bound")
                     bus.declare(name="status", fields=(FieldSpec.string("summary", max_bytes=128),))
                 send({"jsonrpc": "2.0", "id": request["id"], "result": {"disposition": {"kind": "continue"}}})
             except (RpcError, BusError) as error:
-                send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": error.code, "message": "invalid params"}})
+                send({"jsonrpc": "2.0", "id": request["id"], "error": rpc_error(error)})
             continue
         args = request["params"]["arguments"]
         method = args["method"]
@@ -145,9 +155,7 @@ def tools():
                 params = {"binding_id": raw_binding, **params}
                 value = {"result": request_host(method, params, stopping)}
         except (RpcError, BusError) as error:
-            from octet_extension.api_v03 import ERROR_SPECS
-            message = next((message for code, message in ERROR_SPECS.values() if code == error.code), "invalid params")
-            value = {"jsonrpc": "2.0", "id": "fixture-error", "error": {"code": error.code, "message": message}}
+            value = {"jsonrpc": "2.0", "id": "fixture-error", "error": rpc_error(error)}
         result(request["id"], value)
 
 
