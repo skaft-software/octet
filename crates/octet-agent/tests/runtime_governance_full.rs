@@ -3,6 +3,7 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::future::Future;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::Duration;
@@ -15,8 +16,9 @@ use octet_agent::extension_process::{
 };
 use octet_agent::extension_runtime::{
     ExtensionManagedRuntimeState, ExtensionResourceExhausted, ExtensionRuntimeBudget,
-    ExtensionRuntimeCatalog, ExtensionRuntimeDomain, ExtensionRuntimeManager,
-    ExtensionRuntimeManagerError, ExtensionRuntimeResource, ExtensionRuntimeUsage,
+    ExtensionRuntimeCatalog, ExtensionRuntimeDomain, ExtensionRuntimeLease,
+    ExtensionRuntimeManager, ExtensionRuntimeManagerError, ExtensionRuntimeResource,
+    ExtensionRuntimeUsage,
 };
 
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -101,10 +103,24 @@ fn starts(root: &Path, name: &str) -> usize {
         .count()
 }
 
-async fn wait_for_start(root: &Path, name: &str) {
+async fn wait_for_start(
+    root: &Path,
+    name: &str,
+    start: impl Future<Output = Result<ExtensionRuntimeLease, ExtensionRuntimeManagerError>>,
+) {
     tokio::time::timeout(DEADLINE, async {
-        while starts(root, name) == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        // Continue driving activation across pre-spawn awaits while the child
+        // keeps its initialization response behind the explicit hold file.
+        tokio::select! {
+            () = async {
+                while starts(root, name) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => {}
+            result = start => match result {
+                Ok(_) => panic!("fixture completed initialization while its startup gate was held"),
+                Err(error) => panic!("fixture failed before reaching its startup gate: {error}"),
+            },
         }
     })
     .await
@@ -308,7 +324,7 @@ async fn release_wakes_coalesced_and_startup_slot_waiters() {
     let queued = manager.bind_session("queued").unwrap();
     let mut starting = Box::pin(blocker.activate("blocker", config(root.path())));
     assert!(poll!(starting.as_mut()).is_pending());
-    wait_for_start(root.path(), "blocker").await;
+    wait_for_start(root.path(), "blocker", starting.as_mut()).await;
     let mut owner = Box::pin(queued.activate("queued", config(root.path())));
     let mut waiter = Box::pin(queued.activate("queued", config(root.path())));
     assert!(poll!(owner.as_mut()).is_pending());
@@ -345,7 +361,7 @@ async fn removed_and_reselected_catalog_cannot_commit_an_old_start_reservation()
     let binding = manager.bind_session("owner").unwrap();
     let mut old = Box::pin(binding.activate("slow", config(root.path())));
     assert!(poll!(old.as_mut()).is_pending());
-    wait_for_start(root.path(), "slow").await;
+    wait_for_start(root.path(), "slow", old.as_mut()).await;
     manager
         .replace_catalog(ExtensionRuntimeCatalog::default())
         .await;
@@ -395,7 +411,7 @@ async fn canceled_queued_reload_restores_the_old_lease_and_releases_transient_us
     fs::write(root.path().join("hold-blocker"), b"").unwrap();
     let mut blocker = Box::pin(binding.activate("blocker", config(root.path())));
     assert!(poll!(blocker.as_mut()).is_pending());
-    wait_for_start(root.path(), "blocker").await;
+    wait_for_start(root.path(), "blocker", blocker.as_mut()).await;
     let mut reload = Box::pin(manager.reload("resident"));
     assert!(poll!(reload.as_mut()).is_pending());
     assert_eq!(manager.usage().processes, 3);
@@ -456,9 +472,14 @@ async fn canceled_start_owner_hands_its_reservation_to_a_shared_waiter() {
     let blocker = manager.bind_session("blocker").unwrap();
     let first = manager.bind_session("first").unwrap();
     let second = manager.bind_session("second").unwrap();
-    let mut starting = Box::pin(blocker.activate("blocker", config(root.path())));
+    // Model a pre-spawn yield, such as Linux's bounded ETXTBSY retry. A single
+    // poll is not sufficient to drive activation to the child's startup gate.
+    let mut starting = Box::pin(async {
+        tokio::task::yield_now().await;
+        blocker.activate("blocker", config(root.path())).await
+    });
     assert!(poll!(starting.as_mut()).is_pending());
-    wait_for_start(root.path(), "blocker").await;
+    wait_for_start(root.path(), "blocker", starting.as_mut()).await;
 
     let mut owner = Box::pin(first.activate("shared", config(root.path())));
     let mut waiter = Box::pin(second.activate("shared", config(root.path())));
@@ -664,7 +685,7 @@ async fn shutdown_wakes_an_inflight_handshake_and_is_terminal() {
     let binding = manager.bind_session("owner").unwrap();
     let mut start = Box::pin(binding.activate("slow", config(root.path())));
     assert!(poll!(start.as_mut()).is_pending());
-    wait_for_start(root.path(), "slow").await;
+    wait_for_start(root.path(), "slow", start.as_mut()).await;
     manager.shutdown().await;
     assert!(matches!(
         tokio::time::timeout(DEADLINE, start).await.unwrap(),
