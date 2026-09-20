@@ -2659,27 +2659,6 @@
     "output": 0,
     "reasoning": null
   },
-  "opencode/jev-1.13": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 42000,
-    "output": 0,
-    "reasoning": null
-  },
-  "opencode/jev-1.13-free": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 0,
-    "output": 0,
-    "reasoning": null
-  },
-  "opencode/jev-latest": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 42000,
-    "output": 0,
-    "reasoning": null
-  },
   "opencode/kimi-k2": {
     "cache_read": 400000,
     "cache_write_5m": 0,
@@ -3304,10 +3283,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "cache_read": 7336,
+    "cache_read": 7112,
     "cache_write_5m": 0,
-    "input": 36680,
-    "output": 73360,
+    "input": 35560,
+    "output": 71120,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
@@ -3332,10 +3311,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
-    "cache_read": 22000,
+    "cache_read": 16968,
     "cache_write_5m": 0,
-    "input": 660000,
-    "output": 1980000,
+    "input": 533280,
+    "output": 1599840,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
@@ -4930,8 +4909,8 @@
   "openrouter/qwen/qwen3.6-35b-a3b": {
     "cache_read": 50000,
     "cache_write_5m": 0,
-    "input": 100000,
-    "output": 900000,
+    "input": 150000,
+    "output": 1000000,
     "reasoning": null
   },
   "openrouter/qwen/qwen3.6-flash": {
@@ -4986,8 +4965,8 @@
   "openrouter/qwen/qwen3.8-27b": {
     "cache_read": 85000,
     "cache_write_5m": 0,
-    "input": 420000,
-    "output": 3000000,
+    "input": 200000,
+    "output": 2550000,
     "reasoning": null
   },
   "openrouter/qwen/qwen3.8-27b:free": {
@@ -5131,10 +5110,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy3": {
-    "cache_read": 33000,
+    "cache_read": 20625,
     "cache_write_5m": 0,
-    "input": 132000,
-    "output": 528000,
+    "input": 82500,
+    "output": 330000,
     "reasoning": null
   },
   "openrouter/tencent/hy3-preview": {
@@ -5376,10 +5355,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3": {
-    "cache_read": 166400,
+    "cache_read": 169000,
     "cache_write_5m": 0,
-    "input": 896000,
-    "output": 2816000,
+    "input": 910000,
+    "output": 2860000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
@@ -5439,10 +5418,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 18228,
+    "cache_read": 16968,
     "cache_write_5m": 0,
-    "input": 572880,
-    "output": 1718640,
+    "input": 533280,
+    "output": 1599840,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
@@ -5523,10 +5502,10 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
-    "cache_read": 156780,
+    "cache_read": 154440,
     "cache_write_5m": 0,
-    "input": 844200,
-    "output": 2653200,
+    "input": 831600,
+    "output": 2613600,
     "reasoning": null
   },
   "qwen-token-plan-cn/deepseek-v3.2": {

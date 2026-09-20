@@ -9843,60 +9843,6 @@
     "reasoning_options": [],
     "tool_call": true
   },
-  "opencode/jev-1.13": {
-    "limit": {
-      "context": 64000,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Jev 1.13",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
-  "opencode/jev-1.13-free": {
-    "limit": {
-      "context": 64000,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Jev 1.13 Free",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
-  "opencode/jev-latest": {
-    "limit": {
-      "context": 64000,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Jev",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
   "opencode/kimi-k2": {
     "limit": {
       "context": 262144,
@@ -12195,7 +12141,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -20027,7 +19973,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "limit": {
       "context": 1310720,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [

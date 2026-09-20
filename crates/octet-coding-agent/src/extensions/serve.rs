@@ -11859,7 +11859,13 @@ mod tests {
 
         // Neither inspection nor export requires a launchable fleet roster.
         // Both the raw snapshot and the final restored export ID remain bounded.
-        assert!(!sessions.dir().join(".delegation/fleet.json").exists());
+        assert!(std::fs::read_dir(sessions.dir().join(".delegation"))
+            .unwrap()
+            .all(|entry| {
+                let name = entry.unwrap().file_name();
+                let name = name.to_string_lossy();
+                name != "fleet.json" && !(name.starts_with("fleet-") && name.ends_with(".json"))
+            }));
         let context = host.delegated_session_context(&session_id).unwrap();
         assert!(original.len() < exported.len() - 1);
         for limit in [16, exported.len() - 1] {

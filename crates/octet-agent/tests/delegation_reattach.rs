@@ -21,6 +21,7 @@ use octet_ai::{
     AiClient, Auth, Capabilities, Endpoint, EndpointId, Message, ModalitySet, Model, ModelId,
     ModelLimits, ModelSpec, Protocol, ReasoningConfig, ToolResultPart, UserPart,
 };
+use sha2::{Digest, Sha256};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
@@ -208,7 +209,12 @@ impl Rig {
     }
 
     fn roster_path(&self) -> PathBuf {
-        self.delegation_directory().join("fleet.json")
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(self.session_path().to_string_lossy().as_bytes())
+        );
+        self.delegation_directory()
+            .join(format!("fleet-{}.json", &digest[..16]))
     }
 
     /// Builds one owning session over an already-created session file.
@@ -322,7 +328,11 @@ async fn wait_for_parked_record(roster: &Path, agent_id: &str) -> serde_json::Va
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(record) = fleet_record(roster, agent_id) {
-                if record["detached"] == true && record["status"]["state"] == "detached" {
+                if record["detached"] == true
+                    && record["durable_diagnostic"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("owning session was released"))
+                {
                     return record;
                 }
             }
@@ -368,7 +378,7 @@ impl Respond for FirstOwnerScript {
     }
 }
 
-/// Second owning session (the simulated restart): reattach, wait, then steer.
+/// Second owning session: inspect the settled record, then explicitly continue it.
 struct RestartedOwnerScript {
     state: Arc<ScriptState>,
 }
@@ -427,6 +437,7 @@ async fn a_restarted_session_reattaches_and_continues_its_worker() {
     let rig = Rig::new();
     let session_path = rig.session_path();
     Session::create(&session_path).unwrap();
+    let completed_at;
 
     {
         let mut first = rig.open_agent(&server, &session_path);
@@ -444,12 +455,19 @@ async fn a_restarted_session_reattaches_and_continues_its_worker() {
             false,
             "the first task must complete before the session is released"
         );
+        completed_at = fleet_record(&rig.roster_path(), "agent-1")
+            .expect("completed worker must have a durable record")["completed_at_ms"]
+            .clone();
+        assert!(completed_at.is_u64());
     }
     // Dropping the first owning session releases its workers: the idle worker
     // parks as a recoverable durable record instead of retiring.
     let parked = wait_for_parked_record(&rig.roster_path(), "agent-1").await;
     assert_eq!(parked["agent_path"], "/root/survivor", "{parked}");
     assert_eq!(parked["turn_count"], 1, "{parked}");
+    assert_eq!(parked["status"]["state"], "completed", "{parked}");
+    assert_eq!(parked["status"]["output"], "survivor first task complete");
+    assert_eq!(parked["completed_at_ms"], completed_at);
     // The released manager drops its lease as soon as the parked worker returns;
     // the simulated restart reopens the same transcript and delegation store.
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -479,18 +497,19 @@ async fn a_restarted_session_reattaches_and_continues_its_worker() {
     let restored = &agents[0];
     assert_eq!(restored["agent_id"], "agent-1");
     assert_eq!(restored["agent_path"], "/root/survivor");
-    // The restarted session reattached the same worker: it is live, owned, and
-    // no longer detached, with its turn accounting preserved.
-    assert_eq!(restored["detached"], false, "{listed}");
-    assert_eq!(restored["live_task"], true, "{listed}");
+    // A restored settled record keeps its outcome without restarting work.
+    // Only the explicit follow-up below reattaches its execution machinery.
+    assert_eq!(restored["detached"], true, "{listed}");
+    assert_eq!(restored["live_task"], false, "{listed}");
     assert_eq!(restored["turn_count"], 1, "{listed}");
-    assert_eq!(restored["status"]["state"], "idle", "{listed}");
+    assert_eq!(restored["status"]["state"], "completed", "{listed}");
+    assert_eq!(restored["status"]["output"], "survivor first task complete");
+    assert_eq!(restored["completed_at_ms"], completed_at);
 
     let steered = parse_result(&results, "steer-reattached");
     assert_eq!(steered["agent_id"], "agent-1");
-    // The reattached worker has a live receiver but no task. A follow-up
-    // starts a new run in that same conversation rather than buffering steering
-    // information for a task that will never arrive.
+    // An explicit follow-up starts a new run in that same conversation instead
+    // of buffering steering for a task that will never arrive.
     assert_eq!(steered["delivery"], "new_run", "{steered}");
     let waited = parse_result(&results, "wait-reattached");
     assert!(

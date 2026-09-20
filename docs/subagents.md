@@ -23,7 +23,8 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
   approval policy, and extension policy — a shared filesystem is **not**
   isolation.
 - **Owned by the session, run by a host run.** The host creates the child
-  conversation and retires its record when the owning run ends. See
+  conversation and detaches, rather than discards, its record when the owning
+  run ends. See
   [session-scoped delegation](#session-scoped-delegation) for what that means
   when a worker outlives the turn that spawned it.
 
@@ -159,13 +160,17 @@ fabricating a resume. The normal read-only parent-controlled mode is unaffected.
 A worker is not a detached OS process. Its record is owned by the **session**,
 not by the run that spawned it: the end of the owning run (including an aborted
 or dropped turn) records an explicit `run_detached` boundary and leaves the
-worker discoverable, while only an explicit stop, owner teardown, or team
-shutdown retires it. The durable roster (`fleet.json` in the delegation session
-directory) carries each worker's id, name, task, child-session reference,
-status, and consumed budget, so the owning session can reattach it on a later
-turn and a restarted process can reconstruct it as `detached` instead of losing
-it silently. Execution caps do not drift up across that boundary: reattachment
-takes a slot per record and leaves the excess visibly detached.
+worker discoverable. Owner teardown parks the worker for reattachment while
+retaining any settled status, output/error, and completion time; explicit stop
+or team shutdown still stops execution. Each root has a separate durable roster
+(`fleet-<owner hash>.json`) beside its root-scoped lease in the delegation
+session directory. It carries each worker's id, name, task, child-session
+reference, status, and consumed budget, so the owning session can reattach it on
+a later turn and a restarted process can reconstruct it without losing it
+silently. Matching legacy `fleet.json` snapshots are read-only migration sources;
+new scoped snapshots take precedence. Execution caps do not drift up across that
+boundary: reattachment takes a slot per record and leaves the excess visibly
+detached.
 
 The extension models the gap as **detached, not dead**:
 

@@ -16,6 +16,7 @@ use octet_ai::{
     AiClient, Auth, Capabilities, Endpoint, EndpointId, Message, ModalitySet, Model, ModelId,
     ModelLimits, ModelSpec, Protocol, ReasoningConfig, ToolResultPart, UserPart,
 };
+use sha2::{Digest, Sha256};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
@@ -550,8 +551,7 @@ fn scripted_model(uri: &str) -> Model {
 struct EnabledAgent {
     agent: Agent,
     team_directory: PathBuf,
-    /// Session-owned durable fleet roster (`fleet.json`), beside the private
-    /// team directory.
+    /// Root-scoped durable fleet roster, beside the private team directory.
     fleet_roster: PathBuf,
     _workspace: tempfile::TempDir,
     _sessions: tempfile::TempDir,
@@ -598,10 +598,18 @@ fn build_enabled_agent_with_mode(
     } else {
         agent.enable_v2_delegation(config).unwrap()
     };
+    let root_digest = format!(
+        "{:x}",
+        Sha256::digest(agent.session().path().to_string_lossy().as_bytes())
+    );
+    let fleet_roster = session_dir
+        .path()
+        .join("delegation")
+        .join(format!("fleet-{}.json", &root_digest[..16]));
     EnabledAgent {
         agent,
         team_directory,
-        fleet_roster: session_dir.path().join("delegation").join("fleet.json"),
+        fleet_roster,
         _workspace: workspace_dir,
         _sessions: session_dir,
     }
@@ -675,7 +683,7 @@ async fn wait_for_provenance(
     .expect("timed out waiting for delegation provenance")
 }
 
-/// Reads one session-owned durable fleet record from `fleet.json`.
+/// Reads one session-owned durable fleet record from its root-scoped roster.
 ///
 /// The roster is the restart-surviving half of a delegated worker's record:
 /// it carries the agent id, name, task, child-session reference, status, and

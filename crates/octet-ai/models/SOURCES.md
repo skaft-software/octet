@@ -80,25 +80,28 @@ Cerebras contracts. Their fixture provenance is recorded in
 ## Reviewed metadata refresh (v0.8.0)
 
 The release-candidate refresh pins public `https://models.dev/api.json` source
-SHA-256 `aa4e49b8018efda0259f390c5374fada51102d0fbe322b9069faeb923895263b`.
-After an earlier receipt-only refresh, CI follow-ups changed two OpenRouter
-price records and three capability records; names stayed identical.
-Muse Glimmer input/output quotes fell to $0.30/$1.20 per million and its output
-limit fell to 16,384. The `~deepseek/deepseek-pro-latest` OpenRouter quote now
-records $0.57288/$1.71864/$0.018228 per million input/output/cache-read tokens
-and a 393,216 output limit; this is not direct DeepSeek pricing. Mistral Small 3.1
-now asserts tools in the saved source; snapshot tool flags do not grant runtime
-tool capability.
+SHA-256 `59ad3b7dca386d788e7c79b005cb03d77db0136a4f299780b678015a754bab6b`.
+The latest CI freshness refresh removes three OpenCode Jev routes absent from
+upstream (`jev-1.13`, `jev-1.13-free`, and `jev-latest`), updates eight OpenRouter
+price records, and changes two output ceilings. Canonical names stay identical.
+OpenRouter `deepseek/deepseek-v4-pro-0813` now reports 393,216 output tokens and
+`~z-ai/glm-flash-latest` reports 943,718. The `~deepseek/deepseek-pro-latest`
+OpenRouter quote is $0.53328/$1.59984/$0.016968 per million input/output/cache-read
+tokens; this is not direct DeepSeek pricing. Other refreshed quotes cover V4 Flash,
+Qwen 3.6 35B and 3.8 27B, Tencent HY3, and GLM 5.3/latest.
+Earlier candidate refreshes lowered Muse Glimmer input/output quotes to
+$0.30/$1.20 per million and its output limit to 16,384. Mistral Small 3.1 asserts
+tools in the saved source; snapshot tool flags do not grant runtime tool capability.
 The four checked-in outputs include this source record and the following
 reviewed changes relative to the v0.7.6 snapshots:
 
 | Snapshot | Current records | Added | Removed | Changed |
 | --- | ---: | ---: | ---: | ---: |
-| Provider-scoped pricing routes | 895 | 100 | 3 | 35 |
+| Provider-scoped pricing routes | 892 | 97 | 3 | 37 |
 | Canonical names | 385 | 5 | 2 | 0 |
-| Capability routes | 916 | 100 | 6 | 44 |
+| Capability routes | 913 | 97 | 6 | 44 |
 
-Price changes cover 33 OpenRouter routes, one Fireworks route, and one opencode
+Price changes cover 35 OpenRouter routes, one Fireworks route, and one opencode
 route. Additions primarily belong to already-supported Qwen-plan, Baseten, and
 Fireworks providers; catalog additions do not introduce new provider protocols
 or prove route availability. Direct DeepSeek schedule pricing remains deliberately

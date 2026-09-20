@@ -4550,10 +4550,11 @@ impl DelegationManager {
 
     /// Parks a live worker whose owning session disappeared.
     ///
-    /// The worker stops, but its durable child session and accounting are kept
-    /// and the record becomes recoverable [`DelegatedAgentStatus::Detached`]
-    /// with the bounded reason. Returns `false` when the owning session is
-    /// still attached, so the caller keeps its normal terminal settlement.
+    /// The worker stops, but its durable child session and accounting are kept.
+    /// Unsettled work becomes [`DelegatedAgentStatus::Detached`]; settled
+    /// outcomes retain their terminal evidence independently of attachment.
+    /// Returns `false` when the owning session is still attached, so the caller
+    /// keeps its normal terminal settlement.
     fn park_released_worker(
         &self,
         id: &str,
