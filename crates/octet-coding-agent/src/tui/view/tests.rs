@@ -14663,6 +14663,45 @@ fn status_render_loop_shell(theme: OctetTheme) -> StatusRenderLoop {
 }
 
 #[test]
+fn renderer_stop_flushes_unpainted_notices_even_when_it_preempts_render() {
+    for queued_render in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.tui.take().unwrap().stop();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let terminal = EmulatedTerminal {
+            size: shell.size.clone(),
+            bytes: bytes.clone(),
+            synchronized_output: true,
+            status_frames: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        renderer_runtime::render_loop_with_terminal(
+            terminal,
+            shell.state.clone(),
+            shell.size.clone(),
+            rx,
+            renderer_runtime::RenderLoopOptions::default(),
+            |state, _| {
+                // The idle poll runs after the initial frame. Install the final
+                // semantic notice and Stop before another frame can be painted.
+                state
+                    .borrow_mut()
+                    .push_block(TranscriptBlock::Notice("FINAL-REEXEC-NOTICE".to_owned()));
+                if queued_render {
+                    tx.send(RenderCommand::Render).unwrap();
+                }
+                tx.send(RenderCommand::Stop).unwrap();
+                false
+            },
+        );
+        let output = bytes.lock().unwrap();
+        let plain = strip_terminal_sequences(&String::from_utf8_lossy(&output));
+        assert_eq!(plain.matches("FINAL-REEXEC-NOTICE").count(), 1, "{plain}");
+    }
+}
+
+#[test]
 fn status_render_loop_skips_missed_phases_after_expensive_frames() {
     let StatusRenderLoop {
         mut shell,

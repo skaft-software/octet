@@ -155,6 +155,7 @@ class PinnedConnection(http.client.HTTPConnection):
         self._operation.check(self._deadline)
         if self._tls:
             context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             wrapped = context.wrap_socket(sock, server_hostname=self.host, do_handshake_on_connect=False)
             self.sock = wrapped
             self._operation.add_socket(wrapped)

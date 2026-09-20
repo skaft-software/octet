@@ -91,8 +91,8 @@ fn duplicate_stdio(fd: i32) -> File {
 }
 
 struct Pty {
-    master: File,
-    slave: File,
+    master: Option<File>,
+    slave: Option<File>,
     original_termios: libc::termios,
     output: Vec<u8>,
 }
@@ -125,16 +125,17 @@ impl Pty {
         let slave = unsafe { File::from_raw_fd(slave_fd) };
         let original_termios = terminal_attributes(slave.as_raw_fd());
         Self {
-            master,
-            slave,
+            master: Some(master),
+            slave: Some(slave),
             original_termios,
             output: Vec::new(),
         }
     }
 
     fn write_input(&mut self, input: &[u8]) {
-        self.master.write_all(input).expect("write PTY input");
-        self.master.flush().expect("flush PTY input");
+        let master = self.master.as_mut().expect("open PTY master");
+        master.write_all(input).expect("write PTY input");
+        master.flush().expect("flush PTY input");
     }
 
     fn resize(&self, columns: u16, rows: u16) {
@@ -147,7 +148,7 @@ impl Pty {
         assert_eq!(
             unsafe {
                 libc::ioctl(
-                    self.slave.as_raw_fd(),
+                    self.slave.as_ref().expect("open PTY slave").as_raw_fd(),
                     libc::TIOCSWINSZ,
                     &size as *const libc::winsize,
                 )
@@ -161,7 +162,12 @@ impl Pty {
     fn read_available(&mut self) {
         let mut buffer = [0u8; 8192];
         loop {
-            match self.master.read(&mut buffer) {
+            match self
+                .master
+                .as_mut()
+                .expect("open PTY master")
+                .read(&mut buffer)
+            {
                 Ok(0) => return,
                 Ok(read) => {
                     self.output.extend_from_slice(&buffer[..read]);
@@ -172,6 +178,11 @@ impl Pty {
                 Err(error) => panic!("read PTY: {error}"),
             }
         }
+    }
+
+    fn close(&mut self) {
+        drop(self.master.take());
+        drop(self.slave.take());
     }
 
     fn drain_for(&mut self, duration: Duration) {
@@ -214,7 +225,7 @@ impl Candidate {
             .expect("credential permissions");
 
         let pty = Pty::open(INITIAL_COLUMNS, INITIAL_ROWS);
-        let tty_fd = pty.slave.as_raw_fd();
+        let tty_fd = pty.slave.as_ref().expect("open PTY slave").as_raw_fd();
         let stdin = duplicate_stdio(tty_fd);
         let stdout = duplicate_stdio(tty_fd);
         let stderr = duplicate_stdio(tty_fd);
@@ -313,7 +324,13 @@ impl Candidate {
         // on macOS. The retained master exposes the same terminal mode state
         // after the child exits on both macOS and Linux.
         trace_fixture("PTY child exited; checking restored terminal");
-        let restored = terminal_attributes(self.pty.master.as_raw_fd());
+        let restored = terminal_attributes(
+            self.pty
+                .master
+                .as_ref()
+                .expect("open PTY master")
+                .as_raw_fd(),
+        );
         assert_eq!(
             restored.c_lflag & (libc::ICANON | libc::ECHO),
             self.pty.original_termios.c_lflag & (libc::ICANON | libc::ECHO),
@@ -324,14 +341,36 @@ impl Candidate {
 
 impl Drop for Candidate {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            trace_fixture("killing and reaping PTY child");
-            unsafe {
-                let _ = libc::kill(self.child.id() as libc::pid_t, libc::SIGKILL);
-            }
-            let _ = self.child.wait();
-            trace_fixture("PTY child reaped");
+        if thread::panicking() {
+            let start = self.pty.output.len().saturating_sub(16 * 1024);
+            let _ = writeln!(
+                io::stderr(),
+                "activity-wait-pty failure tail: {}",
+                visible_bytes(&self.pty.output[start..])
+            );
         }
+        // Do not keep parent-held PTY ends live while reaping a killed child.
+        // This cleanup wait hid the original assertion indefinitely on macOS;
+        // keep it bounded even when the child cannot promptly be reaped.
+        self.pty.close();
+        if self.child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        trace_fixture("killing and reaping PTY child");
+        let _ = self.child.kill();
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.child.try_wait().ok().flatten().is_some() {
+                trace_fixture("PTY child reaped");
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let _ = writeln!(
+            io::stderr(),
+            "activity-wait-pty: killed child did not reap within {SHUTDOWN_TIMEOUT:?}"
+        );
+        assert!(thread::panicking(), "PTY child cleanup timed out");
     }
 }
 
@@ -738,6 +777,29 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
     eprintln!(
         "activity-wait-pty theme={theme} label={label} color={color}: frames={} request_count={request_count} input_budget_ms=500 resize=true cancellation=true",
         frames.len()
+    );
+}
+
+#[test]
+fn failed_pty_fixture_releases_terminal_and_reaps_child() {
+    let _guard = pty_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let candidate = Candidate::spawn("http://127.0.0.1:9/v1/", "dark", "never");
+    let pid = candidate.child.id() as libc::pid_t;
+    let failed = std::panic::catch_unwind(move || {
+        let _candidate = candidate;
+        panic!("intentional fixture failure");
+    });
+    assert!(failed.is_err());
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
     );
 }
 

@@ -100,9 +100,10 @@ octet-mcp --experimental-streamable-http-mcp --config ~/.octet/mcp.json --check-
 ```
 
 A remote endpoint is a separate explicit network-trust decision. Streamable HTTP
-uses the exact configured URL, TLS certificate/hostname validation, no proxy or
-cookie discovery, and no redirects. HTTPS is required except for a numeric
-loopback address, which exists for deterministic local development and tests.
+uses the exact configured URL, TLS 1.2 or newer with certificate/hostname
+validation, no proxy or cookie discovery, and no redirects. HTTPS is required
+except for a numeric loopback address, which exists for deterministic local
+development and tests.
 URLs cannot contain userinfo, a query, or a fragment, preventing URL-auth and
 query credential fields as well as endpoint switching by redirect. The extension
 never synthesizes a browser `Origin` header or forwards browser credentials.

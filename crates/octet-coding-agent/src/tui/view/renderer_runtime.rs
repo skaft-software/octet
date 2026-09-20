@@ -465,6 +465,9 @@ pub(super) fn render_loop_with_terminal(
         last_render = Some(Instant::now());
     }
 
+    // Stop may overtake a coalesced Render. Publish the latest semantic state
+    // before restoring the terminal so exit/re-exec cannot drop final notices.
+    tui.request_render();
     tui.stop();
 }
 

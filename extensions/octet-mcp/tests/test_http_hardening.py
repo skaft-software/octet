@@ -84,6 +84,7 @@ class HttpHardeningTests(unittest.TestCase):
             connection.connect()
             sock.connect.assert_called_once_with(("8.8.8.8", 443))
             factory.assert_called_once_with()
+            self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
             context.wrap_socket.assert_called_once_with(sock, server_hostname="reviewed.example", do_handshake_on_connect=False)
             context.wrap_socket.return_value.do_handshake.assert_called_once_with()
         operation.abort()
@@ -92,6 +93,7 @@ class HttpHardeningTests(unittest.TestCase):
         certificate = Path(__file__).resolve().parents[1] / "fixtures/tls/loopback-cert.pem"
         key = certificate.with_name("loopback-key.pem")
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.minimum_version = ssl.TLSVersion.TLSv1_2
         server_context.load_cert_chain(certificate, key)
         sni = []
         server_context.set_servername_callback(lambda sock, name, context: sni.append(name))
