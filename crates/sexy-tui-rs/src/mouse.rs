@@ -671,7 +671,7 @@ mod tests {
         fn invalidate(&mut self) {}
     }
 
-    fn test_frame<'a>(root: &'a dyn Component, width: u16, height: u16) -> LayoutFrame<'a> {
+    fn test_frame(root: &dyn Component, width: u16, height: u16) -> LayoutFrame<'_> {
         render_layout_frame(root, width, height, Rc::new(|| {}))
     }
 

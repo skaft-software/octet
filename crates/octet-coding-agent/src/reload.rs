@@ -946,7 +946,7 @@ impl ReloadWatcher {
                 fingerprint,
             ));
             if is_directory {
-                self.expand(source, layer, target.path(), 1, &mut budget, &mut entries);
+                Self::expand(source, layer, target.path(), 1, &mut budget, &mut entries);
             }
         }
 
@@ -961,7 +961,6 @@ impl ReloadWatcher {
     }
 
     fn expand(
-        &self,
         source: &impl MetadataSource,
         layer: ReloadLayer,
         directory: &Path,
@@ -994,7 +993,7 @@ impl ReloadWatcher {
             let is_directory = fingerprint.present && fingerprint.is_dir && !fingerprint.is_symlink;
             entries.push(WatchedFingerprint::new(child.clone(), layer, fingerprint));
             if is_directory {
-                self.expand(source, layer, &child, depth + 1, budget, entries);
+                Self::expand(source, layer, &child, depth + 1, budget, entries);
             }
         }
     }

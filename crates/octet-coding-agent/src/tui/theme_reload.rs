@@ -443,7 +443,7 @@ impl<T> ThemeReloadEngine<T> {
             || !self.mode.allows_reload()
             || self.in_flight.is_some()
             || !self.pending
-            || !self.deadline.is_some_and(|deadline| now >= deadline)
+            || self.deadline.is_none_or(|deadline| now < deadline)
         {
             return None;
         }

@@ -2411,9 +2411,9 @@ where
 /// process gate, approval, bounded capture, and context decision instead of
 /// silently becoming model input.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_active_shell_escape<'r, S>(
+async fn dispatch_active_shell_escape<S>(
     composed: &ComposedInput,
-    run: &mut Run<'r>,
+    run: &mut Run<'_>,
     shell: &mut InteractiveShell,
     input: &mut S,
     executable_extensions: &mut crate::extensions::ExecutableExtensions,

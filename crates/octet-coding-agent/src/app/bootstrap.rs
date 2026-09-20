@@ -7675,8 +7675,11 @@ mod codex_context_note_regression_tests {
             ),
         ] {
             let (catalog, notes) = registered_notes(plan);
+            let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
             assert!(
-                !crate::auth::codex::MODELS.is_empty(),
+                catalog
+                    .models()
+                    .any(|model| model.endpoint == codex_endpoint),
                 "the fallback Codex inventory is registered"
             );
             for model_id in crate::auth::codex::MODELS {

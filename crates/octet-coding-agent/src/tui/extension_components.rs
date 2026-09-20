@@ -443,7 +443,7 @@ pub fn raw_key_data(
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let alt = modifiers.contains(KeyModifiers::ALT);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
-    let base = match code {
+    match code {
         KeyCode::Enter => "\r".to_owned(),
         KeyCode::Tab => "\t".to_owned(),
         KeyCode::BackTab => "\x1b[Z".to_owned(),
@@ -487,8 +487,7 @@ pub fn raw_key_data(
         }
         KeyCode::Null => String::new(),
         _ => String::new(),
-    };
-    base
+    }
 }
 
 /// The pi `TuiMouseEvent` wire shape (`packages/tui/src/tui.ts:25-44`).

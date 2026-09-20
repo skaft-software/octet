@@ -1243,10 +1243,14 @@ pub fn allocate_stack_sizes(
         .saturating_mul(gap.max(0));
     let content_size = (available.max(0) - gaps).max(0);
     let total: i32 = sizes.iter().copied().fold(0, i32::saturating_add);
-    if total < content_size {
-        distribute(&mut sizes, entries, content_size - total, Growth::Grow);
-    } else if total > content_size {
-        distribute(&mut sizes, entries, total - content_size, Growth::Shrink);
+    match total.cmp(&content_size) {
+        std::cmp::Ordering::Less => {
+            distribute(&mut sizes, entries, content_size - total, Growth::Grow);
+        }
+        std::cmp::Ordering::Greater => {
+            distribute(&mut sizes, entries, total - content_size, Growth::Shrink);
+        }
+        std::cmp::Ordering::Equal => {}
     }
     sizes
 }
@@ -1772,12 +1776,12 @@ fn paint_box(box_: &LayoutBox<'_>, screen: &mut [String], total_width: i32) {
 }
 
 /// Resolve and paint the frame for a layout root.
-pub fn render_layout_frame<'a>(
-    root: &'a dyn Component,
+pub fn render_layout_frame(
+    root: &dyn Component,
     width: u16,
     height: u16,
     request_render: Rc<dyn Fn()>,
-) -> LayoutFrame<'a> {
+) -> LayoutFrame<'_> {
     let safe_width = i32::from(width.max(1));
     let safe_height = i32::from(height.max(1));
     let context = LayoutContext {
@@ -1901,7 +1905,7 @@ mod tests {
         fn invalidate(&mut self) {}
     }
 
-    fn frame_of<'a>(root: &'a dyn Component, width: u16, height: u16) -> LayoutFrame<'a> {
+    fn frame_of(root: &dyn Component, width: u16, height: u16) -> LayoutFrame<'_> {
         render_layout_frame(root, width, height, Rc::new(|| {}))
     }
 

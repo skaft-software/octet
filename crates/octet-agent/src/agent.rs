@@ -7125,8 +7125,10 @@ impl Agent {
             capacity: &mut capacity,
             telemetry: self.telemetry.clone(),
         };
-        let call = context.call(system, messages, output_tokens);
-        tokio::pin!(call);
+        // Keep the provider/retry future off the caller's state machine: manual
+        // compaction is polled beneath Serve's session and command futures on a
+        // normal Tokio worker stack.
+        let mut call = Box::pin(context.call(system, messages, output_tokens));
         let result = loop {
             tokio::select! {
                 biased;

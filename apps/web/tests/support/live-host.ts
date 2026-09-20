@@ -709,6 +709,10 @@ export class LiveHostHarness {
     }
   }
 
+  diagnostics(): string {
+    return this.sanitizedOutput.join("\n");
+  }
+
   async stop(expectClean = true): Promise<void> {
     const child = this.child;
     this.child = null;

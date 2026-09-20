@@ -3747,8 +3747,8 @@
   "openrouter/meta/muse-glimmer-30b": {
     "cache_read": 40000,
     "cache_write_5m": 0,
-    "input": 350000,
-    "output": 1500000,
+    "input": 300000,
+    "output": 1200000,
     "reasoning": null
   },
   "openrouter/meta/muse-spark-1.1": {
@@ -5439,10 +5439,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 19228,
+    "cache_read": 19140,
     "cache_write_5m": 0,
-    "input": 576840,
-    "output": 1730520,
+    "input": 574200,
+    "output": 1722600,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {

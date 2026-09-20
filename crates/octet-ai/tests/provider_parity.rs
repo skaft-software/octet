@@ -846,9 +846,9 @@ async fn websocket_prewarm_reuses_only_matching_model_headers_and_authoritative_
             let (socket, _) = listener.accept().await.unwrap();
             let captured = captured.clone();
             handlers.push(tokio::spawn(async move {
-                #[expect(
+                #[allow(
                     clippy::result_large_err,
-                    reason = "Tungstenite fixes the callback error type"
+                    reason = "Tungstenite fixes the callback error type; older Clippy does not emit this lint"
                 )]
                 let mut websocket = accept_hdr_async(
                     socket,

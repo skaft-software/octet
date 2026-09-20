@@ -358,7 +358,9 @@ async fn run_prompt(
         return Ok(());
     }
     output.flush()?;
-    let result = if limit_reached {
+    // A tool error is model-visible and may be recovered by a later turn; the
+    // final run outcome, not an intermediate attempt, determines exit status.
+    if limit_reached {
         Err(anyhow::anyhow!(
             "Session cost limit of {} reached.",
             crate::commands::format_microdollars_cents(
@@ -367,10 +369,7 @@ async fn run_prompt(
         ))
     } else {
         classify_finish(outcome)
-    };
-    // A tool error is model-visible and may be recovered by a later turn; the
-    // final run outcome, not an intermediate attempt, determines exit status.
-    result
+    }
 }
 
 #[cfg(test)]

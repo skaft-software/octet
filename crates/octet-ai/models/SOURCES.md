@@ -80,9 +80,13 @@ Cerebras contracts. Their fixture provenance is recorded in
 ## Reviewed metadata refresh (v0.8.0)
 
 The release-candidate refresh pins public `https://models.dev/api.json` source
-SHA-256 `1b41949164821e5412c91e39a1d2d7fb062b479024f5e05604ab8bcf3b25753f`.
-A follow-up CI freshness check refreshed only the source receipt; all three
-selected metadata snapshots remained byte-identical.
+SHA-256 `81539e12794c8df968fe2c6631a3e046e6548bdbd10b4ee65ca33758ac68ad92`.
+After an earlier receipt-only refresh, the final CI follow-up changed two
+OpenRouter price records and two capability records; names stayed identical.
+Muse Glimmer input/output quotes fell to $0.30/$1.20 per million and its output
+limit fell to 16,384. The `~deepseek/deepseek-pro-latest` OpenRouter quote changed
+slightly; this is not direct DeepSeek pricing. Mistral Small 3.1 now asserts tools
+in the saved source; snapshot tool flags do not grant runtime tool capability.
 The four checked-in outputs include this source record and the following
 reviewed changes relative to the v0.7.6 snapshots:
 
@@ -90,7 +94,7 @@ reviewed changes relative to the v0.7.6 snapshots:
 | --- | ---: | ---: | ---: | ---: |
 | Provider-scoped pricing routes | 895 | 100 | 3 | 35 |
 | Canonical names | 385 | 5 | 2 | 0 |
-| Capability routes | 916 | 100 | 6 | 42 |
+| Capability routes | 916 | 100 | 6 | 44 |
 
 Price changes cover 33 OpenRouter routes, one Fireworks route, and one opencode
 route. Additions primarily belong to already-supported Qwen-plan, Baseten, and
